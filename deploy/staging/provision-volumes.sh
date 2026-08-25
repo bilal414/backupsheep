@@ -25,7 +25,7 @@ esac
 
 intent="${BACKUPSHEEP_STAGING_LAYOUT_INTENT:-}"
 case "$intent" in
-  new-empty-v1|migrate-empty-legacy-v1) ;;
+  new-empty-v2|migrate-empty-legacy-v2) ;;
   *) fail "the staging layout intent is missing or unsupported." ;;
 esac
 
@@ -52,7 +52,7 @@ if [ "${DJANGO_SERVER:-prod}" = prod ]; then
 fi
 
 expected_witness="$(
-  printf '%s' "BackupSheep/staging-layout/v1|${installation_id}|${intent}" \
+  printf '%s' "BackupSheep/staging-layout/v2|${installation_id}|${intent}" \
     | sha256sum | awk '{print $1}'
 )"
 [ "$witness" = "$expected_witness" ] \
@@ -70,17 +70,18 @@ esac
 database_root="${provision_root}/database"
 files_root="${provision_root}/files"
 storage_root="${provision_root}/storage"
-transfer_root="${provision_root}/transfer"
+database_transfer_root="${provision_root}/database-transfer"
+files_transfer_root="${provision_root}/files-transfer"
 restore_transfer_root="${provision_root}/restore-transfer"
 backup_storage_root="${provision_root}/backup-storage"
 ssh_trust_root="${provision_root}/ssh-trust"
 legacy_root="${provision_root}/legacy"
 witness_root="${provision_root}/witness"
-witness_file="${witness_root}/layout-v1"
+witness_file="${witness_root}/layout-v2"
 
 for path in \
   "$database_root" "$files_root" "$storage_root" \
-  "$transfer_root" "$restore_transfer_root" \
+  "$database_transfer_root" "$files_transfer_root" "$restore_transfer_root" \
   "$backup_storage_root" "$ssh_trust_root" \
   "$legacy_root" "$witness_root"; do
   [ -d "$path" ] && [ ! -L "$path" ] \
@@ -107,7 +108,8 @@ verify_capacity() {
 
 for path in \
   "$database_root" "$files_root" "$storage_root" \
-  "$transfer_root" "$restore_transfer_root" "$backup_storage_root"; do
+  "$database_transfer_root" "$files_transfer_root" \
+  "$restore_transfer_root" "$backup_storage_root"; do
   verify_capacity "$path"
 done
 
@@ -116,7 +118,7 @@ done
 if [ "${DJANGO_SERVER:-prod}" = prod ]; then
   for path in \
     "$database_root" "$files_root" "$storage_root" \
-    "$transfer_root" "$restore_transfer_root" \
+    "$database_transfer_root" "$files_transfer_root" "$restore_transfer_root" \
     "$backup_storage_root" "$ssh_trust_root" \
     "$legacy_root" "$witness_root"; do
     awk -v wanted="$path" '$5 == wanted { found=1 } END { exit !found }' /proc/self/mountinfo \
@@ -129,13 +131,14 @@ directory_is_empty() {
 }
 
 record="$(cat <<EOF
-schema=1
+schema=2
 installation_id=${installation_id}
 intent=${intent}
 database=10002:10002:0700
 files=10003:10003:0700
 storage=10004:10004:0700
-transfer=0:10998:3771
+database_transfer=0:10989:3771
+files_transfer=0:10991:3771
 restore_transfer=0:10995:3771
 backup_storage=10004:10004:0700
 ssh_trust=10001:10997:2750
@@ -239,7 +242,8 @@ if [ -e "$witness_file" ]; then
   verify_root "$database_root" 10002 10002 700
   verify_root "$files_root" 10003 10003 700
   verify_root "$storage_root" 10004 10004 700
-  verify_root "$transfer_root" 0 10998 3771
+  verify_root "$database_transfer_root" 0 10989 3771
+  verify_root "$files_transfer_root" 0 10991 3771
   verify_root "$restore_transfer_root" 0 10995 3771
   verify_root "$backup_storage_root" 10004 10004 700
   verify_root "$ssh_trust_root" 10001 10997 2750
@@ -255,13 +259,13 @@ directory_is_empty "$witness_root" \
   || fail "the witness volume contains an unknown path."
 for path in \
   "$database_root" "$files_root" "$storage_root" \
-  "$transfer_root" "$restore_transfer_root"; do
+  "$database_transfer_root" "$files_transfer_root" "$restore_transfer_root"; do
   directory_is_empty "$path" \
     || fail "${path} contains data without a durable layout witness."
 done
 directory_is_empty "$legacy_root" \
   || fail "the legacy shared work volume contains ambiguous plaintext."
-if [ "$intent" = new-empty-v1 ]; then
+if [ "$intent" = new-empty-v2 ]; then
   directory_is_empty "$backup_storage_root" \
     || fail "a new installation cannot adopt a populated local backup-storage volume."
 else
@@ -278,8 +282,10 @@ chown 10003:10003 "$files_root"
 chmod 0700 "$files_root"
 chown 10004:10004 "$storage_root"
 chmod 0700 "$storage_root"
-chown 0:10998 "$transfer_root"
-chmod 3771 "$transfer_root"
+chown 0:10989 "$database_transfer_root"
+chmod 3771 "$database_transfer_root"
+chown 0:10991 "$files_transfer_root"
+chmod 3771 "$files_transfer_root"
 chown 0:10995 "$restore_transfer_root"
 chmod 3771 "$restore_transfer_root"
 find "$backup_storage_root" -xdev -exec chown 10004:10004 {} +
@@ -291,7 +297,7 @@ chmod 2750 "$ssh_trust_root"
 chown 0:0 "$witness_root"
 chmod 0700 "$witness_root"
 
-temporary_witness="${witness_root}/.layout-v1.$$"
+temporary_witness="${witness_root}/.layout-v2.$$"
 printf '%s\n' "$record" > "$temporary_witness"
 chown 0:0 "$temporary_witness"
 chmod 0400 "$temporary_witness"
@@ -300,7 +306,8 @@ mv -f "$temporary_witness" "$witness_file"
 verify_root "$database_root" 10002 10002 700
 verify_root "$files_root" 10003 10003 700
 verify_root "$storage_root" 10004 10004 700
-verify_root "$transfer_root" 0 10998 3771
+verify_root "$database_transfer_root" 0 10989 3771
+verify_root "$files_transfer_root" 0 10991 3771
 verify_root "$restore_transfer_root" 0 10995 3771
 verify_root "$backup_storage_root" 10004 10004 700
 validate_backup_storage_tree migrated

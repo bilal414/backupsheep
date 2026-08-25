@@ -12,6 +12,7 @@ from .envelope import (
     encrypt_file,
     open_artifact_source,
     read_envelope_header,
+    read_envelope_header_from_descriptor,
     seal_file,
     unseal_file,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "encrypt_file",
     "open_artifact_source",
     "read_envelope_header",
+    "read_envelope_header_from_descriptor",
     "seal_file",
     "unseal_file",
 ]

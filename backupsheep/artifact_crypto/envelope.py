@@ -534,6 +534,46 @@ def read_envelope_header(
         return _read_header(source, ciphertext_size=source_stat.st_size)
 
 
+class _DescriptorReader:
+    """Read one already-open descriptor without reopening its mutable path."""
+
+    def __init__(self, descriptor: int):
+        self.descriptor = descriptor
+        self.offset = 0
+
+    def read(self, length: int) -> bytes:
+        value = os.pread(self.descriptor, length, self.offset)
+        self.offset += len(value)
+        return value
+
+
+def read_envelope_header_from_descriptor(descriptor: int) -> EnvelopeDescriptor:
+    """Parse BSE1 framing from an already-open regular-file descriptor.
+
+    ``pread`` preserves the caller's file offset and binds validation to the held
+    inode, eliminating the path-reopen race that a shared transfer producer could
+    otherwise exploit between metadata validation and header parsing.
+    """
+
+    if type(descriptor) is not int or descriptor < 0:
+        raise ArtifactConfigurationError(
+            "An open artifact file descriptor is required."
+        )
+    try:
+        source_stat = os.fstat(descriptor)
+    except OSError as error:
+        raise ArtifactConfigurationError(
+            "The artifact file descriptor is not open."
+        ) from error
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise ArtifactFormatError(
+            "The encrypted artifact descriptor is not a regular file."
+        )
+    return _read_header(
+        _DescriptorReader(descriptor), ciphertext_size=source_stat.st_size
+    )
+
+
 _AT_EMPTY_PATH = 0x1000
 
 

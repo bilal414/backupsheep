@@ -21,14 +21,19 @@ HANDOFF_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 class StagingIsolationTests(SimpleTestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
-        self.base = Path(self.temporary_directory.name)
-        self.transfer = self.base / "transfer"
+        # macOS exposes /var as a symlink; resolve the disposable root so the
+        # production no-ancestor-symlink contract is what the test exercises.
+        self.base = Path(self.temporary_directory.name).resolve()
+        self.database_transfer = self.base / "database-transfer"
+        self.files_transfer = self.base / "files-transfer"
         self.restore_transfer = self.base / "restore-transfer"
         self.private = self.base / "private"
-        self.transfer.mkdir(mode=0o700)
+        self.database_transfer.mkdir(mode=0o700)
+        self.files_transfer.mkdir(mode=0o700)
         self.restore_transfer.mkdir(mode=0o700)
         self.private.mkdir(mode=0o700)
-        os.chmod(self.transfer, staging.ROOT_MODE)
+        os.chmod(self.database_transfer, staging.ROOT_MODE)
+        os.chmod(self.files_transfer, staging.ROOT_MODE)
         os.chmod(self.restore_transfer, staging.ROOT_MODE)
         os.chmod(self.private, staging.PRIVATE_MODE)
         self.uid = os.geteuid()
@@ -43,7 +48,12 @@ class StagingIsolationTests(SimpleTestCase):
                 "BACKUPSHEEP_RUNTIME_ROLE": "database",
                 "BACKUPSHEEP_INSTALLATION_ID": INSTALLATION_ID,
                 "BACKUPSHEEP_PLAINTEXT_ROOT": str(self.private),
-                "BACKUPSHEEP_CIPHERTEXT_TRANSFER_ROOT": str(self.transfer),
+                "BACKUPSHEEP_DATABASE_CIPHERTEXT_TRANSFER_ROOT": str(
+                    self.database_transfer
+                ),
+                "BACKUPSHEEP_FILES_CIPHERTEXT_TRANSFER_ROOT": str(
+                    self.files_transfer
+                ),
                 "BACKUPSHEEP_RESTORE_CIPHERTEXT_TRANSFER_ROOT": str(
                     self.restore_transfer
                 ),
@@ -59,8 +69,16 @@ class StagingIsolationTests(SimpleTestCase):
         self.patches = [
             self.environment,
             mock.patch.object(staging, "ROOT_UID", self.uid),
-            mock.patch.object(staging, "TRANSFER_WRITER_GID", self.gid),
-            mock.patch.object(staging, "TRANSFER_READER_GID", self.gid),
+            mock.patch.object(
+                staging,
+                "TRANSFER_WRITER_GIDS",
+                {"database": self.gid, "files": self.gid},
+            ),
+            mock.patch.object(
+                staging,
+                "TRANSFER_READER_GIDS",
+                {"database": self.gid, "files": self.gid},
+            ),
             mock.patch.object(staging, "RESTORE_WRITER_GID", self.gid),
             mock.patch.object(staging, "RESTORE_DATABASE_READER_GID", self.gid),
             mock.patch.object(staging, "RESTORE_FILES_READER_GID", self.gid),
@@ -170,16 +188,20 @@ class StagingIsolationTests(SimpleTestCase):
         fence, candidate = self._fence_with_private_candidate()
         self.assertEqual(candidate.stat().st_mode & 0o7777, 0o600)
 
-        with mock.patch.object(staging, "_validate_bse1_path") as validate:
+        with mock.patch.object(staging, "_validate_bse1_descriptor") as validate:
             published = staging.publish_ciphertext(BACKUP_UUID, candidate.name)
 
         self.assertEqual(published, candidate)
         self.assertEqual(candidate.stat().st_mode & 0o7777, 0o640)
-        validate.assert_called_once_with(candidate, fence)
+        validate.assert_called_once()
+        self.assertIsInstance(validate.call_args.args[0], int)
+        self.assertEqual(validate.call_args.args[1], fence)
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
-        with mock.patch.object(staging, "_validate_bse1_path"):
-            with staging.open_ciphertext(BACKUP_UUID, candidate.name) as source:
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
+            with staging.open_ciphertext(
+                BACKUP_UUID, candidate.name, source_lane="database"
+            ) as source:
                 self.assertEqual(source.read(), b"BSE1complete-test-envelope")
 
     def test_real_bse1_envelope_can_cross_only_after_validation(self):
@@ -211,21 +233,25 @@ class StagingIsolationTests(SimpleTestCase):
         self.assertEqual(destination.stat().st_mode & 0o7777, 0o640)
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
-        with staging.open_ciphertext(BACKUP_UUID, destination.name) as ciphertext:
+        with staging.open_ciphertext(
+            BACKUP_UUID, destination.name, source_lane="database"
+        ) as ciphertext:
             self.assertEqual(ciphertext.read(4), b"BSE1")
 
     def test_unpublished_or_mutable_candidate_is_not_readable_by_storage_api(self):
         _fence, candidate = self._fence_with_private_candidate()
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             with self.assertRaisesRegex(
                 staging.StagingIsolationError, "metadata is unsafe"
             ):
-                staging.open_ciphertext(BACKUP_UUID, candidate.name)
+                staging.open_ciphertext(
+                    BACKUP_UUID, candidate.name, source_lane="database"
+                )
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "database"
         os.chmod(candidate, 0o660)
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             with self.assertRaisesRegex(
                 staging.StagingIsolationError, "private, single-link"
             ):
@@ -238,44 +264,93 @@ class StagingIsolationTests(SimpleTestCase):
         os.chmod(outside, 0o600)
         symlink = fence.path / "symlink.bse1"
         symlink.symlink_to(outside)
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             with self.assertRaises(staging.StagingIsolationError):
                 staging.publish_ciphertext(BACKUP_UUID, symlink.name)
 
         hardlink = fence.path / "hardlink.bse1"
         os.link(outside, hardlink)
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             with self.assertRaisesRegex(
                 staging.StagingIsolationError, "single-link"
             ):
                 staging.publish_ciphertext(BACKUP_UUID, hardlink.name)
 
-    def test_cross_lane_reuse_and_cleanup_are_refused(self):
+    def test_publish_and_open_reject_named_inode_swap_after_held_fd_validation(self):
         fence, candidate = self._fence_with_private_candidate()
-        with mock.patch.object(staging, "_validate_bse1_path"):
+
+        def swap_private(_descriptor, _fence):
+            replacement = fence.path / "replacement.bse1"
+            replacement.write_bytes(b"BSE1replacement-envelope")
+            os.chmod(replacement, staging.PRIVATE_FILE_MODE)
+            os.replace(replacement, candidate)
+
+        with mock.patch.object(
+            staging, "_validate_bse1_descriptor", side_effect=swap_private
+        ):
+            with self.assertRaisesRegex(
+                staging.StagingIsolationError, "changed during validation"
+            ):
+                staging.publish_ciphertext(BACKUP_UUID, candidate.name)
+        self.assertEqual(candidate.stat().st_mode & 0o7777, 0o600)
+
+        # Publish a stable replacement, then exercise the storage-side held-FD
+        # check with another same-name atomic swap.
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
+            staging.publish_ciphertext(BACKUP_UUID, candidate.name)
+        os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
+
+        def swap_published(_descriptor, _fence):
+            replacement = fence.path / "replacement.bse1"
+            replacement.write_bytes(b"BSE1second-replacement")
+            os.chmod(replacement, staging.PUBLISHED_FILE_MODE)
+            os.replace(replacement, candidate)
+
+        with mock.patch.object(
+            staging, "_validate_bse1_descriptor", side_effect=swap_published
+        ):
+            with self.assertRaisesRegex(
+                staging.StagingIsolationError, "changed during validation"
+            ):
+                staging.open_ciphertext(
+                    BACKUP_UUID, candidate.name, source_lane="database"
+                )
+
+    def test_identical_backup_ids_are_isolated_by_source_lane_root(self):
+        database_fence, candidate = self._fence_with_private_candidate()
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             staging.publish_ciphertext(BACKUP_UUID, candidate.name)
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "files"
-        with self.assertRaisesRegex(staging.StagingIsolationError, "different source lane"):
-            staging.create_ciphertext_fence(BACKUP_UUID)
-        with self.assertRaisesRegex(staging.StagingIsolationError, "different source lane"):
-            staging.cleanup_ciphertext_fence(BACKUP_UUID)
-        self.assertTrue(fence.path.exists())
+        files_fence = staging.create_ciphertext_fence(BACKUP_UUID)
+        self.assertEqual(files_fence.path.parent, self.files_transfer)
+        self.assertNotEqual(files_fence.path, database_fence.path)
+        self.assertTrue(staging.cleanup_ciphertext_fence(BACKUP_UUID))
+        self.assertTrue(database_fence.path.exists())
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
         with self.assertRaisesRegex(staging.StagingIsolationError, "not allowed"):
             staging.cleanup_ciphertext_fence(BACKUP_UUID)
-        self.assertTrue(fence.path.exists())
+        with self.assertRaises(staging.StagingIsolationError):
+            staging.open_ciphertext(
+                BACKUP_UUID, candidate.name, source_lane="files"
+            )
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
+            with staging.open_ciphertext(
+                BACKUP_UUID, candidate.name, source_lane="database"
+            ) as opened:
+                self.assertEqual(opened.read(4), b"BSE1")
+        self.assertTrue(database_fence.path.exists())
 
     def test_cleanup_requires_exact_owned_inventory_before_mutating(self):
         fence, candidate = self._fence_with_private_candidate()
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             staging.publish_ciphertext(BACKUP_UUID, candidate.name)
         unexpected = fence.path / "plaintext.zip"
         unexpected.write_bytes(b"secret")
         os.chmod(unexpected, 0o600)
 
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             with self.assertRaisesRegex(
                 staging.StagingIsolationError, "artifact name is invalid"
             ):
@@ -284,16 +359,18 @@ class StagingIsolationTests(SimpleTestCase):
         self.assertTrue(unexpected.exists())
 
         unexpected.unlink()
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             staging.cleanup_ciphertext_fence(BACKUP_UUID)
         self.assertFalse(fence.path.exists())
 
     def test_source_can_discard_complete_unpublished_bse1_after_crash(self):
         fence, candidate = self._fence_with_private_candidate()
         self.assertEqual(candidate.stat().st_mode & 0o7777, 0o600)
-        with mock.patch.object(staging, "_validate_bse1_path") as validate:
+        with mock.patch.object(staging, "_validate_bse1_descriptor") as validate:
             self.assertTrue(staging.cleanup_ciphertext_fence(BACKUP_UUID))
-        validate.assert_called_once_with(candidate, fence)
+        validate.assert_called_once()
+        self.assertIsInstance(validate.call_args.args[0], int)
+        self.assertEqual(validate.call_args.args[1], fence)
         self.assertFalse(fence.path.exists())
         self.assertFalse(staging.cleanup_ciphertext_fence(BACKUP_UUID))
 
@@ -309,7 +386,7 @@ class StagingIsolationTests(SimpleTestCase):
             )
 
     def test_transfer_root_must_remain_root_owned_setgid_and_sticky(self):
-        os.chmod(self.transfer, 0o2770)
+        os.chmod(self.database_transfer, 0o2770)
         with self.assertRaisesRegex(
             staging.StagingIsolationError, "unsafe ownership or permissions"
         ):
@@ -317,7 +394,7 @@ class StagingIsolationTests(SimpleTestCase):
 
     def test_reverse_handoff_is_storage_written_and_target_lane_read_only(self):
         fence, candidate = self._restore_fence_with_private_candidate()
-        with mock.patch.object(staging, "_validate_bse1_path") as validate:
+        with mock.patch.object(staging, "_validate_bse1_descriptor") as validate:
             published = staging.publish_restore_ciphertext(
                 HANDOFF_UUID,
                 candidate.name,
@@ -326,7 +403,9 @@ class StagingIsolationTests(SimpleTestCase):
             )
         self.assertEqual(published, candidate)
         self.assertEqual(candidate.stat().st_mode & 0o7777, 0o640)
-        validate.assert_called_once_with(candidate, fence)
+        validate.assert_called_once()
+        self.assertIsInstance(validate.call_args.args[0], int)
+        self.assertEqual(validate.call_args.args[1], fence)
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "files"
         with self.assertRaisesRegex(staging.StagingIsolationError, "does not own"):
@@ -338,7 +417,7 @@ class StagingIsolationTests(SimpleTestCase):
             )
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "database"
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             with staging.open_restore_ciphertext(
                 HANDOFF_UUID,
                 candidate.name,
@@ -354,7 +433,7 @@ class StagingIsolationTests(SimpleTestCase):
             )
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
-        with mock.patch.object(staging, "_validate_bse1_path"):
+        with mock.patch.object(staging, "_validate_bse1_descriptor"):
             self.assertTrue(
                 staging.cleanup_restore_ciphertext_fence(
                     HANDOFF_UUID,

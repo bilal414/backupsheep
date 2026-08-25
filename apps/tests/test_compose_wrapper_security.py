@@ -25,14 +25,21 @@ CANONICAL_NETWORKS = (
     "files-egress", "storage-egress", "logs-egress",
 )
 CANONICAL_VOLUMES = (
-    "pgdata", "rabbitmq_data", "backup_workdir", "ssh_trust",
+    "pgdata", "rabbitmq_data", "backup_workdir", "database_workdir",
+    "files_workdir", "storage_workdir", "database_ciphertext_transfer",
+    "files_ciphertext_transfer", "restore_ciphertext_transfer",
+    "staging_layout_witness", "ssh_trust",
     "backup_storage", "installation_identity", "django_secret_key",
     "db_password", "rabbitmq_password", "onboarding_token",
     "ssh_managed_private_key",
 )
 CANONICAL_SERVICES = (
-    "db", "rabbitmq", "db-provision", "migrate", "preflight", "app", "worker-cloud",
-    "worker-database", "worker-files", "worker-storage", "worker-logs", "beat",
+    "db", "rabbitmq-volume-init", "rabbitmq", "rabbitmq-provision",
+    "staging-provision", "db-provision", "migrate", "preflight",
+    "app-egress-guard", "app", "cloud-egress-guard", "worker-cloud",
+    "database-egress-guard", "worker-database", "files-egress-guard",
+    "worker-files", "storage-egress-guard", "worker-storage",
+    "logs-egress-guard", "worker-logs", "beat",
 )
 
 

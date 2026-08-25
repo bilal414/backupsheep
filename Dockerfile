@@ -325,12 +325,14 @@ RUN groupadd --gid 10001 backupsheep \
     && groupadd --gid 10006 backupsheep-beat \
     && groupadd --gid 10007 backupsheep-migration \
     && groupadd --gid 10008 backupsheep-cloud \
+    && groupadd --gid 10989 backupsheep-db-xfer-w \
+    && groupadd --gid 10990 backupsheep-db-xfer-r \
+    && groupadd --gid 10991 backupsheep-file-xfer-w \
+    && groupadd --gid 10992 backupsheep-file-xfer-r \
     && groupadd --gid 10993 backupsheep-rst-files \
     && groupadd --gid 10994 backupsheep-rst-database \
     && groupadd --gid 10995 backupsheep-rst-writer \
     && groupadd --gid 10997 backupsheep-ssh-trust \
-    && groupadd --gid 10998 backupsheep-transfer-writer \
-    && groupadd --gid 10999 backupsheep-transfer-reader \
     && useradd --uid 10001 --gid 10001 \
         --home-dir /run/backupsheep --no-create-home \
         --shell /usr/sbin/nologin backupsheep \
@@ -359,8 +361,11 @@ RUN groupadd --gid 10001 backupsheep \
         /run/backupsheep \
     && install -d -o root -g root -m 0555 /code/_storage \
     && install -d -o backupsheep-storage -g backupsheep-storage -m 0700 /backups \
-    && install -d -o root -g backupsheep-transfer-writer -m 3771 \
-        /var/lib/backupsheep/transfer \
+    && install -d -o root -g root -m 0555 /var/lib/backupsheep/transfer \
+    && install -d -o root -g backupsheep-db-xfer-w -m 3771 \
+        /var/lib/backupsheep/transfer/database \
+    && install -d -o root -g backupsheep-file-xfer-w -m 3771 \
+        /var/lib/backupsheep/transfer/files \
     && install -d -o root -g backupsheep-rst-writer -m 3771 \
         /var/lib/backupsheep/restore-transfer \
     && install -d -o backupsheep -g backupsheep-ssh-trust -m 2750 \
@@ -411,6 +416,8 @@ RUN --network=none \
     DJANGO_SERVER=test \
     DJANGO_DEBUG=false \
     DJANGO_SECRET_KEY=build-only-placeholder-not-a-runtime-secret \
+    BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=legacy-only \
+    BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=false \
     python manage.py collectstatic --noinput --clear \
     && test -n "$(find /code/static -type f -print -quit)"
 
@@ -440,8 +447,11 @@ RUN set -eux; \
     install -d -o backupsheep -g backupsheep -m 0700 /run/backupsheep; \
     install -d -o root -g root -m 0555 /code/_storage; \
     install -d -o backupsheep-storage -g backupsheep-storage -m 0700 /backups; \
-    install -d -o root -g backupsheep-transfer-writer -m 3771 \
-        /var/lib/backupsheep/transfer; \
+    install -d -o root -g root -m 0555 /var/lib/backupsheep/transfer; \
+    install -d -o root -g backupsheep-db-xfer-w -m 3771 \
+        /var/lib/backupsheep/transfer/database; \
+    install -d -o root -g backupsheep-file-xfer-w -m 3771 \
+        /var/lib/backupsheep/transfer/files; \
     install -d -o root -g backupsheep-rst-writer -m 3771 \
         /var/lib/backupsheep/restore-transfer; \
     install -d -o backupsheep -g backupsheep-ssh-trust -m 2750 \

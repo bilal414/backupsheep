@@ -22,14 +22,17 @@ from pathlib import Path
 from typing import BinaryIO
 
 
-TRANSFER_ROOT = Path("/var/lib/backupsheep/transfer")
+DATABASE_TRANSFER_ROOT = Path("/var/lib/backupsheep/transfer/database")
+FILES_TRANSFER_ROOT = Path("/var/lib/backupsheep/transfer/files")
 RESTORE_TRANSFER_ROOT = Path("/var/lib/backupsheep/restore-transfer")
 PLAINTEXT_ROOT = Path("/code/_storage")
 RESTORE_FILES_READER_GID = 10993
 RESTORE_DATABASE_READER_GID = 10994
 RESTORE_WRITER_GID = 10995
-TRANSFER_WRITER_GID = 10998
-TRANSFER_READER_GID = 10999
+DATABASE_TRANSFER_WRITER_GID = 10989
+DATABASE_TRANSFER_READER_GID = 10990
+FILES_TRANSFER_WRITER_GID = 10991
+FILES_TRANSFER_READER_GID = 10992
 SSH_TRUST_READER_GID = 10997
 ROOT_UID = 0
 ROOT_MODE = 0o3771  # writers can list/create; storage can traverse only a known fence
@@ -56,6 +59,22 @@ ROLE_IDENTITIES = {
     "cloud": (10008, 10008),
 }
 SOURCE_ROLES = frozenset({"database", "files"})
+TRANSFER_ROOTS = {
+    "database": DATABASE_TRANSFER_ROOT,
+    "files": FILES_TRANSFER_ROOT,
+}
+TRANSFER_ROOT_VARIABLES = {
+    "database": "BACKUPSHEEP_DATABASE_CIPHERTEXT_TRANSFER_ROOT",
+    "files": "BACKUPSHEEP_FILES_CIPHERTEXT_TRANSFER_ROOT",
+}
+TRANSFER_WRITER_GIDS = {
+    "database": DATABASE_TRANSFER_WRITER_GID,
+    "files": FILES_TRANSFER_WRITER_GID,
+}
+TRANSFER_READER_GIDS = {
+    "database": DATABASE_TRANSFER_READER_GID,
+    "files": FILES_TRANSFER_READER_GID,
+}
 RESTORE_READER_GIDS = {
     "database": RESTORE_DATABASE_READER_GID,
     "files": RESTORE_FILES_READER_GID,
@@ -209,13 +228,17 @@ def _runtime_role(*, allowed: frozenset[str] | None = None) -> tuple[str, int, i
     permitted_groups = {expected_gid}
     if role in SOURCE_ROLES:
         permitted_groups.update(
-            {SSH_TRUST_READER_GID, TRANSFER_WRITER_GID, TRANSFER_READER_GID}
+            {
+                SSH_TRUST_READER_GID,
+                TRANSFER_WRITER_GIDS[role],
+                TRANSFER_READER_GIDS[role],
+            }
         )
         permitted_groups.add(RESTORE_READER_GIDS[role])
     elif role == "storage":
         permitted_groups.update(
             {
-                TRANSFER_READER_GID,
+                *TRANSFER_READER_GIDS.values(),
                 RESTORE_WRITER_GID,
                 RESTORE_DATABASE_READER_GID,
                 RESTORE_FILES_READER_GID,
@@ -255,14 +278,15 @@ def _open_directory_tree(path: Path) -> int:
         raise StagingIsolationError("A staging path is missing, unsafe, or not a directory.") from error
 
 
-def _verify_transfer_root() -> tuple[Path, int]:
-    root = _configured_root("BACKUPSHEEP_CIPHERTEXT_TRANSFER_ROOT", TRANSFER_ROOT)
+def _verify_transfer_root(lane: str) -> tuple[Path, int]:
+    lane = _target_lane(lane)
+    root = _configured_root(TRANSFER_ROOT_VARIABLES[lane], TRANSFER_ROOTS[lane])
     descriptor = _open_directory_tree(root)
     metadata = os.fstat(descriptor)
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != ROOT_UID
-        or metadata.st_gid != TRANSFER_WRITER_GID
+        or metadata.st_gid != TRANSFER_WRITER_GIDS[lane]
         or _mode(metadata) != ROOT_MODE
     ):
         os.close(descriptor)
@@ -352,8 +376,8 @@ def require_transfer_capacity(
 ) -> Path:
     """Validate shared ciphertext headroom before a source starts sealing."""
 
-    _runtime_role(allowed=SOURCE_ROLES)
-    root, descriptor = _verify_transfer_root()
+    role, _uid, _gid = _runtime_role(allowed=SOURCE_ROLES)
+    root, descriptor = _verify_transfer_root(role)
     try:
         _verify_capacity(
             descriptor,
@@ -405,7 +429,8 @@ def _marker_bytes(fence: CiphertextFence) -> bytes:
     )
 
 
-def _read_marker(directory_fd: int) -> CiphertextFence:
+def _read_marker(directory_fd: int, lane: str) -> CiphertextFence:
+    lane = _target_lane(lane)
     try:
         descriptor = os.open(FENCE_MARKER, _FILE_FLAGS, dir_fd=directory_fd)
     except OSError as error:
@@ -415,7 +440,7 @@ def _read_marker(directory_fd: int) -> CiphertextFence:
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
-            or metadata.st_gid != TRANSFER_READER_GID
+            or metadata.st_gid != TRANSFER_READER_GIDS[lane]
             or _mode(metadata) != FENCE_MARKER_MODE
         ):
             raise StagingIsolationError("The ciphertext fence marker metadata is unsafe.")
@@ -437,20 +462,20 @@ def _read_marker(directory_fd: int) -> CiphertextFence:
             raise StagingIsolationError("The ciphertext fence marker fields are invalid.")
         backup_uuid = _canonical_backup_uuid(values["backup_uuid"])
         installation_id = _installation_id(str(values["installation_id"]))
-        lane = str(values["lane"])
+        marker_lane = str(values["lane"])
         owner_uid = values["owner_uid"]
         if (
             values["schema"] != 1
-            or lane not in SOURCE_ROLES
+            or marker_lane != lane
             or type(owner_uid) is not int
-            or ROLE_IDENTITIES[lane][0] != owner_uid
+            or ROLE_IDENTITIES[marker_lane][0] != owner_uid
             or metadata.st_uid != owner_uid
         ):
             raise StagingIsolationError("The ciphertext fence marker identity is invalid.")
         fence = CiphertextFence(
             backup_uuid=backup_uuid,
             installation_id=installation_id,
-            lane=lane,
+            lane=marker_lane,
             owner_uid=owner_uid,
             path=Path(),
         )
@@ -466,7 +491,9 @@ def _open_fence(
     root: Path,
     backup_uuid: str,
     installation_id: str,
+    lane: str,
 ) -> tuple[CiphertextFence, int]:
+    lane = _target_lane(lane)
     try:
         descriptor = os.open(backup_uuid, _DIRECTORY_FLAGS, dir_fd=root_fd)
     except FileNotFoundError as error:
@@ -475,10 +502,10 @@ def _open_fence(
         raise StagingIsolationError("The ciphertext fence is missing or unsafe.") from error
     try:
         metadata = os.fstat(descriptor)
-        marker = _read_marker(descriptor)
+        marker = _read_marker(descriptor, lane)
         if (
             not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_gid != TRANSFER_READER_GID
+            or metadata.st_gid != TRANSFER_READER_GIDS[lane]
             or _mode(metadata) != FENCE_MODE
             or metadata.st_uid != marker.owner_uid
             or marker.backup_uuid != backup_uuid
@@ -505,7 +532,7 @@ def create_ciphertext_fence(
     role, current_uid, _current_gid = _runtime_role(allowed=SOURCE_ROLES)
     canonical_uuid = _canonical_backup_uuid(backup_uuid)
     installation = _installation_id(installation_id)
-    root, root_fd = _verify_transfer_root()
+    root, root_fd = _verify_transfer_root(role)
     try:
         _verify_capacity(
             root_fd,
@@ -523,11 +550,14 @@ def create_ciphertext_fence(
             try:
                 directory_fd = os.open(canonical_uuid, _DIRECTORY_FLAGS, dir_fd=root_fd)
                 metadata = os.fstat(directory_fd)
-                if metadata.st_uid != current_uid or metadata.st_gid != TRANSFER_WRITER_GID:
+                if (
+                    metadata.st_uid != current_uid
+                    or metadata.st_gid != TRANSFER_WRITER_GIDS[role]
+                ):
                     raise StagingIsolationError(
                         "The transfer filesystem did not inherit the ciphertext group."
                     )
-                os.fchown(directory_fd, -1, TRANSFER_READER_GID)
+                os.fchown(directory_fd, -1, TRANSFER_READER_GIDS[role])
                 os.fchmod(directory_fd, FENCE_MODE)
                 fence = CiphertextFence(
                     backup_uuid=canonical_uuid,
@@ -571,7 +601,9 @@ def create_ciphertext_fence(
             else:
                 os.close(directory_fd)
                 os.fsync(root_fd)
-        fence, fence_fd = _open_fence(root_fd, root, canonical_uuid, installation)
+        fence, fence_fd = _open_fence(
+            root_fd, root, canonical_uuid, installation, role
+        )
         os.close(fence_fd)
         if fence.lane != role or fence.owner_uid != current_uid:
             raise StagingIsolationError("A different source lane owns this backup fence.")
@@ -587,15 +619,15 @@ def _artifact_name(value: object) -> str:
     return name
 
 
-def _validate_bse1_path(
-    path: Path, fence: CiphertextFence | RestoreCiphertextFence
+def _validate_bse1_descriptor(
+    descriptor: int, fence: CiphertextFence | RestoreCiphertextFence
 ) -> None:
     # Lazy import keeps the filesystem policy usable during image/bootstrap checks
     # without initializing optional KMS clients.
-    from backupsheep.artifact_crypto import read_envelope_header
+    from backupsheep.artifact_crypto import read_envelope_header_from_descriptor
 
-    descriptor = read_envelope_header(path, trusted_source_root=fence.path)
-    if str(descriptor.envelope_id) != fence.backup_uuid:
+    envelope = read_envelope_header_from_descriptor(descriptor)
+    if str(envelope.envelope_id) != fence.backup_uuid:
         raise StagingIsolationError("The BSE1 envelope is not bound to its backup fence.")
 
 
@@ -615,14 +647,16 @@ def publish_ciphertext(
     canonical_uuid = _canonical_backup_uuid(backup_uuid)
     installation = _installation_id(installation_id)
     name = _artifact_name(artifact_name)
-    root, root_fd = _verify_transfer_root()
+    root, root_fd = _verify_transfer_root(role)
     try:
         _verify_capacity(
             root_fd,
             bytes_variable="BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES",
             inodes_variable="BACKUPSHEEP_TRANSFER_MIN_FREE_INODES",
         )
-        fence, fence_fd = _open_fence(root_fd, root, canonical_uuid, installation)
+        fence, fence_fd = _open_fence(
+            root_fd, root, canonical_uuid, installation, role
+        )
         try:
             if fence.lane != role or fence.owner_uid != current_uid:
                 raise StagingIsolationError("A different source lane owns this backup fence.")
@@ -636,15 +670,30 @@ def publish_ciphertext(
                     not stat.S_ISREG(before.st_mode)
                     or before.st_nlink != 1
                     or before.st_uid != current_uid
-                    or before.st_gid != TRANSFER_READER_GID
+                    or before.st_gid != TRANSFER_READER_GIDS[role]
                     or _mode(before) != PRIVATE_FILE_MODE
                 ):
                     raise StagingIsolationError(
                         "Only a private, single-link source-owned file can be published."
                     )
-                _validate_bse1_path(fence.path / name, fence)
+                _validate_bse1_descriptor(descriptor, fence)
+                held_after = os.fstat(descriptor)
                 after = os.stat(name, dir_fd=fence_fd, follow_symlinks=False)
-                if (after.st_dev, after.st_ino, after.st_size) != (
+                if (
+                    held_after.st_dev,
+                    held_after.st_ino,
+                    held_after.st_size,
+                    held_after.st_mtime_ns,
+                    held_after.st_ctime_ns,
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                ) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
                     before.st_dev,
                     before.st_ino,
                     before.st_size,
@@ -666,17 +715,21 @@ def open_ciphertext(
     backup_uuid: object,
     artifact_name: object,
     *,
+    source_lane: object,
     installation_id: str | None = None,
 ) -> BinaryIO:
     """Open a published BSE1 envelope for a storage upload, fail closed."""
 
     _runtime_role(allowed=frozenset({"storage"}))
+    lane = _target_lane(source_lane)
     canonical_uuid = _canonical_backup_uuid(backup_uuid)
     installation = _installation_id(installation_id)
     name = _artifact_name(artifact_name)
-    root, root_fd = _verify_transfer_root()
+    root, root_fd = _verify_transfer_root(lane)
     try:
-        fence, fence_fd = _open_fence(root_fd, root, canonical_uuid, installation)
+        fence, fence_fd = _open_fence(
+            root_fd, root, canonical_uuid, installation, lane
+        )
         try:
             try:
                 descriptor = os.open(name, _FILE_FLAGS, dir_fd=fence_fd)
@@ -688,13 +741,29 @@ def open_ciphertext(
                     not stat.S_ISREG(before.st_mode)
                     or before.st_nlink != 1
                     or before.st_uid != fence.owner_uid
-                    or before.st_gid != TRANSFER_READER_GID
+                    or before.st_gid != TRANSFER_READER_GIDS[lane]
                     or _mode(before) != PUBLISHED_FILE_MODE
                 ):
                     raise StagingIsolationError("The published ciphertext metadata is unsafe.")
-                _validate_bse1_path(fence.path / name, fence)
+                _validate_bse1_descriptor(descriptor, fence)
+                held_after = os.fstat(descriptor)
                 after = os.stat(name, dir_fd=fence_fd, follow_symlinks=False)
-                if (after.st_dev, after.st_ino, after.st_size, _mode(after)) != (
+                if (
+                    held_after.st_dev,
+                    held_after.st_ino,
+                    held_after.st_size,
+                    held_after.st_mtime_ns,
+                    held_after.st_ctime_ns,
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    _mode(after),
+                ) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
                     before.st_dev,
                     before.st_ino,
                     before.st_size,
@@ -719,11 +788,11 @@ def cleanup_ciphertext_fence(
     role, current_uid, _current_gid = _runtime_role(allowed=SOURCE_ROLES)
     canonical_uuid = _canonical_backup_uuid(backup_uuid)
     installation = _installation_id(installation_id)
-    root, root_fd = _verify_transfer_root()
+    root, root_fd = _verify_transfer_root(role)
     try:
         try:
             fence, fence_fd = _open_fence(
-                root_fd, root, canonical_uuid, installation
+                root_fd, root, canonical_uuid, installation, role
             )
         except _CiphertextFenceNotFound:
             return False
@@ -741,7 +810,7 @@ def cleanup_ciphertext_fence(
                     not stat.S_ISREG(metadata.st_mode)
                     or metadata.st_nlink != 1
                     or metadata.st_uid != current_uid
-                    or metadata.st_gid != TRANSFER_READER_GID
+                    or metadata.st_gid != TRANSFER_READER_GIDS[role]
                     or _mode(metadata)
                     not in {PRIVATE_FILE_MODE, PUBLISHED_FILE_MODE}
                 ):
@@ -752,7 +821,11 @@ def cleanup_ciphertext_fence(
                 # complete source-owned 0600 envelope.  It is safe for that same
                 # source lane to discard; partial or non-BSE1 files still block the
                 # entire cleanup before any mutation.
-                _validate_bse1_path(fence.path / normalized, fence)
+                descriptor = os.open(normalized, _FILE_FLAGS, dir_fd=fence_fd)
+                try:
+                    _validate_bse1_descriptor(descriptor, fence)
+                finally:
+                    os.close(descriptor)
                 artifacts.append(normalized)
             # Validate the whole inventory before the first mutation.
             for name in artifacts:
@@ -1075,9 +1148,24 @@ def publish_restore_ciphertext(
                     raise StagingIsolationError(
                         "Only a private, single-link storage-owned restore file can be published."
                     )
-                _validate_bse1_path(fence.path / name, fence)
+                _validate_bse1_descriptor(descriptor, fence)
+                held_after = os.fstat(descriptor)
                 after = os.stat(name, dir_fd=fence_fd, follow_symlinks=False)
-                if (after.st_dev, after.st_ino, after.st_size) != (
+                if (
+                    held_after.st_dev,
+                    held_after.st_ino,
+                    held_after.st_size,
+                    held_after.st_mtime_ns,
+                    held_after.st_ctime_ns,
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                ) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
                     before.st_dev,
                     before.st_ino,
                     before.st_size,
@@ -1146,9 +1234,25 @@ def open_restore_ciphertext(
                     raise StagingIsolationError(
                         "The published restore ciphertext metadata is unsafe."
                     )
-                _validate_bse1_path(fence.path / name, fence)
+                _validate_bse1_descriptor(descriptor, fence)
+                held_after = os.fstat(descriptor)
                 after = os.stat(name, dir_fd=fence_fd, follow_symlinks=False)
-                if (after.st_dev, after.st_ino, after.st_size, _mode(after)) != (
+                if (
+                    held_after.st_dev,
+                    held_after.st_ino,
+                    held_after.st_size,
+                    held_after.st_mtime_ns,
+                    held_after.st_ctime_ns,
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    _mode(after),
+                ) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
                     before.st_dev,
                     before.st_ino,
                     before.st_size,
@@ -1215,7 +1319,11 @@ def cleanup_restore_ciphertext_fence(
                     raise StagingIsolationError(
                         "The restore fence contains an unsafe path; cleanup refused."
                     )
-                _validate_bse1_path(fence.path / normalized, fence)
+                descriptor = os.open(normalized, _FILE_FLAGS, dir_fd=fence_fd)
+                try:
+                    _validate_bse1_descriptor(descriptor, fence)
+                finally:
+                    os.close(descriptor)
                 artifacts.append(normalized)
             for name in artifacts:
                 os.unlink(name, dir_fd=fence_fd)

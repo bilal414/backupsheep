@@ -168,12 +168,14 @@ class RuntimeImageHardeningTests(TestCase):
                 self.assertIn(f"useradd --uid {uid} --gid {uid}", self.runtime)
         self.assertIn("--home-dir /run/backupsheep --no-create-home", self.runtime)
         for gid, group in (
+            (10989, "backupsheep-db-xfer-w"),
+            (10990, "backupsheep-db-xfer-r"),
+            (10991, "backupsheep-file-xfer-w"),
+            (10992, "backupsheep-file-xfer-r"),
             (10993, "backupsheep-rst-files"),
             (10994, "backupsheep-rst-database"),
             (10995, "backupsheep-rst-writer"),
             (10997, "backupsheep-ssh-trust"),
-            (10998, "backupsheep-transfer-writer"),
-            (10999, "backupsheep-transfer-reader"),
         ):
             with self.subTest(group=group):
                 self.assertIn(f"groupadd --gid {gid} {group}", self.runtime)
@@ -297,15 +299,22 @@ class RuntimeImageHardeningTests(TestCase):
                     self.entrypoint,
                     rf"{role}\)?(?:\n|.){{0,120}}expected_uid='{uid}'",
                 )
-        self.assertIn("transfer_writer_gid='10998'", self.entrypoint)
-        self.assertIn("transfer_reader_gid='10999'", self.entrypoint)
+        self.assertIn("database_transfer_writer_gid='10989'", self.entrypoint)
+        self.assertIn("database_transfer_reader_gid='10990'", self.entrypoint)
+        self.assertIn("files_transfer_writer_gid='10991'", self.entrypoint)
+        self.assertIn("files_transfer_reader_gid='10992'", self.entrypoint)
         self.assertIn("restore_writer_gid='10995'", self.entrypoint)
         self.assertIn("restore_database_reader_gid='10994'", self.entrypoint)
         self.assertIn("restore_files_reader_gid='10993'", self.entrypoint)
         self.assertIn("ssh_trust_gid='10997'", self.entrypoint)
         self.assertIn(
-            'verify_owned_directory /var/lib/backupsheep/transfer 0 '
-            '"$transfer_writer_gid" 3771',
+            'verify_owned_directory /var/lib/backupsheep/transfer/database 0 '
+            '"$database_transfer_writer_gid" 3771',
+            self.entrypoint,
+        )
+        self.assertIn(
+            'verify_owned_directory /var/lib/backupsheep/transfer/files 0 '
+            '"$files_transfer_writer_gid" 3771',
             self.entrypoint,
         )
         self.assertIn("reject_dedicated_mount /code/_storage", self.entrypoint)
@@ -315,7 +324,11 @@ class RuntimeImageHardeningTests(TestCase):
         )
         self.assertIn("reject_dedicated_mount /backups", self.entrypoint)
         self.assertIn(
-            "artifact_kms_credentials='/run/secrets/artifact_kms_aws_credentials'",
+            "database_kms_credentials='/run/secrets/artifact_kms_database_aws_credentials'",
+            self.entrypoint,
+        )
+        self.assertIn(
+            "files_kms_credentials='/run/secrets/artifact_kms_files_aws_credentials'",
             self.entrypoint,
         )
         self.assertIn(
@@ -327,7 +340,7 @@ class RuntimeImageHardeningTests(TestCase):
             self.entrypoint,
         )
         self.assertIn(
-            "$runtime_role must not mount the artifact-KMS credential secret",
+            "$runtime_role must not mount an artifact-KMS credential secret",
             self.entrypoint,
         )
         self.assertIn("prepare_private_dir /run/backupsheep", self.entrypoint)

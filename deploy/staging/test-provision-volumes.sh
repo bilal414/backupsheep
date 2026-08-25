@@ -14,16 +14,16 @@ provisioner="${1:-/usr/local/bin/backupsheep-provision-staging-volumes}"
 }
 
 installation_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-intent='migrate-empty-legacy-v1'
+intent='migrate-empty-legacy-v2'
 witness="$(
-  printf '%s' "BackupSheep/staging-layout/v1|${installation_id}|${intent}" \
+  printf '%s' "BackupSheep/staging-layout/v2|${installation_id}|${intent}" \
     | sha256sum | awk '{print $1}'
 )"
 
 new_case() {
   root="$1"
   mkdir -p "$root"
-  for name in database files storage transfer restore-transfer backup-storage ssh-trust legacy witness; do
+  for name in database files storage database-transfer files-transfer restore-transfer backup-storage ssh-trust legacy witness; do
     mkdir "$root/$name"
   done
 }
@@ -47,7 +47,8 @@ run_case "$valid_root"
 [ "$(stat -c '%u:%g:%a' "$valid_root/database")" = 10002:10002:700 ]
 [ "$(stat -c '%u:%g:%a' "$valid_root/files")" = 10003:10003:700 ]
 [ "$(stat -c '%u:%g:%a' "$valid_root/storage")" = 10004:10004:700 ]
-[ "$(stat -c '%u:%g:%a' "$valid_root/transfer")" = 0:10998:3771 ]
+[ "$(stat -c '%u:%g:%a' "$valid_root/database-transfer")" = 0:10989:3771 ]
+[ "$(stat -c '%u:%g:%a' "$valid_root/files-transfer")" = 0:10991:3771 ]
 [ "$(stat -c '%u:%g:%a' "$valid_root/restore-transfer")" = 0:10995:3771 ]
 [ "$(stat -c '%u:%g:%a' "$valid_root/backup-storage")" = 10004:10004:700 ]
 [ "$(stat -c '%u:%g:%a' "$valid_root/ssh-trust")" = 10001:10997:2750 ]
@@ -80,12 +81,12 @@ fi
 
 unwitnessed_restore_root="${root_base}/unwitnessed-restore"
 new_case "$unwitnessed_restore_root"
-printf '%s\n' BSE1unknown > "$unwitnessed_restore_root/restore-transfer/unknown.bse1"
+printf '%s\n' BSE1unknown > "$unwitnessed_restore_root/files-transfer/unknown.bse1"
 if run_case "$unwitnessed_restore_root" >/dev/null 2>&1; then
-  printf '%s\n' "unwitnessed restore-transfer inventory unexpectedly migrated" >&2
+  printf '%s\n' "unwitnessed files-transfer inventory unexpectedly migrated" >&2
   exit 1
 fi
-[ -f "$unwitnessed_restore_root/restore-transfer/unknown.bse1" ] \
+[ -f "$unwitnessed_restore_root/files-transfer/unknown.bse1" ] \
   || { printf '%s\n' "unwitnessed restore evidence was mutated" >&2; exit 1; }
 
 storage_root="${root_base}/legacy-storage"

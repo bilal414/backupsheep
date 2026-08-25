@@ -695,6 +695,7 @@ def storage_upload_artifact(backup, *, legacy_verifier):
         with open_ciphertext(
             backup.uuid_str,
             state.transfer_name,
+            source_lane=state.context.lane,
             installation_id=state.context.installation_id,
         ) as source:
             _copy_ciphertext_atomically(source, destination, state.artifact)

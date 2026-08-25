@@ -85,15 +85,15 @@ semver_at_least 2.34.0-rc.1 2.33.1
 
     def test_installer_starts_only_the_core_without_explicit_operations_opt_in(self):
         self.assertIn(
-            "readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app)",
+            "readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision db-provision migrate preflight app-egress-guard app)",
             self.installer,
         )
         self.assertIn('if [[ "$ENABLE_OPERATIONS" == true ]]', self.installer)
         self.assertIn("compose --profile operations up", self.installer)
-        self.assertIn('compose --profile operations stop "${OPERATION_SERVICES[@]}"', self.installer)
+        self.assertIn('"${OPERATION_SERVICES[@]}" "${OPERATION_GUARD_SERVICES[@]}"', self.installer)
         self.assertLess(
             self.installer.index("    stop_operations\n", self.installer.index("start_core()")),
-            self.installer.index("    compose build --pull db app", self.installer.index("start_core()")),
+            self.installer.index("    compose build --pull db app app-egress-guard", self.installer.index("start_core()")),
         )
         self.assertNotIn("up --build --detach --remove-orphans", self.installer)
         self.assertIn("/proc/1/task/1/children", self.installer)
@@ -159,7 +159,9 @@ semver_at_least 2.34.0-rc.1 2.33.1
 
 class InstallerSecretMigrationTests(TestCase):
     def setUp(self):
-        self.temp_dir = Path(tempfile.mkdtemp(prefix="backupsheep-installer-test-"))
+        self.temp_dir = Path(
+            tempfile.mkdtemp(prefix="backupsheep-installer-test-")
+        ).resolve()
         self.env_file = self.temp_dir / ".env"
         shutil.copyfile(SAMPLE_ENV, self.env_file)
         os.chmod(self.env_file, 0o600)
@@ -199,6 +201,22 @@ class InstallerSecretMigrationTests(TestCase):
         ) + "\n"
         self.env_file.write_text(content, encoding="utf-8")
         os.chmod(self.env_file, 0o600)
+        self.database_kms_credentials = self.temp_dir / "database-kms.ini"
+        self.files_kms_credentials = self.temp_dir / "files-kms.ini"
+        self.database_kms_credentials.write_text(
+            "[default]\n"
+            "aws_access_key_id = AKIADATABASE00001\n"
+            f"aws_secret_access_key = {'d' * 40}\n",
+            encoding="utf-8",
+        )
+        self.files_kms_credentials.write_text(
+            "[default]\n"
+            "aws_access_key_id = AKIAFILES00000001\n"
+            f"aws_secret_access_key = {'f' * 40}\n",
+            encoding="utf-8",
+        )
+        os.chmod(self.database_kms_credentials, 0o600)
+        os.chmod(self.files_kms_credentials, 0o600)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
@@ -211,6 +229,15 @@ INSTALL_REF="$3"
 PUBLIC_HOST=localhost
 APP_DOMAIN=localhost:8000
 INSTALL_WAS_PRESENT=true
+ARTIFACT_KMS_KEY_ID='arn:aws:kms:us-east-1:123456789012:key/11111111-2222-4333-8444-555555555555'
+ARTIFACT_KMS_REGION='us-east-1'
+ARTIFACT_KMS_ALLOWED_KEY_ARNS="$ARTIFACT_KMS_KEY_ID"
+ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE="$2/database-kms.ini"
+ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE="$2/files-kms.ini"
+ENV_FILE="$2/.env"
+if [[ -z "$(read_env_value BACKUPSHEEP_STAGING_LAYOUT_INTENT)" ]]; then
+    MIGRATE_STAGING_LAYOUT=true
+fi
 {body}
 """
         return subprocess.run(
@@ -267,6 +294,19 @@ INSTALL_WAS_PRESENT=true
             f"BACKUPSHEEP_POSTGRES_IMAGE='backupsheep-postgres:{COMMIT}'",
             migrated_env,
         )
+        self.assertIn(
+            f"BACKUPSHEEP_EGRESS_IMAGE='backupsheep-egress:{COMMIT}'",
+            migrated_env,
+        )
+        self.assertIn(
+            "BACKUPSHEEP_STAGING_LAYOUT_INTENT='migrate-empty-legacy-v2'",
+            migrated_env,
+        )
+        database_kms = secret_dir / "artifact_kms_database_aws_credentials"
+        files_kms = secret_dir / "artifact_kms_files_aws_credentials"
+        self.assertEqual(stat.S_IMODE(database_kms.stat().st_mode), 0o444)
+        self.assertEqual(stat.S_IMODE(files_kms.stat().st_mode), 0o444)
+        self.assertNotEqual(database_kms.read_bytes(), files_kms.read_bytes())
         managed_key = secret_dir / "ssh_managed_private_key"
         self.assertEqual(stat.S_IMODE(managed_key.stat().st_mode), 0o444)
         self.assertEqual(managed_key.read_bytes(), b"")
@@ -329,6 +369,23 @@ INSTALL_WAS_PRESENT=true
         secret_dir = self.temp_dir / ".secrets"
         self.assertFalse((secret_dir / "db_bootstrap_password").exists())
         self.assertFalse((secret_dir / "db_migrator_password").exists())
+
+    def test_kms_lane_credentials_require_distinct_access_key_identities(self):
+        self.files_kms_credentials.write_text(
+            "[default]\n"
+            "aws_access_key_id = AKIADATABASE00001\n"
+            f"aws_secret_access_key = {'f' * 40}\n",
+            encoding="utf-8",
+        )
+        os.chmod(self.files_kms_credentials, 0o600)
+        result = self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different AWS access-key identities", result.stderr)
 
     def test_ambiguous_partial_database_secret_transition_fails_closed(self):
         secret_dir = self.temp_dir / ".secrets"

@@ -13,15 +13,15 @@ fail() {
 command -v setpriv >/dev/null 2>&1 || fail "setpriv is required."
 
 run_database() {
-  setpriv --reuid=10002 --regid=10002 --groups=10994,10997,10998,10999 -- "$@"
+  setpriv --reuid=10002 --regid=10002 --groups=10989,10990,10994,10997 -- "$@"
 }
 
 run_files() {
-  setpriv --reuid=10003 --regid=10003 --groups=10993,10997,10998,10999 -- "$@"
+  setpriv --reuid=10003 --regid=10003 --groups=10991,10992,10993,10997 -- "$@"
 }
 
 run_storage() {
-  setpriv --reuid=10004 --regid=10004 --groups=10993,10994,10995,10999 -- "$@"
+  setpriv --reuid=10004 --regid=10004 --groups=10990,10992,10993,10994,10995 -- "$@"
 }
 
 run_web() {
@@ -43,15 +43,20 @@ expect_denied() {
 run_database sh -ceu '
   umask 077
   printf plaintext-database > /volumes/database/plaintext.zip
-  mkdir /volumes/transfer/11111111-2222-4333-8444-555555555555
-  chgrp 10999 /volumes/transfer/11111111-2222-4333-8444-555555555555
-  chmod 2750 /volumes/transfer/11111111-2222-4333-8444-555555555555
-  printf BSE1ciphertext > /volumes/transfer/11111111-2222-4333-8444-555555555555/archive.bse1
-  chmod 0640 /volumes/transfer/11111111-2222-4333-8444-555555555555/archive.bse1
+  mkdir /volumes/database-transfer/11111111-2222-4333-8444-555555555555
+  chgrp 10990 /volumes/database-transfer/11111111-2222-4333-8444-555555555555
+  chmod 2750 /volumes/database-transfer/11111111-2222-4333-8444-555555555555
+  printf BSE1database > /volumes/database-transfer/11111111-2222-4333-8444-555555555555/archive.bse1
+  chmod 0640 /volumes/database-transfer/11111111-2222-4333-8444-555555555555/archive.bse1
 '
 run_files sh -ceu '
   umask 077
   printf plaintext-files > /volumes/files/plaintext.zip
+  mkdir /volumes/files-transfer/11111111-2222-4333-8444-555555555555
+  chgrp 10992 /volumes/files-transfer/11111111-2222-4333-8444-555555555555
+  chmod 2750 /volumes/files-transfer/11111111-2222-4333-8444-555555555555
+  printf BSE1files > /volumes/files-transfer/11111111-2222-4333-8444-555555555555/archive.bse1
+  chmod 0640 /volumes/files-transfer/11111111-2222-4333-8444-555555555555/archive.bse1
 '
 run_storage sh -ceu '
   umask 077
@@ -85,9 +90,25 @@ expect_denied "database reading local storage" \
 expect_denied "files deleting local storage" \
   run_files sh -c 'rm /volumes/backup-storage/local-object.bse1'
 expect_denied "storage pre-creating a transfer fence" \
-  run_storage sh -c 'mkdir /volumes/transfer/22222222-3333-4444-8555-666666666666'
-expect_denied "storage enumerating transfer fences" \
-  run_storage sh -c 'ls /volumes/transfer'
+  run_storage sh -c 'mkdir /volumes/database-transfer/22222222-3333-4444-8555-666666666666'
+expect_denied "storage pre-creating a files transfer fence" \
+  run_storage sh -c 'mkdir /volumes/files-transfer/22222222-3333-4444-8555-666666666666'
+expect_denied "storage enumerating database transfer fences" \
+  run_storage sh -c 'ls /volumes/database-transfer'
+expect_denied "storage enumerating files transfer fences" \
+  run_storage sh -c 'ls /volumes/files-transfer'
+expect_denied "files enumerating database transfer fences" \
+  run_files sh -c 'ls /volumes/database-transfer'
+expect_denied "database enumerating files transfer fences" \
+  run_database sh -c 'ls /volumes/files-transfer'
+expect_denied "files reading known database ciphertext" \
+  run_files sh -c 'exec 3</volumes/database-transfer/11111111-2222-4333-8444-555555555555/archive.bse1'
+expect_denied "database reading known files ciphertext" \
+  run_database sh -c 'exec 3</volumes/files-transfer/11111111-2222-4333-8444-555555555555/archive.bse1'
+expect_denied "files pre-creating a database transfer fence" \
+  run_files sh -c 'mkdir /volumes/database-transfer/22222222-3333-4444-8555-666666666666'
+expect_denied "database pre-creating a files transfer fence" \
+  run_database sh -c 'mkdir /volumes/files-transfer/22222222-3333-4444-8555-666666666666'
 run_database sh -ceu '
   test "$(cat /volumes/restore-transfer/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/archive.bse1)" = BSE1restore
 '
@@ -118,23 +139,28 @@ run_web sh -ceu '
 run_files sh -ceu 'test "$(cat /volumes/ssh-trust/known_hosts)" = rotated-key'
 
 run_storage sh -ceu '
-  test "$(cat /volumes/transfer/11111111-2222-4333-8444-555555555555/archive.bse1)" = BSE1ciphertext
+  test "$(cat /volumes/database-transfer/11111111-2222-4333-8444-555555555555/archive.bse1)" = BSE1database
+  test "$(cat /volumes/files-transfer/11111111-2222-4333-8444-555555555555/archive.bse1)" = BSE1files
 '
 expect_denied "storage modifying published ciphertext" \
-  run_storage sh -c 'printf attack >> /volumes/transfer/11111111-2222-4333-8444-555555555555/archive.bse1'
+  run_storage sh -c 'printf attack >> /volumes/database-transfer/11111111-2222-4333-8444-555555555555/archive.bse1'
 expect_denied "storage deleting published ciphertext" \
-  run_storage sh -c 'rm /volumes/transfer/11111111-2222-4333-8444-555555555555/archive.bse1'
+  run_storage sh -c 'rm /volumes/database-transfer/11111111-2222-4333-8444-555555555555/archive.bse1'
 expect_denied "files deleting another lane fence" \
-  run_files sh -c 'rmdir /volumes/transfer/11111111-2222-4333-8444-555555555555'
+  run_files sh -c 'rmdir /volumes/database-transfer/11111111-2222-4333-8444-555555555555'
 
 # Only the owning source identity can clean its exact fence.  The test names every
 # target explicitly and operates solely on disposable tmpfs mounts.
 run_database sh -ceu '
-  rm /volumes/transfer/11111111-2222-4333-8444-555555555555/archive.bse1
-  rmdir /volumes/transfer/11111111-2222-4333-8444-555555555555
+  rm /volumes/database-transfer/11111111-2222-4333-8444-555555555555/archive.bse1
+  rmdir /volumes/database-transfer/11111111-2222-4333-8444-555555555555
 '
-test ! -e /volumes/transfer/11111111-2222-4333-8444-555555555555 \
+test ! -e /volumes/database-transfer/11111111-2222-4333-8444-555555555555 \
   || fail "the owning source lane could not clean its exact fence."
+run_files sh -ceu '
+  rm /volumes/files-transfer/11111111-2222-4333-8444-555555555555/archive.bse1
+  rmdir /volumes/files-transfer/11111111-2222-4333-8444-555555555555
+'
 run_storage sh -ceu '
   rm /volumes/restore-transfer/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/archive.bse1
   rmdir /volumes/restore-transfer/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee

@@ -92,6 +92,7 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
             "expected_source_key_arn": SOURCE_KEY,
             "destination_key_arn": DESTINATION_KEY,
             "installation_id_witness": INSTALLATION_ID,
+            "lane": "files",
             "limit": 100,
             "apply": apply,
         }
@@ -111,6 +112,14 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         original.refresh_from_db()
         self.assertEqual(envelope.get_active_key_wrap().pk, original.pk)
         self.assertEqual(envelope.key_wraps.count(), 1)
+
+    def test_plan_filters_candidates_to_the_explicit_credential_lane(self):
+        self._active_envelope()
+        output = io.StringIO()
+        arguments = self._arguments()
+        arguments["lane"] = "database"
+        call_command("rotate_artifact_key_wraps", stdout=output, **arguments)
+        self.assertIn("lane=database selected=0", output.getvalue())
 
     def test_shared_provider_factory_context_is_entered_and_closed(self):
         provider = mock.Mock()
@@ -138,6 +147,7 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
             source_key=SOURCE_KEY,
             destination_key=DESTINATION_KEY,
             installation_id=INSTALLATION_ID,
+            expected_lane="files",
         )
         self.assertEqual(result, "rotated")
         original.refresh_from_db()
@@ -198,6 +208,7 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
                 source_key=SOURCE_KEY,
                 destination_key=DESTINATION_KEY,
                 installation_id=INSTALLATION_ID,
+                expected_lane="files",
             )
         original.refresh_from_db()
         self.assertEqual(original.status, CoreBackupKeyWrap.Status.ACTIVE)
@@ -214,6 +225,7 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
                 source_key=SOURCE_KEY,
                 destination_key=DESTINATION_KEY,
                 installation_id=INSTALLATION_ID,
+                expected_lane="files",
             )
         provider.rewrap_data_key.assert_not_called()
 

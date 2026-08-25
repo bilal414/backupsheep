@@ -52,16 +52,21 @@ export \
 
 # Compose assigns one immutable identity to each trust lane. Failing closed catches
 # a user override or accidental shared UID before credentials or backup data become
-# reachable. Only source/storage lanes may join the ciphertext transfer group.
+# reachable. Each source lane has its own transfer writer/reader groups; storage
+# receives only the two reader groups and cannot enumerate either transfer root.
 runtime_role="${BACKUPSHEEP_RUNTIME_ROLE:-}"
-transfer_writer_gid='10998'
-transfer_reader_gid='10999'
+database_transfer_writer_gid='10989'
+database_transfer_reader_gid='10990'
+files_transfer_writer_gid='10991'
+files_transfer_reader_gid='10992'
 restore_writer_gid='10995'
 restore_database_reader_gid='10994'
 restore_files_reader_gid='10993'
 ssh_trust_gid='10997'
-requires_transfer_writer='no'
-requires_transfer_reader='no'
+requires_database_transfer_writer='no'
+requires_database_transfer_reader='no'
+requires_files_transfer_writer='no'
+requires_files_transfer_reader='no'
 requires_ssh_trust_reader='no'
 requires_restore_writer='no'
 requires_restore_database_reader='no'
@@ -70,18 +75,22 @@ case "$runtime_role" in
   web) expected_uid='10001'; expected_gid='10001' ;;
   database)
     expected_uid='10002'; expected_gid='10002'
-    requires_transfer_writer='yes'; requires_transfer_reader='yes'
+    requires_database_transfer_writer='yes'
+    requires_database_transfer_reader='yes'
     requires_ssh_trust_reader='yes'
     requires_restore_database_reader='yes'
     ;;
   files)
     expected_uid='10003'; expected_gid='10003'
-    requires_transfer_writer='yes'; requires_transfer_reader='yes'
+    requires_files_transfer_writer='yes'
+    requires_files_transfer_reader='yes'
     requires_ssh_trust_reader='yes'
     requires_restore_files_reader='yes'
     ;;
   storage)
-    expected_uid='10004'; expected_gid='10004'; requires_transfer_reader='yes'
+    expected_uid='10004'; expected_gid='10004'
+    requires_database_transfer_reader='yes'
+    requires_files_transfer_reader='yes'
     requires_restore_writer='yes'
     requires_restore_database_reader='yes'
     requires_restore_files_reader='yes'
@@ -95,8 +104,10 @@ esac
 [ "$(id -u)" = "$expected_uid" ] || fail "expected UID $expected_uid."
 [ "$(id -g)" = "$expected_gid" ] || fail "expected GID $expected_gid."
 
-has_transfer_writer='no'
-has_transfer_reader='no'
+has_database_transfer_writer='no'
+has_database_transfer_reader='no'
+has_files_transfer_writer='no'
+has_files_transfer_reader='no'
 has_ssh_trust_reader='no'
 has_restore_writer='no'
 has_restore_database_reader='no'
@@ -104,8 +115,10 @@ has_restore_files_reader='no'
 for runtime_gid in $(id -G); do
   case "$runtime_gid" in
     "$expected_gid") ;;
-    "$transfer_writer_gid") has_transfer_writer='yes' ;;
-    "$transfer_reader_gid") has_transfer_reader='yes' ;;
+    "$database_transfer_writer_gid") has_database_transfer_writer='yes' ;;
+    "$database_transfer_reader_gid") has_database_transfer_reader='yes' ;;
+    "$files_transfer_writer_gid") has_files_transfer_writer='yes' ;;
+    "$files_transfer_reader_gid") has_files_transfer_reader='yes' ;;
     "$restore_writer_gid") has_restore_writer='yes' ;;
     "$restore_database_reader_gid") has_restore_database_reader='yes' ;;
     "$restore_files_reader_gid") has_restore_files_reader='yes' ;;
@@ -113,10 +126,14 @@ for runtime_gid in $(id -G); do
     *) fail "runtime identity has an unreviewed supplementary group." ;;
   esac
 done
-[ "$has_transfer_writer" = "$requires_transfer_writer" ] \
-  || fail "the $runtime_role role has an unsafe ciphertext writer-group assignment."
-[ "$has_transfer_reader" = "$requires_transfer_reader" ] \
-  || fail "the $runtime_role role has an unsafe ciphertext reader-group assignment."
+[ "$has_database_transfer_writer" = "$requires_database_transfer_writer" ] \
+  || fail "the $runtime_role role has an unsafe database-transfer writer group."
+[ "$has_database_transfer_reader" = "$requires_database_transfer_reader" ] \
+  || fail "the $runtime_role role has an unsafe database-transfer reader group."
+[ "$has_files_transfer_writer" = "$requires_files_transfer_writer" ] \
+  || fail "the $runtime_role role has an unsafe files-transfer writer group."
+[ "$has_files_transfer_reader" = "$requires_files_transfer_reader" ] \
+  || fail "the $runtime_role role has an unsafe files-transfer reader group."
 [ "$has_ssh_trust_reader" = "$requires_ssh_trust_reader" ] \
   || fail "the $runtime_role role has an unsafe SSH trust-group assignment."
 [ "$has_restore_writer" = "$requires_restore_writer" ] \
@@ -126,8 +143,8 @@ done
 [ "$has_restore_files_reader" = "$requires_restore_files_reader" ] \
   || fail "the $runtime_role role has an unsafe files-restore reader-group assignment."
 
-# The stock enterprise path uses one file-backed AWS credential that is mounted
-# only into the two source/restore lanes. Ambient environment, web identity,
+# The stock enterprise path uses distinct file-backed AWS credentials for the
+# database and files source/restore lanes. Ambient environment, web identity,
 # container metadata and SDK endpoint overrides would either leak decrypt authority
 # to unrelated roles or bypass the reviewed KMS endpoint policy, so reject them.
 for ambient_aws_value in \
@@ -136,7 +153,12 @@ for ambient_aws_value in \
   "${AWS_SESSION_TOKEN:-}" \
   "${AWS_SECURITY_TOKEN:-}" \
   "${AWS_PROFILE:-}" \
+  "${AWS_DEFAULT_PROFILE:-}" \
   "${AWS_CONFIG_FILE:-}" \
+  "${AWS_CA_BUNDLE:-}" \
+  "${AWS_METADATA_SERVICE_ENDPOINT:-}" \
+  "${AWS_METADATA_SERVICE_ENDPOINT_MODE:-}" \
+  "${BOTO_CONFIG:-}" \
   "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" \
   "${AWS_ROLE_ARN:-}" \
   "${AWS_ROLE_SESSION_NAME:-}" \
@@ -151,13 +173,30 @@ for ambient_aws_value in \
 done
 [ "${AWS_EC2_METADATA_DISABLED:-}" = true ] \
   || fail "AWS instance-metadata credentials must be disabled."
+[ "${AWS_EC2_METADATA_V1_DISABLED:-}" = true ] \
+  || fail "AWS instance-metadata v1 must be disabled."
 [ "${AWS_IGNORE_CONFIGURED_ENDPOINT_URLS:-}" = true ] \
   || fail "AWS SDK endpoint environment overrides must be disabled."
-artifact_kms_credentials='/run/secrets/artifact_kms_aws_credentials'
+database_kms_credentials='/run/secrets/artifact_kms_database_aws_credentials'
+files_kms_credentials='/run/secrets/artifact_kms_files_aws_credentials'
 case "$runtime_role" in
-  database|files)
+  database)
+    artifact_kms_credentials="$database_kms_credentials"
+    [ ! -e "$files_kms_credentials" ] \
+      || fail "database must not mount the files artifact-KMS credential secret."
     [ "${AWS_SHARED_CREDENTIALS_FILE:-}" = "$artifact_kms_credentials" ] \
-      || fail "the source lane requires the reviewed artifact-KMS credential file."
+      || fail "the database lane requires its reviewed artifact-KMS credential file."
+    [ -f "$artifact_kms_credentials" ] && [ ! -L "$artifact_kms_credentials" ] \
+      || fail "the artifact-KMS credential secret must be a regular file."
+    [ "$(stat -c '%u:%g:%a:%h' "$artifact_kms_credentials")" = '0:0:444:1' ] \
+      || fail "the artifact-KMS credential secret metadata is unsafe."
+    ;;
+  files)
+    artifact_kms_credentials="$files_kms_credentials"
+    [ ! -e "$database_kms_credentials" ] \
+      || fail "files must not mount the database artifact-KMS credential secret."
+    [ "${AWS_SHARED_CREDENTIALS_FILE:-}" = "$artifact_kms_credentials" ] \
+      || fail "the files lane requires its reviewed artifact-KMS credential file."
     [ -f "$artifact_kms_credentials" ] && [ ! -L "$artifact_kms_credentials" ] \
       || fail "the artifact-KMS credential secret must be a regular file."
     [ "$(stat -c '%u:%g:%a:%h' "$artifact_kms_credentials")" = '0:0:444:1' ] \
@@ -166,8 +205,8 @@ case "$runtime_role" in
   *)
     [ -z "${AWS_SHARED_CREDENTIALS_FILE:-}" ] \
       || fail "$runtime_role must not receive artifact-KMS credentials."
-    [ ! -e "$artifact_kms_credentials" ] \
-      || fail "$runtime_role must not mount the artifact-KMS credential secret."
+    [ ! -e "$database_kms_credentials" ] && [ ! -e "$files_kms_credentials" ] \
+      || fail "$runtime_role must not mount an artifact-KMS credential secret."
     ;;
 esac
 
@@ -247,24 +286,39 @@ verify_owned_directory() {
 }
 
 case "$runtime_role" in
-  database|files)
+  database)
     require_mount /code/_storage any rw
-    require_mount /var/lib/backupsheep/transfer any rw
+    require_mount /var/lib/backupsheep/transfer/database any rw
     require_mount /var/lib/backupsheep/restore-transfer any ro
     verify_owned_directory /code/_storage "$expected_uid" "$expected_gid" 700
-    verify_owned_directory /var/lib/backupsheep/transfer 0 "$transfer_writer_gid" 3771
+    verify_owned_directory /var/lib/backupsheep/transfer/database 0 "$database_transfer_writer_gid" 3771
     verify_owned_directory /var/lib/backupsheep/restore-transfer 0 "$restore_writer_gid" 3771
     require_mount /var/lib/backupsheep/ssh-trust any ro
     verify_owned_directory /var/lib/backupsheep/ssh-trust 10001 "$ssh_trust_gid" 2750
+    reject_dedicated_mount /var/lib/backupsheep/transfer/files
+    reject_dedicated_mount /backups
+    ;;
+  files)
+    require_mount /code/_storage any rw
+    require_mount /var/lib/backupsheep/transfer/files any rw
+    require_mount /var/lib/backupsheep/restore-transfer any ro
+    verify_owned_directory /code/_storage "$expected_uid" "$expected_gid" 700
+    verify_owned_directory /var/lib/backupsheep/transfer/files 0 "$files_transfer_writer_gid" 3771
+    verify_owned_directory /var/lib/backupsheep/restore-transfer 0 "$restore_writer_gid" 3771
+    require_mount /var/lib/backupsheep/ssh-trust any ro
+    verify_owned_directory /var/lib/backupsheep/ssh-trust 10001 "$ssh_trust_gid" 2750
+    reject_dedicated_mount /var/lib/backupsheep/transfer/database
     reject_dedicated_mount /backups
     ;;
   storage)
     require_mount /code/_storage any rw
-    require_mount /var/lib/backupsheep/transfer any ro
+    require_mount /var/lib/backupsheep/transfer/database any ro
+    require_mount /var/lib/backupsheep/transfer/files any ro
     require_mount /var/lib/backupsheep/restore-transfer any rw
     require_mount /backups any rw
     verify_owned_directory /code/_storage "$expected_uid" "$expected_gid" 700
-    verify_owned_directory /var/lib/backupsheep/transfer 0 "$transfer_writer_gid" 3771
+    verify_owned_directory /var/lib/backupsheep/transfer/database 0 "$database_transfer_writer_gid" 3771
+    verify_owned_directory /var/lib/backupsheep/transfer/files 0 "$files_transfer_writer_gid" 3771
     verify_owned_directory /var/lib/backupsheep/restore-transfer 0 "$restore_writer_gid" 3771
     verify_owned_directory /backups "$expected_uid" "$expected_gid" 700
     reject_dedicated_mount /var/lib/backupsheep/ssh-trust
@@ -273,13 +327,15 @@ case "$runtime_role" in
     require_mount /var/lib/backupsheep/ssh-trust any rw
     verify_owned_directory /var/lib/backupsheep/ssh-trust 10001 "$ssh_trust_gid" 2750
     reject_dedicated_mount /code/_storage
-    reject_dedicated_mount /var/lib/backupsheep/transfer
+    reject_dedicated_mount /var/lib/backupsheep/transfer/database
+    reject_dedicated_mount /var/lib/backupsheep/transfer/files
     reject_dedicated_mount /var/lib/backupsheep/restore-transfer
     reject_dedicated_mount /backups
     ;;
   *)
     reject_dedicated_mount /code/_storage
-    reject_dedicated_mount /var/lib/backupsheep/transfer
+    reject_dedicated_mount /var/lib/backupsheep/transfer/database
+    reject_dedicated_mount /var/lib/backupsheep/transfer/files
     reject_dedicated_mount /var/lib/backupsheep/restore-transfer
     reject_dedicated_mount /backups
     reject_dedicated_mount /var/lib/backupsheep/ssh-trust

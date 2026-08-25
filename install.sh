@@ -14,7 +14,7 @@ umask 077
 
 readonly REPOSITORY_URL="https://github.com/bilal414/backupsheep.git"
 readonly APP_PORT="8000"
-readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app)
+readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision db-provision migrate preflight app-egress-guard app)
 readonly -a OPERATION_SERVICES=(
     worker-cloud
     worker-database
@@ -22,6 +22,13 @@ readonly -a OPERATION_SERVICES=(
     worker-storage
     worker-logs
     beat
+)
+readonly -a OPERATION_GUARD_SERVICES=(
+    cloud-egress-guard
+    database-egress-guard
+    files-egress-guard
+    storage-egress-guard
+    logs-egress-guard
 )
 readonly -a SECRET_NAMES=(
     django_secret_key
@@ -47,6 +54,8 @@ readonly -a SECRET_NAMES=(
     celery_trusted_public_keys
     onboarding_token
     ssh_managed_private_key
+    artifact_kms_database_aws_credentials
+    artifact_kms_files_aws_credentials
 )
 readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password)
 readonly -a RABBITMQ_ROLES=(bootstrap app preflight beat cloud database files storage logs)
@@ -73,6 +82,12 @@ SKIP_START=false
 ENABLE_OPERATIONS=false
 MIGRATE_DATABASE_IDENTITIES=false
 MIGRATE_RABBITMQ_IDENTITIES=false
+MIGRATE_STAGING_LAYOUT=false
+ARTIFACT_KMS_KEY_ID=""
+ARTIFACT_KMS_REGION=""
+ARTIFACT_KMS_ALLOWED_KEY_ARNS=""
+ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE=""
+ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE=""
 INSTALL_WAS_PRESENT=false
 ENV_WAS_PRESENT=false
 ENV_FILE=""
@@ -131,6 +146,23 @@ Options:
                      per-lane file credentials and Ed25519 task-signing keys, and
                      enable the one-shot permission reconciler. Required once for
                      an existing install.
+  --migrate-staging-layout
+                     One-time authorization to adopt an existing install only when
+                     the legacy shared work volume is empty and every new lane volume
+                     passes the fail-closed ownership witness.
+  --artifact-kms-key-id ARN
+                     Resolved symmetric AWS KMS key ARN used for new BSE1 data keys.
+  --artifact-kms-region REGION
+                     AWS region containing every allowlisted artifact key.
+  --artifact-kms-allowed-key-arns ARNS
+                     Comma-separated resolved KMS key ARNs accepted for restore and
+                     key-wrap rotation; include the active key.
+  --artifact-kms-database-aws-credentials-file PATH
+                     Private canonical [default] AWS credentials for the database
+                     lane. IAM must restrict KMS context bse:lane=database.
+  --artifact-kms-files-aws-credentials-file PATH
+                     Separate private credentials for the files lane. IAM must
+                     restrict KMS context bse:lane=files. Neither enters .env.
   --skip-start        Create and validate the installation, but do not build or start it.
   -h, --help          Show this help.
 
@@ -292,6 +324,45 @@ parse_args() {
             --migrate-rabbitmq-identities)
                 MIGRATE_RABBITMQ_IDENTITIES=true
                 shift
+                ;;
+            --migrate-staging-layout)
+                MIGRATE_STAGING_LAYOUT=true
+                shift
+                ;;
+            --artifact-kms-key-id)
+                [[ $# -ge 2 ]] || die "--artifact-kms-key-id requires a resolved key ARN"
+                [[ -z "$ARTIFACT_KMS_KEY_ID" ]] \
+                    || die "--artifact-kms-key-id may be specified only once"
+                ARTIFACT_KMS_KEY_ID="$2"
+                shift 2
+                ;;
+            --artifact-kms-region)
+                [[ $# -ge 2 ]] || die "--artifact-kms-region requires a value"
+                [[ -z "$ARTIFACT_KMS_REGION" ]] \
+                    || die "--artifact-kms-region may be specified only once"
+                ARTIFACT_KMS_REGION="$2"
+                shift 2
+                ;;
+            --artifact-kms-allowed-key-arns)
+                [[ $# -ge 2 ]] || die "--artifact-kms-allowed-key-arns requires a value"
+                [[ -z "$ARTIFACT_KMS_ALLOWED_KEY_ARNS" ]] \
+                    || die "--artifact-kms-allowed-key-arns may be specified only once"
+                ARTIFACT_KMS_ALLOWED_KEY_ARNS="$2"
+                shift 2
+                ;;
+            --artifact-kms-database-aws-credentials-file)
+                [[ $# -ge 2 ]] || die "--artifact-kms-database-aws-credentials-file requires a path"
+                [[ -z "$ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE" ]] \
+                    || die "--artifact-kms-database-aws-credentials-file may be specified only once"
+                ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE="$2"
+                shift 2
+                ;;
+            --artifact-kms-files-aws-credentials-file)
+                [[ $# -ge 2 ]] || die "--artifact-kms-files-aws-credentials-file requires a path"
+                [[ -z "$ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE" ]] \
+                    || die "--artifact-kms-files-aws-credentials-file may be specified only once"
+                ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE="$2"
+                shift 2
                 ;;
             --skip-start)
                 SKIP_START=true
@@ -818,6 +889,46 @@ validate_secret_dir() {
     done
 }
 
+validate_artifact_kms_credentials_content() {
+    local credential_file="$1"
+    local credential_size=""
+
+    credential_size="$(file_size "$credential_file")"
+    [[ "$credential_size" -gt 0 && "$credential_size" -le 16384 ]] \
+        || die "The artifact KMS credentials file must be between 1 byte and 16 KiB."
+    ! od -An -v -tx1 "$credential_file" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)' \
+        || die "The artifact KMS credentials file contains a NUL byte."
+    ! grep -q $'\r' "$credential_file" \
+        || die "The artifact KMS credentials file contains carriage returns."
+    awk '
+        NR == 1 { if ($0 != "[default]") exit 1; next }
+        NR == 2 {
+            prefix = "aws_access_key_id = "
+            if (index($0, prefix) != 1) exit 1
+            value = substr($0, length(prefix) + 1)
+            if (value !~ /^[A-Z0-9]+$/ || length(value) < 16 || length(value) > 128) exit 1
+            next
+        }
+        NR == 3 {
+            prefix = "aws_secret_access_key = "
+            if (index($0, prefix) != 1) exit 1
+            value = substr($0, length(prefix) + 1)
+            if (value !~ /^[A-Za-z0-9\/+\=]+$/ || length(value) < 32 || length(value) > 256) exit 1
+            next
+        }
+        NR == 4 {
+            prefix = "aws_session_token = "
+            if (index($0, prefix) != 1) exit 1
+            value = substr($0, length(prefix) + 1)
+            if (value !~ /^[A-Za-z0-9\/+\=_.:-]+$/ || length(value) < 16 || length(value) > 4096) exit 1
+            next
+        }
+        NR > 4 { exit 1 }
+        END { if (NR != 3 && NR != 4) exit 1 }
+    ' "$credential_file" \
+        || die "The artifact KMS credentials file must contain only a canonical [default] access key, secret key, and optional session token."
+}
+
 validate_secret_file() {
     local secret_path="$1"
     local secret_owner=""
@@ -837,6 +948,11 @@ validate_secret_file() {
     [[ "$secret_owner" == "$EUID" && "$secret_mode" == "444" && "$secret_links" == "1" ]] \
         || die "${secret_path} must be owned by the invoking user, mode 0444, and not hard-linked."
     secret_name="$(basename -- "$secret_path")"
+    if [[ "$secret_name" == "artifact_kms_database_aws_credentials" \
+        || "$secret_name" == "artifact_kms_files_aws_credentials" ]]; then
+        validate_artifact_kms_credentials_content "$secret_path"
+        return
+    fi
     if [[ "$secret_name" == "ssh_managed_private_key" ]]; then
         [[ "$secret_size" -le 65536 ]] \
             || die "${secret_path} exceeds the 64 KiB managed-key limit."
@@ -886,6 +1002,77 @@ validate_secret_file() {
     esac
     [[ "${#secret_value}" -ge "$minimum_length" ]] \
         || die "${secret_name} is shorter than its minimum secure length (${minimum_length} characters)."
+}
+
+configure_artifact_kms_credential() {
+    local lane="$1"
+    local supplied_path="$2"
+    local destination="${SECRETS_DIR}/artifact_kms_${lane}_aws_credentials"
+    local option="--artifact-kms-${lane}-aws-credentials-file"
+    local input_path=""
+    local input_mode=""
+    local temporary=""
+
+    [[ "$lane" == database || "$lane" == files ]] \
+        || die "Internal artifact KMS credential lane is invalid."
+    if [[ -n "$supplied_path" ]]; then
+        [[ "$supplied_path" == /* ]] \
+            || die "${option} must be an absolute path."
+        [[ -f "$supplied_path" && ! -L "$supplied_path" ]] \
+            || die "The ${lane} artifact KMS credentials input must be a regular, non-symlink file."
+        input_path="$(realpath -- "$supplied_path")" \
+            || die "Could not resolve the ${lane} artifact KMS credentials input."
+        [[ "$input_path" == "$supplied_path" ]] \
+            || die "The ${lane} artifact KMS credentials input path must already be canonical."
+        [[ "$(file_uid "$input_path")" == "$EUID" && "$(file_links "$input_path")" == "1" ]] \
+            || die "The ${lane} artifact KMS credentials input must be owned by the invoking user and not hard-linked."
+        input_mode="$(file_mode "$input_path")"
+        [[ "$input_mode" == "400" || "$input_mode" == "600" ]] \
+            || die "The ${lane} artifact KMS credentials input must have mode 0400 or 0600."
+        validate_artifact_kms_credentials_content "$input_path"
+    fi
+
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        validate_secret_file "$destination"
+        if [[ -n "$input_path" ]]; then
+            cmp -s -- "$input_path" "$destination" \
+                || die "The supplied ${lane} artifact KMS credentials differ from the installed secret; rotate them through a separately reviewed credential procedure."
+        fi
+        return
+    fi
+    [[ -n "$input_path" ]] \
+        || die "A fresh or migrating stock install requires ${option}."
+    temporary="$(mktemp "${SECRETS_DIR}/.artifact-kms-${lane}-credentials.XXXXXXXX")"
+    if ! cp -- "$input_path" "$temporary"; then
+        rm -f -- "$temporary"
+        die "Could not copy the artifact KMS credentials into protected storage."
+    fi
+    chmod 0444 "$temporary"
+    if ! atomic_move_new "$temporary" "$destination"; then
+        rm -f -- "$temporary"
+        die "Could not atomically publish the artifact KMS credentials."
+    fi
+    validate_secret_file "$destination"
+}
+
+configure_artifact_kms_credentials() {
+    local database_destination="${SECRETS_DIR}/artifact_kms_database_aws_credentials"
+    local files_destination="${SECRETS_DIR}/artifact_kms_files_aws_credentials"
+    local database_access_key=""
+    local files_access_key=""
+
+    configure_artifact_kms_credential \
+        database "$ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE"
+    configure_artifact_kms_credential \
+        files "$ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE"
+    if cmp -s -- "$database_destination" "$files_destination"; then
+        die "Database and files artifact KMS credential secrets must be distinct."
+    fi
+    database_access_key="$(awk -F ' = ' '$1 == "aws_access_key_id" { print $2; exit }' "$database_destination")"
+    files_access_key="$(awk -F ' = ' '$1 == "aws_access_key_id" { print $2; exit }' "$files_destination")"
+    [[ -n "$database_access_key" && -n "$files_access_key" \
+        && "$database_access_key" != "$files_access_key" ]] \
+        || die "Database and files artifact KMS credentials must use different AWS access-key identities."
 }
 
 write_empty_optional_secret_file() {
@@ -1377,6 +1564,167 @@ ensure_installation_id() {
         || die "BACKUPSHEEP_INSTALLATION_ID must be one stable 64-character lowercase hexadecimal value."
 }
 
+sha256_text() {
+    local value="$1"
+    local digest=""
+
+    if command_exists sha256sum; then
+        digest="$(printf '%s' "$value" | sha256sum | awk '{ print $1 }')"
+    elif command_exists shasum; then
+        digest="$(printf '%s' "$value" | shasum -a 256 | awk '{ print $1 }')"
+    elif command_exists openssl; then
+        digest="$(printf '%s' "$value" | openssl dgst -sha256 | awk '{ print $NF }')"
+    else
+        die "A SHA-256 implementation (sha256sum, shasum, or openssl) is required."
+    fi
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+        || die "The host SHA-256 implementation returned an invalid digest."
+    printf '%s' "$digest"
+}
+
+configure_staging_layout_witness() {
+    local intent=""
+    local witness=""
+    local installation_id=""
+    local database_generation=""
+    local expected=""
+    local capacity_key=""
+    local capacity_default=""
+
+    intent="$(read_env_value BACKUPSHEEP_STAGING_LAYOUT_INTENT)"
+    witness="$(read_env_value BACKUPSHEEP_STAGING_LAYOUT_WITNESS)"
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    database_generation="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
+    if [[ -n "$intent" || -n "$witness" ]]; then
+        [[ "$MIGRATE_STAGING_LAYOUT" != true ]] \
+            || die "The staging layout already has an installation witness; rerun without --migrate-staging-layout."
+        [[ "$intent" == "new-empty-v2" || "$intent" == "migrate-empty-legacy-v2" ]] \
+            || die "BACKUPSHEEP_STAGING_LAYOUT_INTENT is invalid."
+        expected="$(sha256_text "BackupSheep/staging-layout/v2|${installation_id}|${intent}")"
+        [[ "$witness" == "$expected" ]] \
+            || die "The staging layout witness does not match this installation and intent."
+        :
+    else
+        if [[ "$ENV_WAS_PRESENT" != true || "$database_generation" == "2-pending-fresh" ]]; then
+            [[ "$MIGRATE_STAGING_LAYOUT" != true ]] \
+                || die "--migrate-staging-layout is valid only for a real existing installation."
+            intent="new-empty-v2"
+        else
+            [[ "$MIGRATE_STAGING_LAYOUT" == true ]] \
+                || die "Existing installations must stop provider operations, drain/quarantine the legacy shared work volume, and rerun once with --migrate-staging-layout."
+            intent="migrate-empty-legacy-v2"
+        fi
+        witness="$(sha256_text "BackupSheep/staging-layout/v2|${installation_id}|${intent}")"
+        set_env_value BACKUPSHEEP_STAGING_LAYOUT_INTENT "$intent"
+        set_env_value BACKUPSHEEP_STAGING_LAYOUT_WITNESS "$witness"
+    fi
+
+    for capacity_key in \
+        BACKUPSHEEP_STAGING_MIN_FREE_BYTES:536870912 \
+        BACKUPSHEEP_STAGING_MIN_FREE_INODES:1024 \
+        BACKUPSHEEP_PRIVATE_MIN_FREE_BYTES:536870912 \
+        BACKUPSHEEP_PRIVATE_MIN_FREE_INODES:1024 \
+        BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES:536870912 \
+        BACKUPSHEEP_TRANSFER_MIN_FREE_INODES:1024 \
+        BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES:536870912 \
+        BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES:1024; do
+        capacity_default="${capacity_key#*:}"
+        capacity_key="${capacity_key%%:*}"
+        if [[ -z "$(read_env_value "$capacity_key")" ]]; then
+            set_env_value "$capacity_key" "$capacity_default"
+        fi
+    done
+}
+
+validate_artifact_kms_configuration() {
+    local key_arn="$1"
+    local region="$2"
+    local allowlist="$3"
+    local item=""
+    local seen=","
+    local found_active=false
+    local count=0
+    local old_ifs="$IFS"
+    local -a artifact_kms_items=()
+
+    [[ "$region" =~ ^[a-z0-9-]{3,32}$ ]] \
+        || die "The artifact KMS region is malformed."
+    [[ "$key_arn" =~ ^arn:[a-z0-9-]+:kms:([a-z0-9-]+):[0-9]{12}:key/[A-Za-z0-9-]+$ \
+        && "${BASH_REMATCH[1]}" == "$region" ]] \
+        || die "The artifact KMS key ID must be a resolved key ARN in the configured region."
+    [[ -n "$allowlist" && "${#allowlist}" -le 8192 && "$allowlist" != *[[:space:]]* ]] \
+        || die "The artifact KMS allowlist must be a bounded comma-separated ARN list without whitespace."
+    IFS=',' read -r -a artifact_kms_items <<< "$allowlist"
+    IFS="$old_ifs"
+    for item in "${artifact_kms_items[@]}"; do
+        count=$((count + 1))
+        [[ "$count" -le 32 && -n "$item" ]] \
+            || die "The artifact KMS allowlist contains too many or empty entries."
+        [[ "$item" =~ ^arn:[a-z0-9-]+:kms:([a-z0-9-]+):[0-9]{12}:key/[A-Za-z0-9-]+$ \
+            && "${BASH_REMATCH[1]}" == "$region" ]] \
+            || die "Every artifact KMS allowlist entry must be a resolved key ARN in the configured region."
+        [[ "$seen" != *",${item},"* ]] \
+            || die "The artifact KMS allowlist contains a duplicate ARN."
+        seen="${seen}${item},"
+        [[ "$item" != "$key_arn" ]] || found_active=true
+    done
+    [[ "$found_active" == true ]] \
+        || die "The artifact KMS allowlist must contain the active key ARN."
+}
+
+configure_artifact_kms_policy() {
+    local key_arn="$ARTIFACT_KMS_KEY_ID"
+    local region="$ARTIFACT_KMS_REGION"
+    local allowlist="$ARTIFACT_KMS_ALLOWED_KEY_ARNS"
+    local ambient_key=""
+    local ambient_value=""
+
+    [[ -n "$key_arn" ]] || key_arn="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_KEY_ID)"
+    [[ -n "$region" ]] || region="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_REGION)"
+    [[ -n "$allowlist" ]] || allowlist="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS)"
+    [[ -n "$key_arn" && -n "$region" && -n "$allowlist" ]] \
+        || die "Stock enterprise installs require the artifact KMS key ARN, region, and resolved ARN allowlist options."
+    validate_artifact_kms_configuration "$key_arn" "$region" "$allowlist"
+
+    set_env_value BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE bse1
+    set_env_value BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE true
+    set_env_value BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE false
+    set_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER aws-kms
+    set_env_value BACKUPSHEEP_ARTIFACT_KMS_KEY_ID "$key_arn"
+    set_env_value BACKUPSHEEP_ARTIFACT_KMS_REGION "$region"
+    set_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS "$allowlist"
+    set_env_value BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL ""
+    set_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT false
+    for ambient_key in \
+        AWS_ACCESS_KEY_ID \
+        AWS_SECRET_ACCESS_KEY \
+        AWS_SESSION_TOKEN \
+        AWS_SECURITY_TOKEN \
+        AWS_PROFILE \
+        AWS_DEFAULT_PROFILE \
+        AWS_CONFIG_FILE \
+        AWS_SHARED_CREDENTIALS_FILE \
+        AWS_WEB_IDENTITY_TOKEN_FILE \
+        AWS_ROLE_ARN \
+        AWS_ROLE_SESSION_NAME \
+        AWS_CONTAINER_CREDENTIALS_FULL_URI \
+        AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+        AWS_CONTAINER_AUTHORIZATION_TOKEN \
+        AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE \
+        AWS_ENDPOINT_URL \
+        AWS_ENDPOINT_URL_KMS \
+        AWS_CA_BUNDLE \
+        AWS_METADATA_SERVICE_ENDPOINT \
+        AWS_METADATA_SERVICE_ENDPOINT_MODE \
+        BOTO_CONFIG; do
+        ambient_value="$(read_env_value "$ambient_key")"
+        [[ -z "$ambient_value" ]] \
+            || die "${ambient_key} must not carry ambient AWS credentials or endpoint policy in .env; use the reviewed artifact KMS credential-file option."
+        set_env_value "$ambient_key" ""
+    done
+    configure_artifact_kms_credentials
+}
+
 adopt_legacy_compose_down_project() {
     local installation_id=""
     local container_listing=""
@@ -1645,6 +1993,7 @@ create_or_migrate_configuration() {
         set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION "2-pending-fresh"
         set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
         set_env_value BACKUPSHEEP_POSTGRES_IMAGE "backupsheep-postgres:${INSTALL_REF}"
+        set_env_value BACKUPSHEEP_EGRESS_IMAGE "backupsheep-egress:${INSTALL_REF}"
         set_env_value DJANGO_ALLOWED_HOSTS "${PUBLIC_HOST},localhost,127.0.0.1"
         set_env_value APP_DOMAIN "$APP_DOMAIN"
         set_env_value APP_PROTOCOL "http://"
@@ -1659,7 +2008,9 @@ create_or_migrate_configuration() {
     fi
 
     ensure_installation_id
+    configure_staging_layout_witness
     ensure_compose_project_name
+    configure_artifact_kms_policy
 
     if [[ "$ENV_WAS_PRESENT" == true ]]; then
         reject_connection_url_overrides
@@ -1676,6 +2027,7 @@ create_or_migrate_configuration() {
     validate_secret_dir
     set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
     set_env_value BACKUPSHEEP_POSTGRES_IMAGE "backupsheep-postgres:${INSTALL_REF}"
+    set_env_value BACKUPSHEEP_EGRESS_IMAGE "backupsheep-egress:${INSTALL_REF}"
     rewrite_env_for_secret_files
     validate_env_file
 }
@@ -1687,6 +2039,13 @@ validate_runtime_configuration() {
     local bootstrap_user=""
     local migrator_user=""
     local runtime_user=""
+    local staging_intent=""
+    local staging_witness=""
+    local installation_id=""
+    local expected_staging_witness=""
+    local kms_key_arn=""
+    local kms_region=""
+    local kms_allowlist=""
 
     value="$(read_env_value BACKUPSHEEP_IMAGE)"
     [[ "$value" == "backupsheep:${INSTALL_REF}" ]] \
@@ -1694,6 +2053,9 @@ validate_runtime_configuration() {
     value="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
     [[ "$value" == "backupsheep-postgres:${INSTALL_REF}" ]] \
         || die "BACKUPSHEEP_POSTGRES_IMAGE must be backupsheep-postgres:${INSTALL_REF} for this verified source build."
+    value="$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
+    [[ "$value" == "backupsheep-egress:${INSTALL_REF}" ]] \
+        || die "BACKUPSHEEP_EGRESS_IMAGE must be backupsheep-egress:${INSTALL_REF} for this verified source build."
     value="$(read_env_value BACKUPSHEEP_BIND_ADDRESS)"
     [[ -z "$value" || "$value" == "127.0.0.1" ]] \
         || die "The installer only starts a loopback-bound web service. Set BACKUPSHEEP_BIND_ADDRESS=127.0.0.1."
@@ -1706,9 +2068,16 @@ validate_runtime_configuration() {
         || die "DJANGO_SETTINGS_MODULE must be backupsheep.settings."
     value="$(read_env_value BACKUPSHEEP_SECRETS_DIR)"
     [[ "$value" == ".secrets" ]] || die "BACKUPSHEEP_SECRETS_DIR must be .secrets."
-    value="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
-    [[ "$value" =~ ^[0-9a-f]{64}$ ]] \
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    [[ "$installation_id" =~ ^[0-9a-f]{64}$ ]] \
         || die "BACKUPSHEEP_INSTALLATION_ID must be one stable 64-character lowercase hexadecimal value."
+    staging_intent="$(read_env_value BACKUPSHEEP_STAGING_LAYOUT_INTENT)"
+    staging_witness="$(read_env_value BACKUPSHEEP_STAGING_LAYOUT_WITNESS)"
+    [[ "$staging_intent" == "new-empty-v2" || "$staging_intent" == "migrate-empty-legacy-v2" ]] \
+        || die "BACKUPSHEEP_STAGING_LAYOUT_INTENT is invalid."
+    expected_staging_witness="$(sha256_text "BackupSheep/staging-layout/v2|${installation_id}|${staging_intent}")"
+    [[ "$staging_witness" == "$expected_staging_witness" ]] \
+        || die "BACKUPSHEEP_STAGING_LAYOUT_WITNESS does not match this installation."
     value="$(read_env_value BACKUPSHEEP_COMPOSE_PROJECT_NAME)"
     [[ "$value" == "$PROJECT_NAME" ]] \
         || die "BACKUPSHEEP_COMPOSE_PROJECT_NAME must match --project-name exactly."
@@ -1749,6 +2118,44 @@ validate_runtime_configuration() {
     [[ -z "$value" ]] || die "CELERY_BROKER_URL must be blank for the stock file-backed broker configuration."
     value="$(read_env_value DATABASE_URL)"
     [[ -z "$value" ]] || die "DATABASE_URL must be blank for the stock file-backed database configuration."
+
+    [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE)" == "bse1" ]] \
+        || die "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE must be bse1."
+    [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE)" == "true" ]] \
+        || die "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE must be true."
+    [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE)" == "false" ]] \
+        || die "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE must be false."
+    [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER)" == "aws-kms" ]] \
+        || die "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER must be aws-kms."
+    [[ -z "$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL)" ]] \
+        || die "Stock enterprise installs forbid an artifact KMS endpoint override."
+    [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT)" == "false" ]] \
+        || die "Stock enterprise installs forbid insecure artifact KMS endpoints."
+    kms_key_arn="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_KEY_ID)"
+    kms_region="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_REGION)"
+    kms_allowlist="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS)"
+    validate_artifact_kms_configuration "$kms_key_arn" "$kms_region" "$kms_allowlist"
+
+    for key in \
+        BACKUPSHEEP_STAGING_MIN_FREE_BYTES \
+        BACKUPSHEEP_STAGING_MIN_FREE_INODES \
+        BACKUPSHEEP_PRIVATE_MIN_FREE_BYTES \
+        BACKUPSHEEP_PRIVATE_MIN_FREE_INODES \
+        BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES \
+        BACKUPSHEEP_TRANSFER_MIN_FREE_INODES \
+        BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES \
+        BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES; do
+        value="$(read_env_value "$key")"
+        [[ "$value" =~ ^[0-9]{1,18}$ ]] \
+            || die "${key} must be a bounded non-negative integer."
+        if [[ "$key" == *_BYTES ]]; then
+            (( 10#$value >= 67108864 )) \
+                || die "${key} must retain at least the 64 MiB production floor."
+        else
+            (( 10#$value >= 128 )) \
+                || die "${key} must retain at least the 128-inode production floor."
+        fi
+    done
 
     for key in \
         DJANGO_SECRET_KEY \
@@ -1848,7 +2255,10 @@ validate_compose_model() {
     log "Validating the exact Compose model without printing expanded secrets"
     compose config --quiet
     available_services="$(compose --profile operations config --services)"
-    for service_name in "${CORE_SERVICES[@]}" "${OPERATION_SERVICES[@]}"; do
+    for service_name in \
+        "${CORE_SERVICES[@]}" \
+        "${OPERATION_SERVICES[@]}" \
+        "${OPERATION_GUARD_SERVICES[@]}"; do
         require_compose_service "$service_name" "$available_services"
     done
 }
@@ -2282,7 +2692,8 @@ wait_for_app() {
 
 stop_operations() {
     log "Stopping the exact provider-worker and scheduler set before build or migration"
-    if ! compose --profile operations stop "${OPERATION_SERVICES[@]}"; then
+    if ! compose --profile operations stop \
+        "${OPERATION_SERVICES[@]}" "${OPERATION_GUARD_SERVICES[@]}"; then
         die "Could not stop every operations service; refusing to build or migrate while provider work may still run."
     fi
 }
@@ -2290,8 +2701,8 @@ stop_operations() {
 start_core() {
     stop_operations
 
-    log "Building the reviewed PostgreSQL and application images"
-    compose build --pull db app
+    log "Building the reviewed PostgreSQL, application, and egress-guard images"
+    compose build --pull db app app-egress-guard
 
     log "Starting core services only (database, broker, identity provisioning, migration, security preflight and web)"
     if ! compose up --detach --no-build "${CORE_SERVICES[@]}"; then

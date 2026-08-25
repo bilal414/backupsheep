@@ -24,24 +24,22 @@
 # credentials and recovery state have been reviewed:
 #     ./backupsheep-compose --profile operations up -d
 #
-# All disk-touching workers (database, files, storage) share the backup_workdir volume,
-# so any of them can see any backup's in-progress files. On a SINGLE host you can scale
-# any of them with `--scale` (each replica handles distinct backups / upload tasks).
-# Keep Beat singleton for ordinary maintenance-task cadence; scheduled backup entries
-# themselves are protected by a transactional occurrence claim. Across MULTIPLE hosts,
-# backup_workdir must be a shared network filesystem (NFS/EFS) so replicas see each
-# other's files.
+# Database, files, and storage use distinct UID-owned private work volumes. Their only
+# shared paths carry authenticated BSE1 ciphertext through fenced, read-only handoffs.
+# The legacy backup_workdir is mounted only into the witnessed one-shot provisioner so
+# an upgrade cannot silently expose historical plaintext to another lane.
 #
-# Plus PostgreSQL and RabbitMQ (the Celery broker). Build both reviewed local images,
+# Plus PostgreSQL, RabbitMQ (the Celery broker), and a no-secret egress guard image.
+# Build all reviewed local images,
 # then start the core with the model-locking wrapper:
-#     ./backupsheep-compose build db app
+#     ./backupsheep-compose build db app app-egress-guard
 #     ./backupsheep-compose up -d
 #
 # Configure .env (see .env_sample). For this stack use the service names below:
 #     DB_HOST=db
 #     DB_PORT=5432
 #     RABBITMQ_HOST=rabbitmq
-#     RABBITMQ_USER=backupsheep
+#     RABBITMQ_USER=backupsheep_app
 #     RABBITMQ_VHOST=backupsheep
 # The installer stores the Django, database, broker, and onboarding secrets as private
 # file-backed Compose secrets under `.secrets`; their `.env` counterparts stay blank.
@@ -64,6 +62,48 @@ x-default-logging: &default-logging
 # before mutation, without changing labels on existing data volumes during upgrades.
 x-installation-labels: &installation-labels
   com.backupsheep.installation-id: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+
+# Only a short policy bootstrap receives network administration capability. It has no
+# env_file, application secret, or data mount, then permanently becomes UID/GID 10020
+# with an empty capability bounding set while keeping the namespace-local nft policy.
+x-egress-guard-runtime: &egress-guard-runtime
+  labels: *installation-labels
+  image: "${BACKUPSHEEP_EGRESS_IMAGE:-backupsheep-egress:local}"
+  pull_policy: never
+  user: "0:0"
+  privileged: false
+  read_only: true
+  cgroup: private
+  ipc: private
+  pids_limit: 32
+  mem_limit: 64m
+  cpus: "0.25"
+  cap_drop:
+    - ALL
+  cap_add:
+    - NET_ADMIN
+    - SETUID
+    - SETGID
+    - SETPCAP
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /run/backupsheep-egress:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=0,gid=0
+  ulimits:
+    core:
+      soft: 0
+      hard: 0
+    nofile:
+      soft: 128
+      hard: 128
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/backupsheep-egress-healthcheck"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 10s
+  logging: *default-logging
+  restart: unless-stopped
 
 # Least-privilege defaults for services built from the BackupSheep application image.
 # The explicit UID is defense in depth if an image's USER metadata regresses. The root
@@ -137,6 +177,58 @@ x-app-secret-environment: &app-secret-environment
   # and mounts the managed private key as a read-only file-backed secret.
   SSH_KNOWN_HOSTS_PATH: /var/lib/backupsheep/ssh-trust/known_hosts
   SSH_MANAGED_PRIVATE_KEY_PATH: /run/backupsheep/ssh/managed_private_key
+  BACKUPSHEEP_SSH_TRUST_GID: "10997"
+  # Stock enterprise custody is BSE1-only. Key identifiers and the decrypt allowlist
+  # are non-secret configuration. Database/files receive distinct credentials whose
+  # IAM policies must condition KMS access on their exact bse:lane context.
+  BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE: bse1
+  BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE: "true"
+  BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE: "false"
+  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER: aws-kms
+  BACKUPSHEEP_ARTIFACT_KMS_KEY_ID: "${BACKUPSHEEP_ARTIFACT_KMS_KEY_ID:?BACKUPSHEEP_ARTIFACT_KMS_KEY_ID is required}"
+  BACKUPSHEEP_ARTIFACT_KMS_REGION: "${BACKUPSHEEP_ARTIFACT_KMS_REGION:?BACKUPSHEEP_ARTIFACT_KMS_REGION is required}"
+  BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS: "${BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS:?BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS is required}"
+  BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL: ""
+  BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT: "false"
+  BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS: "${BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS:-5}"
+  BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS: "${BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS:-20}"
+  BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS: "${BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS:-3}"
+  BACKUPSHEEP_PLAINTEXT_ROOT: /code/_storage
+  BACKUPSHEEP_DATABASE_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/transfer/database
+  BACKUPSHEEP_FILES_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/transfer/files
+  BACKUPSHEEP_RESTORE_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/restore-transfer
+  BACKUPSHEEP_PRIVATE_MIN_FREE_BYTES: "${BACKUPSHEEP_PRIVATE_MIN_FREE_BYTES:-536870912}"
+  BACKUPSHEEP_PRIVATE_MIN_FREE_INODES: "${BACKUPSHEEP_PRIVATE_MIN_FREE_INODES:-1024}"
+  BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES: "${BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES:-536870912}"
+  BACKUPSHEEP_TRANSFER_MIN_FREE_INODES: "${BACKUPSHEEP_TRANSFER_MIN_FREE_INODES:-1024}"
+  BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES: "${BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES:-536870912}"
+  BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES: "${BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES:-1024}"
+  # Empty every ambient AWS credential/role/metadata/endpoint source inherited from
+  # env_file. Each source lane overrides only AWS_SHARED_CREDENTIALS_FILE below.
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_SESSION_TOKEN: ""
+  AWS_SECURITY_TOKEN: ""
+  AWS_PROFILE: ""
+  AWS_DEFAULT_PROFILE: ""
+  AWS_CONFIG_FILE: ""
+  AWS_CA_BUNDLE: ""
+  AWS_METADATA_SERVICE_ENDPOINT: ""
+  AWS_METADATA_SERVICE_ENDPOINT_MODE: ""
+  BOTO_CONFIG: ""
+  AWS_WEB_IDENTITY_TOKEN_FILE: ""
+  AWS_ROLE_ARN: ""
+  AWS_ROLE_SESSION_NAME: ""
+  AWS_CONTAINER_CREDENTIALS_FULL_URI: ""
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: ""
+  AWS_CONTAINER_AUTHORIZATION_TOKEN: ""
+  AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: ""
+  AWS_ENDPOINT_URL: ""
+  AWS_ENDPOINT_URL_KMS: ""
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_EC2_METADATA_V1_DISABLED: "true"
+  AWS_IGNORE_CONFIGURED_ENDPOINT_URLS: "true"
+  AWS_SHARED_CREDENTIALS_FILE: ""
 
 x-app-secrets: &app-secrets
   - django_secret_key
@@ -364,6 +456,85 @@ services:
     logging: *default-logging
     restart: "no"
 
+  # Root is confined to this networkless one-shot. It proves an installation-bound
+  # witness, rejects ambiguous/non-empty shared work, and assigns the fixed UID/GID
+  # layout before any application role can mount a staging or trust volume.
+  staging-provision:
+    <<: *app-runtime
+    image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/backupsheep-provision-staging-volumes"]
+    environment:
+      DJANGO_SERVER: prod
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_STAGING_LAYOUT_INTENT: "${BACKUPSHEEP_STAGING_LAYOUT_INTENT:?BACKUPSHEEP_STAGING_LAYOUT_INTENT is required}"
+      BACKUPSHEEP_STAGING_LAYOUT_WITNESS: "${BACKUPSHEEP_STAGING_LAYOUT_WITNESS:?BACKUPSHEEP_STAGING_LAYOUT_WITNESS is required}"
+      BACKUPSHEEP_STAGING_MIN_FREE_BYTES: "${BACKUPSHEEP_STAGING_MIN_FREE_BYTES:-536870912}"
+      BACKUPSHEEP_STAGING_MIN_FREE_INODES: "${BACKUPSHEEP_STAGING_MIN_FREE_INODES:-1024}"
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      - type: volume
+        source: database_workdir
+        target: /volumes/database
+        volume:
+          nocopy: true
+      - type: volume
+        source: files_workdir
+        target: /volumes/files
+        volume:
+          nocopy: true
+      - type: volume
+        source: storage_workdir
+        target: /volumes/storage
+        volume:
+          nocopy: true
+      - type: volume
+        source: database_ciphertext_transfer
+        target: /volumes/database-transfer
+        volume:
+          nocopy: true
+      - type: volume
+        source: files_ciphertext_transfer
+        target: /volumes/files-transfer
+        volume:
+          nocopy: true
+      - type: volume
+        source: restore_ciphertext_transfer
+        target: /volumes/restore-transfer
+        volume:
+          nocopy: true
+      - type: volume
+        source: backup_storage
+        target: /volumes/backup-storage
+        volume:
+          nocopy: true
+      - type: volume
+        source: ssh_trust
+        target: /volumes/ssh-trust
+        volume:
+          nocopy: true
+      - type: volume
+        source: backup_workdir
+        target: /volumes/legacy
+        volume:
+          nocopy: true
+      - type: volume
+        source: staging_layout_witness
+        target: /volumes/witness
+        volume:
+          nocopy: true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: "0.25"
+    network_mode: none
+    logging: *default-logging
+    restart: "no"
+
   # One-shot: provision the database identity boundary before Django can migrate or
   # serve. It connects as the database-only bootstrap superuser, creates/rotates the
   # marked migrator and runtime roles in one transaction, transfers reviewed public
@@ -371,9 +542,14 @@ services:
   db-provision:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10007:10007"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: migration
       BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "${BACKUPSHEEP_DATABASE_IDENTITY_GENERATION:?BACKUPSHEEP_DATABASE_IDENTITY_GENERATION is required}"
       DB_BOOTSTRAP_USER: "${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}"
       DB_MIGRATOR_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
@@ -405,9 +581,14 @@ services:
   migrate:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10007:10007"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: migration
       DB_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
       DB_PASSWORD_FILE: /run/secrets/db_migrator_password
     secrets:
@@ -432,9 +613,14 @@ services:
   preflight:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10007:10007"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: migration
       BACKUPSHEEP_CELERY_LANE: preflight
       RABBITMQ_USER: backupsheep_preflight
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_preflight_password
@@ -459,15 +645,35 @@ services:
     logging: *default-logging
     restart: "no"
 
+  app-egress-guard:
+    <<: *egress-guard-runtime
+    build:
+      context: .
+      dockerfile: Dockerfile.egress
+    environment:
+      BACKUPSHEEP_EGRESS_ROLE: app
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_APP_EGRESS_MODE:-public}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_APP_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_APP_EGRESS_ALLOW_IPV6:-}"
+    ports:
+      - "${BACKUPSHEEP_BIND_ADDRESS:-127.0.0.1}:${BACKUPSHEEP_BIND_PORT:-8000}:8000"
+    networks:
+      app-database: {}
+      app-broker: {}
+      app-egress:
+        gw_priority: 1
+
   app:
     <<: *app-runtime
     build:
       context: .
       dockerfile: Dockerfile
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10001:10001"
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: web
       BACKUPSHEEP_CELERY_LANE: app
       RABBITMQ_USER: backupsheep_app
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_app_password
@@ -491,19 +697,21 @@ services:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
-    ports:
-      - "${BACKUPSHEEP_BIND_ADDRESS:-127.0.0.1}:${BACKUPSHEEP_BIND_PORT:-8000}:8000"
+      staging-provision:
+        condition: service_completed_successfully
+      app-egress-guard:
+        condition: service_healthy
     mem_limit: "${APP_MEMORY_LIMIT:-2g}"
     cpus: "${APP_CPU_LIMIT:-2.0}"
     volumes:
       # The Internet-facing web process can update only the reviewed SSH trust
       # database. It receives no backup_workdir mount, so staged archives, cache,
       # logs and worker locks are neither readable nor writable after web RCE.
-      - ssh_trust:/var/lib/backupsheep/ssh-trust
       - type: volume
-        source: backup_storage
-        target: /backups
-        read_only: true
+        source: ssh_trust
+        target: /var/lib/backupsheep/ssh-trust
+        volume:
+          nocopy: true
       # Empty, read-only sentinel volume whose immutable Docker label lets the
       # installer prove project ownership even after `docker compose down` removes
       # all containers and networks. It contains no application or secret data.
@@ -511,19 +719,31 @@ services:
         source: installation_identity
         target: /run/backupsheep-installation
         read_only: true
+        volume:
+          nocopy: true
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 60s
-    networks:
-      app-database: {}
-      app-broker: {}
-      app-egress:
-        gw_priority: 1
+    network_mode: service:app-egress-guard
     logging: *default-logging
     restart: unless-stopped
+
+  cloud-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      BACKUPSHEEP_EGRESS_ROLE: cloud
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_CLOUD_EGRESS_MODE:-public}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV6:-}"
+    profiles: ["operations"]
+    networks:
+      cloud-database: {}
+      cloud-broker: {}
+      cloud-egress:
+        gw_priority: 1
 
   # API-only provider snapshots + general/notification tasks. Stateless (no _storage
   # or /backups volume), so this is the only worker safe to scale horizontally.
@@ -532,9 +752,14 @@ services:
   worker-cloud:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10008:10008"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10008,gid=10008
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: cloud
       BACKUPSHEEP_CELERY_LANE: cloud
       RABBITMQ_USER: backupsheep_cloud
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_cloud_password
@@ -558,22 +783,47 @@ services:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
-    networks:
-      cloud-database: {}
-      cloud-broker: {}
-      cloud-egress:
-        gw_priority: 1
+      staging-provision:
+        condition: service_completed_successfully
+      cloud-egress-guard:
+        condition: service_healthy
+    network_mode: service:cloud-egress-guard
     logging: *default-logging
     restart: unless-stopped
 
-  # Database dumps (pg_dump/mysqldump). Heavy CPU/disk, low concurrency. Writes the dump
-  # to the shared backup_workdir volume; worker-storage handles the upload.
+  database-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      BACKUPSHEEP_EGRESS_ROLE: database
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_DATABASE_EGRESS_MODE:-public}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV6:-}"
+    profiles: ["operations"]
+    networks:
+      database-database: {}
+      database-broker: {}
+      database-egress:
+        gw_priority: 1
+
+  # Database dumps (pg_dump/mysqldump). Plaintext remains in the database UID's
+  # private volume; storage receives only a published BSE1 handoff.
   worker-database:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10002:10002"
+    group_add:
+      - "10989"
+      - "10990"
+      - "10994"
+      - "10997"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10002,gid=10002
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: database
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_database_aws_credentials
       BACKUPSHEEP_CELERY_LANE: database
       RABBITMQ_USER: backupsheep_database
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_database_password
@@ -585,6 +835,7 @@ services:
       - celery_signing_database_private_key
       - celery_trusted_public_keys
       - ssh_managed_private_key
+      - artifact_kms_database_aws_credentials
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
@@ -598,32 +849,69 @@ services:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
+      staging-provision:
+        condition: service_completed_successfully
+      database-egress-guard:
+        condition: service_healthy
     volumes:
-      - backup_workdir:/code/_storage
+      - type: volume
+        source: database_workdir
+        target: /code/_storage
+        volume:
+          nocopy: true
+      - type: volume
+        source: database_ciphertext_transfer
+        target: /var/lib/backupsheep/transfer/database
+        volume:
+          nocopy: true
+      - type: volume
+        source: restore_ciphertext_transfer
+        target: /var/lib/backupsheep/restore-transfer
+        read_only: true
+        volume:
+          nocopy: true
       - type: volume
         source: ssh_trust
         target: /var/lib/backupsheep/ssh-trust
         read_only: true
-      - type: volume
-        source: backup_storage
-        target: /backups
-        read_only: true
-    networks:
-      database-database: {}
-      database-broker: {}
-      database-egress:
-        gw_priority: 1
+        volume:
+          nocopy: true
+    network_mode: service:database-egress-guard
     logging: *default-logging
     restart: unless-stopped
 
-  # Website / WordPress / Basecamp file dumps. Heavy CPU/disk, low concurrency. Writes the
-  # dump to the shared backup_workdir volume; worker-storage handles the upload.
+  files-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      BACKUPSHEEP_EGRESS_ROLE: files
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_FILES_EGRESS_MODE:-public}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV6:-}"
+    profiles: ["operations"]
+    networks:
+      files-database: {}
+      files-broker: {}
+      files-egress:
+        gw_priority: 1
+
+  # Website / WordPress / Basecamp source material stays private to the files UID.
   worker-files:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10003:10003"
+    group_add:
+      - "10991"
+      - "10992"
+      - "10993"
+      - "10997"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10003,gid=10003
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: files
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_files_aws_credentials
       BACKUPSHEEP_CELERY_LANE: files
       RABBITMQ_USER: backupsheep_files
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_files_password
@@ -635,6 +923,7 @@ services:
       - celery_signing_files_private_key
       - celery_trusted_public_keys
       - ssh_managed_private_key
+      - artifact_kms_files_aws_credentials
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
@@ -648,35 +937,71 @@ services:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
+      staging-provision:
+        condition: service_completed_successfully
+      files-egress-guard:
+        condition: service_healthy
     volumes:
-      - backup_workdir:/code/_storage
+      - type: volume
+        source: files_workdir
+        target: /code/_storage
+        volume:
+          nocopy: true
+      - type: volume
+        source: files_ciphertext_transfer
+        target: /var/lib/backupsheep/transfer/files
+        volume:
+          nocopy: true
+      - type: volume
+        source: restore_ciphertext_transfer
+        target: /var/lib/backupsheep/restore-transfer
+        read_only: true
+        volume:
+          nocopy: true
       - type: volume
         source: ssh_trust
         target: /var/lib/backupsheep/ssh-trust
         read_only: true
-      - type: volume
-        source: backup_storage
-        target: /backups
-        read_only: true
-    networks:
-      files-database: {}
-      files-broker: {}
-      files-egress:
-        gw_priority: 1
+        volume:
+          nocopy: true
+    network_mode: service:files-egress-guard
     logging: *default-logging
     restart: unless-stopped
 
-  # Dedicated upload pool: takes each finished dump from the shared backup_workdir volume,
-  # uploads it to every configured storage backend (storage_upload), finalizes the backup
-  # and cleans up local files. Reads the same volume the dump workers write, so scale it
-  # out freely for more upload throughput:
+  storage-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      BACKUPSHEEP_EGRESS_ROLE: storage
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_STORAGE_EGRESS_MODE:-public}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV6:-}"
+    profiles: ["operations"]
+    networks:
+      storage-database: {}
+      storage-broker: {}
+      storage-egress:
+        gw_priority: 1
+
+  # Dedicated upload pool copies source-owned BSE1 bytes into storage-private work,
+  # verifies the durable hash/size, uploads, and cleans only its fenced paths.
   #     ./backupsheep-compose --profile operations up -d --scale worker-storage=4
   worker-storage:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10004:10004"
+    group_add:
+      - "10990"
+      - "10992"
+      - "10993"
+      - "10994"
+      - "10995"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10004,gid=10004
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: storage
       BACKUPSHEEP_CELERY_LANE: storage
       RABBITMQ_USER: backupsheep_storage
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_storage_password
@@ -700,16 +1025,55 @@ services:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
+      staging-provision:
+        condition: service_completed_successfully
+      storage-egress-guard:
+        condition: service_healthy
     volumes:
-      - backup_workdir:/code/_storage
-      - backup_storage:/backups
-    networks:
-      storage-database: {}
-      storage-broker: {}
-      storage-egress:
-        gw_priority: 1
+      - type: volume
+        source: storage_workdir
+        target: /code/_storage
+        volume:
+          nocopy: true
+      - type: volume
+        source: database_ciphertext_transfer
+        target: /var/lib/backupsheep/transfer/database
+        read_only: true
+        volume:
+          nocopy: true
+      - type: volume
+        source: files_ciphertext_transfer
+        target: /var/lib/backupsheep/transfer/files
+        read_only: true
+        volume:
+          nocopy: true
+      - type: volume
+        source: restore_ciphertext_transfer
+        target: /var/lib/backupsheep/restore-transfer
+        volume:
+          nocopy: true
+      - type: volume
+        source: backup_storage
+        target: /backups
+        volume:
+          nocopy: true
+    network_mode: service:storage-egress-guard
     logging: *default-logging
     restart: unless-stopped
+
+  logs-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      BACKUPSHEEP_EGRESS_ROLE: logs
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_LOGS_EGRESS_MODE:-public}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV6:-}"
+    profiles: ["operations"]
+    networks:
+      logs-database: {}
+      logs-broker: {}
+      logs-egress:
+        gw_priority: 1
 
   # Log pipeline: writes log entries to the DB (send_log_to_db) and fans out
   # Slack/Telegram notifications. Local run-log pruning is routed to worker-storage,
@@ -717,9 +1081,14 @@ services:
   worker-logs:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10005:10005"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10005,gid=10005
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: logs
       BACKUPSHEEP_CELERY_LANE: logs
       RABBITMQ_USER: backupsheep_logs
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_logs_password
@@ -743,20 +1112,25 @@ services:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
-    networks:
-      logs-database: {}
-      logs-broker: {}
-      logs-egress:
-        gw_priority: 1
+      staging-provision:
+        condition: service_completed_successfully
+      logs-egress-guard:
+        condition: service_healthy
+    network_mode: service:logs-egress-guard
     logging: *default-logging
     restart: unless-stopped
 
   beat:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10006:10006"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10006,gid=10006
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: beat
       BACKUPSHEEP_CELERY_LANE: beat
       RABBITMQ_USER: backupsheep_beat
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_beat_password
@@ -779,6 +1153,8 @@ services:
       migrate:
         condition: service_completed_successfully
       preflight:
+        condition: service_completed_successfully
+      staging-provision:
         condition: service_completed_successfully
     networks:
       - beat-database
@@ -816,7 +1192,16 @@ networks:
 volumes:
   pgdata:
   rabbitmq_data:
+  # Legacy shared work is visible only to staging-provision. Existing installs must
+  # prove it empty before the new per-lane layout receives a durable witness.
   backup_workdir:
+  database_workdir:
+  files_workdir:
+  storage_workdir:
+  database_ciphertext_transfer:
+  files_ciphertext_transfer:
+  restore_ciphertext_transfer:
+  staging_layout_witness:
   # UI-approved host keys are isolated from staged backup data. The app is the
   # only writer; SSH-capable workers mount this trust store read-only.
   ssh_trust:
@@ -887,3 +1272,7 @@ secrets:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/onboarding_token
   ssh_managed_private_key:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_private_key
+  artifact_kms_database_aws_credentials:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_kms_database_aws_credentials
+  artifact_kms_files_aws_credentials:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_kms_files_aws_credentials

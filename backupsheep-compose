@@ -442,7 +442,7 @@ up_no_dependencies=false
 record_selected_service() {
     local service_name="$1"
     case "$service_name" in
-        db|rabbitmq|db-provision|migrate|preflight|app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
+        db|rabbitmq-volume-init|rabbitmq|rabbitmq-provision|staging-provision|db-provision|migrate|preflight|app-egress-guard|app|cloud-egress-guard|worker-cloud|database-egress-guard|worker-database|files-egress-guard|worker-files|storage-egress-guard|worker-storage|logs-egress-guard|worker-logs|beat)
             selected_services+=("$service_name")
             ;;
         *) die "unknown or unreviewed Compose service selection: ${service_name}." ;;

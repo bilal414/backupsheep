@@ -216,7 +216,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         ), mock.patch(
             "backupsheep.staging.open_ciphertext",
             side_effect=lambda *_args, **_kwargs: open(ciphertext, "rb"),
-        ):
+        ) as opener:
             with storage_upload_artifact(
                 self.backup,
                 legacy_verifier=mock.Mock(side_effect=AssertionError("legacy")),
@@ -227,6 +227,12 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
                 self.assertNotEqual(os.stat(snapshot).st_ino, os.stat(ciphertext).st_ino)
                 self.assertEqual(stat_mode(snapshot), 0o600)
             self.assertFalse(snapshot.exists())
+        opener.assert_called_once_with(
+            self.backup.uuid_str,
+            f"{self.backup.uuid_str}.bse1",
+            source_lane="files",
+            installation_id=INSTALLATION_ID,
+        )
 
         tampered = Path(self.temporary.name) / "tampered.bse1"
         tampered.write_bytes(ciphertext.read_bytes() + b"attacker")

@@ -84,6 +84,7 @@ def _rotate_one(
     source_key: str,
     destination_key: str,
     installation_id: str,
+    expected_lane: str,
 ) -> str:
     """Rotate one envelope under a row lock; return rotated/already-rotated."""
 
@@ -103,7 +104,11 @@ def _rotate_one(
             )
         current = active[0]
         context, validated = envelope.validate_restore_state()
-        if validated.pk != current.pk or context.installation_id != installation_id:
+        if (
+            validated.pk != current.pk
+            or context.installation_id != installation_id
+            or context.lane != expected_lane
+        ):
             raise CommandError(
                 f"Envelope {envelope.pk} failed its durable custody witness."
             )
@@ -183,6 +188,7 @@ class Command(BaseCommand):
         parser.add_argument("--expected-source-key-arn", required=True)
         parser.add_argument("--destination-key-arn", required=True)
         parser.add_argument("--installation-id-witness", required=True)
+        parser.add_argument("--lane", required=True, choices=("database", "files"))
         parser.add_argument("--limit", type=int, default=100)
         parser.add_argument("--apply", action="store_true")
 
@@ -190,6 +196,7 @@ class Command(BaseCommand):
         source_key = str(options["expected_source_key_arn"])
         destination_key = str(options["destination_key_arn"])
         installation_id = str(options["installation_id_witness"])
+        lane = str(options["lane"])
         limit = options["limit"]
         if type(limit) is not int or not 1 <= limit <= 10_000:
             raise CommandError("--limit must be between 1 and 10000.")
@@ -205,6 +212,7 @@ class Command(BaseCommand):
                 key_wraps__status=CoreBackupKeyWrap.Status.ACTIVE,
                 key_wraps__provider=CoreBackupKeyWrap.Provider.AWS_KMS,
                 key_wraps__wrapping_key_id=source_key,
+                context_canonical_json__contains=f'"lane":"{lane}"',
             )
             .order_by("pk")
             .values_list("pk", flat=True)[:limit]
@@ -214,10 +222,11 @@ class Command(BaseCommand):
             key_wraps__status=CoreBackupKeyWrap.Status.ACTIVE,
             key_wraps__provider=CoreBackupKeyWrap.Provider.AWS_KMS,
             key_wraps__wrapping_key_id=source_key,
+            context_canonical_json__contains=f'"lane":"{lane}"',
         ).count()
         if not options["apply"]:
             self.stdout.write(
-                f"Artifact key-wrap rotation plan: selected={len(candidates)} "
+                f"Artifact key-wrap rotation plan: lane={lane} selected={len(candidates)} "
                 f"remaining_source={remaining}; no KMS or database mutation performed."
             )
             return
@@ -232,6 +241,7 @@ class Command(BaseCommand):
                     source_key=source_key,
                     destination_key=destination_key,
                     installation_id=installation_id,
+                    expected_lane=lane,
                 )
                 if result == "rotated":
                     rotated += 1
@@ -242,11 +252,12 @@ class Command(BaseCommand):
             key_wraps__status=CoreBackupKeyWrap.Status.ACTIVE,
             key_wraps__provider=CoreBackupKeyWrap.Provider.AWS_KMS,
             key_wraps__wrapping_key_id=source_key,
+            context_canonical_json__contains=f'"lane":"{lane}"',
         ).count()
         self.stdout.write(
             self.style.SUCCESS(
                 "Artifact key-wrap rotation batch committed: "
-                f"rotated={rotated} already_rotated={already_rotated} "
+                f"lane={lane} rotated={rotated} already_rotated={already_rotated} "
                 f"remaining_source={remaining_after}."
             )
         )
