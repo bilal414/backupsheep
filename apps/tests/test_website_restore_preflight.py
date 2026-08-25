@@ -52,6 +52,11 @@ class WebsiteRestorePreflightTests(SimpleTestCase):
             port=22,
             host="sftp.example.invalid",
             verify_ssl=True,
+            # These helpers exercise commands built after the production restore
+            # entry point has already materialized one exact tenant approval.
+            # Keep the synthetic auth object at that same post-validation boundary.
+            _approved_known_hosts_path="/tmp/backupsheep-approved-known-hosts",
+            _approved_host_key_algorithm="ssh-ed25519",
             get_protocol_display=lambda: "SFTP",
         )
         self.website = SimpleNamespace(parallel=2)

@@ -977,6 +977,16 @@ class AuthDatabaseDirectConnectRobustnessTests(BaseTestCase):
         db_con.cursor.return_value.fetchone.return_value = (version_string,)
         return db_con
 
+    @staticmethod
+    def _remote_credential_handle():
+        handle = mock.MagicMock(name="remote_credential_handle")
+        handle.__enter__.return_value = handle
+        handle.stat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_size=0,
+        )
+        return handle
+
     def test_errno_2061_retries_over_ssl_and_raises_clear_hint(self):
         # First connect fails with 2061 (caching_sha2_password over plain
         # transport); the SSL retry succeeds, so the credentials are fine and
@@ -1015,7 +1025,9 @@ class AuthDatabaseDirectConnectRobustnessTests(BaseTestCase):
     def test_ssh_mode_closes_client_and_removes_temp_key(self):
         auth = self._auth(use_private_key=True)
         sftp = mock.MagicMock()
-        sftp.open.side_effect = lambda _name, _mode: io.StringIO()
+        sftp.open.side_effect = (
+            lambda _name, _mode: self._remote_credential_handle()
+        )
         ssh = SimpleNamespace(
             exec_command=lambda command, timeout=None: (
                 None,
@@ -1053,12 +1065,22 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
         return auth
 
     @staticmethod
+    def _remote_credential_handle():
+        handle = mock.MagicMock(name="remote_credential_handle")
+        handle.__enter__.return_value = handle
+        handle.stat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_size=0,
+        )
+        return handle
+
+    @staticmethod
     def _capture_command(auth, method, stdout_text):
         captured = []
         sftp = mock.MagicMock()
 
         def open_remote_file(_name, _mode):
-            return io.StringIO()
+            return AuthDatabaseSSHSSLFlagTests._remote_credential_handle()
 
         sftp.open.side_effect = open_remote_file
 
@@ -1921,6 +1943,12 @@ class WebsiteRestoreSourceManifestTests(SimpleTestCase):
 class WebsiteRestoreEngineTests(RestoreBackendBase):
     """restore_website: lftp pushes the extracted tree back (mirror -R / put)."""
 
+    def _approved_trust(self, auth):
+        path = os.path.join(self.tmp, "approved-known-hosts")
+        auth._approved_known_hosts_path = path
+        auth._approved_host_key_algorithm = "ssh-ed25519"
+        return path
+
     def _run_engine(self, backup, restore):
         scripts = []
 
@@ -2065,15 +2093,22 @@ class WebsiteRestoreEngineTests(RestoreBackendBase):
         self._last_zip = self._make_zip({"public_html/index.html": "hi"})
         restore = self._restore_row(backup)
 
+        materialized_path = os.path.join(self.tmp, "materialized-private-key")
         with mock.patch.object(
-            RW, "_materialize_ssh_private_key"
-        ) as materialize, mock.patch.object(RW, "_normalize_ssh_key"):
+            RW,
+            "_materialize_ssh_private_key",
+            return_value=materialized_path,
+        ) as materialize, mock.patch.object(
+            RW, "_normalize_ssh_key"
+        ), mock.patch.object(
+            CoreAuthWebsite,
+            "materialize_lftp_known_hosts",
+            autospec=True,
+            side_effect=self._approved_trust,
+        ):
             self._run_engine(backup, restore)
 
-        materialize.assert_called_once_with(
-            f"_storage/ssh_restore_{backup.uuid_str}",
-            key_without_newline,
-        )
+        materialize.assert_called_once_with(key_without_newline)
 
     def test_name_fidelity_probe_waits_for_archive_fetch(self):
         node, backup = self._website_backup(
@@ -2089,6 +2124,11 @@ class WebsiteRestoreEngineTests(RestoreBackendBase):
 
         with mock.patch.object(
             CoreAuthWebsite, "check_connection", lambda *args, **kwargs: None
+        ), mock.patch.object(
+            CoreAuthWebsite,
+            "materialize_lftp_known_hosts",
+            autospec=True,
+            side_effect=self._approved_trust,
         ), mock.patch.object(
             RW, "_preflight_restore_target"
         ) as permission_probe, mock.patch.object(

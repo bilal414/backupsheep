@@ -44,6 +44,7 @@ from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
 from apps._tasks.integration.backup.errors import BackupStageError, safe_backup_failure
 from apps._tasks.integration.database import backup_database
 from apps._tasks.integration.website import backup_website
+from apps._tasks.managed_ssh import validate_managed_ssh_files_connection
 from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer
 from apps.api.v1.node.views import CoreNodeView
 from apps.api.v1.utils.api_helpers import (
@@ -69,6 +70,8 @@ from apps.console.connection.models import (
     CoreConnection,
     CoreSSHHostKeyApproval,
 )
+from apps.console.connection.managed_ssh import create_managed_ssh_operation
+from apps.console.connection.ssh import normalize_ssh_host
 from apps.console.node.models import (
     CoreDatabase,
     CoreNode,
@@ -80,6 +83,103 @@ from apps.console.storage.models import CoreStorage, CoreStorageLocal
 from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
+
+
+def _approve_test_ssh_host(account, member, host, port):
+    """Create the exact tenant approval expected by persisted SSH clients."""
+
+    normalized_host = normalize_ssh_host(host)
+    existing = CoreSSHHostKeyApproval.objects.filter(
+        account=account,
+        normalized_host=normalized_host,
+        port=port,
+    ).first()
+    if existing is not None:
+        return existing
+
+    public_bytes = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    wire_type = b"ssh-ed25519"
+    host_blob = (
+        struct.pack(">I", len(wire_type))
+        + wire_type
+        + struct.pack(">I", len(public_bytes))
+        + public_bytes
+    )
+    return CoreSSHHostKeyApproval.objects.create(
+        account=account,
+        normalized_host=normalized_host,
+        port=port,
+        wire_key_type="ssh-ed25519",
+        public_key_base64=base64.b64encode(host_blob).decode("ascii"),
+        fingerprint=(
+            "SHA256:"
+            + base64.b64encode(hashlib.sha256(host_blob).digest())
+            .decode("ascii")
+            .rstrip("=")
+        ),
+        negotiated_host_key_algorithm="ssh-ed25519",
+        bits=256,
+        approved_by_member_pk_snapshot=member.pk,
+        approved_by_user_pk_snapshot=member.user_id,
+    )
+
+
+def _activate_test_customer_ssh_connection(connection):
+    """Project a customer-key fixture active after its mocked validation."""
+
+    connection.refresh_from_db()
+    connection.status = CoreConnection.Status.ACTIVE
+    connection.save(update_fields=("status", "modified"))
+    connection.refresh_from_db()
+    return connection
+
+
+def _test_managed_public_key(marker):
+    wire_type = b"ssh-ed25519"
+    blob = (
+        struct.pack(">I", len(wire_type))
+        + wire_type
+        + struct.pack(">I", 32)
+        + bytes(marker) * 32
+    )
+    return "ssh-ed25519 " + base64.b64encode(blob).decode("ascii")
+
+
+TEST_MANAGED_SSH_SETTINGS = {
+    "SSH_MANAGED_PUBLIC_KEY": "",
+    "SSH_MANAGED_DATABASE_PUBLIC_KEY": _test_managed_public_key(b"d"),
+    "SSH_MANAGED_FILES_PUBLIC_KEY": _test_managed_public_key(b"f"),
+    "SSH_MANAGED_LANE_ISOLATION_REQUIRED": True,
+}
+
+
+def _authorize_test_backup_destination(node, backup, storage=None):
+    """Commit the same non-secret storage-lane witness a source worker requires."""
+
+    storage = storage or factories.make_storage(
+        node.connection.account,
+        node.added_by,
+        bucket=f"authorized-{uuid.uuid4().hex}",
+    )
+    metadata = dict(backup.metadata or {})
+    metadata.update(
+        {
+            "_backup_storage_ids": [storage.pk],
+            "_backup_storage_invalid_id_count": 0,
+            "_backup_destination_setup": {"state": "complete"},
+        }
+    )
+    backup.metadata = metadata
+    backup.save(update_fields=("metadata", "modified"))
+    backup.storage_points.add(storage)
+    node._authorize_local_backup_destinations(backup, [storage.pk])
+    return node._local_destination_point_model(backup).objects.get(
+        backup_id=backup.pk,
+        storage_id=storage.pk,
+    )
 
 
 class LegacyContainerStopSafetyTests(TestCase):
@@ -1055,40 +1155,31 @@ class WebsiteEngineBase(BaseTestCase):
         auth.use_private_key = use_private_key
         auth.use_public_key = use_public_key
         auth.save()
-        public_bytes = Ed25519PrivateKey.generate().public_key().public_bytes(
-            serialization.Encoding.Raw,
-            serialization.PublicFormat.Raw,
+        _approve_test_ssh_host(
+            self.account,
+            self.member,
+            auth.host,
+            auth.port,
         )
-        wire_type = b"ssh-ed25519"
-        host_blob = (
-            struct.pack(">I", len(wire_type))
-            + wire_type
-            + struct.pack(">I", len(public_bytes))
-            + public_bytes
-        )
-        CoreSSHHostKeyApproval.objects.create(
-            account=self.account,
-            normalized_host=auth.host,
-            port=auth.port,
-            wire_key_type="ssh-ed25519",
-            public_key_base64=base64.b64encode(host_blob).decode("ascii"),
-            fingerprint=(
-                "SHA256:"
-                + base64.b64encode(hashlib.sha256(host_blob).digest())
-                .decode("ascii")
-                .rstrip("=")
-            ),
-            negotiated_host_key_algorithm="ssh-ed25519",
-            bits=256,
-            approved_by_member_pk_snapshot=self.member.pk,
-            approved_by_user_pk_snapshot=self.user.pk,
-        )
-        # Approval insertion fences matching connections to PENDING. These engine
-        # tests model a previously validated source, so project it ACTIVE only after
-        # the exact tenant approval exists and refresh every cached witness.
-        node.connection.refresh_from_db()
-        node.connection.status = CoreConnection.Status.ACTIVE
-        node.connection.save(update_fields=("status",))
+        if use_public_key:
+            # Managed identities may become ACTIVE only through a completed worker
+            # validation for the exact current connection generation.
+            with override_settings(**TEST_MANAGED_SSH_SETTINGS), mock.patch(
+                "apps.console.connection.managed_ssh.current_app.send_task"
+            ):
+                operation = create_managed_ssh_operation(
+                    node.connection,
+                    "validate",
+                    requested_by_member=self.member,
+                )
+                with mock.patch.object(
+                    CoreAuthWebsite,
+                    "check_connection",
+                    return_value=None,
+                ):
+                    validate_managed_ssh_files_connection.run(operation.pk)
+        else:
+            _activate_test_customer_ssh_connection(node.connection)
         node.connection.refresh_from_db()
         auth._state.fields_cache["connection"] = node.connection
         if not hasattr(self, "_ssh_runtime_dir"):
@@ -1463,8 +1554,11 @@ class NormalizeSshKeyTests(TestCase):
         with open(generated_path, encoding="utf-8") as source:
             key_without_newline = source.read().rstrip("\n")
 
-        materialized_path = os.path.join(tmp_dir, "materialized_ed25519")
-        W._materialize_ssh_private_key(materialized_path, key_without_newline)
+        os.chmod(tmp_dir, 0o700)
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp_dir}):
+            materialized_path = W._materialize_ssh_private_key(
+                key_without_newline
+            )
 
         with open(materialized_path, "rb") as source:
             materialized = source.read()
@@ -1552,6 +1646,9 @@ class GetSftpClientKeyTests(BaseTestCase):
         auth.private_key = bs_encrypt("-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n", key)
         auth.password = bs_encrypt("key-pass", key)  # the key's passphrase
         auth.save()
+        _approve_test_ssh_host(self.account, self.member, auth.host, auth.port)
+        connection = _activate_test_customer_ssh_connection(node.connection)
+        auth._state.fields_cache["connection"] = connection
         return auth
 
     def _storage_listing(self):
@@ -1560,6 +1657,8 @@ class GetSftpClientKeyTests(BaseTestCase):
     def test_ed25519_key_connects_when_rsa_cannot_parse(self):
         auth = self._auth()
         pkey = mock.Mock(name="pkey")
+        pkey.get_name.return_value = "ssh-ed25519"
+        pkey.get_bits.return_value = 256
         ed = mock.Mock()
         ed.from_private_key_file.return_value = pkey
         rsa = mock.Mock()
@@ -1586,8 +1685,11 @@ class GetSftpClientKeyTests(BaseTestCase):
 
     def test_connect_failure_removes_temp_key(self):
         auth = self._auth()
+        pkey = mock.Mock(name="pkey")
+        pkey.get_name.return_value = "ssh-ed25519"
+        pkey.get_bits.return_value = 256
         ed = mock.Mock()
-        ed.from_private_key_file.return_value = mock.Mock(name="pkey")
+        ed.from_private_key_file.return_value = pkey
         ssh_client = mock.Mock(name="ssh")
         ssh_client.connect.side_effect = Exception("boom")
         before = self._storage_listing()
@@ -1661,6 +1763,17 @@ def make_database_node(account, member, *, db_type, version, database_name="appd
     bs_decrypt calls succeed."""
     conn = factories.make_connection(account, member, code="database")
     key = account.get_encryption_key()
+    ssh_fields = {}
+    if use_private_key:
+        ssh_fields = {
+            "ssh_host": normalize_ssh_host(host),
+            "ssh_port": 22,
+            "ssh_username": bs_encrypt("sshuser", key),
+            "ssh_password": bs_encrypt("sshpw", key),
+            "private_key": bs_encrypt(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n", key
+            ),
+        }
     CoreAuthDatabase.objects.create(
         connection=conn,
         host=host, port=port,
@@ -1672,16 +1785,18 @@ def make_database_node(account, member, *, db_type, version, database_name="appd
         use_ssl=False,
         use_public_key=False,
         use_private_key=use_private_key,
+        **ssh_fields,
     )
     if use_private_key:
         auth = conn.auth_database
-        auth.ssh_host = host
-        auth.ssh_port = 22
-        auth.ssh_username = bs_encrypt("sshuser", key)
-        auth.ssh_password = bs_encrypt("sshpw", key)
-        auth.private_key = bs_encrypt(
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n", key)
-        auth.save()
+        _approve_test_ssh_host(
+            account,
+            member,
+            auth.ssh_host,
+            auth.ssh_port,
+        )
+        conn = _activate_test_customer_ssh_connection(conn)
+        auth._state.fields_cache["connection"] = conn
     node = CoreNode.objects.create(connection=conn, type=CoreNode.Type.DATABASE,
                                    name="db", added_by=member)
     CoreDatabase.objects.create(
@@ -2023,12 +2138,16 @@ class DatabaseSnapshotDispatchTests(BaseTestCase):
             status=UtilBackup.Status.PENDING, attempt_no=1,
             type=UtilBackup.Type.ON_DEMAND,
         )
+        _authorize_test_backup_destination(node, backup)
         with mock.patch("apps._tasks.integration.backup.mysql.snapshot_mysql") as m_mysql, \
              mock.patch("apps._tasks.integration.backup.mariadb.snapshot_mariadb") as m_maria, \
              mock.patch("apps._tasks.integration.backup.postgresql.snapshot_postgresql") as m_pg, \
              mock.patch(
                  "apps._tasks.execution.verify_and_commit_source_artifact",
                  return_value=SimpleNamespace(byte_count=0),
+             ), \
+             mock.patch(
+                 "apps._tasks.integration.storage.tasks.storage_upload.s"
              ), \
              mock.patch("apps._tasks.integration.storage.tasks.finalize_backup"):
             node.database.create_snapshot(backup)
@@ -2066,6 +2185,7 @@ class DatabaseSnapshotDispatchTests(BaseTestCase):
             status=UtilBackup.Status.PENDING, attempt_no=1,
             type=UtilBackup.Type.ON_DEMAND,
         )
+        _authorize_test_backup_destination(node, backup)
         with mock.patch("apps._tasks.integration.backup.mysql.snapshot_mysql") as m_mysql, \
              mock.patch("apps._tasks.integration.backup.mariadb.snapshot_mariadb") as m_maria, \
              mock.patch("apps._tasks.integration.backup.postgresql.snapshot_postgresql") as m_pg:
@@ -2822,6 +2942,8 @@ class AuthDatabaseGetSshClientTests(BaseTestCase):
     def test_falls_back_to_rsa_when_ed25519_cannot_parse(self):
         auth = self._auth()
         pkey = mock.Mock(name="pkey")
+        pkey.get_name.return_value = "ssh-rsa"
+        pkey.get_bits.return_value = 3072
         ed = mock.Mock()
         ed.from_private_key_file.side_effect = Exception("not an Ed25519 key")
         rsa = mock.Mock()
@@ -2844,8 +2966,11 @@ class AuthDatabaseGetSshClientTests(BaseTestCase):
 
     def test_connect_failure_removes_temp_key(self):
         auth = self._auth()
+        pkey = mock.Mock(name="pkey")
+        pkey.get_name.return_value = "ssh-ed25519"
+        pkey.get_bits.return_value = 256
         ed = mock.Mock()
-        ed.from_private_key_file.return_value = mock.Mock(name="pkey")
+        ed.from_private_key_file.return_value = pkey
         ssh_client = mock.Mock(name="ssh")
         ssh_client.connect.side_effect = Exception("boom")
         before = self._storage_listing()
@@ -2992,10 +3117,21 @@ class BackupTaskValidationOrderTests(BaseTestCase):
             bucket=f"validation-order-{suffix}",
         )
 
+    @staticmethod
+    def _authorized_source_task():
+        # Destination-lane authorization is covered independently. These tests
+        # begin at the source task's post-handoff connection-validation stage.
+        return mock.patch.object(
+            CoreNode,
+            "authorized_local_destination_point_ids",
+            return_value=[1],
+        )
+
     def test_website_validation_failure_creates_row_and_marks_retrying(self):
         node = self._website_node()
         storage = self._storage("website-retry")
-        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
              mock.patch.object(CoreConnection, "validate", return_value=False), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_website, "retry",
@@ -3014,7 +3150,8 @@ class BackupTaskValidationOrderTests(BaseTestCase):
     def test_website_validation_failure_max_retries_marks_row(self):
         node = self._website_node()
         storage = self._storage("website-max")
-        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
              mock.patch.object(CoreConnection, "validate", return_value=False), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_website, "retry",
@@ -3045,7 +3182,8 @@ class BackupTaskValidationOrderTests(BaseTestCase):
             public_failure=failure,
         )
 
-        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
              mock.patch.object(CoreConnection, "validate", return_value=True), \
              mock.patch.object(
                  CoreWebsite, "create_snapshot", side_effect=terminal
@@ -3072,7 +3210,8 @@ class BackupTaskValidationOrderTests(BaseTestCase):
     def test_database_validation_failure_creates_row_and_marks_retrying(self):
         node = self._database_node()
         storage = self._storage("database-retry")
-        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
              mock.patch.object(CoreConnection, "validate",
                                side_effect=IntegrationValidationError("nope")), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
@@ -3092,7 +3231,8 @@ class BackupTaskValidationOrderTests(BaseTestCase):
     def test_database_validation_failure_max_retries_marks_row(self):
         node = self._database_node()
         storage = self._storage("database-max")
-        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
              mock.patch.object(CoreConnection, "validate",
                                side_effect=IntegrationValidationError("nope")), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
@@ -3696,6 +3836,7 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
 
     def test_resume_preserves_checkpoint_and_unbinds_progress_callback(self):
         node, backup = self._make_backup()
+        _authorize_test_backup_destination(node, backup)
         checkpoint = mock.Mock(return_value=True)
         execution = SimpleNamespace(
             state=SimpleNamespace(progress_completed=12000),
@@ -3717,7 +3858,10 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
              ), \
              mock.patch(
                  "apps._tasks.integration.storage.tasks.finalize_backup.apply_async",
-             ) as finalize:
+             ) as finalize, \
+             mock.patch(
+                 "apps._tasks.integration.storage.tasks.storage_upload.s",
+             ) as storage_signature:
             _resume_local_backup_owned(
                 backup,
                 node,
@@ -3736,7 +3880,11 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
             unit="bytes",
             metadata_updates={"public_stage": None},
         )
-        finalize.assert_called_once_with(args=[node.id, backup.id])
+        point = CoreWebsiteBackupStoragePoints.objects.get(backup=backup)
+        storage_signature.assert_called_once_with(node.id, backup.id, point.id)
+        storage_signature.return_value.set.assert_called_once_with()
+        storage_signature.return_value.set.return_value.apply_async.assert_called_once_with()
+        finalize.assert_not_called()
         self.assertNotIn("_execution_progress_callback", backup.__dict__)
         self.assertNotIn("_execution_progress_floor", backup.__dict__)
 
@@ -3754,6 +3902,7 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
             storage=storage,
             status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY,
         )
+        _authorize_test_backup_destination(node, backup, storage)
         execution = SimpleNamespace(
             state=SimpleNamespace(progress_completed=0),
             progress=mock.Mock(),

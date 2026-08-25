@@ -8,7 +8,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.test import APIClient
 
 from apps.api.v1.mobile.views import MobileBootstrapView
+from apps.console.setting.models import CoreSiteSettings
 from apps.tests.base import BaseTestCase
+from utils.middleware import OnboardingMiddleware
 
 
 class MobileBootstrapContractUnitTests(SimpleTestCase):
@@ -70,6 +72,10 @@ class MobileBootstrapContractUnitTests(SimpleTestCase):
 class MobileBootstrapAPITests(BaseTestCase):
     def setUp(self):
         super().setUp()
+        site_settings = CoreSiteSettings.load()
+        site_settings.setup_completed = True
+        site_settings.save(update_fields=("setup_completed", "modified"))
+        OnboardingMiddleware._completed = False
         self.client = APIClient()
 
     def test_bootstrap_requires_authentication(self):
@@ -80,7 +86,10 @@ class MobileBootstrapAPITests(BaseTestCase):
             (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
 
-    @override_settings(APP_NAME="BackupSheep Enterprise")
+    @override_settings(
+        APP_NAME="BackupSheep Enterprise",
+        ALLOWED_HOSTS=["testserver", "backup.example.test"],
+    )
     def test_owner_bootstrap_is_scoped_and_secret_free(self):
         self.client.force_authenticate(user=self.user)
 
