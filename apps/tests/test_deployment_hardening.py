@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import re
 from unittest import TestCase
@@ -11,6 +12,22 @@ class DeploymentHardeningContractTests(TestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        manifest = ast.parse(
+            (ROOT / "backupsheep" / "celery_task_manifest.py").read_text(
+                encoding="utf-8"
+            )
+        )
+        policies = next(
+            node.value
+            for node in manifest.body
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "TASK_POLICIES"
+        )
+        cls.task_queues = {
+            key.value: value.args[0].value
+            for key, value in zip(policies.keys, policies.values, strict=True)
+        }
 
     def service_block(self, name):
         match = re.search(
@@ -58,7 +75,11 @@ class DeploymentHardeningContractTests(TestCase):
         )
         self.assertRegex(
             workflow,
-            r'BACKUPSHEEP_DATABASE_IDENTITY_GENERATION:\s+["\']2["\']',
+            r'BACKUPSHEEP_DATABASE_IDENTITY_GENERATION:\s+["\']3["\']',
+        )
+        self.assertRegex(
+            workflow,
+            r'BACKUPSHEEP_CELERY_SECURITY_GENERATION:\s+["\']3["\']',
         )
 
     def test_postgres_healthcheck_authenticates_with_the_file_secret(self):
@@ -88,12 +109,12 @@ class DeploymentHardeningContractTests(TestCase):
                 encoding="utf-8"
             ),
         )
-        self.assertIn(
-            'ctl authenticate_user "$user" "$password"',
-            (ROOT / "deploy" / "rabbitmq" / "provision.sh").read_text(
-                encoding="utf-8"
-            ),
+        provisioner = (ROOT / "deploy" / "rabbitmq" / "provision.sh").read_text(
+            encoding="utf-8"
         )
+        self.assertIn('add_user "$user" "$hash" --pre-hashed-password', provisioner)
+        self.assertIn('stored_password_hash "$user"', provisioner)
+        self.assertIn("rabbit_password_hashing_sha256", provisioner)
         self.assertNotIn("rabbitmq_password:/run/secrets/rabbitmq_password", self.compose)
         self.assertIn(
             '["CMD", "rabbitmq-diagnostics", "-q", "ping"]',
@@ -114,9 +135,9 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertIn("3.13.x to 4.2.x", guide)
 
     def test_compose_bounds_logs_and_isolates_backend(self):
-        self.assertEqual(self.compose.count("logging: *default-logging"), 12)
+        self.assertEqual(self.compose.count("logging: *default-logging"), 17)
         self.assertIn("max-size: \"${DOCKER_LOG_MAX_SIZE:-10m}\"", self.compose)
-        self.assertEqual(self.compose.count(": *internal-network"), 18)
+        self.assertEqual(self.compose.count(": *internal-network"), 19)
         self.assertEqual(self.compose.count(": *egress-network"), 6)
         self.assertIn("com.docker.network.bridge.enable_icc: \"false\"", self.compose)
 
@@ -125,12 +146,15 @@ class DeploymentHardeningContractTests(TestCase):
         entrypoint = (ROOT / "init.sh").read_text(encoding="utf-8")
         env_sample = (ROOT / ".env_sample").read_text(encoding="utf-8")
 
-        self.assertIn("useradd --uid 10001 --gid 10001", dockerfile)
+        for uid in range(10001, 10009):
+            with self.subTest(uid=uid):
+                self.assertIn(f"useradd --uid {uid} --gid {uid}", dockerfile)
         self.assertIn("USER 10001:10001", dockerfile)
-        self.assertIn("/code/_storage /backups", dockerfile)
+        self.assertIn("/code/_storage", dockerfile)
+        self.assertIn("/backups", dockerfile)
         self.assertIn("/code/static", dockerfile)
         self.assertIn("umask 077", entrypoint)
-        self.assertEqual(self.compose.count("<<: *app-runtime"), 10)
+        self.assertEqual(self.compose.count("<<: *app-runtime"), 12)
         self.assertIn('user: "10001:10001"', self.compose)
         self.assertIn("pull_policy: never", self.compose)
         self.assertIn("read_only: true", self.compose)
@@ -165,7 +189,7 @@ class DeploymentHardeningContractTests(TestCase):
 
     def test_every_application_role_uses_one_explicit_image_reference(self):
         image_reference = 'image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"'
-        self.assertEqual(self.compose.count(image_reference), 10)
+        self.assertEqual(self.compose.count(image_reference), 12)
         self.assertNotIn("backupsheep:latest", self.compose)
 
         env_sample = (ROOT / ".env_sample").read_text(encoding="utf-8")
@@ -181,11 +205,11 @@ class DeploymentHardeningContractTests(TestCase):
             '"${BACKUPSHEEP_INSTALLATION_ID:?',
             self.compose,
         )
-        self.assertEqual(self.compose.count("labels: *installation-labels"), 3)
+        self.assertEqual(self.compose.count("labels: *installation-labels"), 4)
         self.assertIn("source: installation_identity", self.service_block("app"))
 
     def test_provider_mutating_roles_require_an_explicit_profile_and_preflight(self):
-        operations = (
+        operation_workers = (
             "worker-cloud",
             "worker-database",
             "worker-files",
@@ -193,11 +217,25 @@ class DeploymentHardeningContractTests(TestCase):
             "worker-logs",
             "beat",
         )
-        self.assertEqual(self.compose.count('profiles: ["operations"]'), len(operations))
-        for service in operations:
+        operation_guards = (
+            "cloud-egress-guard",
+            "database-egress-guard",
+            "files-egress-guard",
+            "storage-egress-guard",
+            "logs-egress-guard",
+        )
+        self.assertEqual(
+            self.compose.count('profiles: ["operations"]'),
+            len(operation_workers) + len(operation_guards),
+        )
+        for service in (*operation_workers, *operation_guards):
             with self.subTest(service=service):
                 block = self.service_block(service)
                 self.assertIn('profiles: ["operations"]', block)
+
+        for service in operation_workers:
+            with self.subTest(preflight_dependency=service):
+                block = self.service_block(service)
                 self.assertIn(
                     "preflight:\n        condition: service_completed_successfully",
                     block,
@@ -208,9 +246,12 @@ class DeploymentHardeningContractTests(TestCase):
             "rabbitmq-volume-init",
             "rabbitmq",
             "rabbitmq-provision",
+            "staging-provision",
             "db-provision",
             "migrate",
+            "db-seal",
             "preflight",
+            "app-egress-guard",
             "app",
         ):
             with self.subTest(core_service=service):
@@ -233,9 +274,16 @@ class DeploymentHardeningContractTests(TestCase):
         secrets = self.compose.split("\nsecrets:\n", 1)[1]
         for name in (
             "django_secret_key",
-            "db_password",
             "db_bootstrap_password",
             "db_migrator_password",
+            "db_app_password",
+            "db_preflight_password",
+            "db_beat_password",
+            "db_cloud_password",
+            "db_database_password",
+            "db_files_password",
+            "db_storage_password",
+            "db_logs_password",
             "rabbitmq_bootstrap_password",
             "rabbitmq_app_password",
             "rabbitmq_preflight_password",
@@ -248,12 +296,15 @@ class DeploymentHardeningContractTests(TestCase):
             "onboarding_token",
             "ssh_managed_database_private_key",
             "ssh_managed_files_private_key",
+            "artifact_kms_database_aws_credentials",
+            "artifact_kms_files_aws_credentials",
         ):
             with self.subTest(secret=name):
                 self.assertIn(
                     f"file: ${{BACKUPSHEEP_SECRETS_DIR:-.secrets}}/{name}",
                     secrets,
                 )
+        self.assertNotRegex(secrets, r"(?m)^  db_password:")
         self.assertNotIn("environment:", secrets)
 
         secret_environment = self.compose.split(
@@ -305,6 +356,7 @@ class DeploymentHardeningContractTests(TestCase):
         database = self.service_block("db")
         provisioner = self.service_block("db-provision")
         migrator = self.service_block("migrate")
+        sealer = self.service_block("db-seal")
 
         self.assertIn(
             "POSTGRES_USER: ${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}",
@@ -319,20 +371,37 @@ class DeploymentHardeningContractTests(TestCase):
             provisioner,
         )
         self.assertIn(
-            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION is required", provisioner
+            'BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"', provisioner
         )
         self.assertIn("DB_HOST: db", provisioner)
         self.assertIn('DB_PORT: "5432"', provisioner)
         for secret_name in (
             "db_bootstrap_password",
             "db_migrator_password",
-            "db_password",
+            "db_app_password",
+            "db_preflight_password",
+            "db_beat_password",
+            "db_cloud_password",
+            "db_database_password",
+            "db_files_password",
+            "db_storage_password",
+            "db_logs_password",
         ):
             self.assertIn(f"- {secret_name}", provisioner)
+            self.assertIn(f"- {secret_name}", sealer)
+        self.assertNotIn("- db_password\n", provisioner)
+        self.assertNotIn("- db_password\n", sealer)
         self.assertNotIn("django_secret_key", provisioner)
         self.assertNotIn("rabbitmq_password", provisioner)
         self.assertIn("- provision-database", provisioner)
         self.assertNotIn("- migrate-database", provisioner)
+        self.assertIn(
+            'command: ["python", "-m", "backupsheep.database_identity", "seal"]',
+            sealer,
+        )
+        self.assertIn(
+            "migrate:\n        condition: service_completed_successfully", sealer
+        )
 
         self.assertIn(
             'DB_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"', migrator
@@ -344,20 +413,28 @@ class DeploymentHardeningContractTests(TestCase):
             migrator,
         )
 
-        for service in (
-            "preflight",
-            "app",
-            "worker-cloud",
-            "worker-database",
-            "worker-files",
-            "worker-storage",
-            "worker-logs",
-            "beat",
-        ):
+        runtime_identities = {
+            "preflight": "preflight",
+            "app": "app",
+            "worker-cloud": "cloud",
+            "worker-database": "database",
+            "worker-files": "files",
+            "worker-storage": "storage",
+            "worker-logs": "logs",
+            "beat": "beat",
+        }
+        for service, lane in runtime_identities.items():
             with self.subTest(runtime_service=service):
                 block = self.service_block(service)
                 self.assertNotIn("db_bootstrap_password", block)
                 self.assertNotIn("db_migrator_password", block)
+                self.assertIn(
+                    f'DB_USER: "${{DB_{lane.upper()}_USER:-backupsheep_{lane}}}"',
+                    block,
+                )
+                self.assertIn(
+                    f"DB_PASSWORD_FILE: /run/secrets/db_{lane}_password", block
+                )
 
     def test_stateful_services_are_unpublished_and_minimally_privileged(self):
         for service in ("db", "rabbitmq"):
@@ -394,22 +471,25 @@ class DeploymentHardeningContractTests(TestCase):
 
     def test_role_networks_prevent_worker_to_worker_lateral_reachability(self):
         role_networks = {}
-        for service in (
-            "app",
-            "worker-cloud",
-            "worker-database",
-            "worker-files",
-            "worker-storage",
-            "worker-logs",
-        ):
-            block = self.service_block(service)
-            networks = block.split("\n    networks:\n", 1)[1].split(
-                "\n    logging:", 1
-            )[0]
+        role_guards = {
+            "app": "app-egress-guard",
+            "worker-cloud": "cloud-egress-guard",
+            "worker-database": "database-egress-guard",
+            "worker-files": "files-egress-guard",
+            "worker-storage": "storage-egress-guard",
+            "worker-logs": "logs-egress-guard",
+        }
+        for service, guard in role_guards.items():
+            block = self.service_block(guard)
+            networks = block.split("\n    networks:\n", 1)[1]
             role_networks[service] = set(
                 re.findall(r"^      ([a-z][a-z0-9-]+):(?: .*)?$", networks, re.MULTILINE)
             )
+            self.assertEqual(len(role_networks[service]), 3)
             self.assertIn("gw_priority: 1", networks)
+            self.assertIn(
+                f"network_mode: service:{guard}", self.service_block(service)
+            )
 
         services = tuple(role_networks)
         for index, left in enumerate(services):
@@ -417,39 +497,55 @@ class DeploymentHardeningContractTests(TestCase):
                 with self.subTest(left=left, right=right):
                     self.assertTrue(role_networks[left].isdisjoint(role_networks[right]))
 
-    def test_backup_storage_is_read_only_outside_the_storage_worker(self):
-        # The app retains read-only access solely for authenticated Local Storage
-        # downloads. Source dump workers may inspect destinations but cannot mutate
-        # them. The cloud/default worker has no proven read requirement at all.
-        self.assertNotIn("/backups", self.service_block("worker-cloud"))
-        for service in ("app", "worker-database", "worker-files"):
+    def test_backup_storage_is_private_to_the_storage_worker(self):
+        for service in (
+            "app",
+            "worker-cloud",
+            "worker-database",
+            "worker-files",
+            "worker-logs",
+            "beat",
+        ):
             with self.subTest(service=service):
-                block = self.service_block(service)
-                mount = block.split("target: /backups", 1)[1].split("\n", 2)
-                self.assertIn("read_only: true", "\n".join(mount))
+                self.assertNotRegex(
+                    self.service_block(service),
+                    r"(?m)^\s+(?:target: /backups|- [^\n]*:/backups(?:\s|$))",
+                )
 
         storage_worker = self.service_block("worker-storage")
-        self.assertIn("- backup_storage:/backups", storage_worker)
+        self.assertIn("source: backup_storage", storage_worker)
+        self.assertIn("target: /backups", storage_worker)
+        self.assertIn(
+            "source: backup_storage\n        target: /volumes/backup-storage",
+            self.service_block("staging-provision"),
+        )
 
     def test_all_local_storage_mutations_route_to_storage_worker(self):
-        settings = (ROOT / "backupsheep" / "settings.py").read_text(
-            encoding="utf-8"
-        )
         for task in (
             "validate_local_storage",
             "validate_pending_local_storages",
             "delete_backup_requested",
             "delete_storage_requested",
             "resume_requested_storage_deletions",
-            "node_delete_requested",
-            "resume_requested_node_deletions",
+            "delete_local_node_requested",
+            "resume_requested_local_node_deletions",
+        ):
+            with self.subTest(task=task):
+                self.assertEqual(self.task_queues[task], "storage")
+
+        self.assertEqual(self.task_queues["node_delete_requested"], "default")
+        self.assertEqual(
+            self.task_queues["resume_requested_node_deletions"], "default"
+        )
+        self.assertEqual(self.task_queues["delete_cloud_node_requested"], "cloud")
+        for retired_task in (
             "clean_delete_failed_backups",
             "delete_requested_integrations",
             "delete_requested_storages",
             "account_delete",
         ):
-            with self.subTest(task=task):
-                self.assertIn(f'"{task}": {{"queue": "storage"}}', settings)
+            with self.subTest(retired_task=retired_task):
+                self.assertNotIn(retired_task, self.task_queues)
 
     def test_web_and_notification_roles_cannot_modify_staged_artifacts(self):
         app = self.service_block("app")
@@ -457,11 +553,8 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertNotIn("- backup_workdir:/code/_storage", app)
         self.assertNotIn("ssh_trust:/var/lib/backupsheep/ssh-trust", app)
         self.assertNotIn("/code/_storage", self.service_block("worker-logs"))
-        settings = (ROOT / "backupsheep" / "settings.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn('"delete_old_logs": {"queue": "storage"}', settings)
-        self.assertIn('"reset_incremental_cache": {"queue": "storage"}', settings)
+        self.assertEqual(self.task_queues["delete_old_logs"], "storage")
+        self.assertEqual(self.task_queues["reset_incremental_cache"], "storage")
 
     def test_tenant_trust_is_ephemeral_and_managed_identities_are_lane_split(self):
         app = self.service_block("app")
