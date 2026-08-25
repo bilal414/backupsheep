@@ -13,7 +13,7 @@ django-model-utils==5.0.0
 # Database and Data Processing
 psycopg2-binary==2.9.12
 mysql-connector-python==9.7.0
-sqlparse==0.5.5
+sqlparse==0.6.0
 tzdata==2026.2
 
 # Task Queue & Celery
