@@ -94,7 +94,9 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
     def _publish(self, _backup_uuid, artifact_name, *, installation_id=None):
         self.assertEqual(installation_id, INSTALLATION_ID)
         path = self.fence / artifact_name
-        os.chmod(path, 0o640)
+        # This unit test runs in one UID. The cross-UID staging suite separately
+        # proves the production publisher's group-readable 0640 handoff.
+        os.chmod(path, 0o600)
         return path
 
     def _source_boundary(self):
@@ -183,7 +185,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         self.assertEqual(envelope.status, envelope.Status.ACTIVE)
         self.assertEqual(envelope.uuid, uuid.UUID(self.backup.uuid_str))
         self.assertFalse(self.archive.exists())
-        self.assertEqual(stat_mode(ciphertext), 0o640)
+        self.assertEqual(stat_mode(ciphertext), 0o600)
         self.assertEqual(ciphertext.read_bytes()[:4], b"BSE1")
 
     def test_key_provider_failure_never_publishes_or_activates_plaintext(self):
@@ -342,7 +344,9 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
 
         def publish(_handoff_uuid, artifact_name, **_kwargs):
             path = reverse_fence / artifact_name
-            os.chmod(path, 0o640)
+            # Cross-UID publication permissions are exercised by the staging
+            # kernel harness; this in-process fixture remains owner-private.
+            os.chmod(path, 0o600)
             return path
 
         with override_settings(LOCAL_STORAGE_ROOT=str(local_root)), mock.patch(
