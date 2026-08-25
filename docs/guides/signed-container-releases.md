@@ -1,73 +1,138 @@
-# Signed container release foundation
+# Signed container releases
 
-BackupSheep's signed-image workflow is checked in but intentionally disabled. Merging
-the workflow does **not** publish an image. An administrator must first protect the
-`signed-release` GitHub environment and then set the repository variable
-`BACKUPSHEEP_SIGNED_RELEASES_ENABLED=true`.
+BackupSheep's release workflow is checked in but deliberately dormant. Merging it
+does not build, sign, promote, or publish anything. An administrator must protect
+the `signed-release` environment and set
+`BACKUPSHEEP_SIGNED_RELEASES_ENABLED=true` before a SemVer tag can start it.
 
-The release job accepts only a SemVer-shaped tag whose exact commit is contained in
-`main`. It builds the application and bundled PostgreSQL images for `linux/amd64` and
-`linux/arm64`, with pinned BuildKit/QEMU inputs and BuildKit `mode=max` provenance. A
-unique, run-scoped registry tag is used only to push each OCI index. Every scan,
-signature, attestation, manifest entry, and consumer verification uses
-`repository@sha256:digest`; the run-scoped tag is never a trust boundary.
+## Trust and promotion model
 
-## Evidence and release gate
+The workflow separates three permission domains:
 
-For each platform manifest, the workflow:
+1. `build_scan` can read source and write GHCR packages, but it has no OIDC token.
+   It builds only into the explicit `*-quarantine` repositories.
+2. `sign_promote` is protected by the `signed-release` environment. It installs
+   hash-verified Cosign and ORAS binaries, revalidates all downloaded evidence,
+   signs quarantine digests, and verifies them online. Only then does it copy the
+   exact OCI index digest to an official SemVer tag. It signs the official digest
+   separately and reruns the complete online verifier.
+3. `publish_evidence` can write GitHub release contents but cannot write packages
+   or request an OIDC token. It verifies the signed archive before publishing it.
 
-1. resolves and validates the exact child digest from the OCI index;
-2. runs Trivy 0.74.0 against that digest and rejects every HIGH or CRITICAL finding,
-   including an unfixed finding;
-3. creates SPDX JSON and CycloneDX JSON SBOMs from that digest;
-4. keyless-signs the platform digest through GitHub Actions OIDC; and
-5. keyless-attests both SBOM predicates to that digest.
+A rejected candidate therefore remains in quarantine and never gets an official
+repository tag. The official repositories receive no run tag, candidate tag, or
+other mutable staging reference. Promotion refuses an existing SemVer tag and
+treats authentication, network, TLS, and unexpected registry errors as failures,
+not as evidence that a tag is absent.
 
-It also keyless-signs each multi-platform index, attaches a SLSA provenance v1
-predicate to it, signs the release manifest as a blob, and reruns the checked-in
-verifier against the registry. There is no vulnerability allowlist in the initial
-policy. Introducing one requires an explicit policy and review design; a scanner flag
-or ignore file is not an accepted exception mechanism.
+## Immutable inputs and real provenance
 
-The retained `signed-release-candidate-<run>-<attempt>` artifact contains the release
-manifest, policy snapshot, OCI indexes, scan reports, both SBOM formats, provenance,
-and Sigstore bundles. A partial artifact from a failed run is diagnostic evidence,
-not a release. A release is eligible for promotion only after the final verification
-step succeeds.
+Every GitHub Action is pinned to a full commit. BuildKit and QEMU container images
+are digest pinned. Cosign, ORAS, Syft, and Trivy are downloaded directly from exact
+release asset URLs and installed only after their checked-in SHA-256 values match.
+No release installer script from another repository is executed.
 
-## Verification
+Each build uses the remote Git URL at the exact 40-character release commit rather
+than the runner workspace. BuildKit is requested to emit SLSA v1 provenance with
+`mode=max` and the release workflow as builder ID. The collector retrieves the raw
+OCI index, each index-bound attestation manifest, and the actual in-toto provenance
+blob. It does not synthesize a replacement predicate. The verifier requires:
 
-With the downloaded evidence directory and Cosign 3.1.3 on `PATH`, run:
+- the retained raw index bytes to hash to the declared registry digest;
+- exactly `linux/amd64` and `linux/arm64` child descriptors;
+- exactly one attestation manifest bound to every child digest;
+- the provenance blob digest to be a layer in that attestation manifest;
+- an in-toto Statement v1 subject containing the exact child digest;
+- the exact remote Git commit, Dockerfile, OCI labels, and workflow builder ID;
+- complete BuildKit request and dependency metadata; and
+- nonempty `mode=max` LLB, source, and layer data.
+
+These fields follow BuildKit's documented [SLSA provenance
+definition](https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md).
+
+## Scanner and SBOM policy
+
+Trivy and Syft run in a cleared environment with explicit trusted empty config
+files. Trivy also receives an explicit empty ignore file. Repository-local
+`.syft.yaml`, `trivy.yaml`, `.trivyignore`, environment overrides, and a hidden
+`--ignore-unfixed` flag cannot silently weaken the gate.
+
+Every exact platform child must have:
+
+- a Syft source catalog whose input and manifest digest match the quarantine
+  `repository@sha256` reference and whose artifact inventory is nonempty;
+- an SPDX document with at least one package;
+- a CycloneDX document with at least one component; and
+- a structurally complete Trivy report with target/class/type metadata and a
+  nonempty package inventory.
+
+Any HIGH or CRITICAL vulnerability fails, including one without a vendor fix. The
+checked-in policy has no allowlist. Scanner evidence, signing, registry lookup, and
+consumer verification always use digest references; tags are never verification
+boundaries.
+
+## Evidence and independent verification
+
+Both candidate and final workflow artifacts use GitHub's 90-day maximum retention.
+After final registry verification, the workflow makes a deterministic archive of
+the manifest, raw OCI objects, BuildKit provenance, SBOMs, Trivy reports, policy
+snapshot, and Sigstore bundles. It signs that archive and publishes the archive,
+checksum, signature bundle, release manifest, manifest bundle, and policy as assets
+on the immutable Git tag's GitHub release.
+
+With an extracted evidence archive and the policy-pinned Cosign and ORAS versions:
 
 ```bash
 python3 scripts/verify_release.py \
   --policy deploy/release-policy.json \
   --manifest release-artifacts/release-manifest.json \
   --artifacts-dir release-artifacts \
-  --manifest-bundle release-artifacts/release-manifest.bundle.json
+  --manifest-bundle release-artifacts/release-manifest.bundle.json \
+  --cosign /trusted/path/cosign \
+  --oras /trusted/path/oras \
+  --phase final
 ```
 
-The default verifier is online and fail closed. It checks the manifest signature,
-index and platform signatures, GitHub repository/workflow/tag/commit certificate
-claims, Rekor-backed keyless verification, SLSA predicate contents, and exact SBOM
-predicate contents. It also recomputes every evidence hash and independently rejects
-HIGH/CRITICAL entries in the Trivy reports.
+The default verifier is online and fail closed. It refetches the OCI index by
+digest from both quarantine and official repositories, requires byte-for-byte
+identity with retained evidence, and verifies the manifest, index, platform,
+provenance, and SBOM signatures against the GitHub workflow/tag/commit identity.
 
-`--offline` validates only structure and hashes. Its success message explicitly says
-that signatures were not checked; it must never be used as release authorization.
+`--offline` validates structure, completeness, OCI membership, source binding, and
+file hashes only. Its success message states that registry state and signatures
+were not checked. Offline success is not release authorization.
 
-## Administrative prerequisites
+## Administrator-owned controls and remaining rollout gates
 
-Before enabling the repository variable:
+Repository code cannot enforce these external controls. Before opt-in:
 
 - protect `main` and release tags against force-update and deletion;
-- protect the `signed-release` environment with required reviewers and prevent
-  administrator bypass;
-- restrict Actions to reviewed, commit-pinned actions;
-- confirm GHCR package visibility and retention for both image repositories;
-- make the signed-release workflow a required release status; and
-- choose who may create release tags and approve vulnerability-policy changes.
+- require reviewers on `signed-release` and disable administrator bypass;
+- restrict Actions to reviewed full-commit-pinned actions;
+- create/authorize both quarantine GHCR packages and official packages for the
+  workflow token, while denying unnecessary human write access;
+- configure quarantine lifecycle retention so rejected candidates are eventually
+  removed without deleting official digests or referrers;
+- protect official package/tag deletion through organization policy and audit it;
+- make the release workflow a required release status; and
+- mirror GitHub release evidence to organization-controlled immutable storage if
+  policy requires retention beyond the life of the repository or GitHub account.
 
-Keyless GitHub OIDC signing needs no long-lived signing key. GHCR and GitHub governance
-still require repository-administrator decisions and cannot be enforced by this commit
-alone.
+Run one protected pre-release tag as a controlled acceptance test before production
+use. Confirm GitHub OIDC issuance, GHCR referrer behavior, ORAS graph copying,
+BuildKit's complete `mode=max` fields for both Dockerfiles, Cosign bundle
+verification, official tag refusal on replay, and GitHub release asset publication.
+This checked-in foundation does not itself configure those GitHub/GHCR controls and
+has not published or deployed a release.
+
+## WordPress connector publication hook
+
+The WordPress connector under `integrations/wordpress/backupsheep-v2` has its own
+package contract and publication lifecycle. This container workflow intentionally
+does not publish a WordPress ZIP or imply that a container release also shipped the
+plugin. A future plugin release job should run only after its focused package and
+protocol tests, build from the exact Git tree with `scripts/build_wordpress_plugin.py`,
+record the archive SHA-256 in a small plugin manifest, keyless-sign both files under
+the same protected tag identity, and attach them to the GitHub release. WordPress.org
+or marketplace publication remains a separately approved operation with separate
+credentials and acceptance evidence.
