@@ -83,7 +83,11 @@ def build_plugin(output: Path) -> None:
         | getattr(os, "O_NOFOLLOW", 0)
     )
     try:
-        descriptor = os.open(output, flags, 0o644)
+        # Keep the generated package private in the local build workspace. The
+        # publication channel (GitHub release/artifact permissions) decides who can
+        # download it; a permissive local umask must not make an unpublished build
+        # readable by every account on a shared runner.
+        descriptor = os.open(output, flags, 0o600)
     except FileExistsError as error:
         raise PluginBuildError(f"refusing to overwrite existing output: {output}") from error
     try:
