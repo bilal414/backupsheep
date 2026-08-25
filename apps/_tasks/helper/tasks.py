@@ -123,12 +123,13 @@ def resume_pending_backup_requests(self):
 
 
 _CLOUD_BACKUP_MODELS = None
-_LOCAL_BACKUP_MODELS = None
+_DATABASE_BACKUP_MODELS = None
+_FILES_BACKUP_MODELS = None
 
 
 def _recovery_backup_models():
     """Load every backup model lazily to avoid the node/model import cycle."""
-    global _CLOUD_BACKUP_MODELS, _LOCAL_BACKUP_MODELS
+    global _CLOUD_BACKUP_MODELS, _DATABASE_BACKUP_MODELS, _FILES_BACKUP_MODELS
     if _CLOUD_BACKUP_MODELS is None:
         from apps.console.backup.models import (
             CoreAWSBackup,
@@ -160,20 +161,24 @@ def _recovery_backup_models():
             CoreAWSRDSBackup,
             CoreVultrDatabaseBackup,
         )
-    if _LOCAL_BACKUP_MODELS is None:
+    if _DATABASE_BACKUP_MODELS is None or _FILES_BACKUP_MODELS is None:
         from apps.console.backup.models import (
             CoreBasecampBackup,
             CoreDatabaseBackup,
             CoreWebsiteBackup,
             CoreWordPressBackup,
         )
-        _LOCAL_BACKUP_MODELS = (
+        _DATABASE_BACKUP_MODELS = (CoreDatabaseBackup,)
+        _FILES_BACKUP_MODELS = (
             CoreWebsiteBackup,
-            CoreDatabaseBackup,
             CoreWordPressBackup,
             CoreBasecampBackup,
         )
-    return _CLOUD_BACKUP_MODELS, _LOCAL_BACKUP_MODELS
+    return (
+        _CLOUD_BACKUP_MODELS,
+        _DATABASE_BACKUP_MODELS,
+        _FILES_BACKUP_MODELS,
+    )
 
 
 def _backup_control(backup):
@@ -1038,9 +1043,8 @@ def _recoverable_oracle_delete_queryset(*, cutoff, now, batch_size):
     )
 
 
-@current_app.task(name="resume_in_progress_backups", bind=True, ignore_result=True)
-def resume_in_progress_backups(self):
-    """Requeue work left behind by a worker or server restart.
+def _resume_in_progress_backup_models(models, *, cloud):
+    """Requeue only the models owned by one database/worker lane.
 
     RabbitMQ late acknowledgements handle ordinary worker loss. This sweep is the
     durable fallback for messages lost during broker migration, old ETA pollers, and
@@ -1054,9 +1058,7 @@ def resume_in_progress_backups(self):
     batch_size = int(getattr(settings, "BACKUP_RECOVERY_BATCH_SIZE", 100))
     cutoff = timezone.now() - datetime.timedelta(seconds=stale_seconds)
     recovery_now = timezone.now()
-    cloud_models, local_models = _recovery_backup_models()
-
-    for model in cloud_models + local_models:
+    for model in models:
         backups = _recoverable_backup_queryset(
             model,
             cutoff=cutoff,
@@ -1095,7 +1097,7 @@ def resume_in_progress_backups(self):
                         )
                     continue
 
-                if model in cloud_models and _backup_has_provider_reference(backup):
+                if cloud and _backup_has_provider_reference(backup):
                     recovery_id = f"recover-poll-{model.__name__}-{backup.pk}"
                     claimed = _claim_cloud_poll(
                         backup,
@@ -1126,7 +1128,7 @@ def resume_in_progress_backups(self):
                 # the original create lease is still active; if the worker died,
                 # the lease expiry is the safe hand-off point.
                 if (
-                    model in cloud_models
+                    cloud
                     and not _backup_has_provider_reference(backup)
                     and _backup_lease_active(backup, "create")
                 ):
@@ -1137,7 +1139,7 @@ def resume_in_progress_backups(self):
                 # is healthy would create a second chord whose callback could run
                 # before the first upload finishes.
                 if (
-                    model in local_models
+                    not cloud
                     and backup.status == UtilBackup.Status.UPLOAD_IN_PROGRESS
                     and _local_upload_is_active(backup)
                 ):
@@ -1168,6 +1170,34 @@ def resume_in_progress_backups(self):
                 # One malformed/removed row must not prevent recovery of the rest of
                 # the provider catalog. The next sweep can retry this row.
                 capture_exception(error)
+
+
+@current_app.task(name="resume_in_progress_backups", bind=True, ignore_result=True)
+def resume_in_progress_backups(self):
+    """Recover only cloud-provider backups in the cloud lane."""
+
+    cloud_models, _database_models, _files_models = _recovery_backup_models()
+    return _resume_in_progress_backup_models(cloud_models, cloud=True)
+
+
+@current_app.task(
+    name="resume_in_progress_database_backups", bind=True, ignore_result=True
+)
+def resume_in_progress_database_backups(self):
+    """Recover database dumps without granting their rows to cloud/files."""
+
+    _cloud_models, database_models, _files_models = _recovery_backup_models()
+    return _resume_in_progress_backup_models(database_models, cloud=False)
+
+
+@current_app.task(
+    name="resume_in_progress_files_backups", bind=True, ignore_result=True
+)
+def resume_in_progress_files_backups(self):
+    """Recover website/WordPress/Basecamp dumps only in the files lane."""
+
+    _cloud_models, _database_models, files_models = _recovery_backup_models()
+    return _resume_in_progress_backup_models(files_models, cloud=False)
 
 
 @current_app.task(

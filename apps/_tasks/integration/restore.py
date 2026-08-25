@@ -1067,9 +1067,8 @@ def _dispatch_restore_recovery(restore):
     current_app.send_task(task_name, task_id=task_id, args=args)
 
 
-@current_app.task(name="resume_in_progress_restores", bind=True, ignore_result=True)
-def resume_in_progress_restores(self):
-    """Recover restore messages lost during worker, broker, or server failure."""
+def _resume_in_progress_restore_models(models):
+    """Recover only restore rows owned by one worker/database lane."""
     now = timezone.now()
     stale_seconds = int(
         getattr(settings, "RESTORE_RECOVERY_STALE_SECONDS", 5 * 60)
@@ -1079,12 +1078,6 @@ def resume_in_progress_restores(self):
     )
     batch_size = int(getattr(settings, "RESTORE_RECOVERY_BATCH_SIZE", 100))
     cutoff = now - timedelta(seconds=stale_seconds)
-    models = (
-        CoreCloudRestore,
-        CoreWebsiteRestore,
-        CoreDatabaseRestore,
-        CoreVultrDatabaseRestore,
-    )
     for model in models:
         for candidate in _recoverable_restore_rows(
             model,
@@ -1105,3 +1098,30 @@ def resume_in_progress_restores(self):
                 # The short DB reservation expires automatically. A provider or
                 # broker outage therefore retries safely without exposing details.
                 capture_exception(error)
+
+
+@current_app.task(name="resume_in_progress_restores", bind=True, ignore_result=True)
+def resume_in_progress_restores(self):
+    """Recover cloud-provider restores only in the cloud lane."""
+
+    return _resume_in_progress_restore_models(
+        (CoreCloudRestore, CoreVultrDatabaseRestore)
+    )
+
+
+@current_app.task(
+    name="resume_in_progress_database_restores", bind=True, ignore_result=True
+)
+def resume_in_progress_database_restores(self):
+    """Recover database restores only in the database source lane."""
+
+    return _resume_in_progress_restore_models((CoreDatabaseRestore,))
+
+
+@current_app.task(
+    name="resume_in_progress_files_restores", bind=True, ignore_result=True
+)
+def resume_in_progress_files_restores(self):
+    """Recover website restores only in the files source lane."""
+
+    return _resume_in_progress_restore_models((CoreWebsiteRestore,))

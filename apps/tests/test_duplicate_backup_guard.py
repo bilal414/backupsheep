@@ -559,7 +559,7 @@ class RecoverySweepTests(BaseTestCase):
         )
 
         with mock.patch.object(helper_tasks.current_app, "send_task") as send_task:
-            helper_tasks.resume_in_progress_backups.apply()
+            helper_tasks.resume_in_progress_files_backups.apply()
 
         send_task.assert_called_once()
         self.assertEqual(

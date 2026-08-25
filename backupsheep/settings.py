@@ -1474,6 +1474,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_in_progress_backups",
         "schedule": 60.0,
     },
+    "resume-in-progress-database-backups": {
+        "task": "resume_in_progress_database_backups",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-files-backups": {
+        "task": "resume_in_progress_files_backups",
+        "schedule": 60.0,
+    },
     # API-triggered Oracle snapshot deletes enqueue immediately. This independent
     # sweep re-publishes DELETE_IN_PROGRESS rows after broker loss, worker crash,
     # or a server reboot; the provider adapter keeps the exact delete checkpoint.
@@ -1483,6 +1491,14 @@ CELERY_BEAT_SCHEDULE = {
     },
     "resume-in-progress-restores": {
         "task": "resume_in_progress_restores",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-database-restores": {
+        "task": "resume_in_progress_database_restores",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-files-restores": {
+        "task": "resume_in_progress_files_restores",
         "schedule": 60.0,
     },
     "resume-pending-backup-requests": {
