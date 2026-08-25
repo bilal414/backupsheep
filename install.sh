@@ -159,7 +159,8 @@ Options:
   --migrate-database-identities
                      Explicitly convert a legacy stock database superuser into the
                      database-only bootstrap identity and generate separate migrator
-                     and runtime credentials. Required once for an existing install.
+                     plus per-lane runtime credentials. Required once for an existing
+                     install.
   --migrate-rabbitmq-identities
                      Explicitly retire the legacy shared broker login, generate
                      per-lane file credentials and Ed25519 task-signing keys, and
@@ -1383,134 +1384,199 @@ configure_database_identity_generation() {
     local generation=""
     local bootstrap_user=""
     local migrator_user="backupsheep_migrator"
-    local runtime_user="backupsheep_runtime"
-    local runtime_secret="${SECRETS_DIR}/db_password"
+    local legacy_user=""
+    local legacy_secret="${SECRETS_DIR}/db_password"
     local bootstrap_secret="${SECRETS_DIR}/db_bootstrap_password"
     local migrator_secret="${SECRETS_DIR}/db_migrator_password"
-    local existing_count=0
+    local lane=""
+    local variable=""
+    local role=""
+    local left_role=""
+    local right_role=""
+    local left_value=""
+    local right_value=""
+    local secret_path=""
+    local right_path=""
+    local seen_missing=false
+    local -a role_variables=(DB_BOOTSTRAP_USER DB_MIGRATOR_USER)
+    local -a secret_paths=("$bootstrap_secret" "$migrator_secret")
+
+    for lane in "${DATABASE_LANES[@]}"; do
+        case "$lane" in
+            app) variable=DB_APP_USER ;;
+            preflight) variable=DB_PREFLIGHT_USER ;;
+            beat) variable=DB_BEAT_USER ;;
+            cloud) variable=DB_CLOUD_USER ;;
+            database) variable=DB_DATABASE_USER ;;
+            files) variable=DB_FILES_USER ;;
+            storage) variable=DB_STORAGE_USER ;;
+            logs) variable=DB_LOGS_USER ;;
+            *) die "Internal database lane inventory is invalid." ;;
+        esac
+        role_variables+=("$variable")
+        secret_paths+=("${SECRETS_DIR}/db_${lane}_password")
+    done
 
     generation="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
-    if [[ "$ENV_WAS_PRESENT" != true ]]; then
-        [[ "$MIGRATE_DATABASE_IDENTITIES" != true ]] \
-            || die "--migrate-database-identities is valid only for an existing legacy installation."
-        # Persist a narrow pending state before publishing any of the three files.
-        # A process interruption can then resume the exact ordered fresh-install
-        # states without mistaking a partial install for a legacy database.
-        set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "2-pending-fresh"
-        set_env_value DB_BOOTSTRAP_USER "backupsheep_bootstrap"
-        set_env_value DB_MIGRATOR_USER "$migrator_user"
-        set_env_value DB_USER "$runtime_user"
-        generation="2-pending-fresh"
-    fi
 
     case "$generation" in
-        2)
+        3)
             [[ "$MIGRATE_DATABASE_IDENTITIES" != true ]] \
-                || die "Database identities are already generation 2; rerun without --migrate-database-identities."
-            for secret_path in "$runtime_secret" "$bootstrap_secret" "$migrator_secret"; do
-                [[ -e "$secret_path" || -L "$secret_path" ]] \
-                    || die "Database identity generation 2 is missing $(basename -- "$secret_path")."
-                validate_secret_file "$secret_path"
-            done
-            return
+                || die "Database identities are already generation 3; rerun without --migrate-database-identities."
             ;;
-        2-pending-fresh)
+        3-pending-fresh)
             [[ "$MIGRATE_DATABASE_IDENTITIES" != true ]] \
                 || die "A fresh database identity transition is already pending; rerun without --migrate-database-identities."
-            [[ "$(read_env_value DB_BOOTSTRAP_USER)" == "backupsheep_bootstrap" \
-                && "$(read_env_value DB_MIGRATOR_USER)" == "$migrator_user" \
-                && "$(read_env_value DB_USER)" == "$runtime_user" ]] \
-                || die "The pending fresh database identity roles drifted; restore the installer-created configuration before retrying."
-            for secret_path in "$bootstrap_secret" "$migrator_secret" "$runtime_secret"; do
-                if [[ -e "$secret_path" || -L "$secret_path" ]]; then
-                    existing_count=$((existing_count + 1))
-                fi
-            done
-            if [[ "$existing_count" -eq 0 ]]; then
-                write_secret_file db_bootstrap_password "$(random_hex 32)"
-                write_secret_file db_migrator_password "$(random_hex 32)"
-                write_secret_file db_password "$(random_hex 32)"
-            elif [[ "$existing_count" -eq 1 \
-                && -f "$bootstrap_secret" && ! -L "$bootstrap_secret" ]]; then
-                validate_secret_file "$bootstrap_secret"
-                write_secret_file db_migrator_password "$(random_hex 32)"
-                write_secret_file db_password "$(random_hex 32)"
-            elif [[ "$existing_count" -eq 2 \
-                && -f "$bootstrap_secret" && ! -L "$bootstrap_secret" \
-                && -f "$migrator_secret" && ! -L "$migrator_secret" ]]; then
-                validate_secret_file "$bootstrap_secret"
-                validate_secret_file "$migrator_secret"
-                write_secret_file db_password "$(random_hex 32)"
-            elif [[ "$existing_count" -eq 3 ]]; then
-                for secret_path in "$bootstrap_secret" "$migrator_secret" "$runtime_secret"; do
-                    validate_secret_file "$secret_path"
-                done
-            else
-                die "The pending fresh database identity secret state is incomplete or ambiguous. Restore the installer-created configuration before retrying."
-            fi
-            set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "2"
-            return
             ;;
-        "")
+        3-pending-upgrade)
             [[ "$MIGRATE_DATABASE_IDENTITIES" == true ]] \
-                || die "This existing installation still uses its application database login as the PostgreSQL bootstrap superuser. Review the database identity migration guide, stop provider operations, create an encrypted rollback, then rerun once with --migrate-database-identities."
+                || die "Database identity generation 3 is pending; rerun with --migrate-database-identities after preserving rollback evidence."
+            ;;
+        2|"")
+            [[ "$MIGRATE_DATABASE_IDENTITIES" == true ]] \
+                || die "This installation requires the explicit generation-3 database lane migration. Stop provider operations, preserve an encrypted rollback, then rerun once with --migrate-database-identities."
             ;;
         *)
             die "Unsupported BACKUPSHEEP_DATABASE_IDENTITY_GENERATION=${generation}; refusing to guess database ownership."
             ;;
     esac
 
-    # An interrupted local file transition is resumable only along the exact ordered
-    # states below: legacy; bootstrap; bootstrap+migrator; or all generation-2 files.
-    for secret_path in "$runtime_secret" "$bootstrap_secret" "$migrator_secret"; do
-        if [[ -e "$secret_path" || -L "$secret_path" ]]; then
-            existing_count=$((existing_count + 1))
-        fi
-    done
-    if [[ "$existing_count" -eq 0 ]]; then
+    if [[ "$generation" == "" ]]; then
+        for secret_path in "${secret_paths[@]}"; do
+            [[ ! -e "$secret_path" && ! -L "$secret_path" ]] \
+                || die "The legacy database secret transition is incomplete or ambiguous; restore the protected rollback copy before retrying."
+        done
         migrate_one_secret DB_PASSWORD db_password false
-        existing_count=1
-    fi
-    if [[ "$existing_count" -eq 1 && -f "$runtime_secret" && ! -L "$runtime_secret" ]]; then
-        validate_secret_file "$runtime_secret"
-        if ! atomic_move_new "$runtime_secret" "$bootstrap_secret"; then
-            die "Could not atomically confine the legacy database credential as db_bootstrap_password."
-        fi
-        write_secret_file db_migrator_password "$(random_hex 32)"
-        write_secret_file db_password "$(random_hex 32)"
-    elif [[ "$existing_count" -eq 1 && -f "$bootstrap_secret" && ! -L "$bootstrap_secret" ]]; then
-        validate_secret_file "$bootstrap_secret"
-        write_secret_file db_migrator_password "$(random_hex 32)"
-        write_secret_file db_password "$(random_hex 32)"
-    elif [[ "$existing_count" -eq 2 \
-        && -f "$bootstrap_secret" && ! -L "$bootstrap_secret" \
-        && -f "$migrator_secret" && ! -L "$migrator_secret" \
-        && ! -e "$runtime_secret" && ! -L "$runtime_secret" ]]; then
-        validate_secret_file "$bootstrap_secret"
-        validate_secret_file "$migrator_secret"
-        write_secret_file db_password "$(random_hex 32)"
-    elif [[ "$existing_count" -eq 3 ]]; then
-        for secret_path in "$runtime_secret" "$bootstrap_secret" "$migrator_secret"; do
+        validate_secret_file "$legacy_secret"
+        bootstrap_user="$(read_env_value DB_BOOTSTRAP_USER)"
+        [[ -n "$bootstrap_user" ]] || bootstrap_user="$(read_env_value DB_USER)"
+        validate_database_role_name DB_BOOTSTRAP_USER "$bootstrap_user"
+        set_env_value DB_BOOTSTRAP_USER "$bootstrap_user"
+        set_env_value DB_MIGRATOR_USER "$migrator_user"
+        set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "3-pending-upgrade"
+        generation="3-pending-upgrade"
+    elif [[ "$generation" == "2" ]]; then
+        for secret_path in "$legacy_secret" "$bootstrap_secret" "$migrator_secret"; do
+            [[ -e "$secret_path" || -L "$secret_path" ]] \
+                || die "Database identity generation 2 is missing $(basename -- "$secret_path")."
             validate_secret_file "$secret_path"
         done
-    else
-        die "The database identity secret migration is incomplete or ambiguous. Restore the protected .secrets directory from its rollback copy before retrying."
+        bootstrap_user="$(read_env_value DB_BOOTSTRAP_USER)"
+        validate_database_role_name DB_BOOTSTRAP_USER "$bootstrap_user"
+        validate_database_role_name DB_MIGRATOR_USER "$(read_env_value DB_MIGRATOR_USER)"
+        legacy_user="$(read_env_value DB_USER)"
+        validate_database_role_name DB_USER "$legacy_user"
+        for lane in "${DATABASE_LANES[@]}"; do
+            secret_path="${SECRETS_DIR}/db_${lane}_password"
+            [[ ! -e "$secret_path" && ! -L "$secret_path" ]] \
+                || die "The generation-2 database secret transition is incomplete or ambiguous; restore the protected rollback copy before retrying."
+        done
+        set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "3-pending-upgrade"
+        generation="3-pending-upgrade"
     fi
 
     bootstrap_user="$(read_env_value DB_BOOTSTRAP_USER)"
-    if [[ -z "$bootstrap_user" ]]; then
-        bootstrap_user="$(read_env_value DB_USER)"
-    fi
-    validate_database_role_name DB_BOOTSTRAP_USER "$bootstrap_user"
-    [[ "$bootstrap_user" != "$migrator_user" && "$bootstrap_user" != "$runtime_user" ]] \
-        || die "The legacy database role collides with a generation-2 role name; migrate it manually."
-
-    # The generation witness is written last. A failure in an earlier atomic .env
-    # rewrite therefore cannot make a partial identity transition look complete.
+    [[ -n "$bootstrap_user" ]] || bootstrap_user="backupsheep_bootstrap"
     set_env_value DB_BOOTSTRAP_USER "$bootstrap_user"
     set_env_value DB_MIGRATOR_USER "$migrator_user"
-    set_env_value DB_USER "$runtime_user"
-    set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "2"
+    for lane in "${DATABASE_LANES[@]}"; do
+        case "$lane" in
+            app) variable=DB_APP_USER ;;
+            preflight) variable=DB_PREFLIGHT_USER ;;
+            beat) variable=DB_BEAT_USER ;;
+            cloud) variable=DB_CLOUD_USER ;;
+            database) variable=DB_DATABASE_USER ;;
+            files) variable=DB_FILES_USER ;;
+            storage) variable=DB_STORAGE_USER ;;
+            logs) variable=DB_LOGS_USER ;;
+        esac
+        set_env_value "$variable" "backupsheep_${lane}"
+    done
+    set_env_value DB_USER "backupsheep_app"
+
+    if [[ "$generation" == "3-pending-upgrade" \
+        && ! -e "$bootstrap_secret" && ! -L "$bootstrap_secret" ]]; then
+        [[ -f "$legacy_secret" && ! -L "$legacy_secret" ]] \
+            || die "The pending database upgrade lost both its bootstrap and legacy credential; restore the protected rollback copy."
+        validate_secret_file "$legacy_secret"
+        if ! atomic_move_new "$legacy_secret" "$bootstrap_secret"; then
+            die "Could not atomically confine the legacy database credential as db_bootstrap_password."
+        fi
+    fi
+
+    # The exact ordered prefix makes a terminated secret-generation pass resumable.
+    # Compose cannot start db-provision until every listed file exists, so filling a
+    # missing suffix cannot rotate a credential already used by PostgreSQL.
+    for secret_path in "${secret_paths[@]}"; do
+        if [[ -e "$secret_path" || -L "$secret_path" ]]; then
+            [[ "$seen_missing" != true ]] \
+                || die "The pending database secret set is not an ordered prefix; restore it from the protected rollback copy."
+            validate_secret_file "$secret_path"
+        else
+            [[ "$generation" != "3" ]] \
+                || die "Database identity generation 3 is missing $(basename -- "$secret_path"); restore the installed secret instead of rotating it implicitly."
+            seen_missing=true
+            write_secret_file "$(basename -- "$secret_path")" "$(random_hex 32)"
+        fi
+    done
+
+    for variable in "${role_variables[@]}"; do
+        role="$(read_env_value "$variable")"
+        validate_database_role_name "$variable" "$role"
+    done
+    for left_role in "${role_variables[@]}"; do
+        left_value="$(read_env_value "$left_role")"
+        for right_role in "${role_variables[@]}"; do
+            [[ "$left_role" < "$right_role" ]] || continue
+            right_value="$(read_env_value "$right_role")"
+            [[ "$left_value" != "$right_value" ]] \
+                || die "Database roles ${left_role} and ${right_role} collide."
+        done
+    done
+
+    for secret_path in "${secret_paths[@]}"; do
+        left_value="$(<"$secret_path")"
+        for right_path in "${secret_paths[@]}"; do
+            [[ "$secret_path" < "$right_path" ]] || continue
+            right_value="$(<"$right_path")"
+            [[ "$left_value" != "$right_value" ]] \
+                || die "Database credentials $(basename -- "$secret_path") and $(basename -- "$right_path") are identical."
+        done
+        if [[ -f "$legacy_secret" && ! -L "$legacy_secret" ]]; then
+            right_value="$(<"$legacy_secret")"
+            [[ "$left_value" != "$right_value" ]] \
+                || die "A generation-3 database credential reuses the legacy runtime password."
+        fi
+    done
+}
+
+complete_database_identity_generation() {
+    local generation=""
+    local legacy_secret="${SECRETS_DIR}/db_password"
+
+    generation="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
+    case "$generation" in
+        3-pending-fresh|3-pending-upgrade)
+            ;;
+        3)
+            # A prior process may have been interrupted after the database seal and
+            # generation witness but before deleting the now-retired v2 credential.
+            ;;
+        *)
+            die "Cannot complete unsupported database identity generation ${generation}."
+            ;;
+    esac
+
+    # db-seal has already retired the legacy role and preflight will independently
+    # validate every ACL/RLS witness. Remove the old credential before writing the
+    # generation witness last, so an interrupted upgrade remains explicitly pending.
+    if [[ -e "$legacy_secret" || -L "$legacy_secret" ]]; then
+        [[ -f "$legacy_secret" && ! -L "$legacy_secret" ]] \
+            || die "The retired database credential is not a safe regular file."
+        validate_secret_file "$legacy_secret"
+        rm -f -- "$legacy_secret"
+    fi
+    set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION 3
 }
 
 validate_rabbitmq_role_name() {
@@ -1938,7 +2004,7 @@ configure_staging_layout_witness() {
             || die "The staging layout witness does not match this installation and intent."
         :
     else
-        if [[ "$ENV_WAS_PRESENT" != true || "$database_generation" == "2-pending-fresh" ]]; then
+        if [[ "$ENV_WAS_PRESENT" != true || "$database_generation" == "3-pending-fresh" ]]; then
             [[ "$MIGRATE_STAGING_LAYOUT" != true ]] \
                 || die "--migrate-staging-layout is valid only for a real existing installation."
             intent="new-empty-v2"
@@ -2321,7 +2387,7 @@ create_or_migrate_configuration() {
         # Establish the resumable fresh database-identity state before any later
         # secret generation. A terminated first run can then distinguish itself
         # from a real legacy installation without guessing from partial files.
-        set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "2-pending-fresh"
+        set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "3-pending-fresh"
         set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION "2-pending-fresh"
         set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION "3-pending-fresh"
         set_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION "1"
@@ -2372,7 +2438,13 @@ validate_runtime_configuration() {
     local secret_name=""
     local bootstrap_user=""
     local migrator_user=""
-    local runtime_user=""
+    local lane=""
+    local variable=""
+    local role=""
+    local left_role=""
+    local right_role=""
+    local left_value=""
+    local right_value=""
     local staging_intent=""
     local staging_witness=""
     local installation_id=""
@@ -2380,6 +2452,22 @@ validate_runtime_configuration() {
     local kms_key_arn=""
     local kms_region=""
     local kms_allowlist=""
+    local -a database_role_variables=(DB_BOOTSTRAP_USER DB_MIGRATOR_USER)
+
+    for lane in "${DATABASE_LANES[@]}"; do
+        case "$lane" in
+            app) variable=DB_APP_USER ;;
+            preflight) variable=DB_PREFLIGHT_USER ;;
+            beat) variable=DB_BEAT_USER ;;
+            cloud) variable=DB_CLOUD_USER ;;
+            database) variable=DB_DATABASE_USER ;;
+            files) variable=DB_FILES_USER ;;
+            storage) variable=DB_STORAGE_USER ;;
+            logs) variable=DB_LOGS_USER ;;
+            *) die "Internal database lane inventory is invalid." ;;
+        esac
+        database_role_variables+=("$variable")
+    done
 
     value="$(read_env_value BACKUPSHEEP_IMAGE)"
     [[ "$value" == "backupsheep:${INSTALL_REF}" ]] \
@@ -2416,8 +2504,9 @@ validate_runtime_configuration() {
     [[ "$value" == "$PROJECT_NAME" ]] \
         || die "BACKUPSHEEP_COMPOSE_PROJECT_NAME must match --project-name exactly."
     value="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
-    [[ "$value" == "2" ]] \
-        || die "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION must be 2."
+    [[ "$value" == "3" || "$value" == "3-pending-fresh" \
+        || "$value" == "3-pending-upgrade" ]] \
+        || die "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION must be generation 3 or an explicit generation-3 pending state."
     value="$(read_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION)"
     [[ "$value" == "2" ]] \
         || die "BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION must be 2."
@@ -2427,16 +2516,21 @@ validate_runtime_configuration() {
     value="$(read_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION)"
     [[ "$value" =~ ^[1-9][0-9]{0,8}$ ]] \
         || die "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION must be a positive bounded integer."
-    bootstrap_user="$(read_env_value DB_BOOTSTRAP_USER)"
-    migrator_user="$(read_env_value DB_MIGRATOR_USER)"
-    runtime_user="$(read_env_value DB_USER)"
-    validate_database_role_name DB_BOOTSTRAP_USER "$bootstrap_user"
-    validate_database_role_name DB_MIGRATOR_USER "$migrator_user"
-    validate_database_role_name DB_USER "$runtime_user"
-    [[ "$bootstrap_user" != "$migrator_user" \
-        && "$bootstrap_user" != "$runtime_user" \
-        && "$migrator_user" != "$runtime_user" ]] \
-        || die "Database bootstrap, migrator, and runtime roles must be distinct."
+    for variable in "${database_role_variables[@]}"; do
+        role="$(read_env_value "$variable")"
+        validate_database_role_name "$variable" "$role"
+    done
+    [[ "$(read_env_value DB_USER)" == "$(read_env_value DB_APP_USER)" ]] \
+        || die "DB_USER must remain the compatibility alias of DB_APP_USER."
+    for left_role in "${database_role_variables[@]}"; do
+        left_value="$(read_env_value "$left_role")"
+        for right_role in "${database_role_variables[@]}"; do
+            [[ "$left_role" < "$right_role" ]] || continue
+            right_value="$(read_env_value "$right_role")"
+            [[ "$left_value" != "$right_value" ]] \
+                || die "Database roles ${left_role} and ${right_role} collide."
+        done
+    done
     value="$(read_env_value DB_HOST)"
     [[ "$value" == "db" ]] \
         || die "The stock database identity provisioner requires DB_HOST=db."
@@ -2944,7 +3038,38 @@ validate_rabbitmq_data_generation() {
 
 show_failure_guidance() {
     warn "Startup was left in place for evidence and recovery; no volumes or containers were deleted."
-    warn "Inspect locally with: cd $(printf '%q' "$INSTALL_DIR") && ./backupsheep-compose logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app"
+    warn "Inspect locally with: cd $(printf '%q' "$INSTALL_DIR") && ./backupsheep-compose logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate db-seal preflight app"
+}
+
+wait_for_database_seal() {
+    local elapsed=0
+    local service_name=""
+    local container_id=""
+    local status=""
+    local exit_code=""
+
+    log "Waiting for the generation-3 database grants to seal"
+    while [[ "$elapsed" -lt 300 ]]; do
+        for service_name in rabbitmq-provision db-provision migrate db-seal; do
+            container_id="$(compose ps --all -q "$service_name" 2>/dev/null || true)"
+            [[ -n "$container_id" ]] || continue
+            status="$("$DOCKER_BIN" inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+            exit_code="$("$DOCKER_BIN" inspect --format '{{.State.ExitCode}}' "$container_id" 2>/dev/null || true)"
+            if [[ "$status" == "exited" && "$exit_code" != "0" ]]; then
+                show_failure_guidance
+                die "Database transition service ${service_name} failed (exit code: ${exit_code})."
+            fi
+            if [[ "$service_name" == "db-seal" && "$status" == "exited" \
+                && "$exit_code" == "0" ]]; then
+                return
+            fi
+        done
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+
+    show_failure_guidance
+    die "Generation-3 database grants did not seal within five minutes."
 }
 
 wait_for_app() {
@@ -3041,10 +3166,22 @@ start_core() {
     log "Building the reviewed PostgreSQL, application, and egress-guard images"
     compose build --pull db app app-egress-guard
 
-    log "Starting core services only (database, broker, identity provisioning, migration, security preflight and web)"
-    if ! compose up --detach --no-build "${CORE_SERVICES[@]}"; then
+    log "Preparing and sealing database identities while every long-lived lane remains blocked"
+    if ! compose up --detach --no-build \
+        db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision \
+        db-provision migrate db-seal; then
         show_failure_guidance
-        die "Core startup failed."
+        die "Database identity transition startup failed."
+    fi
+    wait_for_database_seal
+    complete_database_identity_generation
+    validate_runtime_configuration
+    validate_compose_model
+
+    log "Starting the security preflight and web service against the sealed database"
+    if ! compose up --detach --no-build preflight app-egress-guard app; then
+        show_failure_guidance
+        die "Core startup failed after the database identity seal."
     fi
     wait_for_app
 }

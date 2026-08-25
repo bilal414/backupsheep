@@ -86,7 +86,7 @@ semver_at_least 2.34.0-rc.1 2.33.1
 
     def test_installer_starts_only_the_core_without_explicit_operations_opt_in(self):
         self.assertIn(
-            "readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision db-provision migrate preflight app-egress-guard app)",
+            "readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision db-provision migrate db-seal preflight app-egress-guard app)",
             self.installer,
         )
         self.assertIn('if [[ "$ENABLE_OPERATIONS" == true ]]', self.installer)
@@ -150,7 +150,7 @@ semver_at_least 2.34.0-rc.1 2.33.1
         self.assertIn("preflight_container_id", self.installer)
         self.assertIn("Docker security preflight failed", self.installer)
         self.assertIn(
-            "logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app",
+            "logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate db-seal preflight app",
             self.installer,
         )
         self.assertIn("RabbitMQ identity provisioning failed", self.installer)
@@ -184,7 +184,7 @@ class InstallerSecretMigrationTests(TestCase):
             self.assertIn(old, content)
             content = content.replace(old, new, 1)
         # Model an installation created before generation-2 identities existed.
-        content = content.replace("DB_USER='backupsheep_runtime'", "DB_USER='backupsheep'", 1)
+        content = content.replace("DB_USER='backupsheep_app'", "DB_USER='backupsheep'", 1)
         content = content.replace("RABBITMQ_USER='backupsheep_app'", "RABBITMQ_USER='backupsheep'", 1)
         content = "\n".join(
             line
@@ -194,6 +194,14 @@ class InstallerSecretMigrationTests(TestCase):
                     "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION=",
                     "DB_BOOTSTRAP_USER=",
                     "DB_MIGRATOR_USER=",
+                    "DB_APP_USER=",
+                    "DB_PREFLIGHT_USER=",
+                    "DB_BEAT_USER=",
+                    "DB_CLOUD_USER=",
+                    "DB_DATABASE_USER=",
+                    "DB_FILES_USER=",
+                    "DB_STORAGE_USER=",
+                    "DB_LOGS_USER=",
                     "BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION=",
                     "BACKUPSHEEP_CELERY_SECURITY_GENERATION=",
                     "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION=",
@@ -280,10 +288,26 @@ fi
             r"BACKUPSHEEP_INSTALLATION_ID='[0-9a-f]{64}'",
         )
         self.assertIn("DJANGO_SECRET_KEY=''", migrated_env)
-        self.assertIn("BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='2'", migrated_env)
+        self.assertIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3-pending-upgrade'",
+            migrated_env,
+        )
         self.assertIn("DB_BOOTSTRAP_USER='backupsheep'", migrated_env)
         self.assertIn("DB_MIGRATOR_USER='backupsheep_migrator'", migrated_env)
-        self.assertIn("DB_USER='backupsheep_runtime'", migrated_env)
+        for lane in (
+            "app",
+            "preflight",
+            "beat",
+            "cloud",
+            "database",
+            "files",
+            "storage",
+            "logs",
+        ):
+            self.assertIn(
+                f"DB_{lane.upper()}_USER='backupsheep_{lane}'", migrated_env
+            )
+        self.assertIn("DB_USER='backupsheep_app'", migrated_env)
         self.assertIn("DB_PASSWORD=''", migrated_env)
         self.assertIn("BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION='2'", migrated_env)
         self.assertIn("BACKUPSHEEP_CELERY_SECURITY_GENERATION='3'", migrated_env)
@@ -315,7 +339,17 @@ fi
         managed_key = secret_dir / "ssh_managed_private_key"
         self.assertEqual(stat.S_IMODE(managed_key.stat().st_mode), 0o444)
         self.assertEqual(managed_key.read_bytes(), b"")
-        for generated_name in ("db_migrator_password", "db_password"):
+        for generated_name in (
+            "db_migrator_password",
+            "db_app_password",
+            "db_preflight_password",
+            "db_beat_password",
+            "db_cloud_password",
+            "db_database_password",
+            "db_files_password",
+            "db_storage_password",
+            "db_logs_password",
+        ):
             generated_value = (secret_dir / generated_name).read_text(encoding="utf-8")
             self.assertRegex(generated_value, r"^[0-9a-f]{64}\n$")
             self.assertNotEqual(
@@ -356,10 +390,31 @@ fi
 
         before = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
         self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
             "create_or_migrate_configuration\nvalidate_runtime_configuration"
         )
         after = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
         self.assertEqual(before, after)
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "complete_database_identity_generation\n"
+            "validate_runtime_configuration"
+        )
+        completed_env = self.env_file.read_text(encoding="utf-8")
+        self.assertIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3'", completed_env
+        )
+        self.assertFalse((secret_dir / "db_password").exists())
+        completed = {
+            path.name: path.read_bytes() for path in secret_dir.iterdir()
+        }
+        self.run_installer_functions(
+            "create_or_migrate_configuration\nvalidate_runtime_configuration"
+        )
+        rerun = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
+        self.assertEqual(completed, rerun)
 
     def test_existing_database_identity_transition_requires_explicit_opt_in(self):
         result = self.run_installer_functions(
@@ -370,7 +425,7 @@ fi
         self.assertIn("--migrate-database-identities", result.stderr)
         self.assertIn("encrypted rollback", result.stderr)
         self.assertNotIn(
-            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='2'",
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3'",
             self.env_file.read_text(encoding="utf-8"),
         )
         secret_dir = self.temp_dir / ".secrets"
@@ -484,7 +539,7 @@ fi
         self.assertIn("incomplete or ambiguous", result.stderr)
         self.assertFalse((secret_dir / "db_bootstrap_password").exists())
 
-    def test_fresh_database_identity_configuration_generates_three_credentials(self):
+    def test_fresh_database_identity_configuration_generates_per_lane_credentials(self):
         shutil.copyfile(SAMPLE_ENV, self.env_file)
         os.chmod(self.env_file, 0o600)
         secret_dir = self.temp_dir / ".secrets"
@@ -494,16 +549,26 @@ fi
             'ENV_FILE="$INSTALL_DIR/.env"\n'
             'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
             "ENV_WAS_PRESENT=false\n"
+            "set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION 3-pending-fresh\n"
             "configure_database_identity_generation"
         )
 
         configured = self.env_file.read_text(encoding="utf-8")
-        self.assertIn("BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='2'", configured)
-        self.assertNotIn("2-pending-fresh", configured)
+        self.assertIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3-pending-fresh'",
+            configured,
+        )
         for name in (
             "db_bootstrap_password",
             "db_migrator_password",
-            "db_password",
+            "db_app_password",
+            "db_preflight_password",
+            "db_beat_password",
+            "db_cloud_password",
+            "db_database_password",
+            "db_files_password",
+            "db_storage_password",
+            "db_logs_password",
         ):
             self.assertRegex(
                 (secret_dir / name).read_text(encoding="utf-8"),
@@ -515,7 +580,7 @@ fi
         os.chmod(self.env_file, 0o600)
         content = self.env_file.read_text(encoding="utf-8").replace(
             "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION=''",
-            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='2-pending-fresh'",
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3-pending-fresh'",
             1,
         )
         self.env_file.write_text(content, encoding="utf-8")
@@ -535,9 +600,19 @@ fi
 
         self.assertEqual(bootstrap.read_text(encoding="utf-8"), "b" * 64 + "\n")
         self.assertTrue((secret_dir / "db_migrator_password").is_file())
-        self.assertTrue((secret_dir / "db_password").is_file())
+        for lane in (
+            "app",
+            "preflight",
+            "beat",
+            "cloud",
+            "database",
+            "files",
+            "storage",
+            "logs",
+        ):
+            self.assertTrue((secret_dir / f"db_{lane}_password").is_file())
         self.assertIn(
-            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='2'",
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3-pending-fresh'",
             self.env_file.read_text(encoding="utf-8"),
         )
 

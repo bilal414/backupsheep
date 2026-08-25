@@ -43,8 +43,9 @@
 #     RABBITMQ_VHOST=backupsheep
 # The installer stores the Django, database, broker, and onboarding secrets as private
 # file-backed Compose secrets under `.secrets`; their `.env` counterparts stay blank.
-# PostgreSQL has three distinct trust levels: a database-only bootstrap superuser, a
-# one-shot schema-owning migrator, and the non-owner application runtime identity.
+# PostgreSQL has a database-only bootstrap superuser, a one-shot schema-owning
+# migrator, and an independently authenticated non-owner identity for every runtime
+# lane. A post-migration seal applies and witnesses the exact table/column/RLS policy.
 
 # Persist the installer-reviewed project identity in configuration as well as the
 # command line. This prevents a manual rerun from silently selecting a new project
@@ -161,7 +162,7 @@ x-app-secret-environment: &app-secret-environment
   # still contains one; the deployment preflight independently enforces this.
   DATABASE_URL: ""
   DB_PASSWORD: ""
-  DB_PASSWORD_FILE: /run/secrets/db_password
+  DB_PASSWORD_FILE: ""
   CELERY_BROKER_URL: ""
   RABBITMQ_PASSWORD: ""
   RABBITMQ_PASSWORD_FILE: ""
@@ -229,11 +230,6 @@ x-app-secret-environment: &app-secret-environment
   AWS_EC2_METADATA_V1_DISABLED: "true"
   AWS_IGNORE_CONFIGURED_ENDPOINT_URLS: "true"
   AWS_SHARED_CREDENTIALS_FILE: ""
-
-x-app-secrets: &app-secrets
-  - django_secret_key
-  - db_password
-  - celery_trusted_public_keys
 
 # Shared stateful-service controls. PostgreSQL and RabbitMQ start directly as their
 # fixed non-root users with an empty capability bounding set. A separate non-networked
@@ -537,8 +533,8 @@ services:
 
   # One-shot: provision the database identity boundary before Django can migrate or
   # serve. It connects as the database-only bootstrap superuser, creates/rotates the
-  # marked migrator and runtime roles in one transaction, transfers reviewed public
-  # object ownership to the migrator, and grants the runtime identity DML without DDL.
+  # marked migrator and per-lane roles in one transaction, transfers reviewed public
+  # object ownership to the migrator, and removes all runtime access until db-seal.
   db-provision:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
@@ -550,21 +546,46 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: migration
-      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "${BACKUPSHEEP_DATABASE_IDENTITY_GENERATION:?BACKUPSHEEP_DATABASE_IDENTITY_GENERATION is required}"
+      # Provision/seal may run while install.sh deliberately leaves the durable .env
+      # witness pending. Long-lived services inherit that pending value and fail closed
+      # until db-seal exits successfully and the installer promotes generation 3.
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
       DB_BOOTSTRAP_USER: "${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}"
       DB_MIGRATOR_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
-      DB_USER: "${DB_USER:-backupsheep_runtime}"
+      DB_APP_USER: "${DB_APP_USER:-backupsheep_app}"
+      DB_PREFLIGHT_USER: "${DB_PREFLIGHT_USER:-backupsheep_preflight}"
+      DB_BEAT_USER: "${DB_BEAT_USER:-backupsheep_beat}"
+      DB_CLOUD_USER: "${DB_CLOUD_USER:-backupsheep_cloud}"
+      DB_DATABASE_USER: "${DB_DATABASE_USER:-backupsheep_database}"
+      DB_FILES_USER: "${DB_FILES_USER:-backupsheep_files}"
+      DB_STORAGE_USER: "${DB_STORAGE_USER:-backupsheep_storage}"
+      DB_LOGS_USER: "${DB_LOGS_USER:-backupsheep_logs}"
+      DB_USER: ""
       # Pin the only reviewed privileged route; do not let env_file/libpq redirect
       # the bootstrap credential to an external endpoint.
       DB_HOST: db
       DB_PORT: "5432"
       DB_BOOTSTRAP_PASSWORD_FILE: /run/secrets/db_bootstrap_password
       DB_MIGRATOR_PASSWORD_FILE: /run/secrets/db_migrator_password
-      DB_PASSWORD_FILE: /run/secrets/db_password
+      DB_APP_PASSWORD_FILE: /run/secrets/db_app_password
+      DB_PREFLIGHT_PASSWORD_FILE: /run/secrets/db_preflight_password
+      DB_BEAT_PASSWORD_FILE: /run/secrets/db_beat_password
+      DB_CLOUD_PASSWORD_FILE: /run/secrets/db_cloud_password
+      DB_DATABASE_PASSWORD_FILE: /run/secrets/db_database_password
+      DB_FILES_PASSWORD_FILE: /run/secrets/db_files_password
+      DB_STORAGE_PASSWORD_FILE: /run/secrets/db_storage_password
+      DB_LOGS_PASSWORD_FILE: /run/secrets/db_logs_password
     secrets:
       - db_bootstrap_password
       - db_migrator_password
-      - db_password
+      - db_app_password
+      - db_preflight_password
+      - db_beat_password
+      - db_cloud_password
+      - db_database_password
+      - db_files_password
+      - db_storage_password
+      - db_logs_password
     command: ["python", "-m", "backupsheep.database_identity", "provision"]
     mem_limit: "${DB_PROVISION_MEMORY_LIMIT:-512m}"
     cpus: "${DB_PROVISION_CPU_LIMIT:-0.5}"
@@ -607,6 +628,69 @@ services:
     logging: *default-logging
     restart: "no"
 
+  # One-shot: after Django migrations, replace every broad/default grant with the
+  # reviewed per-lane table, column, sequence and routine ACLs, enable RLS on
+  # cross-lane ledgers, and bind policy comments to this installation. The bootstrap
+  # credential never enters a long-lived service.
+  db-seal:
+    <<: *app-runtime
+    image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10007:10007"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007
+    env_file: .env
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: migration
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+      DB_BOOTSTRAP_USER: "${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}"
+      DB_MIGRATOR_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
+      DB_APP_USER: "${DB_APP_USER:-backupsheep_app}"
+      DB_PREFLIGHT_USER: "${DB_PREFLIGHT_USER:-backupsheep_preflight}"
+      DB_BEAT_USER: "${DB_BEAT_USER:-backupsheep_beat}"
+      DB_CLOUD_USER: "${DB_CLOUD_USER:-backupsheep_cloud}"
+      DB_DATABASE_USER: "${DB_DATABASE_USER:-backupsheep_database}"
+      DB_FILES_USER: "${DB_FILES_USER:-backupsheep_files}"
+      DB_STORAGE_USER: "${DB_STORAGE_USER:-backupsheep_storage}"
+      DB_LOGS_USER: "${DB_LOGS_USER:-backupsheep_logs}"
+      DB_USER: ""
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_BOOTSTRAP_PASSWORD_FILE: /run/secrets/db_bootstrap_password
+      DB_MIGRATOR_PASSWORD_FILE: /run/secrets/db_migrator_password
+      DB_APP_PASSWORD_FILE: /run/secrets/db_app_password
+      DB_PREFLIGHT_PASSWORD_FILE: /run/secrets/db_preflight_password
+      DB_BEAT_PASSWORD_FILE: /run/secrets/db_beat_password
+      DB_CLOUD_PASSWORD_FILE: /run/secrets/db_cloud_password
+      DB_DATABASE_PASSWORD_FILE: /run/secrets/db_database_password
+      DB_FILES_PASSWORD_FILE: /run/secrets/db_files_password
+      DB_STORAGE_PASSWORD_FILE: /run/secrets/db_storage_password
+      DB_LOGS_PASSWORD_FILE: /run/secrets/db_logs_password
+    secrets:
+      - db_bootstrap_password
+      - db_migrator_password
+      - db_app_password
+      - db_preflight_password
+      - db_beat_password
+      - db_cloud_password
+      - db_database_password
+      - db_files_password
+      - db_storage_password
+      - db_logs_password
+    command: ["python", "-m", "backupsheep.database_identity", "seal"]
+    mem_limit: "${DB_SEAL_MEMORY_LIMIT:-1g}"
+    cpus: "${DB_SEAL_CPU_LIMIT:-1.0}"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - provision-database
+    logging: *default-logging
+    restart: "no"
+
   # One-shot fail-closed deployment gate. The command verifies production settings,
   # secret-file resolution, database/broker isolation, and required migrations before
   # either the web process or an externally mutating worker can start.
@@ -621,12 +705,15 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: migration
+      BACKUPSHEEP_DATABASE_LANE: preflight
       BACKUPSHEEP_CELERY_LANE: preflight
+      DB_USER: "${DB_PREFLIGHT_USER:-backupsheep_preflight}"
+      DB_PASSWORD_FILE: /run/secrets/db_preflight_password
       RABBITMQ_USER: backupsheep_preflight
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_preflight_password
     secrets:
       - django_secret_key
-      - db_password
+      - db_preflight_password
       - rabbitmq_preflight_password
       - celery_trusted_public_keys
     command: ["python", "manage.py", "docker_preflight"]
@@ -638,6 +725,8 @@ services:
       rabbitmq-provision:
         condition: service_completed_successfully
       migrate:
+        condition: service_completed_successfully
+      db-seal:
         condition: service_completed_successfully
     networks:
       - preflight-database
@@ -674,14 +763,17 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: web
+      BACKUPSHEEP_DATABASE_LANE: app
       BACKUPSHEEP_CELERY_LANE: app
+      DB_USER: "${DB_APP_USER:-backupsheep_app}"
+      DB_PASSWORD_FILE: /run/secrets/db_app_password
       RABBITMQ_USER: backupsheep_app
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_app_password
       CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_app_private_key
       ONBOARDING_INSTALL_TOKEN_SECRET_FILE: /run/secrets/onboarding_token
     secrets:
       - django_secret_key
-      - db_password
+      - db_app_password
       - rabbitmq_app_password
       - celery_signing_app_private_key
       - celery_trusted_public_keys
@@ -759,13 +851,16 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: cloud
+      BACKUPSHEEP_DATABASE_LANE: cloud
       BACKUPSHEEP_CELERY_LANE: cloud
+      DB_USER: "${DB_CLOUD_USER:-backupsheep_cloud}"
+      DB_PASSWORD_FILE: /run/secrets/db_cloud_password
       RABBITMQ_USER: backupsheep_cloud
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_cloud_password
       CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_cloud_private_key
     secrets:
       - django_secret_key
-      - db_password
+      - db_cloud_password
       - rabbitmq_cloud_password
       - celery_signing_cloud_private_key
       - celery_trusted_public_keys
@@ -822,6 +917,9 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: database
+      BACKUPSHEEP_DATABASE_LANE: database
+      DB_USER: "${DB_DATABASE_USER:-backupsheep_database}"
+      DB_PASSWORD_FILE: /run/secrets/db_database_password
       AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_database_aws_credentials
       BACKUPSHEEP_CELERY_LANE: database
       RABBITMQ_USER: backupsheep_database
@@ -829,7 +927,7 @@ services:
       CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_database_private_key
     secrets:
       - django_secret_key
-      - db_password
+      - db_database_password
       - rabbitmq_database_password
       - celery_signing_database_private_key
       - celery_trusted_public_keys
@@ -910,6 +1008,9 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: files
+      BACKUPSHEEP_DATABASE_LANE: files
+      DB_USER: "${DB_FILES_USER:-backupsheep_files}"
+      DB_PASSWORD_FILE: /run/secrets/db_files_password
       AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_files_aws_credentials
       BACKUPSHEEP_CELERY_LANE: files
       RABBITMQ_USER: backupsheep_files
@@ -917,7 +1018,7 @@ services:
       CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_files_private_key
     secrets:
       - django_secret_key
-      - db_password
+      - db_files_password
       - rabbitmq_files_password
       - celery_signing_files_private_key
       - celery_trusted_public_keys
@@ -1001,13 +1102,16 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: storage
+      BACKUPSHEEP_DATABASE_LANE: storage
       BACKUPSHEEP_CELERY_LANE: storage
+      DB_USER: "${DB_STORAGE_USER:-backupsheep_storage}"
+      DB_PASSWORD_FILE: /run/secrets/db_storage_password
       RABBITMQ_USER: backupsheep_storage
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_storage_password
       CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_storage_private_key
     secrets:
       - django_secret_key
-      - db_password
+      - db_storage_password
       - rabbitmq_storage_password
       - celery_signing_storage_private_key
       - celery_trusted_public_keys
@@ -1088,13 +1192,16 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: logs
+      BACKUPSHEEP_DATABASE_LANE: logs
       BACKUPSHEEP_CELERY_LANE: logs
+      DB_USER: "${DB_LOGS_USER:-backupsheep_logs}"
+      DB_PASSWORD_FILE: /run/secrets/db_logs_password
       RABBITMQ_USER: backupsheep_logs
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_logs_password
       CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_logs_private_key
     secrets:
       - django_secret_key
-      - db_password
+      - db_logs_password
       - rabbitmq_logs_password
       - celery_signing_logs_private_key
       - celery_trusted_public_keys
@@ -1130,13 +1237,16 @@ services:
     environment:
       <<: *app-secret-environment
       BACKUPSHEEP_RUNTIME_ROLE: beat
+      BACKUPSHEEP_DATABASE_LANE: beat
       BACKUPSHEEP_CELERY_LANE: beat
+      DB_USER: "${DB_BEAT_USER:-backupsheep_beat}"
+      DB_PASSWORD_FILE: /run/secrets/db_beat_password
       RABBITMQ_USER: backupsheep_beat
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_beat_password
       CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_beat_private_key
     secrets:
       - django_secret_key
-      - db_password
+      - db_beat_password
       - rabbitmq_beat_password
       - celery_signing_beat_private_key
       - celery_trusted_public_keys
@@ -1227,12 +1337,26 @@ volumes:
 secrets:
   django_secret_key:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/django_secret_key
-  db_password:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_password
   db_bootstrap_password:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_bootstrap_password
   db_migrator_password:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_migrator_password
+  db_app_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_app_password
+  db_preflight_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_preflight_password
+  db_beat_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_beat_password
+  db_cloud_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_cloud_password
+  db_database_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_database_password
+  db_files_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_files_password
+  db_storage_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_storage_password
+  db_logs_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_logs_password
   rabbitmq_bootstrap_password:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_bootstrap_password
   rabbitmq_app_password:

@@ -133,11 +133,20 @@ API token is issued.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DB_NAME` | `backupsheep` | Database name; also initializes bundled PostgreSQL |
-| `DB_BOOTSTRAP_USER` | `backupsheep_bootstrap` | Bundled PostgreSQL bootstrap login. The official image initializes it as the cluster superuser; it is mounted/used only by PostgreSQL and `db-provision` |
-| `DB_MIGRATOR_USER` | `backupsheep_migrator` | Non-superuser owner of the database/public schema used only by the one-shot migration service |
-| `DB_USER` | `backupsheep_runtime` | Non-owner runtime login shared by long-lived application roles |
+| `BACKUPSHEEP_DATABASE_IDENTITY_GENERATION` | blank sample / installer-owned `3` | Fail-closed stock identity/ACL/RLS contract witness. Pending values cannot start a long-lived lane; never change it manually |
+| `DB_BOOTSTRAP_USER` | `backupsheep_bootstrap` | Bundled PostgreSQL bootstrap login. The official image initializes it as cluster superuser; only PostgreSQL, `db-provision`, and `db-seal` receive its password |
+| `DB_MIGRATOR_USER` | `backupsheep_migrator` | Non-superuser database/schema/object owner used by `migrate`; its password also enters provision/seal |
+| `DB_APP_USER` | `backupsheep_app` | Non-owner web/control-plane lane |
+| `DB_PREFLIGHT_USER` | `backupsheep_preflight` | Read-only deployment/catalog gate lane |
+| `DB_BEAT_USER` | `backupsheep_beat` | Scheduler lane; workers cannot read or mutate its schedule tables |
+| `DB_CLOUD_USER` | `backupsheep_cloud` | Explicit remote-provider worker lane |
+| `DB_DATABASE_USER` | `backupsheep_database` | Database source/backup/restore lane |
+| `DB_FILES_USER` | `backupsheep_files` | Website, WordPress and Basecamp source lane |
+| `DB_STORAGE_USER` | `backupsheep_storage` | Local storage/artifact handoff lane |
+| `DB_LOGS_USER` | `backupsheep_logs` | Run-log/notification and bounded replay-retention lane |
+| `DB_USER` | `backupsheep_app` | Compatibility alias used by non-Compose deployments; stock Compose pins each service to its lane user |
 | `DB_PASSWORD` | unsafe placeholder outside stock Compose; blank in stock `.env` | Direct database password for non-stock deployments |
-| `DB_PASSWORD_FILE` | unset outside stock Compose | Absolute file-backed database-password pointer; stock application roles use `/run/secrets/db_password` |
+| `DB_PASSWORD_FILE` | unset outside stock Compose | Absolute database-password pointer; stock long-lived services receive only `/run/secrets/db_<lane>_password` |
 | `DB_HOST` | `db` | Database hostname in stock Compose |
 | `DB_PORT` | `5432` | Database port |
 | `DATABASE_URL` | blank | `postgres://` or `postgresql://` URL; overrides the five discrete Django values |
@@ -145,11 +154,14 @@ API token is issued.
 | `DB_SSLROOTCERT` | blank | CA/root-certificate bundle for external PostgreSQL hostname verification |
 
 The bundled `db` service consumes `DB_NAME`/`DB_BOOTSTRAP_USER` and
-`db_bootstrap_password` as `POSTGRES_PASSWORD_FILE`. `db-provision` rotates the two
-marked application-role passwords transactionally before every migration; the migration
-service receives only `db_migrator_password`, and long-lived roles receive only
-`db_password`. In
-production, plaintext PostgreSQL is allowed only for an exact
+`db_bootstrap_password` as `POSTGRES_PASSWORD_FILE`. `db-provision` prepares all
+marked identities and revokes runtime access; `migrate` receives only
+`db_migrator_password`; then `db-seal` applies the exact per-lane grants and
+RLS contract. App, preflight, Beat and each worker receive only their own lane password.
+Database/files workers cannot read any `core_storage*` table or change the
+storage-owned per-backup destination authorization witness; source access begins only
+after the storage lane has durably validated the frozen destination set.
+In production, plaintext PostgreSQL is allowed only for an exact
 stock `db` service name, loopback address, or Unix socket. Every other hostname or IP,
 including RFC1918 addresses, requires `sslmode=verify-full` plus `sslrootcert`; the two
 options may instead be supplied in the `DATABASE_URL` query string.

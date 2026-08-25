@@ -11,6 +11,7 @@ from apps.management.commands.docker_preflight import (
     _assert_no_pending_migrations,
     _assert_process_boundary,
     _assert_runtime_database_identity,
+    _database_secret_path,
     _assert_secure_tmpfs,
     _assert_stock_configuration_sources,
     _proc_status_values,
@@ -151,112 +152,53 @@ Seccomp_filters:\t1
         executor.migration_plan = lambda _leaf_nodes: []
         _assert_no_pending_migrations(executor)
 
-    @staticmethod
-    def identity_cursor(*, record, memberships=()):
-        class Cursor:
-            def __init__(self):
-                self.query = ""
+    def test_database_secret_path_is_bound_to_the_declared_lane(self):
+        self.assertEqual(
+            _database_secret_path({"BACKUPSHEEP_DATABASE_LANE": "storage"}),
+            "/run/secrets/db_storage_password",
+        )
+        for lane in ("", "runtime", "../storage", "STORAGE"):
+            with self.subTest(lane=lane), self.assertRaises(CommandError):
+                _database_secret_path({"BACKUPSHEEP_DATABASE_LANE": lane})
 
-            def execute(self, query):
-                self.query = query
-
-            def fetchone(self):
-                if "FROM pg_catalog.pg_roles role" in self.query:
-                    return record
-                raise AssertionError(f"unexpected fetchone query: {self.query}")
-
-            def fetchall(self):
-                if "FROM pg_catalog.pg_auth_members" in self.query:
-                    return [(membership,) for membership in memberships]
-                raise AssertionError(f"unexpected fetchall query: {self.query}")
-
-        return Cursor()
-
-    def test_runtime_database_identity_must_be_marked_non_owner_without_ddl(self):
-        installation_id = "a" * 64
+    def test_runtime_database_identity_delegates_complete_generation_3_check(self):
+        cursor = object()
         environment = {
-            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION": "2",
-            "BACKUPSHEEP_INSTALLATION_ID": installation_id,
-            "DB_BOOTSTRAP_USER": "backupsheep_bootstrap",
-            "DB_MIGRATOR_USER": "backupsheep_migrator",
-            "DB_USER": "backupsheep_runtime",
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION": "3",
+            "BACKUPSHEEP_DATABASE_LANE": "preflight",
         }
         runtime_settings = SimpleNamespace(
-            DATABASES={"default": {"USER": "backupsheep_runtime"}}
+            DATABASES={"default": {"USER": "backupsheep_preflight"}}
         )
-        safe_record = (
-            "backupsheep_runtime",
-            False,
-            False,
-            False,
-            False,
-            False,
-            True,
-            f"backupsheep:database-identity-v2:{installation_id}:runtime",
-            "backupsheep_migrator",
-            "backupsheep_migrator",
-            False,
-            False,
-            False,
-        )
-        _assert_runtime_database_identity(
-            cursor=self.identity_cursor(record=safe_record),
-            environment=environment,
-            runtime_settings=runtime_settings,
-        )
-
-        unsafe_records = (
-            safe_record[:1] + (True,) + safe_record[2:],
-            safe_record[:7] + ("unmarked",) + safe_record[8:],
-            safe_record[:8] + ("backupsheep_runtime",) + safe_record[9:],
-            safe_record[:10] + (True,) + safe_record[11:],
-        )
-        for record in unsafe_records:
-            with self.subTest(record=record), self.assertRaises(CommandError):
-                _assert_runtime_database_identity(
-                    cursor=self.identity_cursor(record=record),
-                    environment=environment,
-                    runtime_settings=runtime_settings,
-                )
-
-        with self.assertRaises(CommandError):
+        with mock.patch(
+            "apps.management.commands.docker_preflight.assert_database_lane_contract",
+            return_value="preflight",
+        ) as validate:
             _assert_runtime_database_identity(
-                cursor=self.identity_cursor(
-                    record=safe_record, memberships=("database_admin",)
-                ),
+                cursor=cursor,
                 environment=environment,
                 runtime_settings=runtime_settings,
             )
-
-    def test_runtime_database_identity_rejects_configuration_drift(self):
-        installation_id = "b" * 64
-        record = (
-            "backupsheep_runtime",
-            False,
-            False,
-            False,
-            False,
-            False,
-            True,
-            f"backupsheep:database-identity-v2:{installation_id}:runtime",
-            "backupsheep_migrator",
-            "backupsheep_migrator",
-            False,
-            False,
-            False,
+        validate.assert_called_once_with(
+            cursor,
+            environment=environment,
+            configured_user="backupsheep_preflight",
         )
-        environment = {
-            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION": "1",
-            "BACKUPSHEEP_INSTALLATION_ID": installation_id,
-            "DB_BOOTSTRAP_USER": "backupsheep_bootstrap",
-            "DB_MIGRATOR_USER": "backupsheep_migrator",
-            "DB_USER": "backupsheep_runtime",
-        }
-        with self.assertRaises(CommandError):
+
+    def test_runtime_database_identity_redacts_provisioning_failures(self):
+        from backupsheep.database_identity import ProvisioningError
+
+        with mock.patch(
+            "apps.management.commands.docker_preflight.assert_database_lane_contract",
+            side_effect=ProvisioningError("database table privileges drifted"),
+        ), self.assertRaisesMessage(
+            CommandError,
+            "Docker security preflight failed: database table privileges drifted",
+        ):
             _assert_runtime_database_identity(
-                cursor=self.identity_cursor(record=record),
-                environment=environment,
+                cursor=object(),
+                environment={"BACKUPSHEEP_DATABASE_LANE": "preflight"},
                 runtime_settings=SimpleNamespace(
-                    DATABASES={"default": {"USER": "different_user"}}
+                    DATABASES={"default": {"USER": "backupsheep_preflight"}}
                 ),
             )

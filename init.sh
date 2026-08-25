@@ -534,15 +534,17 @@ if [ "$#" -ge 3 ] \
     migrate|docker_preflight) run_deployment_preflight='no' ;;
   esac
 fi
-# Database identity provisioning is a reviewed one-shot that must run before the
-# runtime login exists. It deliberately does not load Django settings and is the only
-# non-management command exempt from the application-level database/broker probe.
+# Database identity provision/seal are reviewed one-shots around migrations. They do
+# not load Django settings and cannot run the runtime preflight before its restricted
+# login and exact grants exist.
 if [ "$#" -eq 4 ] \
   && [ "$1" = 'python' ] \
   && [ "$2" = '-m' ] \
   && [ "$3" = 'backupsheep.database_identity' ] \
-  && [ "$4" = 'provision' ]; then
-  run_deployment_preflight='no'
+  ; then
+  case "$4" in
+    provision|seal) run_deployment_preflight='no' ;;
+  esac
 fi
 if [ "$run_deployment_preflight" = 'yes' ]; then
   python /code/manage.py docker_preflight \
