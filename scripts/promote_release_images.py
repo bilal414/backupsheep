@@ -48,34 +48,69 @@ def _oras(oras: str, arguments: list[str], *, allow_not_found: bool = False) -> 
     return result.stdout
 
 
+def _fetch_and_verify_index(
+    oras: str,
+    reference: str,
+    expected_path: Path,
+    expected_digest: str,
+    *,
+    allow_not_found: bool = False,
+) -> bool:
+    """Return False only for an authenticated, definitive registry miss."""
+
+    with tempfile.TemporaryDirectory(prefix="backupsheep-promote-") as temporary:
+        fetched = Path(temporary) / "index.json"
+        status = _oras(
+            oras,
+            ["manifest", "fetch", "--output", str(fetched), reference],
+            allow_not_found=allow_not_found,
+        )
+        if status == "NOT_FOUND":
+            return False
+        if _sha256_path(fetched) != expected_digest:
+            raise ReleaseVerificationError(f"official reference has the wrong OCI digest: {reference}")
+        if fetched.read_bytes() != expected_path.read_bytes():
+            raise ReleaseVerificationError(f"official reference has different OCI index bytes: {reference}")
+        return True
+
+
 def promote(policy: dict, manifest: dict, artifacts_dir: Path, oras: str) -> None:
     policy = _validate_policy(policy)
     validate_release(policy, manifest, artifacts_dir)
     tag = manifest["release"]["tag"]
 
-    # Complete every absence check before making the first official write. A
-    # timeout/auth/TLS failure is not treated as an absent tag.
-    for image in manifest["images"].values():
+    # Classify every destination before making the first write. An exact tag
+    # from an interrupted earlier attempt is safe to resume; any mismatch,
+    # timeout, authentication failure, or TLS failure stops the whole release.
+    missing: set[str] = set()
+    expected_indexes: dict[str, Path] = {}
+    for image_name, image in manifest["images"].items():
         official_tag = f"{image['official_repository']}:{tag}"
-        status = _oras(oras, ["manifest", "fetch", "--descriptor", official_tag], allow_not_found=True)
-        if status != "NOT_FOUND":
-            raise ReleaseVerificationError(f"refusing to replace existing official tag {official_tag}")
+        expected_path = _safe_artifact(
+            artifacts_dir, image["oci_index"]["file"], f"{image_name} retained OCI index"
+        )
+        expected_indexes[image_name] = expected_path
+        if not _fetch_and_verify_index(
+            oras,
+            official_tag,
+            expected_path,
+            image["digest"],
+            allow_not_found=True,
+        ):
+            missing.add(image_name)
 
     for image_name, image in manifest["images"].items():
         source = image["quarantine_reference"]
         destination = f"{image['official_repository']}:{tag}"
-        _oras(oras, ["cp", source, destination])
-        expected_path = _safe_artifact(
-            artifacts_dir, image["oci_index"]["file"], f"{image_name} retained OCI index"
-        )
+        if image_name in missing:
+            _oras(oras, ["cp", source, destination])
         for reference in (destination, image["official_reference"]):
-            with tempfile.TemporaryDirectory(prefix="backupsheep-promote-") as temporary:
-                fetched = Path(temporary) / "index.json"
-                _oras(oras, ["manifest", "fetch", "--output", str(fetched), reference])
-                if _sha256_path(fetched) != image["digest"]:
-                    raise ReleaseVerificationError(f"promotion changed the OCI digest for {reference}")
-                if fetched.read_bytes() != expected_path.read_bytes():
-                    raise ReleaseVerificationError(f"promotion changed the OCI index bytes for {reference}")
+            _fetch_and_verify_index(
+                oras,
+                reference,
+                expected_indexes[image_name],
+                image["digest"],
+            )
 
 
 def main(argv: list[str] | None = None) -> int:

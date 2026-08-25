@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import build_release_manifest as builder  # noqa: E402
 import install_release_tools as installer  # noqa: E402
+import promote_release_images as promoter  # noqa: E402
 import verify_release as verifier  # noqa: E402
 
 
@@ -476,6 +477,73 @@ class ReleaseToolInstallerTests(TestCase):
             with self.assertRaisesRegex(verifier.ReleaseVerificationError, "SHA-256 mismatch"):
                 installer.install(policy, temporary / "bin", ["syft"])
 
+
+class ReleasePromotionRecoveryTests(ReleaseFixtureMixin, TestCase):
+    def _registry(self, initially_present):
+        indexes = {
+            name: (self.artifacts / image["oci_index"]["file"]).read_bytes()
+            for name, image in self.manifest["images"].items()
+        }
+        registry = {}
+        for name in initially_present:
+            image = self.manifest["images"][name]
+            registry[f"{image['official_repository']}:{self.tag}"] = indexes[name]
+            registry[image["official_reference"]] = indexes[name]
+        copies = []
+
+        def fake_oras(_oras, arguments, *, allow_not_found=False):
+            if arguments[:2] == ["manifest", "fetch"]:
+                output = Path(arguments[arguments.index("--output") + 1])
+                reference = arguments[-1]
+                payload = registry.get(reference)
+                if payload is None:
+                    if allow_not_found:
+                        return "NOT_FOUND"
+                    raise verifier.ReleaseVerificationError(f"missing test reference {reference}")
+                output.write_bytes(payload)
+                return ""
+            if arguments[0] == "cp":
+                _command, _source, destination = arguments
+                copies.append(destination)
+                image_name = next(
+                    name
+                    for name, image in self.manifest["images"].items()
+                    if destination.startswith(f"{image['official_repository']}:")
+                )
+                image = self.manifest["images"][image_name]
+                registry[destination] = indexes[image_name]
+                registry[image["official_reference"]] = indexes[image_name]
+                return ""
+            raise AssertionError(arguments)
+
+        return registry, copies, fake_oras
+
+    def test_partial_release_resumes_only_missing_exact_tags(self):
+        _registry, copies, fake_oras = self._registry({"app"})
+        with mock.patch.object(promoter, "_oras", side_effect=fake_oras):
+            promoter.promote(self.policy, self.manifest, self.artifacts, "oras")
+        self.assertEqual(
+            copies,
+            [
+                f"{self.manifest['images']['postgres']['official_repository']}:{self.tag}",
+                f"{self.manifest['images']['egress']['official_repository']}:{self.tag}",
+            ],
+        )
+
+    def test_exact_completed_release_is_idempotent(self):
+        _registry, copies, fake_oras = self._registry(set(self.manifest["images"]))
+        with mock.patch.object(promoter, "_oras", side_effect=fake_oras):
+            promoter.promote(self.policy, self.manifest, self.artifacts, "oras")
+        self.assertEqual(copies, [])
+
+    def test_existing_mismatched_tag_fails_before_any_write(self):
+        registry, copies, fake_oras = self._registry({"app"})
+        registry[f"{self.manifest['images']['app']['official_repository']}:{self.tag}"] = b"wrong"
+        with mock.patch.object(promoter, "_oras", side_effect=fake_oras), self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "wrong OCI digest"
+        ):
+            promoter.promote(self.policy, self.manifest, self.artifacts, "oras")
+        self.assertEqual(copies, [])
 
 class ReleaseWorkflowContractTests(TestCase):
     @classmethod
