@@ -572,6 +572,11 @@ raise SystemExit(99)
         )
         self.assertIn('/proc/1/task/1/children', harness)
         self.assertIn('^State:[[:space:]]+T', harness)
+        for gateway in (".1", ".17", ".33"):
+            self.assertIn(
+                f'--gateway "10.253.${{subnet_octet}}{gateway}"',
+                harness,
+            )
 
     def test_topology_proves_real_preflight_database_and_broker_identities(self):
         for expected in (

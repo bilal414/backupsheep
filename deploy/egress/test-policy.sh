@@ -273,9 +273,18 @@ exercise_policy() {
 
 # Use small explicit test-only subnets so the harness remains runnable when a full
 # BackupSheep topology has consumed Docker's default local address pools.
-docker network create --subnet "10.253.${subnet_octet}.0/28" "$external_net" >/dev/null
-docker network create --internal --subnet "10.253.${subnet_octet}.16/28" "$database_net" >/dev/null
-docker network create --internal --subnet "10.253.${subnet_octet}.32/28" "$broker_net" >/dev/null
+docker network create \
+  --subnet "10.253.${subnet_octet}.0/28" \
+  --gateway "10.253.${subnet_octet}.1" \
+  "$external_net" >/dev/null
+docker network create --internal \
+  --subnet "10.253.${subnet_octet}.16/28" \
+  --gateway "10.253.${subnet_octet}.17" \
+  "$database_net" >/dev/null
+docker network create --internal \
+  --subnet "10.253.${subnet_octet}.32/28" \
+  --gateway "10.253.${subnet_octet}.33" \
+  "$broker_net" >/dev/null
 
 start_database_server
 docker run -d --name "$broker_server" \
