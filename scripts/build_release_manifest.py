@@ -213,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--app-index", type=Path, required=True)
     parser.add_argument("--postgres-digest", required=True)
     parser.add_argument("--postgres-index", type=Path, required=True)
+    parser.add_argument("--egress-digest", required=True)
+    parser.add_argument("--egress-index", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
         policy = _load_json(arguments.policy, maximum_bytes=MAX_CONTROL_FILE_BYTES)
@@ -234,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
             image_inputs={
                 "app": (arguments.app_digest, arguments.app_index),
                 "postgres": (arguments.postgres_digest, arguments.postgres_index),
+                "egress": (arguments.egress_digest, arguments.egress_index),
             },
         )
         _write_json(arguments.output, manifest)

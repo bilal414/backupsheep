@@ -189,8 +189,10 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         raise ReleaseVerificationError("only ghcr.io is authorized by this verifier")
 
     images = _mapping(policy["images"], "policy.images")
-    if set(images) != {"app", "postgres"}:
-        raise ReleaseVerificationError("policy.images must contain exactly app and postgres")
+    if set(images) != {"app", "postgres", "egress"}:
+        raise ReleaseVerificationError(
+            "policy.images must contain exactly app, postgres, and egress"
+        )
     all_repositories: list[str] = []
     for image_name, raw_image in images.items():
         image = _mapping(raw_image, f"policy.images.{image_name}")

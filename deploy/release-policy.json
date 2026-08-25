@@ -13,6 +13,11 @@
       "quarantine_repository": "ghcr.io/bilal414/backupsheep-postgres-quarantine",
       "official_repository": "ghcr.io/bilal414/backupsheep-postgres",
       "dockerfile": "Dockerfile.postgres"
+    },
+    "egress": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-egress-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-egress",
+      "dockerfile": "Dockerfile.egress"
     }
   },
   "platforms": [

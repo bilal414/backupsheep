@@ -25,6 +25,10 @@ other mutable staging reference. Promotion refuses an existing SemVer tag and
 treats authentication, network, TLS, and unexpected registry errors as failures,
 not as evidence that a tag is absent.
 
+The release set is atomic and contains three separately scanned and signed images:
+the application, its PostgreSQL runtime, and the no-secret egress guard. A missing
+or unverifiable image blocks promotion of the entire release set.
+
 ## Immutable inputs and real provenance
 
 Every GitHub Action is pinned to a full commit. BuildKit and QEMU container images
@@ -120,7 +124,7 @@ Repository code cannot enforce these external controls. Before opt-in:
 
 Run one protected pre-release tag as a controlled acceptance test before production
 use. Confirm GitHub OIDC issuance, GHCR referrer behavior, ORAS graph copying,
-BuildKit's complete `mode=max` fields for both Dockerfiles, Cosign bundle
+BuildKit's complete `mode=max` fields for all three Dockerfiles, Cosign bundle
 verification, official tag refusal on replay, and GitHub release asset publication.
 This checked-in foundation does not itself configure those GitHub/GHCR controls and
 has not published or deployed a release.

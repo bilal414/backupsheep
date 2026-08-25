@@ -29,9 +29,11 @@ jobs:
     outputs:
       app_digest: ${{ steps.build-app.outputs.digest }}
       postgres_digest: ${{ steps.build-postgres.outputs.digest }}
+      egress_digest: ${{ steps.build-egress.outputs.digest }}
     env:
       APP_QUARANTINE: ghcr.io/bilal414/backupsheep-quarantine
       POSTGRES_QUARANTINE: ghcr.io/bilal414/backupsheep-postgres-quarantine
+      EGRESS_QUARANTINE: ghcr.io/bilal414/backupsheep-egress-quarantine
       ARTIFACT_DIR: release-artifacts
       TOOL_DIR: /tmp/backupsheep-release-tools
       DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -135,16 +137,36 @@ jobs:
           provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
           sbom: true
 
+      - name: Build egress-guard candidate from exact remote commit
+        id: build-egress
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.egress
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: true
+          tags: ghcr.io/bilal414/backupsheep-egress-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
       - name: Collect raw OCI indexes and actual BuildKit provenance
         shell: bash
         env:
           APP_DIGEST: ${{ steps.build-app.outputs.digest }}
           POSTGRES_DIGEST: ${{ steps.build-postgres.outputs.digest }}
+          EGRESS_DIGEST: ${{ steps.build-egress.outputs.digest }}
         run: |
           set -euo pipefail
           umask 077
           [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$POSTGRES_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$EGRESS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           install -d -m 0700 "$ARTIFACT_DIR"/{oci,provenance,sbom,scans,bundles}
           install -m 0600 deploy/release-policy.json "$ARTIFACT_DIR/release-policy.json"
           python3 scripts/collect_release_evidence.py \
@@ -159,6 +181,12 @@ jobs:
             --image postgres \
             --digest "$POSTGRES_DIGEST" \
             --oras "$TOOL_DIR/oras"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image egress \
+            --digest "$EGRESS_DIGEST" \
+            --oras "$TOOL_DIR/oras"
 
       - name: Scan exact child digests and generate complete SBOMs
         shell: bash
@@ -169,6 +197,7 @@ jobs:
             case "$image" in
               app) repository="$APP_QUARANTINE" ;;
               postgres) repository="$POSTGRES_QUARANTINE" ;;
+              egress) repository="$EGRESS_QUARANTINE" ;;
               *) exit 1 ;;
             esac
             [[ "$platform" == "linux/amd64" || "$platform" == "linux/arm64" ]]
@@ -214,7 +243,10 @@ jobs:
           sys.path.insert(0, "scripts")
           from build_release_manifest import _platform_digests
 
-          for image in ("app", "postgres"):
+          import json
+
+          images = json.loads(Path("deploy/release-policy.json").read_text())["images"]
+          for image in images:
               for platform, digest in _platform_digests(
                   Path("release-artifacts/oci") / f"{image}.index.json",
                   ["linux/amd64", "linux/arm64"],
@@ -229,6 +261,7 @@ jobs:
         env:
           APP_DIGEST: ${{ steps.build-app.outputs.digest }}
           POSTGRES_DIGEST: ${{ steps.build-postgres.outputs.digest }}
+          EGRESS_DIGEST: ${{ steps.build-egress.outputs.digest }}
           RELEASE_TAG: ${{ github.ref_name }}
           SOURCE_COMMIT: ${{ github.sha }}
           WORKFLOW_RUN: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
@@ -247,7 +280,9 @@ jobs:
             --app-digest "$APP_DIGEST" \
             --app-index "$ARTIFACT_DIR/oci/app.index.json" \
             --postgres-digest "$POSTGRES_DIGEST" \
-            --postgres-index "$ARTIFACT_DIR/oci/postgres.index.json"
+            --postgres-index "$ARTIFACT_DIR/oci/postgres.index.json" \
+            --egress-digest "$EGRESS_DIGEST" \
+            --egress-index "$ARTIFACT_DIR/oci/egress.index.json"
           python3 scripts/verify_release.py \
             --policy deploy/release-policy.json \
             --manifest "$ARTIFACT_DIR/release-manifest.json" \

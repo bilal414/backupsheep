@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--artifacts-dir", type=Path, required=True)
-    parser.add_argument("--image", choices=("app", "postgres"), required=True)
+    parser.add_argument("--image", choices=("app", "postgres", "egress"), required=True)
     parser.add_argument("--digest", required=True)
     parser.add_argument("--oras", default="oras")
     arguments = parser.parse_args(argv)

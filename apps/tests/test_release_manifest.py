@@ -39,6 +39,7 @@ class ReleaseFixtureMixin:
         self.platform_digests = {
             "app": {"linux/amd64": "sha256:" + "2" * 64, "linux/arm64": "sha256:" + "3" * 64},
             "postgres": {"linux/amd64": "sha256:" + "5" * 64, "linux/arm64": "sha256:" + "6" * 64},
+            "egress": {"linux/amd64": "sha256:" + "7" * 64, "linux/arm64": "sha256:" + "8" * 64},
         }
         self.statements = {}
         self._write_evidence()
@@ -118,7 +119,7 @@ class ReleaseFixtureMixin:
 
     def _write_evidence(self):
         self.index_digests = {}
-        for image in ("app", "postgres"):
+        for image in self.policy["images"]:
             child_descriptors = []
             attestation_descriptors = []
             quarantine = self.policy["images"][image]["quarantine_repository"]
@@ -248,7 +249,7 @@ class ReleaseFixtureMixin:
             created_at="2026-08-25T12:34:56Z",
             image_inputs={
                 image: (self.index_digests[image], self.artifacts / "oci" / f"{image}.index.json")
-                for image in ("app", "postgres")
+                for image in self.policy["images"]
             },
         )
 
@@ -516,18 +517,20 @@ class ReleaseWorkflowContractTests(TestCase):
     def test_candidates_are_quarantined_and_official_tags_are_post_gate_semver_only(self):
         self.assertIn("backupsheep-quarantine:candidate-", self.workflow)
         self.assertIn("backupsheep-postgres-quarantine:candidate-", self.workflow)
+        self.assertIn("backupsheep-egress-quarantine:candidate-", self.workflow)
         self.assertNotIn("backupsheep:candidate-", self.workflow)
         self.assertNotIn("backupsheep-postgres:candidate-", self.workflow)
+        self.assertNotIn("backupsheep-egress:candidate-", self.workflow)
         verify_position = self.workflow.index("Verify quarantine before any official write")
         promote_position = self.workflow.index("Promote exact verified indexes")
         self.assertLess(verify_position, promote_position)
         self.assertIn("scripts/promote_release_images.py", self.workflow)
 
     def test_buildkit_provenance_is_real_remote_source_bound_mode_max(self):
-        self.assertEqual(self.workflow.count("provenance: mode=max,version=v1,builder-id="), 2)
+        self.assertEqual(self.workflow.count("provenance: mode=max,version=v1,builder-id="), 3)
         self.assertEqual(
             self.workflow.count("context: https://github.com/${{ github.repository }}.git#${{ github.sha }}"),
-            2,
+            3,
         )
         self.assertIn("scripts/collect_release_evidence.py", self.workflow)
         self.assertIn("--statement \"$ARTIFACT_DIR/$statement\"", self.workflow)
