@@ -162,8 +162,6 @@ jobs:
       TEST_APPLICATION_CONTAINER: "backupsheep-ci-tests-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_TOPOLOGY_PROJECT: "bs-ci-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_OWNERSHIP_VALUE: "${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
-      CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
-      CI_SCAN_DIR: "${{ runner.temp }}/backupsheep-ci-image-evidence"
     steps:
       - name: Check out the exact source under test
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -214,6 +212,8 @@ jobs:
 
       - name: Install hash-verified Syft 1.51.0 and Trivy 0.74.0
         shell: bash
+        env:
+          CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
         run: |
           set -euo pipefail
           umask 077
@@ -230,6 +230,9 @@ jobs:
 
       - name: Generate SBOMs and reject HIGH or CRITICAL findings in exact images
         shell: bash
+        env:
+          CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
+          CI_SCAN_DIR: "${{ runner.temp }}/backupsheep-ci-image-evidence"
         run: |
           set -euo pipefail
           export LC_ALL=C
@@ -327,7 +330,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: security-image-evidence-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.CI_SCAN_DIR }}
+          path: ${{ runner.temp }}/backupsheep-ci-image-evidence
           if-no-files-found: error
           retention-days: 14
 

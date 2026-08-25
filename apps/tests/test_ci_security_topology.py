@@ -44,6 +44,8 @@ class CISecurityTopologyContractTests(TestCase):
 
     def test_recurring_workflow_scans_exact_images_with_strict_pinned_tools(self):
         gate = self.workflow.split("  application-security-regression:\n", 1)[1]
+        job_environment = gate.split("    steps:\n", 1)[0]
+        self.assertNotIn("runner.temp", job_environment)
         for expected in (
             "scripts/install_release_tools.py",
             "--tool syft",
@@ -67,6 +69,8 @@ class CISecurityTopologyContractTests(TestCase):
             "postgres\t$TEST_POSTGRES_IMAGE",
             "egress\t$TEST_EGRESS_IMAGE",
             "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            'CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"',
+            "path: ${{ runner.temp }}/backupsheep-ci-image-evidence",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, gate)
