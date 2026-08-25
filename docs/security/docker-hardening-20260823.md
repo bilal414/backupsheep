@@ -13,11 +13,12 @@ those boundaries trustworthy
 > **Current-repository follow-up, 2026-08-25:** The commit, image digests, 2,298-test
 > run, scans and demo observations below remain an immutable evidence snapshot for
 > `7be0729...`. The current working tree subsequently implemented BSE1 chunked
-> AES-256-GCM-SIV artifact envelopes with external AWS KMS custody, private per-lane
-> staging and ciphertext-only handoffs, generation-3 database/task identities, and
-> namespace egress guards. It also hardened the CodeQL-reported credential-output,
-> temporary-file and public exception-message paths. Those follow-up changes are
-> **not** covered by the old digests, scan counts, demo state or regression count.
+> AES-256-GCM-SIV artifact envelopes with an AWS KMS integration/policy contract,
+> private per-lane staging and ciphertext-only handoffs, generation-3 database/task
+> identities, and namespace egress guards. It also hardened the CodeQL-reported
+> credential-output, temporary-file and public exception-message paths. Those
+> follow-up changes are **not** covered by the old digests, scan counts, demo state or
+> regression count.
 > The current [PR checks](https://github.com/bilal414/backupsheep/pull/73/checks) are the
 > repository gate; protected signed publication, deployed topology inspection and
 > provider backup/restore/chaos proof remain separate operational gates.
@@ -125,9 +126,10 @@ reported in the exact application or PostgreSQL runtime payload by either scanne
 
 This is not an “attack-proof” or enterprise-certified result. No defensible review can
 promise that. The current repository materially improves the original evidence cut: it
-now implements authenticated per-backup encryption, external KMS custody, per-lane
-filesystem/database/broker identities and guarded egress. Enterprise approval is still
-conditional on exact-release validation and the residual gates below. A compromised
+now implements authenticated per-backup encryption, an external KMS integration/policy
+contract, per-lane filesystem/database/broker identities and guarded egress.
+Enterprise approval is still conditional on exact-release validation and the residual
+gates below. A compromised
 source lane can still read the plaintext it must back up, a broadly permitted outbound
 policy can still exfiltrate that lane's data, and a host/Docker-daemon compromise remains
 outside the container boundary.
@@ -253,11 +255,11 @@ authenticated backup cryptography.
 
 ### PostgreSQL and RabbitMQ
 
-- PostgreSQL uses a custom image with fixed `USER 999:999`, `cap_drop: [ALL]`,
+- PostgreSQL uses a custom image with fixed `USER 70:70`, `cap_drop: [ALL]`,
   read-only root, `no-new-privileges`, private namespaces, and bounded resources.
 - The custom PostgreSQL image verifies the upstream entrypoint before replacing
-  `gosu` with `setpriv`; `gosu` is then removed. The live process has all capability
-  sets at zero and data checksums enabled.
+  `gosu` with pinned `su-exec`; `gosu` is then removed. The live process has all
+  capability sets at zero and data checksums enabled.
 - PostgreSQL and RabbitMQ publish no host ports and are reachable only on explicit
   role-specific internal networks.
 - RabbitMQ is digest-pinned to `4.3.5-alpine`, uses an authenticated health check,
