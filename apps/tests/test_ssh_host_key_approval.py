@@ -75,6 +75,7 @@ class SSHHostKeyApprovalAPITests(BaseTestCase):
         self.client.force_authenticate(user=self.user)
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
+        os.chmod(self.tmpdir.name, 0o2750)
         self.known_hosts_path = os.path.join(self.tmpdir.name, "ssh_known_hosts")
         self.settings_override = override_settings(
             SSH_KNOWN_HOSTS_PATH=self.known_hosts_path,
@@ -143,7 +144,7 @@ class SSHHostKeyApprovalAPITests(BaseTestCase):
             host or f"[{self.host}]:{self.port}", key.get_name(), key
         )
         known_hosts.save(self.known_hosts_path)
-        os.chmod(self.known_hosts_path, 0o600)
+        os.chmod(self.known_hosts_path, 0o640)
 
     def test_authentication_and_node_changes_permission_are_required(self):
         anonymous = APIClient().post(
@@ -296,7 +297,7 @@ class SSHHostKeyApprovalAPITests(BaseTestCase):
         self.assertEqual(response.json()["code"], "host_key_changed")
         self.assertFalse(os.path.exists(self.known_hosts_path))
 
-    def test_unknown_approval_is_written_idempotently_with_atomic_0600_permissions(self):
+    def test_unknown_approval_is_written_idempotently_with_atomic_0640_permissions(self):
         preview = self._preview()
         with mock.patch("apps.api.v1.utils.ssh_host_keys.os.replace", wraps=os.replace) as replace, \
              mock.patch("apps.api.v1.utils.ssh_host_keys.os.fsync", wraps=os.fsync) as fsync:
@@ -312,19 +313,82 @@ class SSHHostKeyApprovalAPITests(BaseTestCase):
         self.assertEqual(first.json()["key_type"], "ssh-rsa")
         self.assertGreaterEqual(replace.call_count, 1)
         self.assertGreaterEqual(fsync.call_count, 2)
-        self.assertEqual(stat.S_IMODE(os.stat(self.known_hosts_path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.known_hosts_path).st_mode), 0o640)
         self.assertEqual(stat.S_IMODE(os.stat(f"{self.known_hosts_path}.lock").st_mode), 0o600)
 
-        os.chmod(self.known_hosts_path, 0o644)
-        with mock.patch("apps.api.v1.utils.ssh_host_keys.os.replace", wraps=os.replace) as repair_replace:
-            second = self._approve(preview)
+        second = self._approve(preview)
         self.assertEqual(second.status_code, status.HTTP_200_OK, second.content)
         self.assertEqual(second.json()["status"], "already_approved")
-        self.assertEqual(repair_replace.call_count, 1)
-        self.assertEqual(stat.S_IMODE(os.stat(self.known_hosts_path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.known_hosts_path).st_mode), 0o640)
         with open(self.known_hosts_path, "r", encoding="utf-8") as known_hosts:
             lines = [line for line in known_hosts if line.strip()]
         self.assertEqual(len(lines), 1)
+
+    def test_unsafe_trust_file_or_directory_metadata_fails_closed(self):
+        self._write_known_key(self.key)
+        os.chmod(self.known_hosts_path, 0o644)
+        with self._patch_scan(self.key):
+            unsafe_file = self.client.post(
+                PREVIEW_URL,
+                {"host": self.host, "port": self.port},
+                format="json",
+            )
+        self.assertEqual(unsafe_file.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(unsafe_file.json()["code"], "known_hosts_unavailable")
+        self.assertEqual(stat.S_IMODE(os.stat(self.known_hosts_path).st_mode), 0o644)
+
+        os.chmod(self.known_hosts_path, 0o640)
+        os.chmod(self.tmpdir.name, 0o2755)
+        with self._patch_scan(self.key):
+            unsafe_directory = self.client.post(
+                PREVIEW_URL,
+                {"host": self.host, "port": self.port},
+                format="json",
+            )
+        self.assertEqual(
+            unsafe_directory.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    def test_unsafe_existing_lock_metadata_is_not_silently_repaired(self):
+        lock_path = f"{self.known_hosts_path}.lock"
+        with open(lock_path, "w", encoding="utf-8") as lock_file:
+            lock_file.write("")
+        os.chmod(lock_path, 0o640)
+
+        with self._patch_scan(self.key):
+            response = self.client.post(
+                PREVIEW_URL,
+                {"host": self.host, "port": self.port},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(response.json()["code"], "known_hosts_unavailable")
+        self.assertEqual(stat.S_IMODE(os.stat(lock_path).st_mode), 0o640)
+
+    def test_symlink_and_hardlink_trust_files_fail_closed(self):
+        outside = os.path.join(self.tmpdir.name, "outside")
+        with open(outside, "w", encoding="utf-8") as target:
+            target.write("host ssh-ed25519 AAAATEST\n")
+        os.chmod(outside, 0o640)
+        os.symlink(outside, self.known_hosts_path)
+        with self._patch_scan(self.key):
+            symlink = self.client.post(
+                PREVIEW_URL,
+                {"host": self.host, "port": self.port},
+                format="json",
+            )
+        self.assertEqual(symlink.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        os.unlink(self.known_hosts_path)
+
+        os.link(outside, self.known_hosts_path)
+        with self._patch_scan(self.key):
+            hardlink = self.client.post(
+                PREVIEW_URL,
+                {"host": self.host, "port": self.port},
+                format="json",
+            )
+        self.assertEqual(hardlink.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def test_changed_same_algorithm_requires_explicit_replacement(self):
         self._write_known_key(self.key)

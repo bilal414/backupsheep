@@ -318,11 +318,52 @@ RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
     && test -z "$(find /usr/local/bin -maxdepth 1 -type f -name 'pip*' -print -quit)"
 
 RUN groupadd --gid 10001 backupsheep \
+    && groupadd --gid 10002 backupsheep-database \
+    && groupadd --gid 10003 backupsheep-files \
+    && groupadd --gid 10004 backupsheep-storage \
+    && groupadd --gid 10005 backupsheep-logs \
+    && groupadd --gid 10006 backupsheep-beat \
+    && groupadd --gid 10007 backupsheep-migration \
+    && groupadd --gid 10008 backupsheep-cloud \
+    && groupadd --gid 10993 backupsheep-rst-files \
+    && groupadd --gid 10994 backupsheep-rst-database \
+    && groupadd --gid 10995 backupsheep-rst-writer \
+    && groupadd --gid 10997 backupsheep-ssh-trust \
+    && groupadd --gid 10998 backupsheep-transfer-writer \
+    && groupadd --gid 10999 backupsheep-transfer-reader \
     && useradd --uid 10001 --gid 10001 \
         --home-dir /run/backupsheep --no-create-home \
         --shell /usr/sbin/nologin backupsheep \
+    && useradd --uid 10002 --gid 10002 \
+        --home-dir /run/backupsheep --no-create-home \
+        --shell /usr/sbin/nologin backupsheep-database \
+    && useradd --uid 10003 --gid 10003 \
+        --home-dir /run/backupsheep --no-create-home \
+        --shell /usr/sbin/nologin backupsheep-files \
+    && useradd --uid 10004 --gid 10004 \
+        --home-dir /run/backupsheep --no-create-home \
+        --shell /usr/sbin/nologin backupsheep-storage \
+    && useradd --uid 10005 --gid 10005 \
+        --home-dir /run/backupsheep --no-create-home \
+        --shell /usr/sbin/nologin backupsheep-logs \
+    && useradd --uid 10006 --gid 10006 \
+        --home-dir /run/backupsheep --no-create-home \
+        --shell /usr/sbin/nologin backupsheep-beat \
+    && useradd --uid 10007 --gid 10007 \
+        --home-dir /run/backupsheep --no-create-home \
+        --shell /usr/sbin/nologin backupsheep-migration \
+    && useradd --uid 10008 --gid 10008 \
+        --home-dir /run/backupsheep --no-create-home \
+        --shell /usr/sbin/nologin backupsheep-cloud \
     && install -d -o backupsheep -g backupsheep -m 0700 \
-        /run/backupsheep /code/_storage /backups \
+        /run/backupsheep \
+    && install -d -o root -g root -m 0555 /code/_storage \
+    && install -d -o backupsheep-storage -g backupsheep-storage -m 0700 /backups \
+    && install -d -o root -g backupsheep-transfer-writer -m 3771 \
+        /var/lib/backupsheep/transfer \
+    && install -d -o root -g backupsheep-rst-writer -m 3771 \
+        /var/lib/backupsheep/restore-transfer \
+    && install -d -o backupsheep -g backupsheep-ssh-trust -m 2750 \
         /var/lib/backupsheep/ssh-trust \
     && install -d -o root -g root -m 0555 /run/backupsheep-installation \
     && install -d -o backupsheep -g backupsheep -m 0700 /code/static
@@ -338,6 +379,7 @@ COPY --link --chown=0:0 apps /code/apps
 COPY --link --chown=0:0 backupsheep /code/backupsheep
 COPY --link --chown=0:0 utils /code/utils
 COPY --link --chown=0:0 --chmod=0555 init.sh /usr/local/bin/init.sh
+COPY --link --chown=0:0 --chmod=0555 deploy/staging/provision-volumes.sh /usr/local/bin/backupsheep-provision-staging-volumes
 
 # Git records executability, not the complete checkout mode. A source tree created
 # under umask 0077 therefore reaches BuildKit with mode-0600 modules and mode-0700
@@ -395,8 +437,14 @@ RUN set -eux; \
         echo "Refusing hard-linked files in the runtime application tree." >&2; \
         exit 1; \
     fi; \
-    install -d -o backupsheep -g backupsheep -m 0700 \
-        /run/backupsheep /code/_storage /backups \
+    install -d -o backupsheep -g backupsheep -m 0700 /run/backupsheep; \
+    install -d -o root -g root -m 0555 /code/_storage; \
+    install -d -o backupsheep-storage -g backupsheep-storage -m 0700 /backups; \
+    install -d -o root -g backupsheep-transfer-writer -m 3771 \
+        /var/lib/backupsheep/transfer; \
+    install -d -o root -g backupsheep-rst-writer -m 3771 \
+        /var/lib/backupsheep/restore-transfer; \
+    install -d -o backupsheep -g backupsheep-ssh-trust -m 2750 \
         /var/lib/backupsheep/ssh-trust; \
     find / -xdev -type f -perm /6000 -exec chmod a-s {} +; \
     if find / -xdev -type f -perm /6000 -print -quit | grep -q .; then \

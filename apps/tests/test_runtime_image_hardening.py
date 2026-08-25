@@ -154,8 +154,34 @@ class RuntimeImageHardeningTests(TestCase):
             with self.subTest(probe=probe):
                 self.assertIn(probe, self.runtime)
 
-        self.assertIn("useradd --uid 10001 --gid 10001", self.runtime)
+        for uid, role in (
+            (10001, "backupsheep"),
+            (10002, "backupsheep-database"),
+            (10003, "backupsheep-files"),
+            (10004, "backupsheep-storage"),
+            (10005, "backupsheep-logs"),
+            (10006, "backupsheep-beat"),
+            (10007, "backupsheep-migration"),
+            (10008, "backupsheep-cloud"),
+        ):
+            with self.subTest(role=role):
+                self.assertIn(f"useradd --uid {uid} --gid {uid}", self.runtime)
         self.assertIn("--home-dir /run/backupsheep --no-create-home", self.runtime)
+        for gid, group in (
+            (10993, "backupsheep-rst-files"),
+            (10994, "backupsheep-rst-database"),
+            (10995, "backupsheep-rst-writer"),
+            (10997, "backupsheep-ssh-trust"),
+            (10998, "backupsheep-transfer-writer"),
+            (10999, "backupsheep-transfer-reader"),
+        ):
+            with self.subTest(group=group):
+                self.assertIn(f"groupadd --gid {gid} {group}", self.runtime)
+        self.assertIn(
+            "COPY --link --chown=0:0 --chmod=0555 "
+            "deploy/staging/provision-volumes.sh ",
+            self.runtime,
+        )
         self.assertIn("USER 10001:10001", self.runtime)
         self.assertIn("STOPSIGNAL SIGTERM", self.runtime)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/init.sh"]', self.runtime)
@@ -257,6 +283,53 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertIn("ulimit -c 0", self.entrypoint)
         self.assertIn("expected_uid='10001'", self.entrypoint)
         self.assertIn("expected_gid='10001'", self.entrypoint)
+        for role, uid in (
+            ("database", 10002),
+            ("files", 10003),
+            ("storage", 10004),
+            ("logs", 10005),
+            ("beat", 10006),
+            ("migration", 10007),
+            ("cloud", 10008),
+        ):
+            with self.subTest(role=role):
+                self.assertRegex(
+                    self.entrypoint,
+                    rf"{role}\)?(?:\n|.){{0,120}}expected_uid='{uid}'",
+                )
+        self.assertIn("transfer_writer_gid='10998'", self.entrypoint)
+        self.assertIn("transfer_reader_gid='10999'", self.entrypoint)
+        self.assertIn("restore_writer_gid='10995'", self.entrypoint)
+        self.assertIn("restore_database_reader_gid='10994'", self.entrypoint)
+        self.assertIn("restore_files_reader_gid='10993'", self.entrypoint)
+        self.assertIn("ssh_trust_gid='10997'", self.entrypoint)
+        self.assertIn(
+            'verify_owned_directory /var/lib/backupsheep/transfer 0 '
+            '"$transfer_writer_gid" 3771',
+            self.entrypoint,
+        )
+        self.assertIn("reject_dedicated_mount /code/_storage", self.entrypoint)
+        self.assertIn(
+            "reject_dedicated_mount /var/lib/backupsheep/restore-transfer",
+            self.entrypoint,
+        )
+        self.assertIn("reject_dedicated_mount /backups", self.entrypoint)
+        self.assertIn(
+            "artifact_kms_credentials='/run/secrets/artifact_kms_aws_credentials'",
+            self.entrypoint,
+        )
+        self.assertIn(
+            "AWS instance-metadata credentials must be disabled",
+            self.entrypoint,
+        )
+        self.assertIn(
+            "AWS SDK endpoint environment overrides must be disabled",
+            self.entrypoint,
+        )
+        self.assertIn(
+            "$runtime_role must not mount the artifact-KMS credential secret",
+            self.entrypoint,
+        )
         self.assertIn("prepare_private_dir /run/backupsheep", self.entrypoint)
         self.assertIn(
             "for capability_set in CapInh CapPrm CapEff CapBnd CapAmb",

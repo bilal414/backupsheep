@@ -50,12 +50,126 @@ export \
 [ -z "${BACKUPSHEEP_SECRETS:-}" ] \
   || fail "BACKUPSHEEP_SECRETS is not accepted by the stock Docker runtime."
 
-# Dockerfile supplies this exact identity. Failing closed catches an accidental
-# root override before provider credentials or backup data become reachable.
-expected_uid='10001'
-expected_gid='10001'
+# Compose assigns one immutable identity to each trust lane. Failing closed catches
+# a user override or accidental shared UID before credentials or backup data become
+# reachable. Only source/storage lanes may join the ciphertext transfer group.
+runtime_role="${BACKUPSHEEP_RUNTIME_ROLE:-}"
+transfer_writer_gid='10998'
+transfer_reader_gid='10999'
+restore_writer_gid='10995'
+restore_database_reader_gid='10994'
+restore_files_reader_gid='10993'
+ssh_trust_gid='10997'
+requires_transfer_writer='no'
+requires_transfer_reader='no'
+requires_ssh_trust_reader='no'
+requires_restore_writer='no'
+requires_restore_database_reader='no'
+requires_restore_files_reader='no'
+case "$runtime_role" in
+  web) expected_uid='10001'; expected_gid='10001' ;;
+  database)
+    expected_uid='10002'; expected_gid='10002'
+    requires_transfer_writer='yes'; requires_transfer_reader='yes'
+    requires_ssh_trust_reader='yes'
+    requires_restore_database_reader='yes'
+    ;;
+  files)
+    expected_uid='10003'; expected_gid='10003'
+    requires_transfer_writer='yes'; requires_transfer_reader='yes'
+    requires_ssh_trust_reader='yes'
+    requires_restore_files_reader='yes'
+    ;;
+  storage)
+    expected_uid='10004'; expected_gid='10004'; requires_transfer_reader='yes'
+    requires_restore_writer='yes'
+    requires_restore_database_reader='yes'
+    requires_restore_files_reader='yes'
+    ;;
+  logs) expected_uid='10005'; expected_gid='10005' ;;
+  beat) expected_uid='10006'; expected_gid='10006' ;;
+  migration) expected_uid='10007'; expected_gid='10007' ;;
+  cloud) expected_uid='10008'; expected_gid='10008' ;;
+  *) fail "BACKUPSHEEP_RUNTIME_ROLE is missing or unsupported." ;;
+esac
 [ "$(id -u)" = "$expected_uid" ] || fail "expected UID $expected_uid."
 [ "$(id -g)" = "$expected_gid" ] || fail "expected GID $expected_gid."
+
+has_transfer_writer='no'
+has_transfer_reader='no'
+has_ssh_trust_reader='no'
+has_restore_writer='no'
+has_restore_database_reader='no'
+has_restore_files_reader='no'
+for runtime_gid in $(id -G); do
+  case "$runtime_gid" in
+    "$expected_gid") ;;
+    "$transfer_writer_gid") has_transfer_writer='yes' ;;
+    "$transfer_reader_gid") has_transfer_reader='yes' ;;
+    "$restore_writer_gid") has_restore_writer='yes' ;;
+    "$restore_database_reader_gid") has_restore_database_reader='yes' ;;
+    "$restore_files_reader_gid") has_restore_files_reader='yes' ;;
+    "$ssh_trust_gid") has_ssh_trust_reader='yes' ;;
+    *) fail "runtime identity has an unreviewed supplementary group." ;;
+  esac
+done
+[ "$has_transfer_writer" = "$requires_transfer_writer" ] \
+  || fail "the $runtime_role role has an unsafe ciphertext writer-group assignment."
+[ "$has_transfer_reader" = "$requires_transfer_reader" ] \
+  || fail "the $runtime_role role has an unsafe ciphertext reader-group assignment."
+[ "$has_ssh_trust_reader" = "$requires_ssh_trust_reader" ] \
+  || fail "the $runtime_role role has an unsafe SSH trust-group assignment."
+[ "$has_restore_writer" = "$requires_restore_writer" ] \
+  || fail "the $runtime_role role has an unsafe restore writer-group assignment."
+[ "$has_restore_database_reader" = "$requires_restore_database_reader" ] \
+  || fail "the $runtime_role role has an unsafe database-restore reader-group assignment."
+[ "$has_restore_files_reader" = "$requires_restore_files_reader" ] \
+  || fail "the $runtime_role role has an unsafe files-restore reader-group assignment."
+
+# The stock enterprise path uses one file-backed AWS credential that is mounted
+# only into the two source/restore lanes. Ambient environment, web identity,
+# container metadata and SDK endpoint overrides would either leak decrypt authority
+# to unrelated roles or bypass the reviewed KMS endpoint policy, so reject them.
+for ambient_aws_value in \
+  "${AWS_ACCESS_KEY_ID:-}" \
+  "${AWS_SECRET_ACCESS_KEY:-}" \
+  "${AWS_SESSION_TOKEN:-}" \
+  "${AWS_SECURITY_TOKEN:-}" \
+  "${AWS_PROFILE:-}" \
+  "${AWS_CONFIG_FILE:-}" \
+  "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" \
+  "${AWS_ROLE_ARN:-}" \
+  "${AWS_ROLE_SESSION_NAME:-}" \
+  "${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}" \
+  "${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:-}" \
+  "${AWS_CONTAINER_AUTHORIZATION_TOKEN:-}" \
+  "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE:-}" \
+  "${AWS_ENDPOINT_URL:-}" \
+  "${AWS_ENDPOINT_URL_KMS:-}"; do
+  [ -z "$ambient_aws_value" ] \
+    || fail "ambient AWS credentials, roles, metadata, and endpoint overrides are forbidden."
+done
+[ "${AWS_EC2_METADATA_DISABLED:-}" = true ] \
+  || fail "AWS instance-metadata credentials must be disabled."
+[ "${AWS_IGNORE_CONFIGURED_ENDPOINT_URLS:-}" = true ] \
+  || fail "AWS SDK endpoint environment overrides must be disabled."
+artifact_kms_credentials='/run/secrets/artifact_kms_aws_credentials'
+case "$runtime_role" in
+  database|files)
+    [ "${AWS_SHARED_CREDENTIALS_FILE:-}" = "$artifact_kms_credentials" ] \
+      || fail "the source lane requires the reviewed artifact-KMS credential file."
+    [ -f "$artifact_kms_credentials" ] && [ ! -L "$artifact_kms_credentials" ] \
+      || fail "the artifact-KMS credential secret must be a regular file."
+    [ "$(stat -c '%u:%g:%a:%h' "$artifact_kms_credentials")" = '0:0:444:1' ] \
+      || fail "the artifact-KMS credential secret metadata is unsafe."
+    ;;
+  *)
+    [ -z "${AWS_SHARED_CREDENTIALS_FILE:-}" ] \
+      || fail "$runtime_role must not receive artifact-KMS credentials."
+    [ ! -e "$artifact_kms_credentials" ] \
+      || fail "$runtime_role must not mount the artifact-KMS credential secret."
+    ;;
+esac
 
 # The image is intentionally unusable under a weakened `docker run`. These checks
 # make the Compose isolation contract part of container startup instead of relying
@@ -112,6 +226,65 @@ require_mount() {
 require_mount / any ro
 require_mount /tmp tmpfs rw noexec nosuid nodev
 require_mount /run/backupsheep tmpfs rw noexec nosuid nodev
+
+reject_dedicated_mount() {
+  rejected_path="$1"
+  while IFS=' ' read -r _source mount_path _filesystem _options _rest; do
+    [ "$mount_path" != "$rejected_path" ] \
+      || fail "$runtime_role must not mount $rejected_path."
+  done < /proc/mounts
+}
+
+verify_owned_directory() {
+  directory="$1"
+  owner="$2"
+  group="$3"
+  mode="$4"
+  [ ! -L "$directory" ] && [ -d "$directory" ] \
+    || fail "$directory must be a real directory."
+  [ "$(stat -c '%u:%g:%a' "$directory")" = "$owner:$group:$mode" ] \
+    || fail "$directory has unsafe ownership or permissions."
+}
+
+case "$runtime_role" in
+  database|files)
+    require_mount /code/_storage any rw
+    require_mount /var/lib/backupsheep/transfer any rw
+    require_mount /var/lib/backupsheep/restore-transfer any ro
+    verify_owned_directory /code/_storage "$expected_uid" "$expected_gid" 700
+    verify_owned_directory /var/lib/backupsheep/transfer 0 "$transfer_writer_gid" 3771
+    verify_owned_directory /var/lib/backupsheep/restore-transfer 0 "$restore_writer_gid" 3771
+    require_mount /var/lib/backupsheep/ssh-trust any ro
+    verify_owned_directory /var/lib/backupsheep/ssh-trust 10001 "$ssh_trust_gid" 2750
+    reject_dedicated_mount /backups
+    ;;
+  storage)
+    require_mount /code/_storage any rw
+    require_mount /var/lib/backupsheep/transfer any ro
+    require_mount /var/lib/backupsheep/restore-transfer any rw
+    require_mount /backups any rw
+    verify_owned_directory /code/_storage "$expected_uid" "$expected_gid" 700
+    verify_owned_directory /var/lib/backupsheep/transfer 0 "$transfer_writer_gid" 3771
+    verify_owned_directory /var/lib/backupsheep/restore-transfer 0 "$restore_writer_gid" 3771
+    verify_owned_directory /backups "$expected_uid" "$expected_gid" 700
+    reject_dedicated_mount /var/lib/backupsheep/ssh-trust
+    ;;
+  web)
+    require_mount /var/lib/backupsheep/ssh-trust any rw
+    verify_owned_directory /var/lib/backupsheep/ssh-trust 10001 "$ssh_trust_gid" 2750
+    reject_dedicated_mount /code/_storage
+    reject_dedicated_mount /var/lib/backupsheep/transfer
+    reject_dedicated_mount /var/lib/backupsheep/restore-transfer
+    reject_dedicated_mount /backups
+    ;;
+  *)
+    reject_dedicated_mount /code/_storage
+    reject_dedicated_mount /var/lib/backupsheep/transfer
+    reject_dedicated_mount /var/lib/backupsheep/restore-transfer
+    reject_dedicated_mount /backups
+    reject_dedicated_mount /var/lib/backupsheep/ssh-trust
+    ;;
+esac
 
 # A Compose file can look bounded while the selected daemon silently runs without
 # controller support, or an override can remove the limits. Verify the active
@@ -212,10 +385,9 @@ prepare_private_dir() {
   directory="$1"
   [ ! -L "$directory" ] || fail "$directory must not be a symbolic link."
   [ -d "$directory" ] || fail "$directory is missing; mount its tmpfs first."
-  [ "$(stat -c '%u:%g' "$directory")" = "$expected_uid:$expected_gid" ] \
-    || fail "$directory must be owned by $expected_uid:$expected_gid."
+  [ "$(stat -c '%u:%g:%a' "$directory")" = "$expected_uid:$expected_gid:700" ] \
+    || fail "$directory must be owned by $expected_uid:$expected_gid at mode 0700."
   [ -w "$directory" ] || fail "$directory is not writable."
-  chmod 0700 "$directory" || fail "could not protect $directory."
 }
 
 prepare_private_dir /run/backupsheep

@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 TOKEN_SALT = "backupsheep.ssh-host-key-approval.v1"
 DEFAULT_TOKEN_MAX_AGE = 10 * 60
+STOCK_SSH_TRUST_GID = 10997
+SSH_TRUST_DIRECTORY_MODE = 0o2750
+SSH_TRUST_FILE_MODE = 0o640
 
 
 class SSHHostKeyFlowError(Exception):
@@ -73,6 +76,95 @@ def _token_max_age() -> int:
 
 def _known_hosts_path() -> str:
     return ssh.known_hosts_path()
+
+
+def _ssh_trust_gid() -> int:
+    raw = os.environ.get("BACKUPSHEEP_SSH_TRUST_GID", "")
+    if getattr(settings, "DJANGO_SERVER", "prod") == "prod":
+        if raw != str(STOCK_SSH_TRUST_GID):
+            raise SSHHostKeyStorageError()
+        return STOCK_SSH_TRUST_GID
+    if not raw:
+        return os.getegid()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise SSHHostKeyStorageError() from None
+    if value < 0:
+        raise SSHHostKeyStorageError()
+    return value
+
+
+def _open_trust_directory(directory: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(directory, flags)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != _ssh_trust_gid()
+            or stat.S_IMODE(metadata.st_mode) != SSH_TRUST_DIRECTORY_MODE
+        ):
+            raise OSError(errno.EPERM, "unsafe SSH trust directory metadata")
+        return descriptor
+    except Exception:
+        try:
+            os.close(descriptor)
+        except (NameError, OSError):
+            pass
+        logger.warning("Unable to validate the SSH host-key directory")
+        raise SSHHostKeyStorageError() from None
+
+
+def _open_known_hosts(directory_fd: int, basename: str) -> int | None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(basename, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise SSHHostKeyStorageError() from None
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != _ssh_trust_gid()
+            or stat.S_IMODE(metadata.st_mode) != SSH_TRUST_FILE_MODE
+        ):
+            raise SSHHostKeyStorageError()
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _load_known_hosts_descriptor(descriptor: int) -> paramiko.HostKeys:
+    """Parse only the inode that passed the no-follow metadata checks."""
+
+    host_keys = paramiko.HostKeys()
+    with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                entry = paramiko.hostkeys.HostKeyEntry.from_line(line, line_number)
+            except paramiko.SSHException:
+                # Match Paramiko's HostKeys.load compatibility behavior for an
+                # unsupported line, while still failing on I/O or encoding errors.
+                continue
+            if entry is None:
+                continue
+            for hostname in list(entry.hostnames):
+                if host_keys.check(hostname, entry.key):
+                    entry.hostnames.remove(hostname)
+            if entry.hostnames:
+                host_keys._entries.append(entry)
+    return host_keys
 
 
 def _validate_endpoint(host, port):
@@ -182,16 +274,26 @@ def _current_account(request):
 
 
 def _read_known_hosts(path: str) -> paramiko.HostKeys:
+    directory = os.path.dirname(path) or "."
+    basename = os.path.basename(path)
+    directory_fd = None
+    descriptor = None
     try:
-        host_keys = paramiko.HostKeys()
-        if os.path.exists(path):
-            if not os.path.isfile(path):
-                raise OSError(errno.EINVAL, "known_hosts is not a file")
-            host_keys.load(path)
-        return host_keys
+        directory_fd = _open_trust_directory(directory)
+        descriptor = _open_known_hosts(directory_fd, basename)
+        if descriptor is None:
+            return paramiko.HostKeys()
+        return _load_known_hosts_descriptor(descriptor)
+    except SSHHostKeyStorageError:
+        raise
     except Exception:
         logger.warning("Unable to read the SSH host-key database")
         raise SSHHostKeyStorageError()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 def _token_matches(hostname: str, token: str) -> bool:
@@ -234,12 +336,38 @@ def _host_key_state(host_keys: paramiko.HostKeys, scanned: ScannedHostKey):
 @contextlib.contextmanager
 def _known_hosts_lock(path: str):
     directory = os.path.dirname(path) or "."
-    lock_path = f"{path}.lock"
+    basename = os.path.basename(path)
+    lock_basename = f"{basename}.lock"
+    directory_fd = None
     descriptor = None
     try:
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        os.fchmod(descriptor, 0o600)
+        directory_fd = _open_trust_directory(directory)
+        lock_flags = (
+            os.O_RDWR
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(
+                lock_basename,
+                lock_flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            # Existing trust metadata is an operator-owned security boundary.
+            # Never repair it in a live process: the witnessed provisioner is
+            # the only reviewed migration path.
+            descriptor = os.open(lock_basename, lock_flags, dir_fd=directory_fd)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != _ssh_trust_gid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise OSError(errno.EPERM, "unsafe SSH trust lock metadata")
         fcntl.flock(descriptor, fcntl.LOCK_EX)
     except Exception:
         logger.warning("Unable to lock the SSH host-key database")
@@ -248,6 +376,8 @@ def _known_hosts_lock(path: str):
                 os.close(descriptor)
             except OSError:
                 pass
+        if directory_fd is not None:
+            os.close(directory_fd)
         raise SSHHostKeyStorageError()
     try:
         yield
@@ -256,6 +386,7 @@ def _known_hosts_lock(path: str):
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+            os.close(directory_fd)
 
 
 def _remove_same_algorithm_entries(host_keys: paramiko.HostKeys, hostname: str, key_type: str):
@@ -275,45 +406,68 @@ def _remove_same_algorithm_entries(host_keys: paramiko.HostKeys, hostname: str, 
     host_keys._entries = retained
 
 
-def _fsync_directory(directory: str) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    descriptor = os.open(directory, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _atomic_save_known_hosts(host_keys: paramiko.HostKeys, path: str) -> None:
     directory = os.path.dirname(path) or "."
     basename = os.path.basename(path)
+    directory_fd = None
     descriptor = None
     temporary_path = None
     try:
+        directory_fd = _open_trust_directory(directory)
+        existing = _open_known_hosts(directory_fd, basename)
+        if existing is not None:
+            os.close(existing)
         descriptor, temporary_path = tempfile.mkstemp(
             prefix=f".{basename}.", suffix=".tmp", dir=directory
         )
-        os.fchmod(descriptor, 0o600)
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != _ssh_trust_gid()
+        ):
+            raise OSError(errno.EPERM, "unsafe temporary SSH trust ownership")
+        os.fchmod(descriptor, SSH_TRUST_FILE_MODE)
         os.close(descriptor)
         descriptor = None
 
         host_keys.save(temporary_path)
-        descriptor = os.open(temporary_path, os.O_RDONLY)
-        os.fchmod(descriptor, 0o600)
+        descriptor = os.open(
+            temporary_path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        os.fchmod(descriptor, SSH_TRUST_FILE_MODE)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != _ssh_trust_gid()
+            or stat.S_IMODE(metadata.st_mode) != SSH_TRUST_FILE_MODE
+        ):
+            raise OSError(errno.EPERM, "unsafe temporary SSH trust metadata")
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
 
-        os.replace(temporary_path, path)
+        os.replace(
+            os.path.basename(temporary_path),
+            basename,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
         temporary_path = None
-        descriptor = os.open(path, os.O_RDONLY)
-        os.fchmod(descriptor, 0o600)
+        descriptor = _open_known_hosts(directory_fd, basename)
+        if descriptor is None:
+            raise OSError(errno.ENOENT, "published SSH trust file disappeared")
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
-        _fsync_directory(directory)
+        os.fsync(directory_fd)
+    except SSHHostKeyStorageError:
+        raise
     except Exception:
         logger.warning("Unable to atomically publish the SSH host-key database")
         raise SSHHostKeyStorageError()
@@ -328,6 +482,8 @@ def _atomic_save_known_hosts(host_keys: paramiko.HostKeys, path: str) -> None:
                 os.unlink(temporary_path)
             except OSError:
                 pass
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 def preview_host_key(request, payload):
@@ -429,15 +585,6 @@ def approve_host_key(request, payload):
                 _remove_same_algorithm_entries(host_keys, hostname, scanned.key_type)
             host_keys.add(hostname, scanned.key_type, scanned.key)
             _atomic_save_known_hosts(host_keys, path)
-        else:
-            try:
-                needs_mode_repair = stat.S_IMODE(os.stat(path).st_mode) != 0o600
-            except OSError:
-                raise SSHHostKeyStorageError()
-            if needs_mode_repair:
-                # An operator may have pre-approved this key with a permissive
-                # mode; approval repairs that trust-store boundary atomically.
-                _atomic_save_known_hosts(host_keys, path)
 
     CoreLog.record(
         account,
