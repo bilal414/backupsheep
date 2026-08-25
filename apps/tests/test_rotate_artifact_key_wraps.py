@@ -3,6 +3,7 @@
 import hashlib
 import io
 import uuid
+from contextlib import nullcontext
 from unittest import mock
 
 from django.core.management import call_command
@@ -111,6 +112,23 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         self.assertEqual(envelope.get_active_key_wrap().pk, original.pk)
         self.assertEqual(envelope.key_wraps.count(), 1)
 
+    def test_shared_provider_factory_context_is_entered_and_closed(self):
+        provider = mock.Mock()
+        provider.name = "aws-kms"
+        provider.external = True
+        provider.enterprise_eligible = True
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = provider
+        with mock.patch(
+            "apps._tasks.artifact_encryption._configured_provider",
+            return_value=manager,
+        ) as provider_factory:
+            with rotation._configured_provider() as observed:
+                self.assertIs(observed, provider)
+        provider_factory.assert_called_once_with()
+        manager.__enter__.assert_called_once_with()
+        manager.__exit__.assert_called_once()
+
     def test_successful_rotation_is_atomic_and_preserves_retired_witness(self):
         envelope, original = self._active_envelope()
         provider = self.mock_provider(b"destination-wrapped-key")
@@ -139,7 +157,9 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         provider = self.mock_provider(b"command-destination-wrap")
         output = io.StringIO()
         with mock.patch.object(
-            rotation, "_configured_provider", return_value=provider
+            rotation,
+            "_configured_provider",
+            side_effect=lambda: nullcontext(provider),
         ) as provider_factory:
             call_command(
                 "rotate_artifact_key_wraps",
@@ -155,7 +175,9 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
 
         output = io.StringIO()
         with mock.patch.object(
-            rotation, "_configured_provider", return_value=provider
+            rotation,
+            "_configured_provider",
+            side_effect=lambda: nullcontext(provider),
         ):
             call_command(
                 "rotate_artifact_key_wraps",

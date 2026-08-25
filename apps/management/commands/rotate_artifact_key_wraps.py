@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from contextlib import contextmanager
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -58,21 +59,22 @@ def _validated_rotation_scope(
         raise CommandError("AWS KMS BSE1 artifact custody is not active.")
 
 
+@contextmanager
 def _configured_provider():
     # Keep provider construction in the same fail-closed registry used by sealing
     # and restore so a management path cannot silently select a different backend.
     from apps._tasks.artifact_encryption import _configured_provider as provider_factory
 
-    provider = provider_factory()
-    if (
-        getattr(provider, "name", None) != CoreBackupKeyWrap.Provider.AWS_KMS
-        or getattr(provider, "external", None) is not True
-        or getattr(provider, "enterprise_eligible", None) is not True
-    ):
-        raise CommandError(
-            "The configured artifact key provider is not enterprise AWS KMS."
-        )
-    return provider
+    with provider_factory() as provider:
+        if (
+            getattr(provider, "name", None) != CoreBackupKeyWrap.Provider.AWS_KMS
+            or getattr(provider, "external", None) is not True
+            or getattr(provider, "enterprise_eligible", None) is not True
+        ):
+            raise CommandError(
+                "The configured artifact key provider is not enterprise AWS KMS."
+            )
+        yield provider
 
 
 def _rotate_one(
@@ -220,21 +222,21 @@ class Command(BaseCommand):
             )
             return
 
-        provider = _configured_provider()
         rotated = 0
         already_rotated = 0
-        for envelope_id in candidates:
-            result = _rotate_one(
-                envelope_id,
-                provider=provider,
-                source_key=source_key,
-                destination_key=destination_key,
-                installation_id=installation_id,
-            )
-            if result == "rotated":
-                rotated += 1
-            else:
-                already_rotated += 1
+        with _configured_provider() as provider:
+            for envelope_id in candidates:
+                result = _rotate_one(
+                    envelope_id,
+                    provider=provider,
+                    source_key=source_key,
+                    destination_key=destination_key,
+                    installation_id=installation_id,
+                )
+                if result == "rotated":
+                    rotated += 1
+                else:
+                    already_rotated += 1
         remaining_after = CoreBackupEncryptionEnvelope.objects.filter(
             status=CoreBackupEncryptionEnvelope.Status.ACTIVE,
             key_wraps__status=CoreBackupKeyWrap.Status.ACTIVE,
