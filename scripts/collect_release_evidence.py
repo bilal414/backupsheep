@@ -144,6 +144,7 @@ class _OCILayoutDirectory:
             raise ReleaseVerificationError("OCI layout path must be a real directory")
         self._path = path
         count = 0
+        total_bytes = 0
         for directory, directory_names, file_names in os.walk(path, followlinks=False):
             for name in [*directory_names, *file_names]:
                 count += 1
@@ -161,6 +162,12 @@ class _OCILayoutDirectory:
                 ) and stat.S_ISREG(item.st_mode)
                 if stat.S_ISLNK(item.st_mode) or not (allowed_directory or allowed_file):
                     raise ReleaseVerificationError("OCI layout contains an unsafe member")
+                if allowed_file:
+                    if item.st_nlink != 1:
+                        raise ReleaseVerificationError("OCI layout contains a linked file")
+                    total_bytes += item.st_size
+                    if total_bytes > MAX_OCI_LAYOUT_BYTES:
+                        raise ReleaseVerificationError("OCI layout is too large")
 
     def close(self) -> None:
         return None
