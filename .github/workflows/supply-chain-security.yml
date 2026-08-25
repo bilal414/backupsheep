@@ -19,6 +19,12 @@ jobs:
   dependency-and-deployment-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # docker-compose.yml deliberately fails closed when an installation has no stable
+    # project/ownership identity. CI is an installation too: use fixed, non-secret
+    # witnesses so manifest validation exercises the same locked model as install.sh.
+    env:
+      BACKUPSHEEP_COMPOSE_PROJECT_NAME: "backupsheep-ci"
+      BACKUPSHEEP_INSTALLATION_ID: "0000000000000000000000000000000000000000000000000000000000000001"
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

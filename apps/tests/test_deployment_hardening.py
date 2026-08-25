@@ -43,6 +43,20 @@ class DeploymentHardeningContractTests(TestCase):
             'name: "${BACKUPSHEEP_COMPOSE_PROJECT_NAME:', self.compose
         )
 
+    def test_supply_chain_ci_supplies_compose_ownership_witnesses(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "supply-chain-security.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertRegex(
+            workflow,
+            r'BACKUPSHEEP_COMPOSE_PROJECT_NAME:\s+["\']backupsheep-ci["\']',
+        )
+        self.assertRegex(
+            workflow,
+            r'BACKUPSHEEP_INSTALLATION_ID:\s+["\'][0-9a-f]{64}["\']',
+        )
+
     def test_postgres_healthcheck_authenticates_with_the_file_secret(self):
         database = self.service_block("db")
         self.assertIn("cat /run/secrets/db_password", database)
