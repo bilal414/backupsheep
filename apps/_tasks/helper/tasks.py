@@ -2191,98 +2191,242 @@ def digitalocean_clean_volume_snapshots(self):
 """
 RUNS ON ENDPOINT NODE
 """
+LOCAL_NODE_INTEGRATIONS = frozenset(
+    {"basecamp", "database", "website", "wordpress"}
+)
+
+
+def _node_deletion_lane(node):
+    code = str(node.connection.integration.code or "").lower()
+    return "local" if code in LOCAL_NODE_INTEGRATIONS else "cloud"
+
+
+def _requested_node_for_lane(node_id, expected_lane):
+    """Return one durably prepared node without crossing its worker boundary."""
+
+    from apps.console.node.models import CoreNode
+
+    node = (
+        CoreNode.objects.select_related("connection__integration")
+        .filter(
+            id=node_id,
+            status=CoreNode.Status.DELETE_REQUESTED,
+            flag_delete_node=True,
+        )
+        .first()
+    )
+    if node is None:
+        return None
+    actual_lane = _node_deletion_lane(node)
+    if actual_lane != expected_lane:
+        raise RuntimeError(
+            f"Node {node_id} belongs to the {actual_lane} deletion lane, not "
+            f"{expected_lane}."
+        )
+    # Only the web control plane may mutate django-celery-beat.  A worker must
+    # never erase a node while a schedule or PeriodicTask relationship remains.
+    if node.schedules.exists():
+        raise RuntimeError(
+            f"Node {node_id} deletion was not prepared by the control plane."
+        )
+    return node
+
+
+def _delete_requested_node(node_id, expected_lane):
+    """Execute provider/local cleanup under one explicit database + filesystem lane."""
+
+    from apps.console.node.models import CoreNode
+
+    node = _requested_node_for_lane(node_id, expected_lane)
+    if node is None:
+        return {"result": "not_requested", "node_id": node_id}
+
+    node_type_object = node._integration_object()
+    query = ~Q(status=UtilBackup.Status.DELETE_COMPLETED)
+    if node_type_object:
+        pending_backups = node_type_object.backups.filter(query).order_by("created")
+        for backup in pending_backups:
+            if (
+                backup.status == UtilBackup.Status.DELETE_IN_PROGRESS
+                and node.connection.integration.code == "oracle"
+            ):
+                # Oracle deletion is owned by the durable reconciler lease.
+                backup._enqueue_delete_reconciliation()
+                continue
+            deleted = backup.soft_delete()
+            if deleted is False:
+                backup.refresh_from_db()
+                deletion_request = dict(
+                    (backup.metadata or {}).get("_deletion_request") or {}
+                )
+                if deletion_request.get("state") == "deferred_protected":
+                    # Protection cancels the deletion phase visibly and prevents
+                    # a replayed child from adopting the old intent.
+                    node.status = CoreNode.Status.PAUSED
+                    node.flag_delete_node = False
+                    node.save(
+                        update_fields=["status", "flag_delete_node", "modified"]
+                    )
+                    return {"result": "protected", "node_id": node.pk}
+
+        if node_type_object.backups.filter(query).exists():
+            raise RuntimeError(
+                f"Node {node_id} still has backups whose remote deletion has "
+                "not been confirmed."
+            )
+
+    if expected_lane == "local" and getattr(node, "website", None) is not None:
+        # Only storage owns the shared local-artifact volume. Cloud deletion never
+        # resolves or mutates a host path.
+        storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+        cache_base = os.path.realpath(
+            os.path.join(storage_dir, "website_cache", node.uuid_str)
+        )
+        if (
+            cache_base != storage_dir
+            and os.path.commonpath([storage_dir, cache_base]) == storage_dir
+        ):
+            shutil.rmtree(cache_base, ignore_errors=True)
+            for suffix in (".meta.json", ".lock"):
+                try:
+                    os.remove(cache_base + suffix)
+                except FileNotFoundError:
+                    pass
+
+    # Recheck the durable phase under a row lock immediately before the cascade.
+    # A schedule created by a racing request or an unconfirmed backup blocks delete.
+    with transaction.atomic():
+        locked = (
+            CoreNode.objects.select_for_update()
+            .select_related("connection__integration")
+            .filter(
+                id=node_id,
+                status=CoreNode.Status.DELETE_REQUESTED,
+                flag_delete_node=True,
+            )
+            .first()
+        )
+        if locked is None:
+            return {"result": "phase_changed", "node_id": node_id}
+        if _node_deletion_lane(locked) != expected_lane or locked.schedules.exists():
+            raise RuntimeError(f"Node {node_id} deletion phase changed.")
+        locked_type_object = locked._integration_object()
+        if locked_type_object and locked_type_object.backups.filter(query).exists():
+            raise RuntimeError(
+                f"Node {node_id} acquired an unfinished backup during deletion."
+            )
+        locked.delete()
+    return {"result": "deleted", "node_id": node_id}
+
+
 @current_app.task(
-    name="node_delete_requested",
+    name="delete_local_node_requested",
     track_started=True,
     default_retry_delay=1 * 60,
     max_retries=16,
     bind=True,
 )
+def delete_local_node_requested(self, node_id):
+    try:
+        return _delete_requested_node(node_id, "local")
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry()
+
+
+@current_app.task(
+    name="delete_cloud_node_requested",
+    track_started=True,
+    default_retry_delay=1 * 60,
+    max_retries=16,
+    bind=True,
+)
+def delete_cloud_node_requested(self, node_id):
+    try:
+        return _delete_requested_node(node_id, "cloud")
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry()
+
+
+@current_app.task(
+    name="node_delete_requested",
+    default_retry_delay=1 * 60,
+    max_retries=16,
+    bind=True,
+    ignore_result=True,
+)
 def node_delete_requested(self, node_id):
-    from apps.console.node.models import CoreNode, CoreSchedule
+    """Compatibility dispatcher for durable requests from older releases."""
+
+    from apps.console.node.models import CoreNode
 
     try:
-        if node_id:
-            for node in CoreNode.objects.filter(status=CoreNode.Status.DELETE_REQUESTED, id=node_id).order_by(
-                "-created"
-            ):
-                node_type_object = node._integration_object()
-                if node_type_object:
-
-                    query = ~Q(status=UtilBackup.Status.DELETE_COMPLETED)
-                    pending_backups = node_type_object.backups.filter(query).order_by("created")
-                    for backup in pending_backups:
-                        if (
-                            backup.status == UtilBackup.Status.DELETE_IN_PROGRESS
-                            and node.connection.integration.code == "oracle"
-                        ):
-                            # Oracle deletion is owned by the durable reconciler
-                            # lease. Node/connection cleanup must not perform an
-                            # unfenced provider read or terminal status write.
-                            backup._enqueue_delete_reconciliation()
-                            continue
-                        deleted = backup.soft_delete()
-                        if deleted is False:
-                            backup.refresh_from_db()
-                            deletion_request = dict(
-                                (backup.metadata or {}).get("_deletion_request") or {}
-                            )
-                            if deletion_request.get("state") == "deferred_protected":
-                                # The backup parent is visible again and must remain
-                                # restorable. Stop the node sweep too: PAUSED is a
-                                # visible, fail-closed outcome that avoids creating
-                                # new backups until the operator resolves protection.
-                                node.status = CoreNode.Status.PAUSED
-                                node.save(update_fields=["status", "modified"])
-                                return {"result": "protected", "node_id": node.pk}
-
-                    # A node row owns the backup catalog.  Never cascade-delete it
-                    # while a provider still has an unconfirmed backup: doing so
-                    # destroys the only local pointer available for a later retry.
-                    if node_type_object.backups.filter(query).exists():
-                        raise RuntimeError(
-                            f"Node {node_id} still has backups whose remote deletion "
-                            "has not been confirmed."
-                        )
-
-                    for schedule in CoreSchedule.objects.filter(node=node):
-                        schedule.schedule_delete()
-
-                    for schedule in node.schedules.all():
-                        schedule.delete()
-
-                # Remove the per-node website mirror cache used by incremental
-                # backups, confined to _storage like delete_from_disk.
-                if getattr(node, "website", None) is not None:
-                    storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
-                    cache_base = os.path.realpath(os.path.join(storage_dir, "website_cache", node.uuid_str))
-                    if cache_base != storage_dir and os.path.commonpath([storage_dir, cache_base]) == storage_dir:
-                        shutil.rmtree(cache_base, ignore_errors=True)
-                        for suffix in (".meta.json", ".lock"):
-                            try:
-                                os.remove(cache_base + suffix)
-                            except FileNotFoundError:
-                                pass
-
-                node.delete()
-    except Exception as e:
-        capture_exception(e)
+        node = (
+            CoreNode.objects.select_related("connection__integration")
+            .filter(
+                id=node_id,
+                status=CoreNode.Status.DELETE_REQUESTED,
+                flag_delete_node=True,
+            )
+            .first()
+        )
+        if node is None:
+            return {"result": "not_requested", "node_id": node_id}
+        if node.schedules.exists():
+            raise RuntimeError(
+                f"Node {node_id} deletion was not prepared by the control plane."
+            )
+        lane = _node_deletion_lane(node)
+        task = (
+            delete_local_node_requested
+            if lane == "local"
+            else delete_cloud_node_requested
+        )
+        task.apply_async(args=[node.pk])
+        return {"result": "dispatched", "lane": lane, "node_id": node.pk}
+    except Exception as error:
+        capture_exception(error)
         raise self.retry()
 
 
 @current_app.task(name="resume_requested_node_deletions", ignore_result=True)
 def resume_requested_node_deletions():
-    """Republish durable node deletion intents using database ids only."""
+    """Republish cloud deletion intents visible to the cloud database lane."""
 
     from apps.console.node.models import CoreNode
 
     node_ids = list(
-        CoreNode.objects.filter(status=CoreNode.Status.DELETE_REQUESTED)
+        CoreNode.objects.filter(
+            status=CoreNode.Status.DELETE_REQUESTED,
+            flag_delete_node=True,
+        )
+        .exclude(connection__integration__code__in=LOCAL_NODE_INTEGRATIONS)
         .order_by("pk")
         .values_list("pk", flat=True)[:100]
     )
     for node_id in node_ids:
-        node_delete_requested.apply_async(args=[node_id])
+        delete_cloud_node_requested.apply_async(args=[node_id])
+    return node_ids
+
+
+@current_app.task(name="resume_requested_local_node_deletions", ignore_result=True)
+def resume_requested_local_node_deletions():
+    """Republish local deletion intents visible only to the storage DB lane."""
+
+    from apps.console.node.models import CoreNode
+
+    node_ids = list(
+        CoreNode.objects.filter(
+            status=CoreNode.Status.DELETE_REQUESTED,
+            flag_delete_node=True,
+            connection__integration__code__in=LOCAL_NODE_INTEGRATIONS,
+        )
+        .order_by("pk")
+        .values_list("pk", flat=True)[:100]
+    )
+    for node_id in node_ids:
+        delete_local_node_requested.apply_async(args=[node_id])
     return node_ids
 
 

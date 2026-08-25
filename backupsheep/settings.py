@@ -1518,6 +1518,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_requested_node_deletions",
         "schedule": 60.0,
     },
+    "resume-requested-local-node-deletions": {
+        "task": "resume_requested_local_node_deletions",
+        "schedule": 60.0,
+    },
     # Recover outbox publications lost after commit and processing leases left by
     # a crashed logs worker. Provider delivery is at-least-once across the narrow
     # crash-after-send/before-SENT window.

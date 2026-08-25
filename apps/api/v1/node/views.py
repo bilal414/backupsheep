@@ -44,7 +44,12 @@ from apps._tasks.exceptions import (
 from apps._tasks.integration.basecamp import backup_basecamp
 from apps._tasks.integration.website import backup_website
 from ..utils.api_filters import DateRangeFilter
-from apps._tasks.helper.tasks import node_delete_requested, reset_incremental_cache
+from apps._tasks.helper.tasks import (
+    LOCAL_NODE_INTEGRATIONS,
+    delete_cloud_node_requested,
+    delete_local_node_requested,
+    reset_incremental_cache,
+)
 
 
 def _log_activity(request, log_type, data):
@@ -1380,18 +1385,38 @@ class CoreNodeView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def delete(self, request, pk=None):
         node = self.get_object()
-        node.status = CoreNode.Status.DELETE_REQUESTED
-        node.save()
+        with transaction.atomic():
+            # Serialize schedule removal and the durable deletion phase. Only the
+            # web control plane has Beat DML; no compromised worker can erase or
+            # rewrite a universal scheduler row while deleting a node.
+            node = (
+                CoreNode.objects.select_for_update()
+                .select_related("connection__integration")
+                .get(pk=node.pk)
+            )
+            for schedule in node.schedules.select_related(
+                "celery_periodic_task"
+            ).order_by("pk"):
+                schedule.schedule_delete()
+                schedule.delete()
+            node.status = CoreNode.Status.DELETE_REQUESTED
+            node.flag_delete_node = True
+            node.save(
+                update_fields=["status", "flag_delete_node", "modified"]
+            )
+            deletion_task = (
+                delete_local_node_requested
+                if node.connection.integration.code in LOCAL_NODE_INTEGRATIONS
+                else delete_cloud_node_requested
+            )
+            node_id = node.pk
 
-        """
-        Delete Node
-        """
         def publish_delete():
             try:
                 # Only the already-authorized row id crosses the broker boundary.
-                # A periodic storage-worker sweep recovers a failed publication
-                # from the durable DELETE_REQUESTED state.
-                node_delete_requested.apply_async(args=[node.id])
+                # Lane-specific sweeps recover a failed publication from the
+                # durable status + flag_delete_node phase.
+                deletion_task.apply_async(args=[node_id])
             except Exception:
                 pass
 
@@ -1411,7 +1436,7 @@ class CoreNodeView(viewsets.ModelViewSet):
             },
         )
         return Response(
-            {"detail": "Node deletion was scheduled on the storage worker."},
+            {"detail": "Node deletion was scheduled on its isolated worker."},
             status=status.HTTP_202_ACCEPTED,
         )
 
