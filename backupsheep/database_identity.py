@@ -1128,6 +1128,7 @@ def _assert_exact_schema_inventory(cursor) -> dict[str, str]:
            AND target_namespace.nspname = 'public'
            AND source.relname IN (
                'core_managed_ssh_operation',
+               'core_ssh_host_key_approval',
                'core_ssh_host_key_approval_event'
            )
          ORDER BY source.relname, source_attribute.attname, key_pair.position

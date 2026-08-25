@@ -21,9 +21,11 @@ from backupsheep.database_identity import IdentityConfiguration, ProvisioningErr
 from backupsheep.database_lane_policy import (
     EXPECTED_ROUTINES,
     LANES,
+    MANAGED_SSH_REVOKE_APPROVAL_ROUTINE,
     MANAGED_SSH_RETENTION_ROUTINE,
     MANAGED_SSH_ROUTINES,
     MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
+    SSH_HOST_KEY_REVOKE_WITNESS_TABLE,
     STORAGE_CONFIG_TABLES,
 )
 
@@ -1189,6 +1191,12 @@ def _assert_managed_ssh_row_isolation(config: IdentityConfiguration) -> None:
                     (complete["operation"],),
                     label="app direct managed SSH proof erasure",
                 )
+                _expect_cursor_denied(
+                    cursor,
+                    "DELETE FROM public.core_ssh_host_key_approval WHERE id = %s",
+                    (complete["approval"],),
+                    label="app direct SSH approval erasure",
+                )
 
                 cursor.execute(
                     """
@@ -1369,24 +1377,12 @@ def _assert_managed_ssh_row_isolation(config: IdentityConfiguration) -> None:
                             "database FK cascade did not remove managed SSH proof"
                         )
                     cursor.execute(
-                        "DELETE FROM public.core_ssh_host_key_approval WHERE id = %s RETURNING id",
+                        "SELECT id FROM public.core_ssh_host_key_approval WHERE id = %s",
                         (fixture["approval"],),
                     )
                     if cursor.fetchone() != (fixture["approval"],):
-                        raise LaneProbeError("app could not delete a host-key approval")
-                    cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
-                    cursor.execute("SET CONSTRAINTS ALL DEFERRED")
-                    cursor.execute(
-                        """
-                        SELECT action FROM public.core_ssh_host_key_approval_event
-                         WHERE approval_pk_snapshot = %s
-                         ORDER BY generation DESC LIMIT 1
-                        """,
-                        (fixture["approval"],),
-                    )
-                    if cursor.fetchone() != ("revoke",):
                         raise LaneProbeError(
-                            "account deletion erased SSH approval audit history"
+                            "connection deletion erased an account-scoped SSH approval"
                         )
 
                 cursor.execute(
@@ -1507,16 +1503,18 @@ def _assert_direct_ssh_approval_visibility(config: IdentityConfiguration) -> Non
                         "SFTP password/private-key approval visibility crossed its lane"
                     )
 
-                # Exercise the web role's exact approval DELETE and connection
-                # deletion grants in the same child-first order as Collector.
+                # The web role has no directly forgeable approval DELETE. This
+                # bootstrap-owned transaction uses SET ROLE only for row-policy and
+                # cascade coverage; it must never be accepted as an authenticated app
+                # login by the SECURITY DEFINER revoke routine. run_probe separately
+                # exercises that routine through the real app connection.
                 _set_lane_role(cursor, config, "app")
-                for approval_id in all_approvals:
-                    cursor.execute(
-                        "DELETE FROM public.core_ssh_host_key_approval WHERE id = %s RETURNING id",
-                        (approval_id,),
-                    )
-                    if cursor.fetchone() != (approval_id,):
-                        raise LaneProbeError("app could not delete an SSH approval")
+                _expect_cursor_denied(
+                    cursor,
+                    "DELETE FROM public.core_ssh_host_key_approval WHERE id = %s",
+                    (all_approvals[0],),
+                    label="app direct SSH approval erasure",
+                )
                 cursor.execute(
                     "DELETE FROM public.core_auth_database WHERE connection_id = %s",
                     (database_connection,),
@@ -1548,11 +1546,17 @@ def _assert_direct_ssh_approval_visibility(config: IdentityConfiguration) -> Non
                     SELECT pg_catalog.count(*)
                       FROM public.core_ssh_host_key_approval_event
                      WHERE approval_pk_snapshot = ANY(%s)
+                       AND action = 'revoke'
+                       AND actor_kind = 'system'
+                       AND actor_member_pk_snapshot IS NULL
+                       AND actor_user_pk_snapshot IS NULL
                     """,
                     (all_approvals,),
                 )
-                if int(cursor.fetchone()[0]) < 2 * len(all_approvals):
-                    raise LaneProbeError("SSH approval deletion lost audit events")
+                if int(cursor.fetchone()[0]) != len(all_approvals):
+                    raise LaneProbeError(
+                        "SSH approval account cascade forged or lost system identity"
+                    )
                 _set_lane_role(cursor, config, None)
         finally:
             connection.rollback()
@@ -1574,6 +1578,7 @@ def run_probe(config: IdentityConfiguration) -> None:
             MANAGED_SSH_ROUTINES
             - {
                 MANAGED_SSH_RETENTION_ROUTINE,
+                MANAGED_SSH_REVOKE_APPROVAL_ROUTINE,
                 MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
             }
         )
@@ -1603,6 +1608,37 @@ def run_probe(config: IdentityConfiguration) -> None:
                     statement,
                     label=f"{lane} managed SSH retention execution",
                 )
+
+        for lane, connection in connections.items():
+            statement = (
+                f"SELECT public.{MANAGED_SSH_REVOKE_APPROVAL_ROUTINE}("
+                "9223372036854775807, 9223372036854775807)"
+            )
+            if lane == "app":
+                _expect_allowed(
+                    connection,
+                    statement,
+                    label="app bounded SSH approval revoke authority",
+                )
+            else:
+                _expect_denied(
+                    connection,
+                    statement,
+                    label=f"{lane} SSH approval revoke execution",
+                )
+
+        for lane, connection in connections.items():
+            _expect_denied(
+                connection,
+                f"SELECT * FROM public.{SSH_HOST_KEY_REVOKE_WITNESS_TABLE}",
+                label=f"{lane} SSH revoke capability-witness read",
+            )
+            _expect_denied(
+                connection,
+                f"INSERT INTO public.{SSH_HOST_KEY_REVOKE_WITNESS_TABLE} "
+                "(backend_pid, approval_id, account_id) VALUES (1, 1, 1)",
+                label=f"{lane} SSH revoke capability-witness forgery",
+            )
 
         for lane, connection in connections.items():
             statement = f"SELECT public.{MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE}(NULL)"
@@ -1886,7 +1922,7 @@ def main() -> int:
         "crossover, artifact/key-wrap isolation, append-only source logs, "
         "provider credential immutability, "
         "destination credentials/witnesses, managed-SSH lifecycle/retention, "
-        "direct SSH approval visibility, timestamp/TTL forgery, trigger EXECUTE, "
+        "SSH approval visibility/revoke authority, timestamp/TTL forgery, trigger EXECUTE, "
         "and parent cascades passed."
     )
     return 0

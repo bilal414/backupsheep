@@ -17,6 +17,7 @@ from backupsheep.database_lane_policy import (
     MANAGED_SSH_MUTABLE_COLUMNS,
     MANAGED_SSH_OPERATION_TABLE,
     MANAGED_SSH_PUBLICATION_COLUMNS,
+    MANAGED_SSH_REVOKE_APPROVAL_ROUTINE,
     MANAGED_SSH_RETENTION_ROUTINE,
     MANAGED_SSH_ROUTINES,
     MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
@@ -29,12 +30,18 @@ from backupsheep.database_lane_policy import (
     SSH_HOST_KEY_APPROVAL_REPLACEMENT_COLUMNS,
     SSH_HOST_KEY_APPROVAL_EVENT_TABLE,
     SSH_HOST_KEY_APPROVAL_TABLE,
+    SSH_HOST_KEY_REVOKE_WITNESS_TABLE,
     STORAGE_CONFIG_TABLES,
     UNUSED_WORKER_TABLES,
 )
 
 
 class DatabaseLanePolicyTests(SimpleTestCase):
+    def test_ssh_revoke_capability_witness_is_not_granted_to_any_runtime_lane(self):
+        for lane, policy in LANE_TABLE_POLICY.items():
+            with self.subTest(lane=lane):
+                self.assertNotIn(SSH_HOST_KEY_REVOKE_WITNESS_TABLE, policy)
+
     def test_non_beat_workers_cannot_read_or_mutate_scheduler_tables(self):
         for lane in ("cloud", "database", "files", "storage", "logs"):
             for table in BEAT_TABLES:
@@ -320,7 +327,7 @@ class DatabaseLanePolicyTests(SimpleTestCase):
         )
         self.assertEqual(
             LANE_TABLE_POLICY["app"][SSH_HOST_KEY_APPROVAL_TABLE],
-            frozenset({"SELECT", "INSERT", "DELETE"}),
+            frozenset({"SELECT", "INSERT"}),
         )
         self.assertEqual(
             LANE_TABLE_POLICY["app"][SSH_HOST_KEY_APPROVAL_EVENT_TABLE],
@@ -391,6 +398,15 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             EXPECTED_MANAGED_SSH_FOREIGN_KEYS,
             {
                 (
+                    "core_ssh_host_key_approval",
+                    "account_id",
+                    "core_account",
+                    "id",
+                    "c",
+                    True,
+                    True,
+                ),
+                (
                     "core_managed_ssh_operation",
                     "account_id",
                     "core_account",
@@ -415,6 +431,7 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             {
                 "backupsheep_is_canonical_ssh_host",
                 MANAGED_SSH_RETENTION_ROUTINE,
+                MANAGED_SSH_REVOKE_APPROVAL_ROUTINE,
                 "backupsheep_managed_ssh_auth_generation",
                 "backupsheep_managed_ssh_account_insert_guard",
                 MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
@@ -486,6 +503,7 @@ class DatabaseLanePolicyTests(SimpleTestCase):
                         managed_routines
                         - {
                             MANAGED_SSH_RETENTION_ROUTINE,
+                            MANAGED_SSH_REVOKE_APPROVAL_ROUTINE,
                             MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
                         }
                     ).isdisjoint(executable)
@@ -498,6 +516,10 @@ class DatabaseLanePolicyTests(SimpleTestCase):
                     self.assertIn(MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE, executable)
                 else:
                     self.assertNotIn(MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE, executable)
+                if lane == "app":
+                    self.assertIn(MANAGED_SSH_REVOKE_APPROVAL_ROUTINE, executable)
+                else:
+                    self.assertNotIn(MANAGED_SSH_REVOKE_APPROVAL_ROUTINE, executable)
 
     def test_replay_and_artifact_rows_have_lane_policies(self):
         for lane in ("cloud", "database", "files", "storage", "logs"):

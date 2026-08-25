@@ -34,6 +34,10 @@ MANAGED_SSH_RETENTION_ROUTINE = (
     "backupsheep_delete_managed_ssh_operation_retention"
 )
 MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE = "backupsheep_managed_ssh_single_account"
+MANAGED_SSH_REVOKE_APPROVAL_ROUTINE = (
+    "backupsheep_revoke_ssh_host_key_approval"
+)
+SSH_HOST_KEY_REVOKE_WITNESS_TABLE = "backupsheep_ssh_host_key_revoke_witness"
 
 
 # Migrations 0043 and 0046 install the reviewed trigger/helper functions below. No
@@ -45,6 +49,10 @@ EXPECTED_ROUTINES = MappingProxyType(
         MANAGED_SSH_RETENTION_ROUTINE: (
             "requested_retention_days integer, requested_batch_size integer",
             "integer",
+        ),
+        MANAGED_SSH_REVOKE_APPROVAL_ROUTINE: (
+            "requested_approval_id bigint, requested_account_id bigint",
+            "boolean",
         ),
         "backupsheep_assert_encryption_envelope_state": (
             "envelope_pk bigint",
@@ -76,7 +84,7 @@ EXPECTED_ROUTINES = MappingProxyType(
 
 # ``(language, kind, security-definer, leakproof, volatility, parallel,
 # configuration)`` is an exact allow-list, not a family of accepted attributes.
-# The ten SECURITY DEFINER managed-SSH functions require the hardened search path
+# The SECURITY DEFINER managed-SSH functions require the hardened search path
 # embedded by migration 0046. The operation/connection/event guards need no elevated
 # catalog reads and deliberately remain caller-rights triggers.
 _DEFAULT_ROUTINE_ATTRIBUTES = (
@@ -119,6 +127,7 @@ MANAGED_SSH_ROUTINES = frozenset(
     {
         "backupsheep_is_canonical_ssh_host",
         MANAGED_SSH_RETENTION_ROUTINE,
+        MANAGED_SSH_REVOKE_APPROVAL_ROUTINE,
         "backupsheep_managed_ssh_auth_generation",
         "backupsheep_managed_ssh_account_insert_guard",
         MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
@@ -143,6 +152,7 @@ EXPECTED_ROUTINE_ATTRIBUTES = MappingProxyType(
             else _MANAGED_SSH_SECURITY_DEFINER_ATTRIBUTES
             if name in {
                 MANAGED_SSH_RETENTION_ROUTINE,
+                MANAGED_SSH_REVOKE_APPROVAL_ROUTINE,
                 MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
                 "backupsheep_managed_ssh_auth_generation",
                 "backupsheep_managed_ssh_account_insert_guard",
@@ -189,10 +199,19 @@ EXPECTED_TRIGGERS = frozenset(
 )
 
 # The operation model deliberately uses Django DO_NOTHING so Collector cannot issue
-# a directly-authorized child DELETE. PostgreSQL owns these two parent cascades;
+# a directly-authorized child DELETE. PostgreSQL owns these parent cascades;
 # approval events intentionally have no FK and therefore survive account deletion.
 EXPECTED_MANAGED_SSH_FOREIGN_KEYS = frozenset(
     {
+        (
+            "core_ssh_host_key_approval",
+            "account_id",
+            "core_account",
+            "id",
+            "c",
+            True,
+            True,
+        ),
         (
             "core_managed_ssh_operation",
             "account_id",
@@ -232,6 +251,11 @@ ROUTINE_EXECUTE_POLICY = MappingProxyType(
                     if lane in {"app", "database", "files"}
                     else set()
                 ),
+                *(
+                    {MANAGED_SSH_REVOKE_APPROVAL_ROUTINE}
+                    if lane == "app"
+                    else set()
+                ),
             }
         )
         for lane in ("app", "database", "files", "storage")
@@ -252,6 +276,7 @@ EXPECTED_TABLES = frozenset(
         "auth_user_user_permissions",
         "authtoken_token",
         "backupsheep_celery_task_replay",
+        SSH_HOST_KEY_REVOKE_WITNESS_TABLE,
         "core_account",
         "core_account_mtm_group",
         "core_account_mtm_group_nodes",
@@ -437,6 +462,7 @@ REPLAY_TABLE = "backupsheep_celery_task_replay"
 MANAGED_SSH_OPERATION_TABLE = "core_managed_ssh_operation"
 SSH_HOST_KEY_APPROVAL_TABLE = "core_ssh_host_key_approval"
 SSH_HOST_KEY_APPROVAL_EVENT_TABLE = "core_ssh_host_key_approval_event"
+INTERNAL_CONTROL_TABLES = frozenset({SSH_HOST_KEY_REVOKE_WITNESS_TABLE})
 ARTIFACT_LEDGER_TABLES = frozenset(
     {
         "core_backup_artifact",
@@ -531,6 +557,7 @@ SENSITIVE_TABLES = (
         SSH_HOST_KEY_APPROVAL_TABLE,
         SSH_HOST_KEY_APPROVAL_EVENT_TABLE,
     }
+    | INTERNAL_CONTROL_TABLES
 )
 
 # Operational metadata is deliberately readable to worker lanes because generic
@@ -831,20 +858,24 @@ LANE_TABLE_POLICY = MappingProxyType(
     {
         "app": _with_table_privileges_many(
             _lane_policy(
-                EXPECTED_TABLES - {REPLAY_TABLE} - RESULT_TABLES,
+                EXPECTED_TABLES
+                - {REPLAY_TABLE}
+                - RESULT_TABLES
+                - INTERNAL_CONTROL_TABLES,
                 EXPECTED_TABLES
                 - RESULT_TABLES
                 - {
                     MANAGED_SSH_OPERATION_TABLE,
                     SSH_HOST_KEY_APPROVAL_TABLE,
                     SSH_HOST_KEY_APPROVAL_EVENT_TABLE,
+                    SSH_HOST_KEY_REVOKE_WITNESS_TABLE,
                     MIGRATION_TABLE,
                     REPLAY_TABLE,
                 },
             ),
             {
                 MANAGED_SSH_OPERATION_TABLE: {"SELECT", "INSERT"},
-                SSH_HOST_KEY_APPROVAL_TABLE: {"SELECT", "INSERT", "DELETE"},
+                SSH_HOST_KEY_APPROVAL_TABLE: {"SELECT", "INSERT"},
                 SSH_HOST_KEY_APPROVAL_EVENT_TABLE: {"SELECT"},
             },
         ),

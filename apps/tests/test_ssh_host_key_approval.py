@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.contrib.auth.models import Group, Permission
 from django.core import signing
 from django.db import (
+    DatabaseError,
     IntegrityError,
     connection as database_connection,
     transaction,
@@ -519,7 +520,7 @@ class SSHHostKeyApprovalAPITests(BaseTestCase):
         self.assertNotEqual(replacement.old_fingerprint, replacement.new_fingerprint)
         self.assertEqual(replacement.new_fingerprint, approval.fingerprint)
 
-    def test_revoke_is_idempotent_and_records_member_actor_without_live_scan(self):
+    def test_revoke_is_idempotent_and_records_application_actor_without_live_scan(self):
         approved = self._approve(self._preview(), key=self.key)
         approval = CoreSSHHostKeyApproval.objects.get(
             account=self.account,
@@ -547,9 +548,11 @@ class SSHHostKeyApprovalAPITests(BaseTestCase):
             action=CoreSSHHostKeyApprovalEvent.Action.REVOKE,
         )
         self.assertEqual(event.account_pk_snapshot, self.account.pk)
-        self.assertEqual(event.actor_kind, CoreSSHHostKeyApprovalEvent.ActorKind.MEMBER)
-        self.assertEqual(event.actor_member_pk_snapshot, self.member.pk)
-        self.assertEqual(event.actor_user_pk_snapshot, self.user.pk)
+        self.assertEqual(
+            event.actor_kind, CoreSSHHostKeyApprovalEvent.ActorKind.APPLICATION
+        )
+        self.assertIsNone(event.actor_member_pk_snapshot)
+        self.assertIsNone(event.actor_user_pk_snapshot)
         self.assertEqual(event.old_fingerprint, approval.fingerprint)
         self.assertEqual(event.new_fingerprint, "")
 
@@ -619,20 +622,6 @@ class SSHHostKeyApprovalDatabaseGuardTests(BaseTestCase):
         }
         values.update(overrides)
         return CoreSSHHostKeyApproval.objects.create(**values)
-
-    @staticmethod
-    def _set_revoke_actor(*, member=None, user=None):
-        with database_connection.cursor() as cursor:
-            if member is not None:
-                cursor.execute(
-                    "SELECT set_config(%s, %s, true)",
-                    ("backupsheep.ssh_revoke_member_pk", str(member)),
-                )
-            if user is not None:
-                cursor.execute(
-                    "SELECT set_config(%s, %s, true)",
-                    ("backupsheep.ssh_revoke_user_pk", str(user)),
-                )
 
     def test_database_accepts_only_supported_exact_algorithm_evidence(self):
         accepted = (
@@ -724,32 +713,43 @@ class SSHHostKeyApprovalDatabaseGuardTests(BaseTestCase):
                     ).exists()
                 )
 
-    def test_database_rejects_partial_and_forged_revoke_actor_claims(self):
-        partial = self._approval("partial-revoke")
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            self._set_revoke_actor(member=self.member.pk)
-            partial.delete()
-        self.assertTrue(CoreSSHHostKeyApproval.objects.filter(pk=partial.pk).exists())
+    def test_database_rejects_direct_delete_even_with_forged_session_gucs(self):
+        actorless = self._approval("actorless-revoke")
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            actorless.delete()
+        self.assertTrue(
+            CoreSSHHostKeyApproval.objects.filter(pk=actorless.pk).exists()
+        )
 
         forged = self._approval("forged-revoke")
-        _other_account, other_member, other_user = factories.make_account()
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            self._set_revoke_actor(member=other_member.pk, user=other_user.pk)
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            with database_connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config(%s, %s, true)",
+                    ("backupsheep.ssh_revoke_member_pk", str(self.member.pk)),
+                )
+                cursor.execute(
+                    "SELECT set_config(%s, %s, true)",
+                    ("backupsheep.ssh_revoke_user_pk", str(self.user.pk)),
+                )
             forged.delete()
         self.assertTrue(CoreSSHHostKeyApproval.objects.filter(pk=forged.pk).exists())
         self.assertFalse(
             CoreSSHHostKeyApprovalEvent.objects.filter(
-                approval_pk_snapshot__in=(partial.pk, forged.pk),
+                approval_pk_snapshot=forged.pk,
                 action=CoreSSHHostKeyApprovalEvent.Action.REVOKE,
             ).exists()
         )
 
-    def test_database_records_matching_active_member_revoke_claim(self):
-        approval = self._approval("member-revoke")
+    def test_database_revoke_routine_records_only_authenticated_application(self):
+        approval = self._approval("application-revoke")
         approval_pk = approval.pk
-        with transaction.atomic():
-            self._set_revoke_actor(member=self.member.pk, user=self.user.pk)
-            approval.delete()
+        with database_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT public.backupsheep_revoke_ssh_host_key_approval(%s, %s)",
+                (approval.pk, self.account.pk),
+            )
+            self.assertEqual(cursor.fetchone(), (True,))
 
         event = CoreSSHHostKeyApprovalEvent.objects.get(
             approval_pk_snapshot=approval_pk,
@@ -758,10 +758,10 @@ class SSHHostKeyApprovalDatabaseGuardTests(BaseTestCase):
         )
         self.assertEqual(
             event.actor_kind,
-            CoreSSHHostKeyApprovalEvent.ActorKind.MEMBER,
+            CoreSSHHostKeyApprovalEvent.ActorKind.APPLICATION,
         )
-        self.assertEqual(event.actor_member_pk_snapshot, self.member.pk)
-        self.assertEqual(event.actor_user_pk_snapshot, self.user.pk)
+        self.assertIsNone(event.actor_member_pk_snapshot)
+        self.assertIsNone(event.actor_user_pk_snapshot)
 
     def test_database_attributes_no_guc_account_cascade_to_system(self):
         approval = self._approval("system-cascade")
