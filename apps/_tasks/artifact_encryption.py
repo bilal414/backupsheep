@@ -715,8 +715,125 @@ def storage_upload_artifact(backup, *, legacy_verifier):
             os.unlink(destination)
 
 
+def _storage_point_object_key(stored_backup) -> str:
+    object_key = str(stored_backup.storage_file_id or "")
+    if not object_key or "\x00" in object_key:
+        raise ArtifactPipelineError(
+            "The storage adapter did not commit a valid object identity."
+        )
+    return object_key
+
+
+def _destination_state_binding(stored_backup, artifact, object_key: str) -> None:
+    """Bind provider readback evidence to one storage row and object version."""
+
+    artifact_metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+    state_key = str(artifact_metadata.get("storage_metadata_key") or "")
+    metadata = stored_backup.metadata if isinstance(stored_backup.metadata, dict) else {}
+    state = metadata.get(state_key) if state_key else None
+    if not isinstance(state, dict) or not state:
+        raise ArtifactPipelineError(
+            "The destination artifact has no committed provider readback state."
+        )
+    if str(state.get("phase") or "").lower() != "committed":
+        raise ArtifactPipelineError(
+            "The destination provider readback state is not committed."
+        )
+
+    state_identities = {
+        str(state[field])
+        for field in (
+            "storage_file_id",
+            "object_key",
+            "provider_id",
+            "path",
+            "provider_path",
+            "file_id",
+            "fileid",
+        )
+        if state.get(field) not in (None, "")
+    }
+    if object_key not in state_identities:
+        raise ArtifactPipelineError(
+            "The destination provider state identifies a different object."
+        )
+
+    try:
+        state_bytes = int(state.get("size_bytes"))
+    except (TypeError, ValueError):
+        state_bytes = -1
+    state_checksum = str(state.get("sha256") or "").lower()
+    if (
+        state_bytes != artifact.byte_count
+        or state_checksum != artifact.checksum_value.lower()
+        or len(state_checksum) != 64
+    ):
+        raise ArtifactPipelineError(
+            "The destination provider state identifies different ciphertext bytes."
+        )
+
+    state_etag = str(
+        state.get("etag")
+        or state.get("content_hash")
+        or state.get("provider_hash")
+        or ""
+    )
+    artifact_etag = str(artifact.etag or "")
+    if state_etag != artifact_etag:
+        raise ArtifactPipelineError(
+            "The destination provider ETag does not match its artifact ledger."
+        )
+
+    state_version = str(
+        state.get("version_id")
+        or state.get("generation")
+        or state.get("revision")
+        or ""
+    )
+    artifact_version = str(artifact.version_id or "")
+    if state_version != artifact_version:
+        raise ArtifactPipelineError(
+            "The destination provider version does not match its artifact ledger."
+        )
+
+
+def _exact_destination_ciphertext_artifact(
+    backup,
+    stored_backup,
+    source_artifact,
+) -> CoreBackupArtifact:
+    object_key = _storage_point_object_key(stored_backup)
+    candidates = list(
+        backup.artifact_records.filter(
+            storage_id=stored_backup.storage_id,
+            object_key=object_key,
+            role__in=("archive", "destination"),
+            verified_at__isnull=False,
+        ).order_by("pk")
+    )
+    if len(candidates) != 1:
+        raise ArtifactPipelineError(
+            "The destination artifact ledger must contain exactly one verified record "
+            "for the storage point object."
+        )
+    candidate = candidates[0]
+    if (
+        candidate.artifact_format != CoreBackupArtifact.Format.BSE1
+        or candidate.encryption_envelope_id
+        != source_artifact.encryption_envelope_id
+        or candidate.byte_count != source_artifact.byte_count
+        or candidate.checksum_algorithm != "sha256"
+        or candidate.checksum_value != source_artifact.checksum_value
+    ):
+        raise ArtifactPipelineError(
+            "The destination artifact ledger does not identify the source ciphertext."
+        )
+    _destination_state_binding(stored_backup, candidate, object_key)
+    return candidate
+
+
 def ensure_destination_ciphertext_ledger(backup, stored_backup, source_artifact) -> None:
-    """Require the successful provider point to identify the uploaded ciphertext."""
+    """Require authoritative provider readback for the exact uploaded ciphertext."""
 
     if source_artifact.artifact_format != CoreBackupArtifact.Format.BSE1:
         return
@@ -725,50 +842,11 @@ def ensure_destination_ciphertext_ledger(backup, stored_backup, source_artifact)
         raise ArtifactPipelineError(
             "The storage adapter did not commit a successful upload state."
         )
-    object_key = str(stored_backup.storage_file_id or "")
-    if not object_key:
-        raise ArtifactPipelineError(
-            "The storage adapter did not commit an object identity."
-        )
-    candidates = list(
-        backup.artifact_records.filter(
-            storage_id=stored_backup.storage_id,
-            role__in=("archive", "destination"),
-            verified_at__isnull=False,
-        ).order_by("pk")
+    _exact_destination_ciphertext_artifact(
+        backup,
+        stored_backup,
+        source_artifact,
     )
-    if not candidates:
-        backup.record_artifact_integrity(
-            role="destination",
-            object_key=object_key,
-            byte_count=source_artifact.byte_count,
-            storage=stored_backup.storage,
-            checksum_algorithm="sha256",
-            checksum_value=source_artifact.checksum_value,
-            verified_at=timezone.now(),
-            metadata={
-                "archive_format": "bse1",
-                "evidence": "adapter_success_and_source_ciphertext_identity",
-            },
-        )
-        candidates = list(
-            backup.artifact_records.filter(
-                storage_id=stored_backup.storage_id,
-                role__in=("archive", "destination"),
-                verified_at__isnull=False,
-            ).order_by("pk")
-        )
-    if not candidates or any(
-        candidate.artifact_format != CoreBackupArtifact.Format.BSE1
-        or candidate.encryption_envelope_id != source_artifact.encryption_envelope_id
-        or candidate.byte_count != source_artifact.byte_count
-        or candidate.checksum_algorithm != "sha256"
-        or candidate.checksum_value != source_artifact.checksum_value
-        for candidate in candidates
-    ):
-        raise ArtifactPipelineError(
-            "The destination artifact ledger does not identify the source ciphertext."
-        )
 
 
 def cleanup_terminal_source_ciphertext(backup, *, expected_lane: str) -> bool:
@@ -872,9 +950,11 @@ def restore_encryption_plan(stored_backup) -> RestoreEncryptionPlan | None:
             "The selected backup has no durable artifact execution ledger."
         )
     state = _load_active_source_state(backup, allow_absent=True)
+    object_key = _storage_point_object_key(stored_backup)
     destination_rows = list(
         backup.artifact_records.filter(
             storage_id=stored_backup.storage_id,
+            object_key=object_key,
             role__in=("archive", "destination"),
             verified_at__isnull=False,
         ).order_by("pk")
@@ -896,24 +976,11 @@ def restore_encryption_plan(stored_backup) -> RestoreEncryptionPlan | None:
                 "Legacy plaintext artifact restore is disabled by policy."
             )
         return None
-    if not destination_rows:
-        raise ArtifactPipelineError(
-            "The selected storage copy has no BSE1 destination ledger."
-        )
-    matching = []
-    for artifact in destination_rows:
-        if (
-            artifact.artifact_format != CoreBackupArtifact.Format.BSE1
-            or artifact.encryption_envelope_id != state.envelope.pk
-            or artifact.byte_count != state.artifact.byte_count
-            or artifact.checksum_algorithm != "sha256"
-            or artifact.checksum_value != state.artifact.checksum_value
-        ):
-            raise ArtifactPipelineError(
-                "The selected storage copy has conflicting encryption evidence."
-            )
-        matching.append(artifact)
-    artifact = matching[0]
+    artifact = _exact_destination_ciphertext_artifact(
+        backup,
+        stored_backup,
+        state.artifact,
+    )
     try:
         context, key_wrap = artifact.validate_encrypted_restore_state()
     except ValidationError as error:

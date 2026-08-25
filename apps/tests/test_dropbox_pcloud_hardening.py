@@ -283,6 +283,8 @@ class DropboxPCloudHardeningTests(TestCase):
         self.assertEqual(state["size_bytes"], len(self.payload))
         self.assertEqual(state["revision"], "rev-1")
         self._assert_artifact_before_complete(self, events)
+        artifact = next(event[1] for event in events if event[0] == "artifact")
+        self.assertEqual(artifact["object_key"], point.storage_file_id)
 
     def test_dropbox_worker_crash_before_status_persistence_adopts_completed_object(self):
         point, _events = self._point("dropbox", lose_final_save=True)

@@ -26,7 +26,11 @@ from apps._tasks.artifact_encryption import (
     seal_or_validate_source_artifact,
     storage_upload_artifact,
 )
-from apps._tasks.integration.restore_common import RestoreError, fetch_backup_zip
+from apps._tasks.integration.restore_common import (
+    RestoreError,
+    _destination_ledger_exists,
+    fetch_backup_zip,
+)
 from apps.console.backup.models import (
     CoreBackupArtifact,
     CoreBackupEncryptionEnvelope,
@@ -148,6 +152,15 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             storage=storage,
             status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
             storage_file_id=str(remote),
+            metadata={
+                "unit_test_destination": {
+                    "phase": "committed",
+                    "storage_file_id": str(remote),
+                    "object_key": str(remote),
+                    "sha256": source_artifact.checksum_value,
+                    "size_bytes": source_artifact.byte_count,
+                }
+            },
         )
         destination = self.backup.record_artifact_integrity(
             role="destination",
@@ -157,6 +170,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             checksum_algorithm="sha256",
             checksum_value=source_artifact.checksum_value,
             verified_at=timezone.now(),
+            metadata={"storage_metadata_key": "unit_test_destination"},
         )
         return point, destination, remote, local_root
 
@@ -450,6 +464,162 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             source_artifact.encryption_envelope_id,
         )
         ensure_destination_ciphertext_ledger(self.backup, point, source_artifact)
+
+    def test_destination_gate_never_synthesizes_or_adopts_same_storage_evidence(self):
+        source_artifact, ciphertext = self._seal()
+        point, destination, _remote, _local_root = self._local_destination(
+            source_artifact, ciphertext
+        )
+        initial_count = self.backup.artifact_records.count()
+
+        destination.verified_at = None
+        destination.save(update_fields=["verified_at", "modified"])
+        with self.assertRaisesRegex(ArtifactPipelineError, "exactly one verified"):
+            ensure_destination_ciphertext_ledger(
+                self.backup,
+                point,
+                source_artifact,
+            )
+        destination.refresh_from_db()
+        self.assertIsNone(destination.verified_at)
+        self.assertEqual(self.backup.artifact_records.count(), initial_count)
+
+        destination.verified_at = timezone.now()
+        destination.object_key = "other-object-on-the-same-storage"
+        destination.save(
+            update_fields=["verified_at", "object_key", "modified"]
+        )
+        self.assertFalse(_destination_ledger_exists(point))
+        with self.assertRaisesRegex(ArtifactPipelineError, "exactly one verified"):
+            ensure_destination_ciphertext_ledger(
+                self.backup,
+                point,
+                source_artifact,
+            )
+        with self.assertRaisesRegex(ArtifactPipelineError, "exactly one verified"):
+            restore_encryption_plan(point)
+
+    def test_duplicate_exact_destination_records_are_ambiguous(self):
+        source_artifact, ciphertext = self._seal()
+        point, destination, _remote, _local_root = self._local_destination(
+            source_artifact, ciphertext
+        )
+        CoreBackupArtifact.objects.create(
+            backup_content_type=destination.backup_content_type,
+            backup_object_id=destination.backup_object_id,
+            storage=destination.storage,
+            role=CoreBackupArtifact.Role.ARCHIVE,
+            artifact_format=CoreBackupArtifact.Format.BSE1,
+            encryption_envelope=destination.encryption_envelope,
+            idempotency_key=f"duplicate-{uuid.uuid4().hex}",
+            object_key=destination.object_key,
+            byte_count=destination.byte_count,
+            checksum_algorithm="sha256",
+            checksum_value=destination.checksum_value,
+            verified_at=timezone.now(),
+            metadata=dict(destination.metadata),
+        )
+
+        with self.assertRaisesRegex(ArtifactPipelineError, "exactly one verified"):
+            ensure_destination_ciphertext_ledger(
+                self.backup,
+                point,
+                source_artifact,
+            )
+        with self.assertRaisesRegex(ArtifactPipelineError, "exactly one verified"):
+            restore_encryption_plan(point)
+
+    def test_restore_binds_selected_object_version_and_etag(self):
+        source_artifact, ciphertext = self._seal()
+        point, destination, _remote, _local_root = self._local_destination(
+            source_artifact, ciphertext
+        )
+        state = dict(point.metadata["unit_test_destination"])
+        state.update({"etag": '"etag-v7"', "version_id": "version-7"})
+        point.metadata = {"unit_test_destination": state}
+        point.save(update_fields=["metadata", "modified"])
+        destination.etag = '"etag-v7"'
+        destination.version_id = "version-7"
+        destination.save(update_fields=["etag", "version_id", "modified"])
+        CoreBackupArtifact.objects.create(
+            backup_content_type=destination.backup_content_type,
+            backup_object_id=destination.backup_object_id,
+            storage=destination.storage,
+            role=CoreBackupArtifact.Role.ARCHIVE,
+            artifact_format=CoreBackupArtifact.Format.BSE1,
+            encryption_envelope=destination.encryption_envelope,
+            idempotency_key=f"decoy-{uuid.uuid4().hex}",
+            object_key="different-object-on-the-same-storage",
+            byte_count=destination.byte_count,
+            checksum_algorithm="sha256",
+            checksum_value=destination.checksum_value,
+            etag='"decoy-etag"',
+            version_id="decoy-version",
+            verified_at=timezone.now(),
+            metadata=dict(destination.metadata),
+        )
+
+        ensure_destination_ciphertext_ledger(self.backup, point, source_artifact)
+        self.assertEqual(restore_encryption_plan(point).artifact.pk, destination.pk)
+
+        state["version_id"] = "attacker-version"
+        point.metadata = {"unit_test_destination": state}
+        point.save(update_fields=["metadata", "modified"])
+        with self.assertRaisesRegex(ArtifactPipelineError, "provider version"):
+            ensure_destination_ciphertext_ledger(
+                self.backup,
+                point,
+                source_artifact,
+            )
+        with self.assertRaisesRegex(ArtifactPipelineError, "provider version"):
+            restore_encryption_plan(point)
+
+    def test_dispatch_inventory_requires_verification_for_every_adapter(self):
+        from apps._tasks.integration.storage.tasks import (
+            _STORAGE_ADAPTER_INVENTORY,
+        )
+
+        self.assertEqual(
+            set(_STORAGE_ADAPTER_INVENTORY),
+            {
+                "alibaba",
+                "aws_s3",
+                "azure",
+                "backblaze_b2",
+                "cloudflare",
+                "do_spaces",
+                "dropbox",
+                "exoscale",
+                "filebase",
+                "google_cloud",
+                "google_drive",
+                "ibm",
+                "idrive",
+                "ionos",
+                "leviia",
+                "linode",
+                "local",
+                "onedrive",
+                "oracle",
+                "pcloud",
+                "rackcorp",
+                "scaleway",
+                "tencent",
+                "upcloud",
+                "vultr",
+                "wasabi",
+            },
+        )
+        self.assertTrue(
+            all(
+                callable(adapter)
+                and (
+                    verification.endswith("sha256")
+                    or verification == "verified-s3-object"
+                )
+                for adapter, verification in _STORAGE_ADAPTER_INVENTORY.values()
+            )
+        )
 
     def test_source_fence_cleanup_requires_terminal_db_state_and_is_idempotent(self):
         source_artifact, _ciphertext = self._seal()

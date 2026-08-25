@@ -175,7 +175,7 @@ def _integrity_restore_error(stored_backup, code, message):
     return RestoreError(message)
 
 
-def _expected_integrity(stored_backup):
+def _expected_integrity(stored_backup, selected_artifact=None):
     """Return the one committed SHA-256 identity for this exact storage object.
 
     New backup pipelines commit both a destination artifact row and provider-local
@@ -189,28 +189,40 @@ def _expected_integrity(stored_backup):
     backup = stored_backup.backup
     storage_id = stored_backup.storage_id
     object_key = str(stored_backup.storage_file_id or "")
+    if not object_key or "\x00" in object_key:
+        raise _integrity_restore_error(
+            stored_backup,
+            "MALFORMED_PROVIDER_STATE",
+            "the selected storage copy has no valid object identity.",
+        )
 
-    def key_matches(candidate):
-        candidate = str(candidate or "")
-        if candidate == object_key:
-            return True
-        if stored_backup.storage.type.code != "local" or not candidate:
-            return False
-        try:
-            root = stored_backup.storage.storage_local.storage_root()
-            candidate_path = os.path.realpath(os.path.join(root, candidate))
-            return candidate_path == os.path.realpath(object_key)
-        except (AttributeError, OSError, ValueError):
-            return False
-
-    artifacts = backup.artifact_records.filter(
-        storage_id=storage_id,
-        verified_at__isnull=False,
-        role__in=("archive", "destination"),
+    artifacts = list(
+        backup.artifact_records.filter(
+            storage_id=storage_id,
+            object_key=object_key,
+            verified_at__isnull=False,
+            role__in=("archive", "destination"),
+        )
     )
+    if selected_artifact is not None:
+        if (
+            selected_artifact.storage_id != storage_id
+            or selected_artifact.object_key != object_key
+            or selected_artifact.verified_at is None
+            or selected_artifact.pk not in {artifact.pk for artifact in artifacts}
+        ):
+            raise _integrity_restore_error(
+                stored_backup,
+                "INTEGRITY_LEDGER_CONFLICT",
+                "the selected encrypted artifact does not belong to this storage object.",
+            )
+    if len(artifacts) > 1:
+        raise _integrity_restore_error(
+            stored_backup,
+            "INTEGRITY_LEDGER_CONFLICT",
+            "multiple verified artifacts claim the selected storage object.",
+        )
     for artifact in artifacts:
-        if artifact.object_key and not key_matches(artifact.object_key):
-            continue
         checksum = _normalise_sha256(artifact.checksum_value)
         if str(artifact.checksum_algorithm or "").lower() == "sha256" and checksum:
             try:
@@ -221,18 +233,61 @@ def _expected_integrity(stored_backup):
                     "MALFORMED_PROVIDER_STATE",
                     "stored backup integrity metadata is invalid.",
                 ) from None
-            candidates.append((byte_count, checksum, "artifact ledger"))
+            candidates.append(
+                {
+                    "size_bytes": byte_count,
+                    "sha256": checksum,
+                    "etag": str(artifact.etag or ""),
+                    "version_id": str(artifact.version_id or ""),
+                    "source": "artifact ledger",
+                }
+            )
 
     for state in (stored_backup.metadata or {}).values():
         if not isinstance(state, dict):
             continue
-        state_key = str(state.get("object_key") or object_key)
+        state_identities = {
+            str(state[field])
+            for field in (
+                "storage_file_id",
+                "object_key",
+                "provider_id",
+                "path",
+                "provider_path",
+                "file_id",
+                "fileid",
+            )
+            if state.get(field) not in (None, "")
+        }
         checksum = _normalise_sha256(state.get("sha256"))
         byte_count = state.get("size_bytes")
-        if not key_matches(state_key) or checksum is None or byte_count is None:
+        if (
+            object_key not in state_identities
+            or str(state.get("phase") or "").lower() != "committed"
+            or checksum is None
+            or byte_count is None
+        ):
             continue
         try:
-            candidates.append((int(byte_count), checksum, "storage metadata"))
+            candidates.append(
+                {
+                    "size_bytes": int(byte_count),
+                    "sha256": checksum,
+                    "etag": str(
+                        state.get("etag")
+                        or state.get("content_hash")
+                        or state.get("provider_hash")
+                        or ""
+                    ),
+                    "version_id": str(
+                        state.get("version_id")
+                        or state.get("generation")
+                        or state.get("revision")
+                        or ""
+                    ),
+                    "source": "storage metadata",
+                }
+            )
         except (TypeError, ValueError):
             raise _integrity_restore_error(
                 stored_backup,
@@ -240,7 +295,10 @@ def _expected_integrity(stored_backup):
                 "stored backup integrity metadata is invalid.",
             ) from None
 
-    identities = {(size, checksum) for size, checksum, _source in candidates}
+    identities = {
+        (candidate["size_bytes"], candidate["sha256"])
+        for candidate in candidates
+    }
     if len(identities) > 1:
         raise _integrity_restore_error(
             stored_backup,
@@ -255,7 +313,28 @@ def _expected_integrity(stored_backup):
                 "MALFORMED_PROVIDER_STATE",
                 "stored backup integrity metadata has an invalid size.",
             )
-        return {"size_bytes": size, "sha256": checksum}
+        etags = {
+            candidate["etag"]
+            for candidate in candidates
+            if candidate["etag"] not in {"", "null"}
+        }
+        versions = {
+            candidate["version_id"]
+            for candidate in candidates
+            if candidate["version_id"] not in {"", "null"}
+        }
+        if len(etags) > 1 or len(versions) > 1:
+            raise _integrity_restore_error(
+                stored_backup,
+                "INTEGRITY_LEDGER_CONFLICT",
+                "stored backup object version records disagree; restore was stopped safely.",
+            )
+        expected = {"size_bytes": size, "sha256": checksum}
+        if etags:
+            expected["etag"] = etags.pop()
+        if versions:
+            expected["version_id"] = versions.pop()
+        return expected
 
     source_is_committed = backup.artifact_records.filter(
         storage__isnull=True,
@@ -383,10 +462,14 @@ def _destination_ledger_exists(stored_backup):
     relation = getattr(stored_backup.backup, "artifact_records", None)
     if relation is None:
         return False
+    object_key = str(getattr(stored_backup, "storage_file_id", "") or "")
+    if not object_key or "\x00" in object_key:
+        return False
     try:
         return bool(
             relation.filter(
                 storage_id=stored_backup.storage_id,
+                object_key=object_key,
                 role__in=("archive", "destination"),
                 verified_at__isnull=False,
             ).exists()
@@ -401,6 +484,8 @@ def _destination_ledger_exists(stored_backup):
             for record in records:
                 if (
                     getattr(record, "storage_id", None) == stored_backup.storage_id
+                    and str(getattr(record, "object_key", "") or "")
+                    == object_key
                     and getattr(record, "role", "") in {"archive", "destination"}
                     and getattr(record, "verified_at", None) is not None
                 ):
@@ -3030,7 +3115,12 @@ def fetch_backup_zip(stored_backup, dest_zip_path, *, restore=None):
         raise RestoreError(
             "stored backup encryption evidence is incomplete or inconsistent."
         ) from None
-    expected = _expected_integrity(stored_backup)
+    expected = _expected_integrity(
+        stored_backup,
+        selected_artifact=(
+            encryption_plan.artifact if encryption_plan is not None else None
+        ),
+    )
     if encryption_plan is not None:
         from backupsheep.staging import require_private_capacity
 

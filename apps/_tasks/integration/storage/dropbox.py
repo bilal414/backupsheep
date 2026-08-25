@@ -491,7 +491,10 @@ def _record_destination_artifact(stored_backup, state, identity):
         raise DropboxStorageAdapterError("ARTIFACT_RECORD_MISSING", SAFE_UPLOAD_FAILURE)
     recorder(
         role="destination",
-        object_key=state["path"],
+        # The durable artifact key is the same immutable provider ID stored on
+        # the storage-point row. The human-readable path remains provider state,
+        # never an alternate restore selector.
+        object_key=state["provider_id"],
         byte_count=identity["size_bytes"],
         storage=stored_backup.storage,
         checksum_algorithm=CHECKSUM_ALGORITHM,

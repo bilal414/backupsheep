@@ -10,6 +10,7 @@ import re
 from urllib.parse import quote
 
 from django.conf import settings
+from django.utils import timezone
 from requests import exceptions as requests_exceptions
 from sentry_sdk import capture_exception
 
@@ -497,11 +498,13 @@ def _verify_and_commit(stored_backup, storage, item, identity, *, target_path, m
         etag=etag,
         version_id=revision,
         multipart_upload_id=session_fingerprint,
+        verified_at=timezone.now(),
         metadata={
             "provider": "onedrive",
             "provider_id": str(item["id"]),
             "provider_path": target_path,
             "revision": revision,
+            "storage_metadata_key": STATE_KEY,
         },
     )
     _save_state(

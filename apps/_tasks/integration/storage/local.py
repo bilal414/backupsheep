@@ -435,6 +435,7 @@ def storage_local(stored_backup):
             state.update(
                 {
                     "object_key": object_key,
+                    "storage_file_id": target,
                     "sha256": identity["sha256"],
                     "size_bytes": identity["size_bytes"],
                     "checksum_algorithm": CHECKSUM_ALGORITHM,
@@ -464,6 +465,7 @@ def storage_local(stored_backup):
         state.update(
             {
                 "object_key": object_key,
+                "storage_file_id": target,
                 "sha256": identity["sha256"],
                 "size_bytes": identity["size_bytes"],
                 "checksum_algorithm": CHECKSUM_ALGORITHM,
@@ -476,7 +478,7 @@ def storage_local(stored_backup):
             target,
             status=_status(stored_backup, "UPLOAD_VALIDATION"),
         )
-        _record_destination_artifact(stored_backup, object_key, identity)
+        _record_destination_artifact(stored_backup, target, identity)
         _persist_state(
             stored_backup,
             state,

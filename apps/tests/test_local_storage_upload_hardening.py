@@ -113,6 +113,7 @@ class LocalStorageUploadHardeningTests(TestCase):
 
         state = point.metadata[LOCAL_OBJECT_METADATA_KEY]
         self.assertEqual(state["object_key"], f"backups/{self.identifier}.zip")
+        self.assertEqual(state["storage_file_id"], point.storage_file_id)
         self.assertEqual(state["sha256"], checksum)
         self.assertEqual(state["size_bytes"], len(payload))
         self.assertEqual(state["checksum_algorithm"], "sha256")
@@ -128,7 +129,7 @@ class LocalStorageUploadHardeningTests(TestCase):
         self.assertLess(artifact_index, complete_save_index)
         artifact = events[artifact_index][1]
         self.assertEqual(artifact["role"], "destination")
-        self.assertEqual(artifact["object_key"], f"backups/{self.identifier}.zip")
+        self.assertEqual(artifact["object_key"], point.storage_file_id)
         self.assertEqual(artifact["byte_count"], len(payload))
         self.assertEqual(artifact["checksum_value"], checksum)
 

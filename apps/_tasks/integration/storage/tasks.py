@@ -130,63 +130,44 @@ class SourceArtifactInvalid(RuntimeError):
     pass
 
 
-def _dispatch_storage_adapter(stored_backup):
-    """Run one adapter against the already-materialized immutable upload input."""
+_STORAGE_ADAPTER_INVENTORY = {
+    "dropbox": (storage_dropbox, "remote-stream-sha256"),
+    "google_drive": (storage_google_drive, "remote-stream-sha256"),
+    "aws_s3": (storage_aws_s3, "verified-s3-object"),
+    "wasabi": (storage_wasabi, "verified-s3-object"),
+    "do_spaces": (storage_do_spaces, "verified-s3-object"),
+    "filebase": (storage_filebase, "verified-s3-object"),
+    "backblaze_b2": (storage_backblaze_b2, "verified-s3-object"),
+    "linode": (storage_linode, "verified-s3-object"),
+    "vultr": (storage_vultr, "verified-s3-object"),
+    "upcloud": (storage_upcloud, "verified-s3-object"),
+    "exoscale": (storage_exoscale, "verified-s3-object"),
+    "oracle": (storage_oracle, "verified-s3-object"),
+    "scaleway": (storage_scaleway, "verified-s3-object"),
+    "pcloud": (storage_pcloud, "remote-stream-sha256"),
+    "onedrive": (storage_onedrive, "remote-stream-sha256"),
+    "cloudflare": (storage_cloudflare, "verified-s3-object"),
+    "google_cloud": (storage_google_cloud, "remote-stream-sha256"),
+    "azure": (storage_azure, "remote-stream-sha256"),
+    "leviia": (storage_leviia, "verified-s3-object"),
+    "idrive": (storage_idrive, "verified-s3-object"),
+    "ionos": (storage_ionos, "verified-s3-object"),
+    "alibaba": (storage_alibaba, "verified-s3-object"),
+    "tencent": (storage_tencent, "verified-s3-object"),
+    "rackcorp": (storage_rackcorp, "verified-s3-object"),
+    "ibm": (storage_ibm, "verified-s3-object"),
+    "local": (storage_local, "local-readback-sha256"),
+}
 
-    if stored_backup.storage.type.code == "dropbox":
-        storage_dropbox(stored_backup)
-    elif stored_backup.storage.type.code == "google_drive":
-        storage_google_drive(stored_backup)
-    elif stored_backup.storage.type.code == "aws_s3":
-        storage_aws_s3(stored_backup)
-    elif stored_backup.storage.type.code == "wasabi":
-        storage_wasabi(stored_backup)
-    elif stored_backup.storage.type.code == "do_spaces":
-        storage_do_spaces(stored_backup)
-    elif stored_backup.storage.type.code == "filebase":
-        storage_filebase(stored_backup)
-    elif stored_backup.storage.type.code == "backblaze_b2":
-        storage_backblaze_b2(stored_backup)
-    elif stored_backup.storage.type.code == "linode":
-        storage_linode(stored_backup)
-    elif stored_backup.storage.type.code == "vultr":
-        storage_vultr(stored_backup)
-    elif stored_backup.storage.type.code == "upcloud":
-        storage_upcloud(stored_backup)
-    elif stored_backup.storage.type.code == "exoscale":
-        storage_exoscale(stored_backup)
-    elif stored_backup.storage.type.code == "oracle":
-        storage_oracle(stored_backup)
-    elif stored_backup.storage.type.code == "scaleway":
-        storage_scaleway(stored_backup)
-    elif stored_backup.storage.type.code == "pcloud":
-        storage_pcloud(stored_backup)
-    elif stored_backup.storage.type.code == "onedrive":
-        storage_onedrive(stored_backup)
-    elif stored_backup.storage.type.code == "cloudflare":
-        storage_cloudflare(stored_backup)
-    elif stored_backup.storage.type.code == "google_cloud":
-        storage_google_cloud(stored_backup)
-    elif stored_backup.storage.type.code == "azure":
-        storage_azure(stored_backup)
-    elif stored_backup.storage.type.code == "leviia":
-        storage_leviia(stored_backup)
-    elif stored_backup.storage.type.code == "idrive":
-        storage_idrive(stored_backup)
-    elif stored_backup.storage.type.code == "ionos":
-        storage_ionos(stored_backup)
-    elif stored_backup.storage.type.code == "alibaba":
-        storage_alibaba(stored_backup)
-    elif stored_backup.storage.type.code == "tencent":
-        storage_tencent(stored_backup)
-    elif stored_backup.storage.type.code == "rackcorp":
-        storage_rackcorp(stored_backup)
-    elif stored_backup.storage.type.code == "ibm":
-        storage_ibm(stored_backup)
-    elif stored_backup.storage.type.code == "local":
-        storage_local(stored_backup)
-    else:
+
+def _dispatch_storage_adapter(stored_backup):
+    """Run one inventoried adapter; every entry must persist readback evidence."""
+
+    entry = _STORAGE_ADAPTER_INVENTORY.get(stored_backup.storage.type.code)
+    if entry is None:
         raise UnsupportedStorageBackend()
+    adapter, _verification_mechanism = entry
+    adapter(stored_backup)
 
 
 def _mark_storage_upload_started(backup):
