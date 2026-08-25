@@ -54,6 +54,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.sha }}
 
       - name: Validate immutable release inputs
         shell: bash

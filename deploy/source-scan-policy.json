@@ -7,7 +7,7 @@
       "severity": "HIGH",
       "status": "FAIL",
       "target": "Dockerfile",
-      "target_sha256": "cbf56816cfd910ee2fc3f1963951594e73dcdb1434c6dec1e4d85c9d4b0ca325"
+      "target_sha256": "7040710907571e1b472c70b9d90d14edccc0dd9db366ac0eeb39ae335611762a"
     },
     {
       "finding_sha256": "d63aab39cd66efda6cdce44afc349590c893f1afbfa3c33b33f78e85f80b57c6",

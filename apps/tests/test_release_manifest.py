@@ -844,6 +844,20 @@ class ReleaseWorkflowContractTests(TestCase):
             with self.subTest(action=action):
                 self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
 
+    def test_every_release_checkout_is_detached_at_the_event_sha(self):
+        self.assertEqual(
+            self.workflow.count(
+                "uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+            ),
+            3,
+        )
+        self.assertEqual(self.workflow.count("ref: ${{ github.sha }}"), 3)
+        build_checkout = self.workflow.split(
+            "      - name: Check out the exact tagged commit\n", 1
+        )[1].split("      - name: Validate immutable release inputs\n", 1)[0]
+        self.assertIn("fetch-depth: 0", build_checkout)
+        self.assertIn("persist-credentials: false", build_checkout)
+
     def test_release_repeats_the_exact_security_regression_before_building(self):
         self.assertIn("on:\n  workflow_call:\n", self.supply_chain_workflow)
         regression_job = self.workflow.split("  release_regression:", 1)[1].split(
