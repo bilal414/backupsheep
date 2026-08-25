@@ -1,15 +1,26 @@
 import base64
 import hashlib
+import inspect
 import json
 import struct
+import threading
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError, transaction
-from django.test import SimpleTestCase, override_settings
+from django.db import (
+    DatabaseError,
+    IntegrityError,
+    close_old_connections,
+    connection as database_connection,
+    connections,
+    transaction,
+)
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -17,10 +28,18 @@ from apps._tasks.managed_ssh import (
     validate_managed_ssh_database_connection,
     validate_managed_ssh_files_connection,
 )
-from apps.api.v1.connection.website.serializers import CoreAuthWebsiteWriteSerializer
+from apps.api.v1.connection.database.serializers import (
+    CoreDatabaseConnectionWriteSerializer,
+)
+from apps.api.v1.connection.website.serializers import (
+    CoreAuthWebsiteWriteSerializer,
+    CoreWebsiteConnectionWriteSerializer,
+)
 from apps.api.v1.utils.api_helpers import bs_encrypt
+from apps.console.account.models import CoreAccount
 from apps.console.connection.managed_ssh import (
     ManagedSSHOperationError,
+    acquire_managed_ssh_mutation_lock,
     create_managed_ssh_operation,
     managed_public_key_fingerprint,
     managed_public_key_for_lane,
@@ -30,10 +49,12 @@ from apps.console.connection.models import (
     CoreAuthDatabase,
     CoreAuthWebsite,
     CoreConnection,
+    CoreIntegration,
     CoreManagedSSHOperation,
     CoreSSHHostKeyApproval,
 )
 from apps.console.connection.ssh import managed_private_key_path
+from apps.console.onboarding.views import account as onboarding_account_view
 from apps.console.setting.models import CoreSiteSettings
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -614,3 +635,217 @@ class ManagedSSHPublicKeyTests(SimpleTestCase):
         self.assertNotIn("- ssh_managed_database_private_key", files_block)
         for block in (app_block, database_block, files_block):
             self.assertNotIn("ssh_trust:/var/lib/backupsheep/ssh-trust", block)
+
+
+class ManagedSSHMutationEntryOrderingTests(SimpleTestCase):
+    def assert_fence_precedes(self, entrypoint, later_expression):
+        source = inspect.getsource(inspect.unwrap(entrypoint))
+        self.assertIn("acquire_managed_ssh_mutation_lock()", source)
+        self.assertIn(later_expression, source)
+        self.assertLess(
+            source.index("acquire_managed_ssh_mutation_lock()"),
+            source.index(later_expression),
+        )
+
+    def test_onboarding_account_creation_takes_fence_before_first_write(self):
+        self.assert_fence_precedes(onboarding_account_view, "User.objects.create_user")
+        self.assert_fence_precedes(onboarding_account_view, "CoreAccount.objects.create")
+
+    def test_database_serializer_takes_fence_before_account_row_lock(self):
+        for entrypoint in (
+            CoreDatabaseConnectionWriteSerializer.create,
+            CoreDatabaseConnectionWriteSerializer.update,
+        ):
+            with self.subTest(entrypoint=entrypoint.__name__):
+                self.assert_fence_precedes(
+                    entrypoint,
+                    "CoreAccount.objects.select_for_update()",
+                )
+
+    def test_website_serializer_takes_fence_before_account_row_lock(self):
+        for entrypoint in (
+            CoreWebsiteConnectionWriteSerializer.create,
+            CoreWebsiteConnectionWriteSerializer.update,
+        ):
+            with self.subTest(entrypoint=entrypoint.__name__):
+                self.assert_fence_precedes(
+                    entrypoint,
+                    "CoreAccount.objects.select_for_update()",
+                )
+
+
+@override_settings(**MANAGED_KEY_SETTINGS)
+class ManagedSSHMutationLockConcurrencyTests(TransactionTestCase):
+    def setUp(self):
+        super().setUp()
+        CoreIntegration.objects.get_or_create(
+            code="website",
+            defaults={
+                "name": "Website",
+                "type": CoreIntegration.Type.WEBSITE,
+            },
+        )
+        self.account, self.member, self.user = factories.make_account()
+        self.connection = factories.make_connection(
+            self.account,
+            self.member,
+            code="website",
+            name="managed SSH concurrency",
+        )
+        key = self.account.get_encryption_key()
+        self.auth = CoreAuthWebsite.objects.create(
+            connection=self.connection,
+            host="lock-order.example.test",
+            port=22,
+            protocol=CoreAuthWebsite.Protocol.SFTP,
+            username=bs_encrypt("website-user", key),
+            password=None,
+            private_key=None,
+            use_public_key=True,
+            use_private_key=False,
+        )
+        CoreSSHHostKeyApproval.objects.create(
+            account=self.account,
+            normalized_host=self.auth.host,
+            port=self.auth.port,
+            wire_key_type="ssh-ed25519",
+            public_key_base64=HOST_PUBLIC_KEY_BASE64,
+            fingerprint=HOST_FINGERPRINT,
+            negotiated_host_key_algorithm="ssh-ed25519",
+            bits=256,
+            approved_by_member_pk_snapshot=self.member.pk,
+            approved_by_user_pk_snapshot=self.user.pk,
+        )
+
+    @staticmethod
+    def _set_statement_timeout(milliseconds):
+        with connections["default"].cursor() as cursor:
+            cursor.execute("SET LOCAL statement_timeout = %s", (milliseconds,))
+
+    def test_compliant_operation_and_account_mutation_serialize_without_deadlock(self):
+        operation_ready = threading.Event()
+        release_operation = threading.Event()
+        account_backend_ready = threading.Event()
+        account_backend = {}
+        errors = []
+
+        def create_operation():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    self._set_statement_timeout(4000)
+                    create_managed_ssh_operation(
+                        self.connection,
+                        "validate",
+                        requested_by_member=self.member,
+                    )
+                    operation_ready.set()
+                    if not release_operation.wait(timeout=5):
+                        raise TimeoutError("operation release timed out")
+            except Exception as error:
+                errors.append(("operation", error))
+                operation_ready.set()
+            finally:
+                close_old_connections()
+
+        def create_account():
+            close_old_connections()
+            try:
+                if not operation_ready.wait(timeout=5):
+                    raise TimeoutError("operation did not acquire its fence")
+                with transaction.atomic():
+                    self._set_statement_timeout(4000)
+                    with connections["default"].cursor() as cursor:
+                        cursor.execute("SELECT pg_backend_pid()")
+                        account_backend["pid"] = cursor.fetchone()[0]
+                    account_backend_ready.set()
+                    acquire_managed_ssh_mutation_lock()
+                    CoreAccount.objects.create(
+                        name="Concurrent second account",
+                        encryption_key=Fernet.generate_key(),
+                    )
+            except Exception as error:
+                errors.append(("account", error))
+                account_backend_ready.set()
+            finally:
+                close_old_connections()
+
+        with mock.patch(
+            "apps.console.connection.managed_ssh.current_app.send_task"
+        ):
+            operation_thread = threading.Thread(target=create_operation)
+            account_thread = threading.Thread(target=create_account)
+            operation_thread.start()
+            self.assertTrue(operation_ready.wait(timeout=5))
+            account_thread.start()
+            self.assertTrue(account_backend_ready.wait(timeout=5))
+
+            observed_advisory_wait = False
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and not observed_advisory_wait:
+                with database_connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT wait_event_type, wait_event "
+                        "FROM pg_stat_activity WHERE pid = %s",
+                        (account_backend.get("pid"),),
+                    )
+                    state = cursor.fetchone()
+                observed_advisory_wait = state == ("Lock", "advisory")
+                if not observed_advisory_wait:
+                    time.sleep(0.01)
+
+            release_operation.set()
+            operation_thread.join(timeout=5)
+            account_thread.join(timeout=5)
+
+        self.assertTrue(observed_advisory_wait)
+        self.assertFalse(operation_thread.is_alive())
+        self.assertFalse(account_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(CoreAccount.objects.count(), 2)
+        self.assertEqual(CoreManagedSSHOperation.objects.count(), 1)
+
+    def test_inverted_row_first_caller_fails_fast_with_serialization_failure(self):
+        finished = threading.Event()
+        outcome = {}
+
+        def inverted_mutation():
+            close_old_connections()
+            trigger_started = None
+            try:
+                with transaction.atomic():
+                    self._set_statement_timeout(2500)
+                    auth = CoreAuthWebsite.objects.select_for_update().get(
+                        pk=self.auth.pk
+                    )
+                    auth.host = "changed-lock-order.example.test"
+                    trigger_started = time.monotonic()
+                    auth.save(update_fields=("host", "modified"))
+            except DatabaseError as error:
+                cause = getattr(error, "__cause__", None)
+                outcome["sqlstate"] = getattr(cause, "pgcode", None) or getattr(
+                    cause, "sqlstate", None
+                )
+                if trigger_started is not None:
+                    outcome["elapsed"] = time.monotonic() - trigger_started
+            except Exception as error:
+                outcome["unexpected"] = error
+            finally:
+                finished.set()
+                close_old_connections()
+
+        with transaction.atomic():
+            self._set_statement_timeout(4000)
+            acquire_managed_ssh_mutation_lock()
+            thread = threading.Thread(target=inverted_mutation)
+            thread.start()
+            completed_while_fence_held = finished.wait(timeout=2)
+
+        thread.join(timeout=5)
+        self.assertTrue(completed_while_fence_held)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("unexpected", outcome)
+        self.assertEqual(outcome.get("sqlstate"), "40001")
+        self.assertLess(outcome.get("elapsed", 999), 1.5)
+        self.auth.refresh_from_db()
+        self.assertEqual(self.auth.host, "lock-order.example.test")

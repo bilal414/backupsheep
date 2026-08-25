@@ -120,6 +120,7 @@ class SSHHostKeyScannerTests(SimpleTestCase):
         )
         rejected = (
             ("ssh-rsa", 2048),
+            ("ssh-rsa", 16385),
             ("ssh-dss", 1024),
             ("ecdsa-sha2-nistp256", 384),
             ("ecdsa-sha2-nistp384", 256),
