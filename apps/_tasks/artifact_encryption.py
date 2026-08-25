@@ -71,6 +71,28 @@ class RestoreEncryptionPlan:
     wrapped_data_key: WrappedDataKey
 
 
+def local_restore_phase_task_id(restore, phase: str) -> str:
+    """Derive the stable Celery id for one restore ciphertext handoff phase."""
+
+    if phase not in {"stage", "cleanup"}:
+        raise ArtifactPipelineError("The restore handoff phase is invalid.")
+    try:
+        correlation_id = str(uuid.UUID(str(restore.correlation_id)))
+        model_label = str(restore._meta.label_lower)
+        restore_id = int(restore.pk)
+    except (AttributeError, TypeError, ValueError):
+        raise ArtifactPipelineError(
+            "The restore handoff task identity is invalid."
+        ) from None
+    if not model_label or restore_id <= 0:
+        raise ArtifactPipelineError("The restore handoff task identity is invalid.")
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "backupsheep:local-restore:"
+        f"{phase}:{model_label}:{restore_id}:{correlation_id}",
+    ).hex
+
+
 def restore_ciphertext_handoff_identity(
     restore,
     plan: RestoreEncryptionPlan,

@@ -51,6 +51,7 @@ from apps._tasks.integration.backup._archive import (
 )
 from apps._tasks.artifact_encryption import (
     ArtifactPipelineError,
+    local_restore_phase_task_id,
     restore_ciphertext_handoff_identity,
     restore_encryption_plan,
     unseal_downloaded_artifact,
@@ -3064,7 +3065,8 @@ def _open_local_restore_ciphertext(restore, stored_backup, encryption_plan):
             )
 
             stage_local_restore_ciphertext.apply_async(
-                args=[_local_restore_model_key(restore), restore.pk]
+                args=[_local_restore_model_key(restore), restore.pk],
+                task_id=local_restore_phase_task_id(restore, "stage"),
             )
         raise _SafeProviderRestoreError(
             "RESTORE_CIPHERTEXT_HANDOFF_PENDING",

@@ -10,6 +10,7 @@ from django.utils.dateparse import parse_datetime
 from sentry_sdk import capture_exception
 
 from apps._tasks.diagnostics import capture_execution_diagnostic
+from apps._tasks.artifact_encryption import local_restore_phase_task_id
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.restore_lease import (
     DurableRestoreLease,
@@ -448,7 +449,10 @@ def _schedule_local_restore_handoff_cleanup(restore):
     model_key = (
         "website" if isinstance(restore, CoreWebsiteRestore) else "database"
     )
-    cleanup_local_restore_ciphertext.apply_async(args=[model_key, restore.pk])
+    cleanup_local_restore_ciphertext.apply_async(
+        args=[model_key, restore.pk],
+        task_id=local_restore_phase_task_id(restore, "cleanup"),
+    )
 
 
 def _refresh_bound_restore(lease):
