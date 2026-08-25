@@ -2291,7 +2291,7 @@ def account_delete(self):
             """
             for node in CoreNode.objects.filter(connection__account=account).order_by("-created"):
                 node.status = CoreNode.Status.DELETE_REQUESTED
-                node.save()
+                node.save(update_fields=["status", "modified"])
                 node_delete_requested(node_id=node.id)
 
             """

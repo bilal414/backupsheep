@@ -105,7 +105,7 @@ def backup_wordpress(
             email@bilal.me
             """
             node.status = CoreNode.Status.ACTIVE
-            node.save()
+            node.save(update_fields=["status", "modified"])
         except ConnectionValidationFailedError as error:
             node.notify_backup_fail(error, backup_type)
             node.backup_retrying_reset(self.request.id)

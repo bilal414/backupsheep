@@ -237,6 +237,143 @@ _LOCAL_RESTORE_MODELS = {
 }
 
 
+def _frozen_local_backup_request(backup):
+    """Reconstruct the source message from the durable concrete backup only."""
+
+    metadata = dict(backup.metadata or {})
+    storage_ids, _invalid_count = CoreNode._canonical_backup_storage_ids(
+        metadata.get("_backup_storage_ids")
+    )
+    return {
+        "node_id": int(backup.node.pk),
+        "schedule_id": int(backup.schedule_id) if backup.schedule_id else None,
+        "storage_ids": storage_ids,
+        "notes": backup.notes,
+        "resume": True,
+    }
+
+
+def _publish_prepared_local_backup(model_key, backup):
+    """Publish the stable source task only after storage authorization commits."""
+
+    node = backup.node
+    if not node.authorized_local_destination_point_ids(backup):
+        return False
+    task_id = str(backup.celery_task_id or "")
+    if not task_id:
+        raise RuntimeError("prepared local backup has no stable source task id")
+    current_app.send_task(
+        node.backup_task_name(),
+        task_id=task_id,
+        kwargs=_frozen_local_backup_request(backup),
+        delivery_mode=2,
+        mandatory=True,
+        retry=True,
+        retry_policy={
+            "max_retries": 3,
+            "interval_start": 0,
+            "interval_step": 1,
+            "interval_max": 3,
+        },
+    )
+    return True
+
+
+def _prepare_local_backup_destinations_id(model_key, backup_id):
+    """Validate one durable local request and hand it back to its source lane."""
+
+    model_key = str(model_key or "")
+    model = _BACKUP_MODELS.get(model_key)
+    canonical_id = _canonical_positive_id(backup_id)
+    if model is None or canonical_id is None:
+        return {"result": "invalid_request"}
+    backup = model.objects.filter(pk=canonical_id).first()
+    if backup is None:
+        return {"result": "not_found"}
+    if backup.status not in UtilBackup.ACTIVE_STATUSES:
+        return {"result": "terminal"}
+
+    node = backup.node
+    metadata = dict(backup.metadata or {})
+    storage_ids, _invalid_count = CoreNode._canonical_backup_storage_ids(
+        metadata.get("_backup_storage_ids")
+    )
+    prepared = node.backup_initiate(
+        backup.celery_task_id,
+        backup.type or UtilBackup.Type.ON_DEMAND,
+        max(1, int(backup.attempt_no or 1)),
+        backup.schedule_id,
+        storage_ids,
+        backup.notes,
+        prepare_destinations=True,
+    )
+    if prepared is None:
+        backup.refresh_from_db(fields=["status", "metadata"])
+        if backup.status == UtilBackup.Status.STORAGE_VALIDATION_FAILED:
+            return {"result": "rejected"}
+        return {"result": "busy"}
+    if not _publish_prepared_local_backup(model_key, prepared):
+        return {"result": "not_authorized"}
+    return {"result": "published"}
+
+
+@current_app.task(
+    name="prepare_local_backup_destinations",
+    bind=True,
+    default_retry_delay=60,
+    max_retries=16,
+    ignore_result=True,
+)
+def prepare_local_backup_destinations(self, model_key, backup_id):
+    """Run credential-bearing destination validation in the storage lane."""
+
+    try:
+        result = _prepare_local_backup_destinations_id(model_key, backup_id)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(exc=error)
+    if result.get("result") == "busy":
+        raise self.retry(countdown=60)
+    return result
+
+
+@current_app.task(
+    name="resume_pending_backup_destination_validations",
+    ignore_result=True,
+)
+def resume_pending_backup_destination_validations():
+    """Repair source/setup publication gaps from durable local backup rows."""
+
+    try:
+        batch_size = max(
+            1,
+            min(
+                int(getattr(settings, "BACKUP_RECOVERY_BATCH_SIZE", 100)),
+                1000,
+            ),
+        )
+    except (TypeError, ValueError):
+        batch_size = 100
+    preparation_published = []
+    for model_key, model in _BACKUP_MODELS.items():
+        candidates = list(
+            model.objects.filter(status__in=UtilBackup.ACTIVE_STATUSES)
+            .order_by("modified", "pk")[:batch_size]
+        )
+        for backup in candidates:
+            if backup.node.authorized_local_destination_point_ids(backup):
+                # Once authorization commits, the existing lane-specific source
+                # recovery sweep owns a lost storage-to-source publish. It already
+                # honors the source execution lease and stable task id.
+                continue
+            prepare_local_backup_destinations.apply_async(
+                args=[model_key, backup.pk],
+                task_id=CoreNode.local_destination_preparation_task_id(backup),
+            )
+            preparation_published.append((model_key, backup.pk))
+    return preparation_published
+
+
 def _canonical_positive_id(value):
     """Accept a canonical positive database id, never a path-like payload."""
 

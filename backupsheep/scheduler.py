@@ -335,7 +335,10 @@ class BackupDatabaseScheduler(DatabaseScheduler):
                     "task_name": schedule.node.backup_task_name(),
                     "node": schedule.node,
                     "schedule": schedule,
-                    "requested_by": schedule.added_by,
+                    # Preserve the FK snapshot without loading CoreMember into the
+                    # Beat process. Its database principal intentionally cannot
+                    # enumerate identities.
+                    "requested_by_id": schedule.added_by_id,
                     "trigger": SCHEDULE_TRIGGER,
                     "payload": payload,
                     "next_dispatch_at": timezone.now(),

@@ -1,6 +1,8 @@
 from datetime import timedelta
 from unittest import mock
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from django_celery_beat.models import PeriodicTask
 
@@ -44,6 +46,20 @@ class RunScheduledBackupTests(BaseTestCase):
         self.assertEqual(self.node.backup_task_name(), "backup_website")
         do_node = factories.make_cloud_node(self.account, self.member, code="digitalocean")
         self.assertEqual(do_node.backup_task_name(), "backup_digitalocean")
+
+    def test_schedule_storage_ids_use_only_the_non_secret_through_table(self):
+        storage = factories.make_storage(
+            self.account, self.member, bucket="scheduled-through-only"
+        )
+        schedule = factories.make_schedule(
+            self.node, self.member, storages=(storage,)
+        )
+        with CaptureQueriesContext(connection) as queries:
+            storage_ids = schedule.storage_ids
+        self.assertEqual(storage_ids, [storage.pk])
+        sql = "\n".join(query["sql"] for query in queries.captured_queries)
+        self.assertIn('"core_schedule_storage_points"', sql)
+        self.assertNotIn('FROM "core_storage"', sql)
 
 
 class CrashSafeBeatSchedulingTests(BaseTestCase):
@@ -350,6 +366,7 @@ class AirGappedCopyPolicyTests(BaseTestCase):
                 schedule.id,
                 schedule.storage_ids,
                 None,
+                prepare_destinations=True,
             )
 
         self.assertIsNone(result)

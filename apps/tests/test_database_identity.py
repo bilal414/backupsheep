@@ -10,7 +10,9 @@ from backupsheep.database_identity import (
     _ensure_application_role,
     _connect,
     _read_secret,
+    main,
 )
+from backupsheep.database_lane_policy import LANES
 
 
 class DatabaseIdentityConfigurationTests(TestCase):
@@ -22,7 +24,10 @@ class DatabaseIdentityConfigurationTests(TestCase):
         self.secrets = {
             "bootstrap": "b" * 32,
             "migrator": "m" * 32,
-            "runtime": "r" * 32,
+            **{
+                lane: chr(ord("c") + index) * 32
+                for index, lane in enumerate(LANES)
+            },
         }
         for name, value in self.secrets.items():
             path = self.secret_root / name
@@ -34,47 +39,59 @@ class DatabaseIdentityConfigurationTests(TestCase):
 
     def environment(self):
         return {
-            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION": "2",
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION": "3",
             "BACKUPSHEEP_INSTALLATION_ID": "a" * 64,
             "DB_NAME": "backupsheep",
             "DB_HOST": "db",
             "DB_PORT": "5432",
             "DB_BOOTSTRAP_USER": "backupsheep_bootstrap",
             "DB_MIGRATOR_USER": "backupsheep_migrator",
-            "DB_USER": "backupsheep_runtime",
             "DB_BOOTSTRAP_PASSWORD_FILE": str(self.secret_root / "bootstrap"),
             "DB_MIGRATOR_PASSWORD_FILE": str(self.secret_root / "migrator"),
-            "DB_PASSWORD_FILE": str(self.secret_root / "runtime"),
+            **{
+                f"DB_{lane.upper()}_USER": f"backupsheep_{lane}"
+                for lane in LANES
+            },
+            **{
+                f"DB_{lane.upper()}_PASSWORD_FILE": str(self.secret_root / lane)
+                for lane in LANES
+            },
         }
 
-    def test_configuration_loads_three_distinct_file_backed_identities(self):
+    def test_configuration_loads_every_distinct_file_backed_lane_identity(self):
         config = IdentityConfiguration.from_environment(
             self.environment(), secret_root=self.secret_root
         )
 
         self.assertEqual(config.bootstrap_user, "backupsheep_bootstrap")
         self.assertEqual(config.migrator_user, "backupsheep_migrator")
-        self.assertEqual(config.runtime_user, "backupsheep_runtime")
         self.assertEqual(config.bootstrap_password, self.secrets["bootstrap"])
         self.assertEqual(
-            config.marker("runtime"),
-            "backupsheep:database-identity-v2:" + "a" * 64 + ":runtime",
+            dict(config.lane_users),
+            {lane: f"backupsheep_{lane}" for lane in LANES},
+        )
+        self.assertEqual(dict(config.lane_passwords), {
+            lane: self.secrets[lane] for lane in LANES
+        })
+        self.assertEqual(
+            config.marker("storage"),
+            "backupsheep:database-identity-v3:" + "a" * 64 + ":storage",
         )
 
     def test_configuration_rejects_role_or_credential_reuse(self):
         reused_role = self.environment()
-        reused_role["DB_USER"] = reused_role["DB_MIGRATOR_USER"]
-        with self.assertRaisesRegex(ProvisioningError, "roles must be distinct"):
+        reused_role["DB_STORAGE_USER"] = reused_role["DB_MIGRATOR_USER"]
+        with self.assertRaisesRegex(ProvisioningError, "must be distinct"):
             IdentityConfiguration.from_environment(
                 reused_role, secret_root=self.secret_root
             )
 
-        (self.secret_root / "runtime").chmod(0o644)
-        (self.secret_root / "runtime").write_text(
+        (self.secret_root / "storage").chmod(0o644)
+        (self.secret_root / "storage").write_text(
             self.secrets["migrator"] + "\n", encoding="utf-8"
         )
-        (self.secret_root / "runtime").chmod(0o444)
-        with self.assertRaisesRegex(ProvisioningError, "credentials must be distinct"):
+        (self.secret_root / "storage").chmod(0o444)
+        with self.assertRaisesRegex(ProvisioningError, "credential must be distinct"):
             IdentityConfiguration.from_environment(
                 self.environment(), secret_root=self.secret_root
             )
@@ -167,7 +184,7 @@ class ExistingDatabaseRoleSafetyTests(TestCase):
     def test_existing_unmarked_role_is_never_adopted(self):
         cursor = self.Cursor(
             (
-                "backupsheep_runtime",
+                "backupsheep_storage",
                 False,
                 False,
                 False,
@@ -182,16 +199,16 @@ class ExistingDatabaseRoleSafetyTests(TestCase):
         ):
             _ensure_application_role(
                 cursor,
-                role_name="backupsheep_runtime",
+                role_name="backupsheep_storage",
                 password="r" * 32,
-                marker="backupsheep:database-identity-v2:" + "a" * 64 + ":runtime",
+                marker="backupsheep:database-identity-v3:" + "a" * 64 + ":storage",
             )
 
     def test_existing_marked_role_with_elevated_attribute_is_rejected(self):
-        marker = "backupsheep:database-identity-v2:" + "a" * 64 + ":runtime"
+        marker = "backupsheep:database-identity-v3:" + "a" * 64 + ":storage"
         cursor = self.Cursor(
             (
-                "backupsheep_runtime",
+                "backupsheep_storage",
                 True,
                 False,
                 False,
@@ -204,7 +221,7 @@ class ExistingDatabaseRoleSafetyTests(TestCase):
         with self.assertRaisesRegex(ProvisioningError, "unsafe attributes"):
             _ensure_application_role(
                 cursor,
-                role_name="backupsheep_runtime",
+                role_name="backupsheep_storage",
                 password="r" * 32,
                 marker=marker,
             )
@@ -238,3 +255,55 @@ class ExistingDatabaseShapeSafetyTests(TestCase):
 
         with self.assertRaisesRegex(ProvisioningError, "standalone types"):
             _assert_supported_database_shape(cursor, self.config)
+
+
+class DatabaseIdentitySealCommandTests(TestCase):
+    @mock.patch("backupsheep.database_lane_probe.run_probe")
+    @mock.patch("backupsheep.database_identity.seal_database_identities")
+    @mock.patch("backupsheep.database_identity._connect")
+    @mock.patch("backupsheep.database_identity.IdentityConfiguration.from_environment")
+    def test_seal_runs_adversarial_probe_after_closing_bootstrap_connection(
+        self,
+        configuration,
+        connect,
+        seal,
+        run_probe,
+    ):
+        config = mock.Mock()
+        configuration.return_value = config
+        connection = mock.Mock()
+        connect.return_value = connection
+
+        self.assertEqual(main(["seal"]), 0)
+
+        seal.assert_called_once_with(connection, config)
+        connection.close.assert_called_once_with()
+        run_probe.assert_called_once_with(config)
+
+    @mock.patch(
+        "backupsheep.database_lane_probe.run_probe",
+        side_effect=RuntimeError("synthetic probe failure"),
+    )
+    @mock.patch("backupsheep.database_identity.seal_database_identities")
+    @mock.patch("backupsheep.database_identity._connect")
+    @mock.patch("backupsheep.database_identity.IdentityConfiguration.from_environment")
+    def test_seal_fails_closed_when_adversarial_probe_fails(
+        self,
+        configuration,
+        connect,
+        _seal,
+        _run_probe,
+    ):
+        configuration.return_value = mock.Mock()
+        connect.return_value = mock.Mock()
+
+        with mock.patch("builtins.print") as output:
+            self.assertEqual(main(["seal"]), 1)
+
+        rendered = " ".join(
+            str(argument)
+            for call in output.call_args_list
+            for argument in call.args
+        )
+        self.assertIn("failed closed", rendered)
+        self.assertNotIn("synthetic probe failure", rendered)

@@ -1,46 +1,90 @@
-# PostgreSQL identity generation 2
+# PostgreSQL identity generation 3
 
-The stock Docker stack uses three PostgreSQL logins with separate credentials:
+Stock Docker uses ten independently authenticated PostgreSQL logins. No web,
+worker, scheduler, or preflight container receives another lane's password.
 
-| Identity | Lifetime and authority | Secret recipients |
+| Identity | Lifetime | Database authority |
 | --- | --- | --- |
-| Bootstrap | Bundled-cluster superuser required by the official PostgreSQL initializer and the transactional identity provisioner | `db`, `db-provision` |
-| Migrator | Non-superuser owner of the BackupSheep database and `public` schema; runs Django migrations | `db-provision`, `migrate` |
-| Runtime | Non-owner login with table DML, sequence use and execution of public routines, but no database/schema DDL or temporary-table privilege | `db-provision`, app, preflight, workers, Beat |
+| Bootstrap | PostgreSQL plus `db-provision` and `db-seal` only | Bundled-cluster superuser required by the official initializer and the two transactional boundary phases |
+| Migrator | `migrate` one-shot only | Non-superuser owner of the database, `public` schema, application relations, sequences and routines |
+| App | Long-lived web | Control-plane DML needed by the console/API, without schema DDL, temporary tables, task-replay access, or migration writes |
+| Preflight | One-shot gate | Read-only migration evidence and PostgreSQL catalogs needed to validate the complete boundary |
+| Beat | Long-lived scheduler | Beat tables plus narrowly scoped scheduled-backup occurrence/outbox writes; no member, destination-configuration, source-worker, notification, or replay-row access |
+| Cloud | Cloud/default worker | Explicit remote-provider tables and only cloud-scoped shared rows |
+| Database | Database worker | Database source/backup/restore rows and database-scoped shared rows; no destination-configuration reads |
+| Files | Files worker | Website, WordPress and Basecamp source rows and files-scoped shared rows; no destination-configuration reads |
+| Storage | Storage worker | Storage configuration, local artifact handoff, deletion and recovery rows; no user/session/token, source-auth, cloud-auth, notification-secret, or Beat tables |
+| Logs | Logs worker | Run-log/notification delivery rows and bounded terminal replay cleanup |
 
-Fresh verified installs create this boundary automatically. This runbook is only for an
-existing stock Docker database whose old `DB_USER` is also the PostgreSQL bootstrap
-superuser. It does not apply to managed/external PostgreSQL or a deployment with
-`DATABASE_URL`; those identities and grants are operator-managed.
+All eight runtime identities are non-owners with no superuser, role creation,
+database creation, replication, row-security bypass, schema creation, database
+temporary-table, or role-membership authority. Exact table/column/sequence/routine
+grants replace broad schema grants after every migration.
 
-## Safety boundary
+Row-level security separates shared ledgers that cannot safely be split into
+different tables:
 
-Identity conversion changes durable PostgreSQL ownership and credentials. It is not a
-normal configuration edit. Before starting:
+- Celery replay rows are restricted by `target_lane`; only logs may delete expired
+  terminal rows.
+- Artifact wrap/context and execution rows are restricted by source lane and content
+  type.
+- Managed-SSH operations are restricted by `source_lane`; database/files can update
+  only worker-result columns, never immutable intent columns, and no runtime role
+  can delete proof rows directly. A lane-authenticated security-definer retention
+  routine clamps retention to 7–365 days and batch size to 1–500; it never removes
+  the newest successful validation for a connection's current generation.
+- The app/database/files-only single-account predicate counts accounts outside the
+  caller's RLS view. A second account therefore disables and fences installation-
+  managed SSH globally and cannot be hidden from one source lane by row filtering.
+- Shared connection rows are restricted by integration type. Database/files may
+  update only validation status, and database may update only the reviewed database
+  type/version metadata columns.
+- Every local backup destination through row is storage-owned. Database/files have
+  SELECT-only access to the non-secret point id and authorization witness and have no
+  privilege on any `core_storage*` table. A source task first commits its concrete
+  backup, stops before source/provider access, and asks storage to validate the
+  frozen destination selection. Storage commits the accepted-point witnesses before
+  republishing the stable source task. The storage and source recovery sweeps repair
+  either broker/crash gap; missing or forged source metadata never opens the gate.
 
-1. Use the exact current and target commits and the normal
+The policy is an exact inventory. A new or missing application table, routine,
+trigger, RLS expression, privilege, default ACL, owner, role marker, or connection
+limit causes `db-seal` or preflight to fail closed.
+
+## Scope
+
+Fresh verified installs create generation 3 automatically. This runbook covers an
+existing stock Docker database on generation 2 or the older shared-superuser model.
+It does not automatically rewrite identities for external/managed PostgreSQL or a
+deployment using `DATABASE_URL`; that operator owns its roles and equivalent grants.
+
+The provisioner accepts only the reviewed stock database shape: application objects
+in `public`, the expected Django tables/routines/triggers, and ownership by the marked
+bootstrap/migrator identities. Custom schemas, extensions, standalone types,
+unsupported relation kinds, unmarked role collisions, unsafe attributes, or unknown
+objects stop the migration. Review those objects manually; never weaken the inventory
+or edit an installation marker to bypass it.
+
+## Before the change
+
+Identity conversion changes durable cluster roles, ownership, passwords, ACLs and
+RLS. Before starting:
+
+1. Pin the exact current and target commits and complete the normal
    [upgrade ownership checks](upgrades.md#before-the-change).
-2. Stop the app, every worker and Beat. Prove there are no database-backed application
-   processes or broker consumers still running.
-3. Create and verify an encrypted off-host recovery set containing a PostgreSQL custom
-   dump, a recoverable `pgdata` snapshot, `.env`, the complete `.secrets` directory,
-   Compose overrides, exact Git commit and both image IDs. A dump alone does not contain
-   cluster roles and is not a complete rollback for this change.
-4. Confirm the legacy `DB_USER` and database name are the intended stock installation.
-   Never copy a secret or generation marker from another installation.
+2. Stop the app, every worker and Beat. Prove that no application database sessions
+   or broker consumers remain.
+3. Create and restore-test an encrypted off-host recovery set containing a PostgreSQL
+   custom dump, a recoverable `pgdata` snapshot, `.env`, the complete `.secrets`
+   directory, approved Compose overrides, exact Git commit and image IDs. A logical
+   dump does not contain cluster roles and is not sufficient by itself.
+4. Confirm the old database/user and Compose project are the intended installation.
+   Never copy a password or generation witness from another installation.
 
-The provisioner intentionally accepts only a narrow legacy topology. The current
-database and its relations must be owned by the legacy bootstrap or the marked migrator,
-and application relations/routines must be in `public`. Custom schemas, extensions,
-standalone types and unsupported catalog/cluster object classes fail closed. Review and transfer
-those objects manually in a separate change; do not weaken the inventory or edit the
-generation witness to bypass it.
+## Stage the transition
 
-## Stage the credential transition
-
-After checking out the reviewed target commit, run the verified installer once with
-startup disabled and the explicit migration flag. Include the same domain, project name
-and approved override arguments used by this installation:
+Run the verified installer with the explicit database migration flag and all normal
+installation/KMS arguments. `--skip-start` is useful for a change-review pause:
 
 ```bash
 TARGET_COMMIT='<40-character-reviewed-release-commit>'
@@ -52,75 +96,82 @@ TARGET_COMMIT='<40-character-reviewed-release-commit>'
   --skip-start
 ```
 
-This local, resumable transition:
+The local stage:
 
-- atomically moves the legacy `db_password` file to `db_bootstrap_password`;
-- creates new random `db_migrator_password` and runtime `db_password` files;
-- preserves the legacy role name as `DB_BOOTSTRAP_USER`;
-- sets fixed, distinct migrator/runtime role names and writes identity generation `2`
-  only after every file and environment rewrite succeeds.
+- preserves the current bootstrap credential and migrator credential where present;
+- creates distinct random credentials for app, preflight, Beat, cloud, database,
+  files, storage and logs;
+- writes fixed per-lane role names and keeps `DB_USER` as the app compatibility alias;
+- records `3-pending-upgrade` (or `3-pending-fresh`) before a new secret can appear;
+- accepts only the exact ordered resumable secret prefix; and
+- deliberately leaves the generation pending when startup is skipped.
 
-The installer accepts only the ordered resumable file states produced by those steps.
-An unexpected combination stops as ambiguous and requires restoring the protected
-configuration from the rollback set. If a later independent installer gate stops after
-generation `2` was recorded, retain the evidence and rerun without
-`--migrate-database-identities`; the one-time option is deliberately rejected once the
-local transition is complete.
+A pending deployment cannot start a long-lived lane: database runtime validation
+requires completed generation 3. For an interrupted existing-install transition,
+preserve evidence and rerun with `--migrate-database-identities`. Do not manually set
+the marker to `3`, remove a pending secret, or start an older Compose model.
 
-Do not start an old Compose model after staging. Do not rename or delete either new
-credential, and do not expose their values in shell output, logs or tickets.
+## Seal and promote
 
-## Provision and verify
-
-Run the same exact installer normally, without the one-time flag:
+Run the same installer without `--skip-start`; keep the migration flag while an
+existing-install transition remains pending:
 
 ```bash
 ./install.sh \
   --ref "${TARGET_COMMIT}" \
   --install-dir "$PWD" \
-  --project-name backupsheep
+  --project-name backupsheep \
+  --migrate-database-identities
 ```
 
-`db-provision` connects over its dedicated internal bridge and applies one PostgreSQL
-transaction. It marks this installation's roles, rejects pre-existing unmarked roles or
-unsafe attributes/memberships, transfers reviewed ownership, applies grants/default
-privileges and rotates both application-role passwords. `migrate` cannot run unless that
-transaction commits; the app cannot run unless migration and the independent security
-preflight both pass.
+Startup is intentionally two phase:
 
-Verify all three one-shots and retain their exit codes in the change record:
+1. Provider workers and Beat remain stopped.
+2. `db-provision` creates/rotates marked roles, transfers reviewed ownership, revokes
+   public/default/runtime access, retires the marked generation-2 runtime and exits.
+3. `migrate` runs only as the non-superuser owner.
+4. `db-seal` inventories the migrated schema, applies exact ACLs and RLS, and
+   records installation-bound policy witnesses.
+5. Only after `db-seal` exits zero does the installer remove the retired shared
+   password and atomically promote `.env` to generation `3`.
+6. Preflight connects as the unprivileged preflight role and validates the complete
+   catalog contract before the web service can start.
+
+An interruption before step 5 leaves the durable marker pending. An interruption
+after step 5 is safe because `db-seal` has committed, and Compose still requires
+preflight to succeed before app/workers/Beat.
+
+Retain these bounded logs and one-shot exit codes in the change record:
 
 ```bash
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=200 db-provision migrate preflight
+./backupsheep-compose logs --tail=200 db-provision migrate db-seal preflight
 ```
 
-The preflight connects as `DB_USER` and independently proves:
+The release test suite also provisions a fresh PostgreSQL instance, applies all
+migrations, seals the policy and runs direct adversarial connections. It proves
+cross-lane reads/writes, Beat mutation, DDL, schema creation, temporary tables, role
+elevation, replay crossover, source reads of every destination credential table,
+source rewrites of storage-owned authorization witnesses, and immutable managed-SSH
+intent rewrites are denied. Authenticated database/files sessions additionally prove
+that direct proof deletion fails and bounded retention cannot erase the current
+validation witness or another lane's rows.
 
-- the active role carries this installation's runtime marker;
-- it has no superuser, create-role, create-database, replication or row-security-bypass
-  attributes and no role memberships;
-- the migrator owns the database and `public` schema;
-- the runtime cannot create database/schema objects or temporary tables;
-- all migrations are applied.
-
-Keep operations stopped until the ordinary upgrade, recovery and provider-ownership
-review is complete. The generation-2 foundation still uses one shared runtime DML role
-for the web and worker lanes; per-lane table grants are a separate hardening phase.
+Keep operations stopped until ordinary recovery and provider-ownership review is
+complete. Then start operations only through the reviewed wrapper and explicit
+operations profile.
 
 ## Failure and rollback
 
-Provisioning errors are deliberately generic so connection diagnostics cannot disclose
-credentials. Leave failed containers and volumes in place for evidence. First inspect
-the bounded `db-provision`, `migrate` and `preflight` logs; do not repeatedly edit role
-comments, grants or `.env` to force a pass.
+Leave failed containers and volumes in place for evidence. Inspect only the bounded
+one-shot logs; do not repeatedly edit role comments, grants, RLS policies, `.env`, or
+secret files to force a pass.
 
-If PostgreSQL provisioning never committed, restore `.env` and the entire `.secrets`
-directory together from the verified recovery set before returning to the old release.
-If it committed, use the recoverable `pgdata` snapshot plus its matching configuration
-for the cleanest rollback. Do not delete the new roles or partially reassign ownership
-in place. A logical database dump does not restore cluster-role attributes/passwords;
-using it requires an independently reviewed role-reconstruction procedure.
+If provisioning did not commit, restore `.env` and the complete `.secrets` directory
+together before returning to the old release. If provisioning/sealing committed, the
+clean rollback is the matching recoverable `pgdata` snapshot plus its configuration.
+Do not delete new roles or partially reassign ownership in place. A logical dump needs
+an independently reviewed cluster-role reconstruction procedure.
 
-After any rollback, prove the old app can authenticate, verify migrations and durable
-work state, and keep provider operations disabled until reconciliation is complete.
+After rollback, prove old application authentication, migrations and durable work
+state, and keep provider operations disabled until reconciliation completes.
