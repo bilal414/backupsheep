@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -195,6 +196,7 @@ class InstallerSecretMigrationTests(TestCase):
                     "DB_MIGRATOR_USER=",
                     "BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION=",
                     "BACKUPSHEEP_CELERY_SECURITY_GENERATION=",
+                    "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION=",
                     "RABBITMQ_LEGACY_USER=",
                 )
             )
@@ -284,7 +286,10 @@ fi
         self.assertIn("DB_USER='backupsheep_runtime'", migrated_env)
         self.assertIn("DB_PASSWORD=''", migrated_env)
         self.assertIn("BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION='2'", migrated_env)
-        self.assertIn("BACKUPSHEEP_CELERY_SECURITY_GENERATION='2'", migrated_env)
+        self.assertIn("BACKUPSHEEP_CELERY_SECURITY_GENERATION='3'", migrated_env)
+        self.assertIn(
+            "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION='1'", migrated_env
+        )
         self.assertIn("RABBITMQ_USER='backupsheep_app'", migrated_env)
         self.assertIn("RABBITMQ_LEGACY_USER='backupsheep'", migrated_env)
         self.assertIn("RABBITMQ_PASSWORD=''", migrated_env)
@@ -345,6 +350,8 @@ fi
             encoding="utf-8"
         )
         self.assertIn('"installation_id"', registry)
+        self.assertIn('"version":2', registry)
+        self.assertIn('"generation":1', registry)
         self.assertIn('"keys"', registry)
 
         before = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
@@ -369,6 +376,76 @@ fi
         secret_dir = self.temp_dir / ".secrets"
         self.assertFalse((secret_dir / "db_bootstrap_password").exists())
         self.assertFalse((secret_dir / "db_migrator_password").exists())
+
+    def test_generation_two_task_auth_requires_resumable_explicit_rotation(self):
+        self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration"
+        )
+        secret_dir = self.temp_dir / ".secrets"
+        registry_path = secret_dir / "celery_trusted_public_keys"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        legacy_registry = {
+            "version": 1,
+            "installation_id": registry["installation_id"],
+            "keys": registry["keys"],
+        }
+        registry_path.chmod(0o600)
+        registry_path.write_text(
+            json.dumps(legacy_registry, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        registry_path.chmod(0o444)
+        configured = self.env_file.read_text(encoding="utf-8")
+        configured = configured.replace(
+            "BACKUPSHEEP_CELERY_SECURITY_GENERATION='3'",
+            "BACKUPSHEEP_CELERY_SECURITY_GENERATION='2'",
+            1,
+        ).replace(
+            "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION='1'",
+            "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION=''",
+            1,
+        )
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+
+        refused = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "configure_rabbitmq_identity_generation",
+            check=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--rotate-celery-signing-keys", refused.stderr)
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "ROTATE_CELERY_SIGNING_KEYS=true\n"
+            "configure_rabbitmq_identity_generation\n"
+            "validate_secret_dir"
+        )
+        pending = self.env_file.read_text(encoding="utf-8")
+        self.assertIn(
+            "BACKUPSHEEP_CELERY_SECURITY_GENERATION='3-pending-rotation'",
+            pending,
+        )
+        self.assertIn(
+            "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION='2'", pending
+        )
+        for lane in ("app", "beat", "cloud", "database", "files", "storage", "logs"):
+            candidate = secret_dir / f".celery_rotation_{lane}_private_key"
+            self.assertEqual(stat.S_IMODE(candidate.stat().st_mode), 0o444)
+        candidate_registry = json.loads(
+            (secret_dir / ".celery_rotation_trusted_public_keys").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(candidate_registry["version"], 2)
+        self.assertEqual(candidate_registry["generation"], 2)
 
     def test_kms_lane_credentials_require_distinct_access_key_identities(self):
         self.files_kms_credentials.write_text(

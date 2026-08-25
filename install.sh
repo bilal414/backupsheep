@@ -60,6 +60,16 @@ readonly -a SECRET_NAMES=(
 readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password)
 readonly -a RABBITMQ_ROLES=(bootstrap app preflight beat cloud database files storage logs)
 readonly -a CELERY_SIGNING_LANES=(app beat cloud database files storage logs)
+readonly -a CELERY_ROTATION_SECRET_NAMES=(
+    .celery_rotation_app_private_key
+    .celery_rotation_beat_private_key
+    .celery_rotation_cloud_private_key
+    .celery_rotation_database_private_key
+    .celery_rotation_files_private_key
+    .celery_rotation_storage_private_key
+    .celery_rotation_logs_private_key
+    .celery_rotation_trusted_public_keys
+)
 
 default_install_dir() {
     if [[ -n "${XDG_DATA_HOME:-}" && "${XDG_DATA_HOME}" == /* ]]; then
@@ -82,6 +92,7 @@ SKIP_START=false
 ENABLE_OPERATIONS=false
 MIGRATE_DATABASE_IDENTITIES=false
 MIGRATE_RABBITMQ_IDENTITIES=false
+ROTATE_CELERY_SIGNING_KEYS=false
 MIGRATE_STAGING_LAYOUT=false
 ARTIFACT_KMS_KEY_ID=""
 ARTIFACT_KMS_REGION=""
@@ -146,6 +157,10 @@ Options:
                      per-lane file credentials and Ed25519 task-signing keys, and
                      enable the one-shot permission reconciler. Required once for
                      an existing install.
+  --rotate-celery-signing-keys
+                     Explicit generation-3 task-auth upgrade/key rotation. Requires
+                     a running owned broker with empty queues after database recovery,
+                     and every app/worker/Beat container stopped.
   --migrate-staging-layout
                      One-time authorization to adopt an existing install only when
                      the legacy shared work volume is empty and every new lane volume
@@ -325,6 +340,10 @@ parse_args() {
                 MIGRATE_RABBITMQ_IDENTITIES=true
                 shift
                 ;;
+            --rotate-celery-signing-keys)
+                ROTATE_CELERY_SIGNING_KEYS=true
+                shift
+                ;;
             --migrate-staging-layout)
                 MIGRATE_STAGING_LAYOUT=true
                 shift
@@ -380,6 +399,8 @@ parse_args() {
 
     [[ "$SKIP_START" != true || "$ENABLE_OPERATIONS" != true ]] \
         || die "--skip-start and --enable-operations cannot be used together"
+    [[ "$ROTATE_CELERY_SIGNING_KEYS" != true || "$ENABLE_OPERATIONS" != true ]] \
+        || die "--rotate-celery-signing-keys and --enable-operations cannot be used together"
     if [[ -n "$ADOPT_LEGACY_PROJECT" ]]; then
         if [[ "$PROJECT_NAME_WAS_EXPLICIT" == true && "$PROJECT_NAME" != "$ADOPT_LEGACY_PROJECT" ]]; then
             die "--project-name and --adopt-legacy-project must name the same project"
@@ -878,7 +899,10 @@ validate_secret_dir() {
         [[ -e "$entry" || -L "$entry" ]] || continue
         base="$(basename -- "$entry")"
         allowed=false
-        for expected in "${SECRET_NAMES[@]}" "${LEGACY_SECRET_NAMES[@]}"; do
+        for expected in \
+            "${SECRET_NAMES[@]}" \
+            "${LEGACY_SECRET_NAMES[@]}" \
+            "${CELERY_ROTATION_SECRET_NAMES[@]}"; do
             if [[ "$base" == "$expected" ]]; then
                 allowed=true
                 break
@@ -961,7 +985,8 @@ validate_secret_file() {
         return
     fi
 
-    if [[ "$secret_name" == celery_signing_*_private_key ]]; then
+    if [[ "$secret_name" == celery_signing_*_private_key \
+        || "$secret_name" == .celery_rotation_*_private_key ]]; then
         local validation_copy=""
         local public_key=""
         [[ "$secret_size" -gt 100 && "$secret_size" -le 16384 ]] \
@@ -1122,6 +1147,7 @@ write_secret_file() {
 
 write_celery_signing_key() {
     local lane="$1"
+    local key_set="${2:-active}"
     local secret_name="celery_signing_${lane}_private_key"
     local destination="${SECRETS_DIR}/${secret_name}"
     local temporary_key=""
@@ -1135,6 +1161,12 @@ write_celery_signing_key() {
         fi
     done
     [[ "$valid_lane" == true ]] || die "Unknown Celery signing lane: ${lane}"
+    if [[ "$key_set" == rotation ]]; then
+        secret_name=".celery_rotation_${lane}_private_key"
+        destination="${SECRETS_DIR}/${secret_name}"
+    else
+        [[ "$key_set" == active ]] || die "Unknown Celery signing key set."
+    fi
     if [[ -e "$destination" || -L "$destination" ]]; then
         validate_secret_file "$destination"
         return
@@ -1156,10 +1188,16 @@ write_celery_signing_key() {
 
 celery_public_key() {
     local lane="$1"
+    local key_set="${2:-active}"
     local private_key="${SECRETS_DIR}/celery_signing_${lane}_private_key"
     local validation_copy=""
     local public_key=""
 
+    if [[ "$key_set" == rotation ]]; then
+        private_key="${SECRETS_DIR}/.celery_rotation_${lane}_private_key"
+    else
+        [[ "$key_set" == active ]] || die "Unknown Celery signing key set."
+    fi
     validate_secret_file "$private_key"
     validation_copy="$(mktemp "${SECRETS_DIR}/.celery-public.XXXXXXXX")"
     cp -- "$private_key" "$validation_copy"
@@ -1175,30 +1213,113 @@ celery_public_key() {
 }
 
 configure_celery_public_registry() {
+    local signing_generation="${1:-}"
+    local key_set="${2:-active}"
     local installation_id=""
     local expected=""
     local lane=""
     local separator=""
     local existing=""
     local registry="${SECRETS_DIR}/celery_trusted_public_keys"
+    local temporary_registry=""
 
     installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
     [[ "$installation_id" =~ ^[0-9a-f]{64}$ ]] \
         || die "Cannot bind Celery keys to a malformed installation identity."
-    expected="{\"version\":1,\"installation_id\":\"${installation_id}\",\"keys\":{"
+    [[ "$signing_generation" =~ ^[1-9][0-9]{0,8}$ ]] \
+        || die "Celery signing-key generation is invalid."
+    if [[ "$key_set" == rotation ]]; then
+        registry="${SECRETS_DIR}/.celery_rotation_trusted_public_keys"
+    else
+        [[ "$key_set" == active ]] || die "Unknown Celery signing registry set."
+    fi
+    expected='{"version":2,"installation_id":"'
+    expected="${expected}${installation_id}\",\"generation\":${signing_generation},\"keys\":{"
     for lane in "${CELERY_SIGNING_LANES[@]}"; do
-        expected="${expected}${separator}\"${lane}\":\"$(celery_public_key "$lane")\""
+        expected="${expected}${separator}\"${lane}\":\"$(celery_public_key "$lane" "$key_set")\""
         separator=','
     done
     expected="${expected}}}"
     if [[ -e "$registry" || -L "$registry" ]]; then
-        validate_secret_file "$registry"
+        if [[ "$key_set" == active ]]; then
+            validate_secret_file "$registry"
+        else
+            [[ -f "$registry" && ! -L "$registry" \
+                && "$(file_uid "$registry")" == "$EUID" \
+                && "$(file_mode "$registry")" == "444" \
+                && "$(file_links "$registry")" == "1" ]] \
+                || die "The pending Celery public-key registry metadata drifted."
+        fi
         existing="$(<"$registry")"
         [[ "$existing" == "$expected" ]] \
             || die "The Celery public-key registry does not match this installation's private keys."
         return
     fi
-    write_secret_file celery_trusted_public_keys "$expected"
+    if [[ "$key_set" == active ]]; then
+        write_secret_file celery_trusted_public_keys "$expected"
+        return
+    fi
+    temporary_registry="$(mktemp "${SECRETS_DIR}/.celery-rotation-registry.XXXXXXXX")"
+    if ! printf '%s\n' "$expected" > "$temporary_registry"; then
+        rm -f -- "$temporary_registry"
+        die "Could not write the pending Celery public-key registry."
+    fi
+    chmod 0444 "$temporary_registry"
+    if ! atomic_move_new "$temporary_registry" "$registry"; then
+        rm -f -- "$temporary_registry"
+        die "Could not publish the pending Celery public-key registry."
+    fi
+}
+
+validate_legacy_celery_public_registry() {
+    local installation_id=""
+    local expected=""
+    local separator=""
+    local lane=""
+    local registry="${SECRETS_DIR}/celery_trusted_public_keys"
+
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    expected='{"version":1,"installation_id":"'
+    expected="${expected}${installation_id}\",\"keys\":{"
+    for lane in "${CELERY_SIGNING_LANES[@]}"; do
+        expected="${expected}${separator}\"${lane}\":\"$(celery_public_key "$lane")\""
+        separator=','
+    done
+    expected="${expected}}}"
+    validate_secret_file "$registry"
+    [[ "$(<"$registry")" == "$expected" ]] \
+        || die "The legacy Celery registry does not match its installed private keys."
+}
+
+celery_rotation_artifacts_present() {
+    local name=""
+    for name in "${CELERY_ROTATION_SECRET_NAMES[@]}"; do
+        if [[ -e "${SECRETS_DIR}/${name}" || -L "${SECRETS_DIR}/${name}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+prepare_celery_signing_rotation() {
+    local next_generation="$1"
+    local lane=""
+
+    [[ "$next_generation" =~ ^[1-9][0-9]{0,8}$ ]] \
+        || die "The next Celery signing-key generation is invalid."
+    set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 3-pending-rotation
+    set_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION "$next_generation"
+    for lane in "${CELERY_SIGNING_LANES[@]}"; do
+        write_celery_signing_key "$lane" rotation
+    done
+    configure_celery_public_registry "$next_generation" rotation
+}
+
+remove_celery_rotation_artifacts() {
+    local name=""
+    for name in "${CELERY_ROTATION_SECRET_NAMES[@]}"; do
+        rm -f -- "${SECRETS_DIR}/${name}"
+    done
 }
 
 reject_placeholder_secret() {
@@ -1412,47 +1533,104 @@ validate_distinct_rabbitmq_passwords() {
 configure_rabbitmq_identity_generation() {
     local generation=""
     local security_generation=""
+    local signing_generation=""
     local legacy_user=""
     local role=""
     local lane=""
     local secret_path=""
+    local next_generation=""
     local legacy_secret="${SECRETS_DIR}/rabbitmq_password"
     local bootstrap_secret="${SECRETS_DIR}/rabbitmq_bootstrap_password"
 
     generation="$(read_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION)"
     security_generation="$(read_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION)"
+    signing_generation="$(read_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION)"
     if [[ "$ENV_WAS_PRESENT" != true ]]; then
         [[ "$MIGRATE_RABBITMQ_IDENTITIES" != true ]] \
             || die "--migrate-rabbitmq-identities is valid only for an existing legacy installation."
+        [[ "$ROTATE_CELERY_SIGNING_KEYS" != true ]] \
+            || die "--rotate-celery-signing-keys is valid only for an existing generation-2/3 installation."
         set_env_value RABBITMQ_LEGACY_USER backupsheep
         set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2-pending-fresh
-        set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 2-pending-fresh
+        set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 3-pending-fresh
+        set_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION 1
         generation=2-pending-fresh
-        security_generation=2-pending-fresh
+        security_generation=3-pending-fresh
+        signing_generation=1
     fi
 
     case "$generation" in
         2)
             [[ "$MIGRATE_RABBITMQ_IDENTITIES" != true ]] \
                 || die "RabbitMQ identities are already generation 2; rerun without --migrate-rabbitmq-identities."
-            [[ "$security_generation" == 2 ]] \
-                || die "RabbitMQ identity generation 2 has a mismatched Celery security generation."
             for role in "${RABBITMQ_ROLES[@]}"; do
                 validate_secret_file "${SECRETS_DIR}/rabbitmq_${role}_password"
             done
             for lane in "${CELERY_SIGNING_LANES[@]}"; do
                 validate_secret_file "${SECRETS_DIR}/celery_signing_${lane}_private_key"
             done
-            configure_celery_public_registry
             [[ ! -e "$legacy_secret" && ! -L "$legacy_secret" ]] \
                 || die "RabbitMQ generation 2 still contains the retired shared secret."
             validate_distinct_rabbitmq_passwords
-            return
+            case "$security_generation" in
+                3)
+                    [[ "$signing_generation" =~ ^[1-9][0-9]{0,8}$ ]] \
+                        || die "The installed Celery signing-key generation is invalid."
+                    configure_celery_public_registry "$signing_generation" active
+                    if celery_rotation_artifacts_present; then
+                        [[ "$ROTATE_CELERY_SIGNING_KEYS" == true ]] \
+                            || die "Completed Celery key rotation has protected cleanup artifacts; rerun with --rotate-celery-signing-keys to verify and remove them."
+                        configure_celery_public_registry "$signing_generation" rotation
+                        for lane in "${CELERY_SIGNING_LANES[@]}"; do
+                            cmp -s -- \
+                                "${SECRETS_DIR}/celery_signing_${lane}_private_key" \
+                                "${SECRETS_DIR}/.celery_rotation_${lane}_private_key" \
+                                || die "Pending ${lane} signing material differs from the active completed rotation."
+                        done
+                        cmp -s -- \
+                            "${SECRETS_DIR}/celery_trusted_public_keys" \
+                            "${SECRETS_DIR}/.celery_rotation_trusted_public_keys" \
+                            || die "Pending Celery registry differs from the active completed rotation."
+                        remove_celery_rotation_artifacts
+                    elif [[ "$ROTATE_CELERY_SIGNING_KEYS" == true ]]; then
+                        next_generation=$((10#$signing_generation + 1))
+                        (( next_generation <= 999999999 )) \
+                            || die "Celery signing-key generation is exhausted."
+                        prepare_celery_signing_rotation "$next_generation"
+                    fi
+                    return
+                    ;;
+                2)
+                    [[ "$ROTATE_CELERY_SIGNING_KEYS" == true ]] \
+                        || die "This install uses the retired generation-2 task envelope. After database recovery and draining every broker queue, stop app/workers/Beat and rerun with --rotate-celery-signing-keys."
+                    [[ -z "$signing_generation" || "$signing_generation" == 1 ]] \
+                        || die "The generation-2 task envelope has an unexpected signing-key witness."
+                    validate_legacy_celery_public_registry
+                    prepare_celery_signing_rotation 2
+                    return
+                    ;;
+                3-pending-rotation)
+                    [[ "$ROTATE_CELERY_SIGNING_KEYS" == true ]] \
+                        || die "Celery key rotation is pending; rerun with --rotate-celery-signing-keys after preserving broker/database recovery evidence."
+                    [[ "$signing_generation" =~ ^[2-9][0-9]{0,8}$ ]] \
+                        || die "The pending Celery signing-key generation is invalid."
+                    for lane in "${CELERY_SIGNING_LANES[@]}"; do
+                        validate_secret_file "${SECRETS_DIR}/.celery_rotation_${lane}_private_key"
+                    done
+                    configure_celery_public_registry "$signing_generation" rotation
+                    return
+                    ;;
+                *)
+                    die "RabbitMQ identity generation 2 has unsupported Celery security generation ${security_generation}."
+                    ;;
+            esac
             ;;
         2-pending-fresh)
             [[ "$MIGRATE_RABBITMQ_IDENTITIES" != true ]] \
                 || die "A fresh RabbitMQ identity transition is already pending; rerun without the migration flag."
-            [[ "$security_generation" == 2-pending-fresh ]] \
+            [[ "$ROTATE_CELERY_SIGNING_KEYS" != true ]] \
+                || die "A fresh install does not rotate a prior Celery signing generation."
+            [[ "$security_generation" == 3-pending-fresh && "$signing_generation" == 1 ]] \
                 || die "The pending fresh Celery security generation drifted."
             [[ ! -e "$legacy_secret" && ! -L "$legacy_secret" ]] \
                 || die "A pending fresh install unexpectedly contains a legacy RabbitMQ secret."
@@ -1460,6 +1638,8 @@ configure_rabbitmq_identity_generation() {
         ''|2-pending-legacy)
             [[ "$MIGRATE_RABBITMQ_IDENTITIES" == true ]] \
                 || die "This existing installation still shares one RabbitMQ credential. Review the broker identity migration guide, stop provider operations, create an encrypted rollback, then rerun once with --migrate-rabbitmq-identities."
+            [[ "$ROTATE_CELERY_SIGNING_KEYS" != true ]] \
+                || die "Migrate the legacy broker identity before requesting a later signing-key rotation."
             if [[ "$generation" == "" ]]; then
                 legacy_user="$(read_env_value RABBITMQ_USER)"
                 [[ -n "$legacy_user" ]] || legacy_user=backupsheep
@@ -1468,9 +1648,12 @@ configure_rabbitmq_identity_generation() {
                     || die "The RabbitMQ guest account cannot be migrated as a stock identity."
                 set_env_value RABBITMQ_LEGACY_USER "$legacy_user"
                 set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2-pending-legacy
-                set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 2-pending-legacy
+                set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 3-pending-legacy
+                set_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION 1
+                security_generation=3-pending-legacy
+                signing_generation=1
             else
-                [[ "$security_generation" == 2-pending-legacy ]] \
+                [[ "$security_generation" == 3-pending-legacy && "$signing_generation" == 1 ]] \
                     || die "The pending legacy Celery security generation drifted."
                 legacy_user="$(read_env_value RABBITMQ_LEGACY_USER)"
                 validate_rabbitmq_role_name RABBITMQ_LEGACY_USER "$legacy_user"
@@ -1501,16 +1684,116 @@ configure_rabbitmq_identity_generation() {
         fi
     done
     for lane in "${CELERY_SIGNING_LANES[@]}"; do
-        write_celery_signing_key "$lane"
+        write_celery_signing_key "$lane" active
     done
-    configure_celery_public_registry
+    configure_celery_public_registry "$signing_generation" active
     validate_distinct_rabbitmq_passwords
 
     # These witnesses are last: no partial secret/key set can look deployable.
     set_env_value RABBITMQ_USER backupsheep_app
     set_env_value RABBITMQ_VHOST backupsheep
     set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2
-    set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 2
+    set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 3
+}
+
+finalize_celery_signing_rotation() {
+    local security_generation=""
+    local signing_generation=""
+    local running=""
+    local container_id=""
+    local service_name=""
+    local broker_id=""
+    local broker_ids=""
+    local queue_state=""
+    local queue_count=0
+    local queue_name=""
+    local ready=""
+    local unacknowledged=""
+    local lane=""
+    local candidate=""
+    local destination=""
+    local temporary=""
+
+    security_generation="$(read_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION)"
+    [[ "$security_generation" == 3-pending-rotation ]] || return
+    [[ "$ROTATE_CELERY_SIGNING_KEYS" == true ]] \
+        || die "Celery key rotation is pending; rerun with --rotate-celery-signing-keys."
+    signing_generation="$(read_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION)"
+    [[ "$signing_generation" =~ ^[2-9][0-9]{0,8}$ ]] \
+        || die "The pending Celery signing-key generation is invalid."
+
+    running="$(
+        "$DOCKER_BIN" ps \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+            --filter status=running \
+            --format '{{.ID}}\t{{.Label "com.docker.compose.service"}}'
+    )" || die "Could not inventory running services before signing-key rotation."
+    while IFS=$'\t' read -r container_id service_name; do
+        [[ -n "$container_id" ]] || continue
+        case "$service_name" in
+            app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
+                die "Stop app, every worker and Beat after durable database recovery before rotating Celery signing keys (still running: ${service_name})."
+                ;;
+        esac
+    done <<< "$running"
+
+    broker_ids="$(compose ps --all --quiet rabbitmq)" \
+        || die "Could not resolve the owned RabbitMQ container before signing-key rotation."
+    [[ -n "$broker_ids" && "$broker_ids" != *$'\n'* ]] \
+        || die "Signing-key rotation requires exactly one owned RabbitMQ container."
+    broker_id="$broker_ids"
+    [[ "$("$DOCKER_BIN" inspect --format '{{.State.Status}}' "$broker_id")" == running ]] \
+        || die "Signing-key rotation requires the owned RabbitMQ service to remain running."
+    queue_state="$(
+        "$DOCKER_BIN" exec --user 100:101 "$broker_id" \
+            rabbitmqctl -q -p backupsheep \
+            list_queues name messages_ready messages_unacknowledged --silent
+    )" || die "Could not prove the owned RabbitMQ queues are drained."
+    while IFS=$'\t' read -r queue_name ready unacknowledged; do
+        [[ -n "$queue_name" ]] || continue
+        case "$queue_name" in default|cloud|database|files|storage|logs) ;; *)
+            die "RabbitMQ contains an unreviewed queue during signing-key rotation: ${queue_name}."
+            ;;
+        esac
+        [[ "$ready" == 0 && "$unacknowledged" == 0 ]] \
+            || die "RabbitMQ queue ${queue_name} is not empty; complete database recovery/drain before rotating signing keys."
+        queue_count=$((queue_count + 1))
+    done <<< "$queue_state"
+    [[ "$queue_count" -eq 6 ]] \
+        || die "Signing-key rotation requires all six reviewed queues to exist and be empty."
+
+    # Keep each candidate until every active path and the registry have been replaced.
+    # An interruption is fail closed (generation remains pending) and a rerun copies
+    # the same candidates again; the public registry is committed after private keys.
+    for lane in "${CELERY_SIGNING_LANES[@]}"; do
+        candidate="${SECRETS_DIR}/.celery_rotation_${lane}_private_key"
+        destination="${SECRETS_DIR}/celery_signing_${lane}_private_key"
+        validate_secret_file "$candidate"
+        temporary="$(mktemp "${SECRETS_DIR}/.celery-activate-${lane}.XXXXXXXX")"
+        if ! cp -- "$candidate" "$temporary"; then
+            rm -f -- "$temporary"
+            die "Could not stage the ${lane} Celery signing-key rotation."
+        fi
+        chmod 0444 "$temporary"
+        mv -f -- "$temporary" "$destination"
+        validate_secret_file "$destination"
+    done
+    candidate="${SECRETS_DIR}/.celery_rotation_trusted_public_keys"
+    destination="${SECRETS_DIR}/celery_trusted_public_keys"
+    temporary="$(mktemp "${SECRETS_DIR}/.celery-activate-registry.XXXXXXXX")"
+    if ! cp -- "$candidate" "$temporary"; then
+        rm -f -- "$temporary"
+        die "Could not stage the Celery public-key registry rotation."
+    fi
+    chmod 0444 "$temporary"
+    mv -f -- "$temporary" "$destination"
+    configure_celery_public_registry "$signing_generation" active
+
+    # Publish the protocol witness before deleting candidates. If cleanup is
+    # interrupted, the next explicit rotation run proves candidate==active first.
+    set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 3
+    remove_celery_rotation_artifacts
+    validate_secret_dir
 }
 
 reject_connection_url_overrides() {
@@ -1990,7 +2273,8 @@ create_or_migrate_configuration() {
         # from a real legacy installation without guessing from partial files.
         set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "2-pending-fresh"
         set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION "2-pending-fresh"
-        set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION "2-pending-fresh"
+        set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION "3-pending-fresh"
+        set_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION "1"
         set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
         set_env_value BACKUPSHEEP_POSTGRES_IMAGE "backupsheep-postgres:${INSTALL_REF}"
         set_env_value BACKUPSHEEP_EGRESS_IMAGE "backupsheep-egress:${INSTALL_REF}"
@@ -2088,8 +2372,11 @@ validate_runtime_configuration() {
     [[ "$value" == "2" ]] \
         || die "BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION must be 2."
     value="$(read_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION)"
-    [[ "$value" == "2" ]] \
-        || die "BACKUPSHEEP_CELERY_SECURITY_GENERATION must be 2."
+    [[ "$value" == "3" ]] \
+        || die "BACKUPSHEEP_CELERY_SECURITY_GENERATION must be 3."
+    value="$(read_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION)"
+    [[ "$value" =~ ^[1-9][0-9]{0,8}$ ]] \
+        || die "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION must be a positive bounded integer."
     bootstrap_user="$(read_env_value DB_BOOTSTRAP_USER)"
     migrator_user="$(read_env_value DB_MIGRATOR_USER)"
     runtime_user="$(read_env_value DB_USER)"
@@ -2908,9 +3195,14 @@ main() {
     validate_docker_access
     clone_or_validate_repository
     create_or_migrate_configuration
-    validate_runtime_configuration
+    # A signing-key rotation is prepared fail closed in configuration first. Prove
+    # the exact Compose ownership model before inspecting or mutating its broker,
+    # then commit the candidate generation while every publisher/consumer is stopped.
     validate_compose_model
     validate_compose_project_ownership
+    finalize_celery_signing_rotation
+    validate_runtime_configuration
+    validate_compose_model
     validate_rabbitmq_data_generation
 
     if [[ "$SKIP_START" == true ]]; then
