@@ -5,6 +5,10 @@ umask 077
 
 node='rabbit@rabbitmq'
 vhost='backupsheep'
+queue_policy='backupsheep-queue-bounds-v1'
+queue_pattern='^(default|cloud|database|files|storage|logs)$'
+queue_max_messages='10000'
+queue_max_bytes='67108864'
 ctl() {
     /opt/rabbitmq/sbin/rabbitmqctl -q -n "$node" -t 30 "$@"
 }
@@ -19,12 +23,35 @@ read_secret() {
 
 password_hash() {
     cleartext="$1"
-    output="$(
-        /opt/rabbitmq/sbin/rabbitmqctl hash_password "$cleartext" \
-            --hashing-algorithm sha256 2>/dev/null
-    )"
+    salt_file="$(mktemp /tmp/backupsheep-rabbit-salt.XXXXXX)"
+    digest_file="$(mktemp /tmp/backupsheep-rabbit-digest.XXXXXX)"
+    # RabbitMQ's SHA-256 credential format is base64(salt ||
+    # sha256(salt || password)). Compute it through stdin so plaintext never
+    # appears in rabbitmqctl/openssl argv, the environment, definitions, or logs.
+    /opt/openssl/bin/openssl rand 4 >"$salt_file"
+    {
+        cat "$salt_file"
+        printf '%s' "$cleartext"
+    } | /opt/openssl/bin/openssl dgst -sha256 -binary >"$digest_file"
     cleartext=''
-    printf '%s\n' "$output" | tail -n 1
+    {
+        cat "$salt_file"
+        cat "$digest_file"
+    } | base64 | tr -d '\n'
+    rm -f "$salt_file" "$digest_file"
+}
+
+stored_password_hash() {
+    lookup_user="$1"
+    output="$(
+        ctl eval "{ok, U} = rabbit_auth_backend_internal:lookup_user(<<\"${lookup_user}\">>), base64:encode(element(3, U))."
+    )"
+    printf '%s\n' "$output" | sed -n 's/^<<"\([A-Za-z0-9+/=]*\)">>$/\1/p'
+}
+
+stored_password_algorithm() {
+    lookup_user="$1"
+    ctl eval "{ok, U} = rabbit_auth_backend_internal:lookup_user(<<\"${lookup_user}\">>), element(5, U)."
 }
 
 user_exists() {
@@ -78,6 +105,10 @@ for role in $roles; do
     hash="$(password_hash "$password")"
     case "$hash" in ''|*[!A-Za-z0-9+/=]*) exit 1 ;; esac
     ctl add_user "$user" "$hash" --pre-hashed-password >/dev/null
+    [ "$(stored_password_hash "$user")" = "$hash" ] \
+        || { printf '%s\n' "RabbitMQ password hash drifted for ${user}." >&2; exit 1; }
+    [ "$(stored_password_algorithm "$user")" = 'rabbit_password_hashing_sha256' ] \
+        || { printf '%s\n' "RabbitMQ password algorithm drifted for ${user}." >&2; exit 1; }
     password=''
     hash=''
 done
@@ -126,6 +157,40 @@ for queue in default cloud database files storage logs; do
         || { printf '%s\n' "RabbitMQ binding for ${queue} is missing." >&2; exit 1; }
 done
 
+# A policy upgrades existing durable queues without deleting/redeclaring them. Every
+# bounded queue rejects new publishes once either limit is reached; dropping the head
+# would silently destroy backup/restore intent and is therefore forbidden.
+ctl set_policy -p "$vhost" "$queue_policy" "$queue_pattern" \
+    "{\"max-length\":${queue_max_messages},\"max-length-bytes\":${queue_max_bytes},\"overflow\":\"reject-publish\"}" \
+    --priority 100 --apply-to queues >/dev/null
+listed_policies="$(ctl -p "$vhost" list_policies --silent)"
+actual_policy_names="$(printf '%s\n' "$listed_policies" | awk '{print $2}' | sort)"
+[ "$actual_policy_names" = "$queue_policy" ] \
+    || { printf '%s\n' 'RabbitMQ contains an unexpected queue policy.' >&2; exit 1; }
+printf '%s\n' "$listed_policies" | grep -Fq "$queue_pattern" \
+    || { printf '%s\n' 'RabbitMQ queue-bound policy pattern drifted.' >&2; exit 1; }
+printf '%s\n' "$listed_policies" | grep -Fq "\"max-length\":${queue_max_messages}" \
+    || { printf '%s\n' 'RabbitMQ queue message bound drifted.' >&2; exit 1; }
+printf '%s\n' "$listed_policies" | grep -Fq "\"max-length-bytes\":${queue_max_bytes}" \
+    || { printf '%s\n' 'RabbitMQ queue byte bound drifted.' >&2; exit 1; }
+printf '%s\n' "$listed_policies" | grep -Fq '"overflow":"reject-publish"' \
+    || { printf '%s\n' 'RabbitMQ overflow behavior is not reject-publish.' >&2; exit 1; }
+
+effective_queues="$(
+    ctl -p "$vhost" list_queues name policy effective_policy_definition --silent
+)"
+printf '%s\n' "$effective_queues" | while IFS="$tab" read -r queue policy definition; do
+    [ -n "$queue" ] || continue
+    [ "$policy" = "$queue_policy" ] \
+        || { printf '%s\n' "RabbitMQ queue ${queue} has no capacity policy." >&2; exit 1; }
+    printf '%s\n' "$definition" | grep -Fq "<<\"max-length\">>, ${queue_max_messages}" \
+        || { printf '%s\n' "RabbitMQ queue ${queue} lacks its message bound." >&2; exit 1; }
+    printf '%s\n' "$definition" | grep -Fq "<<\"max-length-bytes\">>, ${queue_max_bytes}" \
+        || { printf '%s\n' "RabbitMQ queue ${queue} lacks its byte bound." >&2; exit 1; }
+    printf '%s\n' "$definition" | grep -Fq '<<"overflow">>, reject-publish' \
+        || { printf '%s\n' "RabbitMQ queue ${queue} lacks reject-publish overflow." >&2; exit 1; }
+done
+
 # Known pre-generation-2 Celery exchanges may remain while their queue messages drain;
 # no generation-2 user can write them. Any other custom exchange is unreviewed drift.
 printf '%s\n' "$listed_exchanges" \
@@ -138,10 +203,6 @@ printf '%s\n' "$listed_exchanges" \
 
 for role in $roles; do
     user="backupsheep_${role}"
-    password="$(read_secret "$role")"
-    ctl authenticate_user "$user" "$password" >/dev/null 2>&1 \
-        || { password=''; printf '%s\n' "RabbitMQ authentication failed for ${user}." >&2; exit 1; }
-    password=''
     case "$role" in
         bootstrap|preflight) expected_permission="${vhost}${tab}${empty_permission}${tab}${empty_permission}${tab}${empty_permission}" ;;
         app|beat) expected_permission="${vhost}${tab}${empty_permission}${tab}${all_exchanges}${tab}${empty_permission}" ;;

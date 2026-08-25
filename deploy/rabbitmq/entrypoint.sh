@@ -21,13 +21,16 @@ esac
 password="$(cat "$secret_file")"
 [ "${#password}" -ge 32 ] \
     || { printf '%s\n' 'RabbitMQ bootstrap secret is too short.' >&2; exit 1; }
-hash_output="$(
-    /opt/rabbitmq/sbin/rabbitmqctl hash_password "$password" \
-        --hashing-algorithm sha256 2>/dev/null
-)"
+salt_file="$(mktemp /tmp/backupsheep-rabbit-salt.XXXXXX)"
+digest_file="$(mktemp /tmp/backupsheep-rabbit-digest.XXXXXX)"
+/opt/openssl/bin/openssl rand 4 >"$salt_file"
+{
+    cat "$salt_file"
+    printf '%s' "$password"
+} | /opt/openssl/bin/openssl dgst -sha256 -binary >"$digest_file"
 password=''
-password_hash="$(printf '%s\n' "$hash_output" | tail -n 1)"
-hash_output=''
+password_hash="$({ cat "$salt_file"; cat "$digest_file"; } | base64 | tr -d '\n')"
+rm -f "$salt_file" "$digest_file"
 case "$password_hash" in
     ''|*[!A-Za-z0-9+/=]*)
         printf '%s\n' 'RabbitMQ could not derive the bootstrap password hash.' >&2
