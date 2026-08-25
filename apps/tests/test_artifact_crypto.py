@@ -144,6 +144,58 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         self.assertEqual(parsed.plaintext_sha256, hashlib.sha256(payload).hexdigest())
         self.assertEqual(parsed.context_sha256, self.context.sha256)
 
+    def test_normative_bse1_v1_vector_is_byte_for_byte_deterministic(self):
+        vector_path = Path(__file__).with_name("fixtures") / "bse1-v1-vector.json"
+        vector = json.loads(vector_path.read_text(encoding="utf-8"))
+        context = ArtifactContext.from_mapping(vector["context"])
+        plaintext = bytes.fromhex(vector["plaintext_hex"])
+        source = self._source(plaintext, "vector-source.zip")
+        encrypted = self.root / "vector-generated.bse1"
+
+        with mock.patch.object(
+            envelope_module.os,
+            "urandom",
+            return_value=bytes.fromhex(vector["nonce_prefix_hex"]),
+        ):
+            descriptor = encrypt_file(
+                source,
+                encrypted,
+                data_key=bytes.fromhex(vector["data_key_hex"]),
+                context=context,
+                envelope_id=vector["envelope_id"],
+                chunk_size=vector["chunk_size"],
+                trusted_source_root=self.root,
+                trusted_destination_root=self.root,
+            )
+
+        self.assertEqual(encrypted.read_bytes(), bytes.fromhex(vector["envelope_hex"]))
+        self.assertEqual(descriptor.header_sha256, vector["header_sha256"])
+        self.assertEqual(descriptor.context_sha256, vector["context_sha256"])
+        self.assertEqual(descriptor.plaintext_sha256, vector["plaintext_sha256"])
+        self.assertEqual(descriptor.ciphertext_size, vector["ciphertext_size"])
+
+        frozen = self.root / "vector-frozen.bse1"
+        restored = self.root / "vector-restored.zip"
+        frozen.write_bytes(bytes.fromhex(vector["envelope_hex"]))
+        parsed = read_envelope_header(frozen, trusted_source_root=self.root)
+        header_start = envelope_module._PREAMBLE.size
+        self.assertEqual(
+            frozen.read_bytes()[
+                header_start : header_start + parsed.header_size
+            ].decode("ascii"),
+            vector["header_canonical_json"],
+        )
+        decrypt_file(
+            frozen,
+            restored,
+            data_key=bytes.fromhex(vector["data_key_hex"]),
+            context=context,
+            expected=parsed.expectation(),
+            trusted_source_root=self.root,
+            trusted_destination_root=self.root,
+        )
+        self.assertEqual(restored.read_bytes(), plaintext)
+
     def test_wrong_key_context_and_ledger_expectation_fail_without_plaintext(self):
         _source, encrypted, descriptor = self._seal(b"sensitive backup bytes")
         self._decrypt_failure(encrypted, data_key=b"x" * 32)
