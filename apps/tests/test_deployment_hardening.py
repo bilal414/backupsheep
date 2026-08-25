@@ -431,7 +431,9 @@ raise SystemExit(99)
             "apps.tests.test_docker_preflight_command",
             "python bruno/scripts/validate_collection.py",
             "python docs/enterprise/tools/validate_docs.py",
-            "python manage.py test apps.tests apps.console.onboarding --noinput",
+            "python manage.py test apps.tests apps.console.onboarding \\",
+            "--exclude-tag=requires_host_git --noinput",
+            "Unexpected Git executable in the production application image.",
             "if: ${{ always() }}",
         ):
             with self.subTest(required=required):

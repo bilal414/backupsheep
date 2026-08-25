@@ -287,6 +287,19 @@ jobs:
             --policy deploy/static-analysis-policy.json \
             --repository-root "$GITHUB_WORKSPACE"
 
+      - name: Exercise source-scan validator contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          command -v git >/dev/null
+          git --version >/dev/null
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          python3 -m unittest apps.tests.test_source_scan_gate -v
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
       - name: Scan the full final-SHA checkout without exposing secret matches
         shell: bash
         env:
@@ -860,6 +873,10 @@ jobs:
               test ! -w /code/manage.py
               test -w /code/_storage
               test ! -e /usr/bin/pebble
+              if command -v git >/dev/null 2>&1; then
+                printf "%s\n" "Unexpected Git executable in the production application image." >&2
+                exit 1
+              fi
               assert_package() {
                 test "$(dpkg-query -W -f="\${Version}" "$1")" = "$2"
               }
@@ -943,7 +960,8 @@ jobs:
                 --noinput
               python bruno/scripts/validate_collection.py
               python docs/enterprise/tools/validate_docs.py
-              python manage.py test apps.tests apps.console.onboarding --noinput
+              python manage.py test apps.tests apps.console.onboarding \
+                --exclude-tag=requires_host_git --noinput
             ' >/dev/null
 
           # Only tests and source-contract fixtures are mounted read-only. Runtime

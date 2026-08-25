@@ -1,3 +1,4 @@
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -8,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest import TestCase
+from unittest import TestCase, defaultTestLoader
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +22,11 @@ SPEC.loader.exec_module(source_scan)
 
 
 class SourceScanGateTests(TestCase):
+    # Django's test runner honors class tags directly; unittest ignores them.
+    # The Git-free production-image lane excludes this host-tooling tag, while
+    # the static-analysis lane runs the class through unittest with real Git.
+    tags = {"requires_host_git"}
+
     def git(self, *arguments, environment=None):
         return subprocess.run(
             ["git", *arguments],
@@ -594,6 +600,8 @@ class SourceScanGateTests(TestCase):
             "--exit-code 7",
             "--exit-code 9",
             "scripts/validate_source_scan.py",
+            "Exercise source-scan validator contracts",
+            "python3 -m unittest apps.tests.test_source_scan_gate -v",
             '--secret-report "$secret_report"',
             '--canary-report "$canary_report"',
             "deploy/source-scan-policy.json",
@@ -615,6 +623,114 @@ class SourceScanGateTests(TestCase):
 
 
 class SourceScanInstallerContractTests(TestCase):
+    def test_git_repository_contracts_run_only_in_the_git_enabled_static_job(self):
+        expected_git_test_names = [
+            "test_any_vulnerability_or_secret_fails_without_echoing_secret_material",
+            "test_duplicate_results_and_malformed_scanner_inventory_are_rejected",
+            "test_exact_content_pinned_report_produces_only_zero_sensitive_evidence",
+            "test_extra_missing_changed_and_duplicate_misconfigurations_fail_closed",
+            "test_labeled_schema_diagnostic_never_echoes_unknown_field_names",
+            "test_markdown_and_default_skipped_medium_canaries_are_mandatory_and_private",
+            "test_normal_detached_checkout_and_canary_use_exact_opposite_header_forms",
+            "test_policy_rejects_additional_duplicate_changed_and_unexplained_reviews",
+            "test_private_evidence_writer_never_replaces_and_uses_mode_0600",
+            "test_repository_identity_is_independently_bound_to_checkout_remote",
+            "test_repository_metadata_and_artifact_id_fail_closed",
+            "test_repository_policy_pins_exact_current_dockerfile_bytes",
+            "test_repository_reports_must_share_one_exact_artifact_identity",
+            "test_strict_json_loader_rejects_duplicate_keys_symlinks_and_oversized_files",
+            "test_target_byte_change_and_symlink_fail_closed_before_review_is_used",
+            "test_workflow_uses_pinned_tool_full_checkout_and_zero_sensitive_artifact",
+        ]
+        self.assertEqual(
+            defaultTestLoader.getTestCaseNames(SourceScanGateTests),
+            expected_git_test_names,
+        )
+        self.assertEqual(SourceScanGateTests.tags, {"requires_host_git"})
+        self.assertFalse(getattr(SourceScanGateTests, "__unittest_skip__", False))
+        for test_name in expected_git_test_names:
+            self.assertFalse(
+                getattr(
+                    getattr(SourceScanGateTests, test_name),
+                    "__unittest_skip__",
+                    False,
+                )
+            )
+
+        def contains_host_git_tag(expression):
+            return any(
+                isinstance(child, ast.Constant)
+                and child.value == "requires_host_git"
+                for child in ast.walk(expression)
+            )
+
+        tagged_test_targets = []
+        for path in sorted((ROOT / "apps" / "tests").glob("test_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in tree.body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                class_has_tag = any(
+                    contains_host_git_tag(decorator)
+                    for decorator in node.decorator_list
+                )
+                for statement in node.body:
+                    if isinstance(statement, ast.Assign) and any(
+                        isinstance(target, ast.Name) and target.id == "tags"
+                        for target in statement.targets
+                    ):
+                        class_has_tag = class_has_tag or contains_host_git_tag(
+                            statement.value
+                        )
+                    elif (
+                        isinstance(statement, ast.AnnAssign)
+                        and isinstance(statement.target, ast.Name)
+                        and statement.target.id == "tags"
+                        and statement.value is not None
+                    ):
+                        class_has_tag = class_has_tag or contains_host_git_tag(
+                            statement.value
+                        )
+                    elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if any(
+                            contains_host_git_tag(decorator)
+                            for decorator in statement.decorator_list
+                        ):
+                            tagged_test_targets.append(
+                                f"{path.relative_to(ROOT).as_posix()}:{node.name}.{statement.name}"
+                            )
+                if class_has_tag:
+                    tagged_test_targets.append(
+                        f"{path.relative_to(ROOT).as_posix()}:{node.name}"
+                    )
+        self.assertEqual(
+            tagged_test_targets,
+            ["apps/tests/test_source_scan_gate.py:SourceScanGateTests"],
+        )
+
+        workflow = (
+            ROOT / ".github" / "workflows" / "supply-chain-security.yml"
+        ).read_text(encoding="utf-8")
+        static_job = workflow.split("  static-python-security:\n", 1)[1].split(
+            "  application-security-regression:\n", 1
+        )[0]
+        regression_job = workflow.split(
+            "  application-security-regression:\n", 1
+        )[1]
+        self.assertIn("Exercise source-scan validator contracts", static_job)
+        self.assertIn("command -v git >/dev/null", static_job)
+        self.assertIn(
+            "python3 -m unittest apps.tests.test_source_scan_gate -v", static_job
+        )
+        self.assertNotIn("--exclude-tag=requires_host_git", static_job)
+        self.assertNotIn("continue-on-error", static_job)
+        self.assertIn(
+            "Unexpected Git executable in the production application image.",
+            regression_job,
+        )
+        self.assertIn("--exclude-tag=requires_host_git --noinput", regression_job)
+        self.assertEqual(regression_job.count("--exclude-tag=requires_host_git"), 1)
+
     def test_dependency_audit_installer_is_whole_file_and_artifact_hash_locked(self):
         workflow = (
             ROOT / ".github" / "workflows" / "supply-chain-security.yml"
