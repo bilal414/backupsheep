@@ -3257,11 +3257,11 @@ class CoreAuthDatabase(TimeStampedModel):
             for available_db_versions in available_db_versions:
                 if available_db_versions in db_version:
                     self.version = available_db_versions
-                    self.save()
+                    self.save(update_fields=("version",))
             for available_db_type in available_db_types:
                 if available_db_type[1].lower() in db_version:
                     self.type = available_db_type[0]
-                    self.save()
+                    self.save(update_fields=("type",))
         return {"type": self.get_type_display(), "version": self.get_version_display()}
 
     def get_ssh_client(self, data=None):
@@ -4113,3 +4113,142 @@ class CoreConnection(TimeStampedModel):
     def incremental_backup_available(self):
         if self.integration.code == "website":
             return self.auth_website.use_public_key or self.auth_website.use_private_key
+
+
+class CoreManagedSSHOperation(TimeStampedModel):
+    """Durable, lane-bound request for use of the installation managed SSH key.
+
+    The web process may create and observe these rows, but it never receives the
+    managed private key.  Database and files workers may update only the mutable
+    execution columns granted by the generation-3 database policy.  The immutable
+    intent columns are repeated and hashed so a worker can fail closed if the
+    connection, public key, Celery message, or requested path changed after the
+    request was authorized.
+    """
+
+    class SourceLane(models.TextChoices):
+        DATABASE = "database", "Database"
+        FILES = "files", "Files"
+
+    class Operation(models.TextChoices):
+        VALIDATE = "validate", "Validate connection"
+        DISCOVER = "discover", "Discover objects"
+        UPDATE_METADATA = "update_metadata", "Update database metadata"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RUNNING = "running", "Running"
+        COMPLETE = "complete", "Complete"
+        FAILED = "failed", "Failed"
+        EXPIRED = "expired", "Expired"
+
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    connection = models.ForeignKey(
+        CoreConnection,
+        related_name="managed_ssh_operations",
+        on_delete=models.PROTECT,
+        editable=False,
+    )
+    account = models.ForeignKey(
+        CoreAccount,
+        related_name="managed_ssh_operations",
+        on_delete=models.PROTECT,
+        editable=False,
+    )
+    source_lane = models.CharField(
+        max_length=16,
+        choices=SourceLane.choices,
+        editable=False,
+    )
+    operation = models.CharField(
+        max_length=32,
+        choices=Operation.choices,
+        editable=False,
+    )
+    requested_path = models.CharField(max_length=2048, blank=True, editable=False)
+    managed_public_key_fingerprint = models.CharField(
+        max_length=64,
+        editable=False,
+    )
+    connection_config_digest = models.CharField(max_length=64, editable=False)
+    celery_task_id = models.UUIDField(unique=True, editable=False)
+    idempotency_key = models.CharField(max_length=64, unique=True, editable=False)
+    intent_digest = models.CharField(max_length=64, editable=False)
+    expires_at = models.DateTimeField(editable=False)
+
+    # Only these execution/result fields are mutable after insertion. Database
+    # grants independently enforce that boundary even if a worker is compromised.
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    result_payload = models.JSONField(default=dict, blank=True)
+    result_digest = models.CharField(max_length=64, blank=True)
+    error_payload = models.JSONField(default=dict, blank=True)
+    execution_witness_digest = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        db_table = "core_managed_ssh_operation"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(source_lane__in=("database", "files")),
+                name="managed_ssh_source_lane_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    operation__in=("validate", "discover", "update_metadata")
+                ),
+                name="managed_ssh_operation_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    status__in=(
+                        "pending",
+                        "running",
+                        "complete",
+                        "failed",
+                        "expired",
+                    )
+                ),
+                name="managed_ssh_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(operation="validate")
+                | models.Q(requested_path=""),
+                name="managed_ssh_validate_path_empty",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        managed_public_key_fingerprint__regex=r"^[0-9a-f]{64}$"
+                    )
+                    & models.Q(connection_config_digest__regex=r"^[0-9a-f]{64}$")
+                    & models.Q(idempotency_key__regex=r"^[0-9a-f]{64}$")
+                    & models.Q(intent_digest__regex=r"^[0-9a-f]{64}$")
+                ),
+                name="managed_ssh_intent_digests_valid",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(
+                    status__in=("complete", "failed", "expired")
+                )
+                | models.Q(completed_at__isnull=False),
+                name="managed_ssh_terminal_completed_at",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("connection", "status"),
+                name="managed_ssh_connection_status",
+            ),
+            models.Index(
+                fields=("status", "expires_at"),
+                name="managed_ssh_status_expiry",
+            ),
+        ]

@@ -173,8 +173,8 @@ x-app-secret-environment: &app-secret-environment
   CELERY_TRUSTED_PUBLIC_KEYS_FILE: /run/secrets/celery_trusted_public_keys
   ONBOARDING_INSTALL_TOKEN: ""
   # Keep SSH trust and the optional managed identity out of the shared backup
-  # work volume. Compose mounts the trust store only into roles that use SSH,
-  # and mounts the managed private key as a read-only file-backed secret.
+  # work volume. The web role receives only the public identity/trust store;
+  # Compose mounts the managed private key only into database/files workers.
   SSH_KNOWN_HOSTS_PATH: /var/lib/backupsheep/ssh-trust/known_hosts
   SSH_MANAGED_PRIVATE_KEY_PATH: /run/backupsheep/ssh/managed_private_key
   BACKUPSHEEP_SSH_TRUST_GID: "10997"
@@ -686,7 +686,6 @@ services:
       - celery_signing_app_private_key
       - celery_trusted_public_keys
       - onboarding_token
-      - ssh_managed_private_key
     # Uses the image ENTRYPOINT (init.sh) to start gunicorn on :8000.
     depends_on:
       db:

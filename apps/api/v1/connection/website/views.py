@@ -11,6 +11,13 @@ from apps.console.connection.models import (
     CoreConnection,
     CoreConnectionLocation,
     CoreIntegration,
+    CoreManagedSSHOperation,
+)
+from apps.console.connection.managed_ssh import (
+    ManagedSSHOperationError,
+    connection_uses_managed_key,
+    create_managed_ssh_operation,
+    wait_for_managed_ssh_operation,
 )
 from apps.api.v1.utils.api_permissions import MemberPermissions
 from .filters import CoreWebsiteFilter
@@ -81,6 +88,30 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     def validate(self, request, pk=None):
         try:
             connection = self.get_object()
+            if connection_uses_managed_key(connection):
+                operation = wait_for_managed_ssh_operation(
+                    create_managed_ssh_operation(connection, "validate")
+                )
+                if operation.status == CoreManagedSSHOperation.Status.COMPLETE:
+                    return Response(
+                        {"detail": "Validation passed. Integration is good for backups."},
+                        status=status.HTTP_200_OK,
+                    )
+                if operation.status in (
+                    CoreManagedSSHOperation.Status.FAILED,
+                    CoreManagedSSHOperation.Status.EXPIRED,
+                ):
+                    raise ManagedSSHOperationError(
+                        "Managed SSH validation failed."
+                    )
+                return Response(
+                    {
+                        "detail": "Managed SSH validation is still running.",
+                        "operation_id": str(operation.uuid),
+                        "operation_status": operation.status,
+                    },
+                    status=status.HTTP_202_ACCEPTED,
+                )
             validation = connection.auth_website.validate()
             if validation:
                 return Response({"detail": "Validation passed. Integration is good for backups."}, status=status.HTTP_200_OK)
@@ -102,6 +133,38 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                     path_item = "/".join(path_split[:num + 1])
                     if path_item not in path_tree:
                         path_tree.append({"name": item, "path": path_item})
+            if connection_uses_managed_key(connection):
+                operation = wait_for_managed_ssh_operation(
+                    create_managed_ssh_operation(
+                        connection,
+                        "discover",
+                        requested_path=path,
+                    )
+                )
+                if operation.status == CoreManagedSSHOperation.Status.COMPLETE:
+                    return Response(
+                        {
+                            "eligible_objects": operation.result_payload.get(
+                                "eligible_objects", []
+                            ),
+                            "path_tree": path_tree,
+                        }
+                    )
+                if operation.status in (
+                    CoreManagedSSHOperation.Status.FAILED,
+                    CoreManagedSSHOperation.Status.EXPIRED,
+                ):
+                    raise ManagedSSHOperationError(
+                        "Managed SSH object discovery failed."
+                    )
+                return Response(
+                    {
+                        "detail": "Managed SSH object discovery is still running.",
+                        "operation_id": str(operation.uuid),
+                        "operation_status": operation.status,
+                    },
+                    status=status.HTTP_202_ACCEPTED,
+                )
             eligible_objects = connection.auth_website.get_eligible_objects(path=path)
             return Response({"eligible_objects": eligible_objects, "path_tree": path_tree})
         except Exception as e:

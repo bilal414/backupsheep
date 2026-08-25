@@ -469,6 +469,22 @@ chmod 0700 \
 managed_key_source='/run/secrets/ssh_managed_private_key'
 managed_key_target='/run/backupsheep/ssh/managed_private_key'
 SSH_MANAGED_PRIVATE_KEY_PATH=''
+managed_public_key="${SSH_MANAGED_PUBLIC_KEY:-}"
+managed_public_identity=''
+if [ -n "$managed_public_key" ]; then
+  managed_public_identity="$(
+    printf '%s\n' "$managed_public_key" \
+      | awk '
+          NR == 1 && (NF == 2 || NF == 3) {
+            if ($1 !~ /^[A-Za-z0-9@._+-]+$/ || $2 !~ /^[A-Za-z0-9+\/=]+$/) exit 1
+            print $1 " " $2
+            next
+          }
+          { exit 1 }
+          END { if (NR != 1) exit 1 }
+        '
+  )" || fail "SSH_MANAGED_PUBLIC_KEY must contain one canonical OpenSSH public key."
+fi
 if [ -e "$managed_key_source" ]; then
   [ -f "$managed_key_source" ] && [ ! -L "$managed_key_source" ] \
     || fail "the managed SSH private-key secret must be a regular file."
@@ -479,15 +495,29 @@ if [ -e "$managed_key_source" ]; then
   [ "$managed_key_size" -le 65536 ] \
     || fail "the managed SSH private-key secret exceeds 64 KiB."
   if [ "$managed_key_size" -gt 0 ]; then
+    case "$runtime_role" in
+      database|files) ;;
+      *) fail "this runtime role is not authorized to receive the managed SSH private key." ;;
+    esac
+    [ -n "$managed_public_identity" ] \
+      || fail "a managed SSH private key requires SSH_MANAGED_PUBLIC_KEY."
     cp "$managed_key_source" "$managed_key_target" \
       || fail "could not stage the managed SSH private key."
     chmod 0600 "$managed_key_target" \
       || fail "could not protect the managed SSH private key."
-    ssh-keygen -y -P '' -f "$managed_key_target" >/dev/null 2>&1 \
+    derived_public_identity="$(ssh-keygen -y -P '' -f "$managed_key_target" 2>/dev/null)" \
       || fail "the managed SSH private-key secret is invalid or passphrase-protected."
+    [ "$derived_public_identity" = "$managed_public_identity" ] \
+      || fail "the managed SSH private key does not match SSH_MANAGED_PUBLIC_KEY."
     SSH_MANAGED_PRIVATE_KEY_PATH="$managed_key_target"
   fi
 fi
+case "$runtime_role" in
+  database|files)
+    [ -z "$managed_public_identity" ] || [ -n "$SSH_MANAGED_PRIVATE_KEY_PATH" ] \
+      || fail "SSH_MANAGED_PUBLIC_KEY requires a non-empty managed key secret in this worker."
+    ;;
+esac
 export SSH_MANAGED_PRIVATE_KEY_PATH
 
 # Compose dependency ordering is evaluated when `compose up` runs, but Docker may

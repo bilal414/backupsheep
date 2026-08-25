@@ -14,7 +14,7 @@ umask 077
 
 readonly REPOSITORY_URL="https://github.com/bilal414/backupsheep.git"
 readonly APP_PORT="8000"
-readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision db-provision migrate preflight app-egress-guard app)
+readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision db-provision migrate db-seal preflight app-egress-guard app)
 readonly -a OPERATION_SERVICES=(
     worker-cloud
     worker-database
@@ -32,9 +32,16 @@ readonly -a OPERATION_GUARD_SERVICES=(
 )
 readonly -a SECRET_NAMES=(
     django_secret_key
-    db_password
     db_bootstrap_password
     db_migrator_password
+    db_app_password
+    db_preflight_password
+    db_beat_password
+    db_cloud_password
+    db_database_password
+    db_files_password
+    db_storage_password
+    db_logs_password
     rabbitmq_bootstrap_password
     rabbitmq_app_password
     rabbitmq_preflight_password
@@ -57,7 +64,8 @@ readonly -a SECRET_NAMES=(
     artifact_kms_database_aws_credentials
     artifact_kms_files_aws_credentials
 )
-readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password)
+readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password db_password)
+readonly -a DATABASE_LANES=(app preflight beat cloud database files storage logs)
 readonly -a RABBITMQ_ROLES=(bootstrap app preflight beat cloud database files storage logs)
 readonly -a CELERY_SIGNING_LANES=(app beat cloud database files storage logs)
 readonly -a CELERY_ROTATION_SECRET_NAMES=(
@@ -1020,7 +1028,7 @@ validate_secret_file() {
     secret_value="$(<"$secret_path")"
     case "$secret_name" in
         django_secret_key) minimum_length=48 ;;
-        db_password|db_bootstrap_password|db_migrator_password) minimum_length=24 ;;
+        db_password|db_bootstrap_password|db_migrator_password|db_*_password) minimum_length=24 ;;
         rabbitmq_password|rabbitmq_*_password|onboarding_token) minimum_length=32 ;;
         celery_trusted_public_keys) minimum_length=100 ;;
         *) die "Unknown installation secret file: ${secret_name}" ;;
@@ -1820,6 +1828,10 @@ prepare_managed_ssh_private_key() {
     local configured_path=""
     local secret_path="${SECRETS_DIR}/ssh_managed_private_key"
     local secret_size=""
+    local validation_copy=""
+    local derived_public_key=""
+    local configured_public_key=""
+    local configured_public_identity=""
 
     configured_path="$(read_env_value SSH_MANAGED_PRIVATE_KEY_PATH)"
     if [[ -e "$secret_path" || -L "$secret_path" ]]; then
@@ -1833,6 +1845,44 @@ prepare_managed_ssh_private_key() {
             || die "Move the existing managed SSH private key into .secrets/ssh_managed_private_key (mode 0444), clear SSH_MANAGED_PRIVATE_KEY_PATH, and rerun. The installer will not copy host key material implicitly."
         write_empty_optional_secret_file ssh_managed_private_key
     fi
+
+    secret_size="$(file_size "$secret_path")"
+    configured_public_key="$(read_env_value SSH_MANAGED_PUBLIC_KEY)"
+    if [[ "$secret_size" -eq 0 ]]; then
+        [[ -z "$configured_public_key" ]] \
+            || die "SSH_MANAGED_PUBLIC_KEY requires a non-empty .secrets/ssh_managed_private_key file."
+        return
+    fi
+
+    validation_copy="$(mktemp "${SECRETS_DIR}/.managed-key-check.XXXXXXXX")"
+    cp -- "$secret_path" "$validation_copy"
+    chmod 0600 "$validation_copy"
+    if ! derived_public_key="$(ssh-keygen -y -P '' -f "$validation_copy" 2>/dev/null)"; then
+        rm -f -- "$validation_copy"
+        die "The managed SSH private-key secret is invalid or passphrase-protected."
+    fi
+    rm -f -- "$validation_copy"
+    [[ "$derived_public_key" =~ ^[A-Za-z0-9@._+-]+[[:space:]][A-Za-z0-9+/]+={0,3}$ ]] \
+        || die "The managed SSH private key produced a malformed public identity."
+
+    if [[ -z "$configured_public_key" ]]; then
+        set_env_value SSH_MANAGED_PUBLIC_KEY "$derived_public_key"
+        return
+    fi
+    configured_public_identity="$(
+        printf '%s\n' "$configured_public_key" \
+            | awk '
+                NR == 1 && (NF == 2 || NF == 3) {
+                    if ($1 !~ /^[A-Za-z0-9@._+-]+$/ || $2 !~ /^[A-Za-z0-9+\/=]+$/) exit 1
+                    print $1 " " $2
+                    next
+                }
+                { exit 1 }
+                END { if (NR != 1) exit 1 }
+            '
+    )" || die "SSH_MANAGED_PUBLIC_KEY must contain one canonical OpenSSH public key."
+    [[ "$configured_public_identity" == "$derived_public_key" ]] \
+        || die "SSH_MANAGED_PUBLIC_KEY does not match .secrets/ssh_managed_private_key."
 }
 
 ensure_installation_id() {

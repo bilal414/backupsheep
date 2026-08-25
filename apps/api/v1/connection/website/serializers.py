@@ -1,4 +1,5 @@
 import pytz
+from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
@@ -18,6 +19,10 @@ from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreCo
 from apps.api.v1.connection.serializer_helpers import (
     StructuredConnectionValidationMixin,
     safe_connection_validation_error,
+)
+from apps.console.connection.managed_ssh import (
+    create_managed_ssh_operation,
+    managed_public_key_fingerprint,
 )
 
 
@@ -307,8 +312,14 @@ class CoreAuthWebsiteWriteSerializer(serializers.ModelSerializer):
         )
 
         try:
-            auth = CoreAuthWebsite()
-            auth.check_connection(data=connection_data)
+            if mode == "public_key":
+                # The web container deliberately has no managed private key. Its
+                # syntax/binding is checked here; a files-lane worker performs the
+                # network validation after the durable rows commit.
+                managed_public_key_fingerprint()
+            else:
+                auth = CoreAuthWebsite()
+                auth.check_connection(data=connection_data)
         except Exception as error:
             raise safe_connection_validation_error(error, stage="website") from None
 
@@ -350,19 +361,37 @@ class CoreWebsiteConnectionWriteSerializer(
         model = CoreConnection
         fields = "__all__"
 
+    @transaction.atomic
     def create(self, validated_data):
         auth_website = validated_data.pop("auth_website", [])
+        managed_key = bool(auth_website.get("use_public_key"))
+        if managed_key:
+            validated_data["status"] = CoreConnection.Status.PENDING
         instance = CoreConnection.objects.create(**validated_data)
         auth_website["connection"] = instance
         CoreAuthWebsite.objects.create(**auth_website)
+        if managed_key:
+            self.managed_ssh_operation = create_managed_ssh_operation(
+                instance,
+                "validate",
+            )
         return instance
 
+    @transaction.atomic
     def update(self, instance, validated_data):
         if validated_data.get("location"):
             if instance.location != validated_data["location"]:
                 instance.update_scheduled_backup_locations(validated_data["location"])
         auth_website = validated_data.pop("auth_website", [])
+        managed_key = bool(auth_website.get("use_public_key"))
+        if managed_key:
+            validated_data["status"] = CoreConnection.Status.PENDING
         if len(auth_website) > 0:
             super().update(instance.auth_website, auth_website)
         instance = super().update(instance, validated_data)
+        if managed_key:
+            self.managed_ssh_operation = create_managed_ssh_operation(
+                instance,
+                "validate",
+            )
         return instance

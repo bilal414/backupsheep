@@ -1,6 +1,7 @@
 import json
 from unittest.mock import patch
 
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -475,6 +476,12 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
         self.assertIsNone(checked["ssh_password"])
         self.assertIsNone(checked["private_key"])
 
+    @override_settings(
+        SSH_MANAGED_PUBLIC_KEY=(
+            "ssh-ed25519 "
+            "AAAAC3NzaC1lZDI1NTE5AAAAIG1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1t"
+        )
+    )
     @patch.object(CoreAuthDatabase, "check_connection", return_value=True)
     def test_database_switch_to_public_key_clears_private_key_and_passphrase(self, _check):
         connection, auth = self._database_auth(use_private_key=True)

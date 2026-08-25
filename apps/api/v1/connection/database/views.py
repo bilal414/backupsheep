@@ -7,7 +7,18 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
-from apps.console.connection.models import CoreConnection, CoreConnectionLocation, CoreIntegration
+from apps.console.connection.models import (
+    CoreConnection,
+    CoreConnectionLocation,
+    CoreIntegration,
+    CoreManagedSSHOperation,
+)
+from apps.console.connection.managed_ssh import (
+    ManagedSSHOperationError,
+    connection_uses_managed_key,
+    create_managed_ssh_operation,
+    wait_for_managed_ssh_operation,
+)
 from apps.api.v1.utils.api_permissions import MemberPermissions
 from .filters import CoreDatabaseFilter
 from .permissions import CoreDatabaseViewPermissions
@@ -76,6 +87,29 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     def objects(self, request, pk=None):
         try:
             connection = self.get_object()
+            if connection_uses_managed_key(connection):
+                operation = wait_for_managed_ssh_operation(
+                    create_managed_ssh_operation(connection, "discover")
+                )
+                if operation.status == CoreManagedSSHOperation.Status.COMPLETE:
+                    return Response(
+                        operation.result_payload.get("eligible_objects", [])
+                    )
+                if operation.status in (
+                    CoreManagedSSHOperation.Status.FAILED,
+                    CoreManagedSSHOperation.Status.EXPIRED,
+                ):
+                    raise ManagedSSHOperationError(
+                        "Managed SSH object discovery failed."
+                    )
+                return Response(
+                    {
+                        "detail": "Managed SSH object discovery is still running.",
+                        "operation_id": str(operation.uuid),
+                        "operation_status": operation.status,
+                    },
+                    status=status.HTTP_202_ACCEPTED,
+                )
             eligible_objects = connection.auth_database.get_eligible_objects()
             return Response(eligible_objects)
         except Exception as e:
@@ -85,6 +119,28 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         connection = self.get_object()
+        if connection_uses_managed_key(connection):
+            operation = wait_for_managed_ssh_operation(
+                create_managed_ssh_operation(connection, "validate")
+            )
+            if operation.status == CoreManagedSSHOperation.Status.COMPLETE:
+                return Response(
+                    {"detail": "Validation passed. Integration is good for backups."},
+                    status=status.HTTP_200_OK,
+                )
+            if operation.status in (
+                CoreManagedSSHOperation.Status.FAILED,
+                CoreManagedSSHOperation.Status.EXPIRED,
+            ):
+                raise ManagedSSHOperationError("Managed SSH validation failed.")
+            return Response(
+                {
+                    "detail": "Managed SSH validation is still running.",
+                    "operation_id": str(operation.uuid),
+                    "operation_status": operation.status,
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
         connection.auth_database.check_connection(check_errors=True)
         return Response(
             {"detail": "Validation passed. Integration is good for backups."},
@@ -96,6 +152,36 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     def update_db_type_and_version(self, request, pk=None):
         try:
             connection = self.get_object()
+            if connection_uses_managed_key(connection):
+                operation = wait_for_managed_ssh_operation(
+                    create_managed_ssh_operation(connection, "update_metadata")
+                )
+                if operation.status == CoreManagedSSHOperation.Status.COMPLETE:
+                    result = operation.result_payload.get("database", {})
+                    return Response(
+                        {
+                            "detail": (
+                                f"Database type is set to {result.get('type')} "
+                                f"and version {result.get('version')}."
+                            )
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+                if operation.status in (
+                    CoreManagedSSHOperation.Status.FAILED,
+                    CoreManagedSSHOperation.Status.EXPIRED,
+                ):
+                    raise ManagedSSHOperationError(
+                        "Managed SSH metadata discovery failed."
+                    )
+                return Response(
+                    {
+                        "detail": "Managed SSH metadata discovery is still running.",
+                        "operation_id": str(operation.uuid),
+                        "operation_status": operation.status,
+                    },
+                    status=status.HTTP_202_ACCEPTED,
+                )
             result = connection.auth_database.update_db_type_and_version()
             return Response(
                 {"detail": f"Database type is set to {result.get('type')} and version {result.get('version')}."},

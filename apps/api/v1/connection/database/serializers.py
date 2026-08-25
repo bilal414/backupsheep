@@ -1,5 +1,6 @@
 import pytz
 from django.conf import settings
+from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
@@ -22,6 +23,10 @@ from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreCo
 from apps.api.v1.connection.serializer_helpers import (
     StructuredConnectionValidationMixin,
     safe_connection_validation_error,
+)
+from apps.console.connection.managed_ssh import (
+    create_managed_ssh_operation,
+    managed_public_key_fingerprint,
 )
 
 
@@ -393,8 +398,14 @@ class CoreAuthDatabaseWriteSerializer(serializers.ModelSerializer):
         )
 
         try:
-            auth = CoreAuthDatabase()
-            auth.check_connection(data=connection_data)
+            if mode == "public_key":
+                # The managed private key exists only in the database worker. The
+                # web role validates the public identity now and authorizes a
+                # durable, lane-bound worker operation after commit.
+                managed_public_key_fingerprint()
+            else:
+                auth = CoreAuthDatabase()
+                auth.check_connection(data=connection_data)
         except Exception as error:
             raise safe_connection_validation_error(error, stage="database") from None
 
@@ -462,18 +473,36 @@ class CoreDatabaseConnectionWriteSerializer(
         model = CoreConnection
         fields = "__all__"
 
+    @transaction.atomic
     def create(self, validated_data):
         auth_database = validated_data.pop("auth_database", [])
+        managed_key = bool(auth_database.get("use_public_key"))
+        if managed_key:
+            validated_data["status"] = CoreConnection.Status.PENDING
         instance = CoreConnection.objects.create(**validated_data)
         auth_database["connection"] = instance
         CoreAuthDatabase.objects.create(**auth_database)
+        if managed_key:
+            self.managed_ssh_operation = create_managed_ssh_operation(
+                instance,
+                "validate",
+            )
         return instance
 
+    @transaction.atomic
     def update(self, instance, validated_data):
         if validated_data.get("location") and instance.location != validated_data["location"]:
             instance.update_scheduled_backup_locations(validated_data["location"])
         auth_database = validated_data.pop("auth_database", [])
+        managed_key = bool(auth_database.get("use_public_key"))
+        if managed_key:
+            validated_data["status"] = CoreConnection.Status.PENDING
         if len(auth_database) > 0:
             super().update(instance.auth_database, auth_database)
         instance = super().update(instance, validated_data)
+        if managed_key:
+            self.managed_ssh_operation = create_managed_ssh_operation(
+                instance,
+                "validate",
+            )
         return instance
