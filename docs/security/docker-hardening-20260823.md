@@ -1,11 +1,11 @@
 # BackupSheep Docker and container cyber-defense assessment
 
-**Assessment window:** 2026-08-23 through 2026-08-24 UTC  
-**Repository:** `bilal414/backupsheep`  
-**Branch:** `codex/security-hardening-20260823`  
-**Final implementation commit:** `7be0729374e61558740f7a564248a7c4491049be`  
-**Demo deployment:** `demo.backupsheep.com`, project `backupsheepsecure`  
-**Deployment mode:** core only; all provider workers and Celery Beat remain stopped  
+**Assessment window:** 2026-08-23 through 2026-08-25 UTC
+**Repository:** `bilal414/backupsheep`
+**Original evidence branch/commit:** `codex/security-hardening-20260823` / `7be0729374e61558740f7a564248a7c4491049be`
+**Current candidate branch/PR:** `codex/security-enterprise-blockers-20260825` / [PR #73](https://github.com/bilal414/backupsheep/pull/73)
+**Historical demo deployment:** `demo.backupsheep.com`, project `backupsheepsecure`, evidenced at `7be0729...`
+**Historical deployment mode:** core only; all provider workers and Celery Beat stopped
 **Review boundary:** repository-supplied images, Compose topology, installer, wrapper,
 entrypoint, secret loading, startup checks, and application changes required to make
 those boundaries trustworthy
@@ -15,11 +15,12 @@ those boundaries trustworthy
 > `7be0729...`. The current working tree subsequently implemented BSE1 chunked
 > AES-256-GCM-SIV artifact envelopes with external AWS KMS custody, private per-lane
 > staging and ciphertext-only handoffs, generation-3 database/task identities, and
-> namespace egress guards. It also hardened the CodeQL-reported temporary credential-
-> file and public exception-message paths. Those follow-up changes are **not** covered
-> by the old digests, scan counts, demo state or regression count. A new exact commit,
-> full clean tests/scans, fresh installer exercise, deployed topology inspection and
-> provider backup/restore/chaos proof remain the authoritative release gate.
+> namespace egress guards. It also hardened the CodeQL-reported credential-output,
+> temporary-file and public exception-message paths. Those follow-up changes are
+> **not** covered by the old digests, scan counts, demo state or regression count.
+> The current [PR checks](https://github.com/bilal414/backupsheep/pull/73/checks) are the
+> repository gate; protected signed publication, deployed topology inspection and
+> provider backup/restore/chaos proof remain separate operational gates.
 > The current egress-guard candidate now uses digest-pinned official Alpine 3.22.5
 > (`sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce`)
 > for both build and runtime stages. A fresh no-cache Trivy candidate scan reported zero
@@ -34,22 +35,27 @@ those boundaries trustworthy
 > evidence, not a zero-vulnerability or released-multi-architecture claim; Canonical
 > still has relevant 26.04 issues in `Needs evaluation`, as detailed below.
 
-## 2026-08-25 local release-candidate evidence
+## 2026-08-25 predecessor local candidate evidence (`0e76142`)
 
-This section is a new, non-demo evidence cut for the current security branch. It does
-not rewrite the historical `7be0729...` deployment record below and it is not a signed
-release claim. The locally scanned application runtime's Python source matched the
-current runtime source byte for byte; the final test, workflow and documentation fixes
-were mounted as read-only contracts. GitHub CI must still rebuild and scan the final
-committed tree on native amd64, and the protected multi-architecture release workflow
-remains authoritative for publication.
+This section is a non-demo predecessor evidence cut for implementation commit
+`0e76142...`. It does not rewrite the historical `7be0729...` deployment record and it
+is not a signed release claim. The locally scanned application runtime's Python source
+matched that implementation tree byte for byte. Later CodeQL remediations changed
+application source, and the bounded-DNS reconciliation fix changed the egress image, so
+the app/egress identities below are retained only as predecessor evidence. The current
+PR's native-amd64 rebuild, scans and tests are authoritative for the merge candidate;
+the protected multi-architecture release workflow remains authoritative for publication.
 
 The release-candidate gate now saves each locally built image by its immutable Docker
 ID, verifies the Docker/OCI archive descriptor chain from the outer index to the exact
 config, and then requires both Syft and Trivy to identify that config and the same
 archive path. A swapped archive, swapped scanner ID/path, multiple-image archive,
 descriptor traversal, cyclic/oversized graph or content/digest mismatch fails closed.
-No ignore file, ignored-unfixed relaxation or vulnerability allowlist was used.
+The validator accepts only Syft 1.51.0/schema 16.1.10 and Trivy 0.74.0/schema 2,
+recomputes Trivy's tag-context artifact identity, independently matches its config
+image ID, and requires exact cross-scanner OS package-name parity. A scanner/schema
+upgrade therefore fails closed until reviewed. No ignore file, ignored-unfixed
+relaxation or vulnerability allowlist was used.
 
 | Image | Docker outer ID | Archive config ID | Archive SHA-256 | Syft packages | Trivy packages | High/Critical |
 | --- | --- | --- | --- | ---: | ---: | ---: |
@@ -57,7 +63,7 @@ No ignore file, ignored-unfixed relaxation or vulnerability allowlist was used.
 | PostgreSQL | `sha256:1cb6ad4fca79e4632ec2c327dfcb5a4563e732f68e1c331c71bb1252d2ec78cc` | `sha256:c0b3e3ac548276f3c9076002195648ad949278261502954116bbb8dc8d7b261c` | `45028fda4cb978c4a3a37812a94dbaef40ce555a3c2c43c9c1b36b3528ca42c0` | 55 | 54 | 0 |
 | Egress guard | `sha256:49b0a02814e44c84a65f3058a63ba17f9f5b98bd8487d2391509ea748fe8b46e` | `sha256:f2af23dda1a317c706cee7607c7cb7d8013bdd6ec27d7f06f000a9affa348d6b` | `fb931fd1c55f557d11ac903d43555959b72dbe51b6b02e2ef42afe02750c5aab` | 30 | 30 | 0 |
 
-The exact candidate runtime passed **2,667 tests in 395.261 seconds** with one
+The predecessor candidate runtime passed **2,667 tests in 395.261 seconds** with one
 intentional provider-harness skip. A concurrency test also passed ten consecutive
 isolated repetitions after its Celery thread-local proxy was replaced by one explicit
 test app; the complete ordered run then passed the former failure point. Bruno coverage
@@ -82,26 +88,35 @@ files and hostile locale behavior are rejected. Security-sensitive Docker labels
 bounded byte-length plus terminal-sentinel framing and reject control bytes, embedded
 marker tricks and shell newline/NUL normalization before any mutation.
 
-These results close the known repository-owned Docker/install/workflow code blockers.
-They do not close the external release and operations gates: fresh GitHub CodeQL and
-native-amd64 checks, protected signed multi-architecture publication, demo deployment,
-production KMS/IAM custody and cross-lane denial, or live provider backup/restore/chaos
-acceptance. Those remain explicit conditions in the residual register and remediation
-order below.
+### Current pull-request evidence gate
+
+The candidate closes the known repository-owned Docker, installer, workflow and static-
+analysis blockers only when the current PR head has green GitHub Advanced Security
+CodeQL, both language analyses, pinned Bandit/source scanning, dependency/deployment
+checks, exact native-amd64 image scans, the full application suite and the production-
+topology/egress attack gates. The PR's successful evidence artifacts, not the predecessor
+image table above, bind those checks to the exact head under review.
+
+Those repository checks do not close protected signed multi-architecture publication,
+fresh-host or demo deployment, production KMS/IAM custody and denied cross-lane calls,
+or live provider backup/restore/chaos acceptance. The historical Google API credential
+incident below also remains open until provider-side revocation is proven.
 
 ## Executive decision
 
 At the original evidence cut, BackupSheep had a strong secure-by-default Docker
-baseline. The final application and PostgreSQL containers on the demo were healthy on
-exact commit-tagged images. The
-web process is non-root, capability-free, read-only, bounded by CPU/memory/PID limits,
-isolated from the Docker socket and backup work volume, and exposed only on host
-loopback. PostgreSQL now runs directly as UID/GID `70:70` on the digest-pinned Alpine/ICU
-runtime without `gosu`; the earlier Debian/UID-999 volume is accepted only by the explicit
-logical migration gate and remains detached rollback evidence. RabbitMQ and PostgreSQL
-publish no host ports. Core secrets are file-backed and direct secret
-environment variables are blank. A normal profile-less start does not launch any
-provider-mutating worker or scheduler.
+baseline. The `7be0729...` demo ran the application as UID/GID `10001:10001` and
+PostgreSQL as `999:999` on healthy exact commit-tagged images. The web process was
+capability-free, read-only, bounded by CPU/memory/PID limits, isolated from the Docker
+socket and backup work volume, and exposed only on host loopback. RabbitMQ and
+PostgreSQL published no host ports, core secrets were file-backed, and provider-mutating
+workers and the scheduler remained stopped.
+
+The current candidate changes PostgreSQL to direct UID/GID `70:70` on the digest-pinned
+Alpine/ICU runtime without `gosu`, and adds BSE1, per-lane identities/staging and guarded
+egress. Those controls have local and pull-request gates but have not replaced the
+historical demo deployment. Its earlier Debian/UID-999 volume is accepted only by the
+explicit logical migration gate and remains detached rollback evidence.
 
 The result passed a clean 2,298-test regression run, two independent image scanners,
 source/secret/config scanning, adversarial container checks, migration/startup
@@ -121,19 +136,19 @@ outside the container boundary.
 
 | Area | Result | Decision |
 | --- | --- | --- |
-| Application image containment | Pass | Strong non-root immutable baseline demonstrated live |
-| PostgreSQL image containment | Pass | Fixed non-root identity, zero capabilities, read-only root, authenticated probe |
+| Application image containment | Candidate-gated | Strong non-root immutable baseline; historical live and current PR evidence remain distinct |
+| PostgreSQL image containment | Candidate-gated | Current fixed UID/GID 70, zero capabilities, read-only root and authenticated probe; demo still historical UID 999 |
 | RabbitMQ containment | Pass in repository integration | UID/GID 100:101, all capability sets zero, witness-gated volume, per-lane identities; demo redeploy still required |
 | Compose topology | Pass | Loopback web publication, no DB/broker host ports, role-specific internal networks, operations opt-in |
 | Installer/update safety | Pass in tests; demo exception documented | Exact commit, no host provisioning, fail-closed ownership/collision/generation checks |
 | Runtime secrets | Pass with residual | Values absent from direct env; a compromised granted process can still read its mounted files |
-| Supply chain | Conditional pass | Pinned/verified inputs and zero fixable H/C; unsigned local images and no enforced release provenance |
-| Regression suite | Pass | 2,298/2,298 tests |
-| Demo core rollout | Pass | App/DB/Rabbit healthy, preflight passed, queue preserved, operations stopped |
+| Supply chain | Candidate-gated | Pinned/verified CI inputs and strict findings policy; signed publication remains pending |
+| Regression suite | Candidate-gated | 2,298 historical demo tests; 2,667 predecessor-candidate tests; current PR full-suite check is authoritative |
+| Historical demo core rollout | Pass at `7be0729...` | App/DB/Rabbit healthy, preflight passed, queue preserved, operations stopped; current candidate not deployed |
 | Provider operations and restores | Held | Not enabled or treated as proven by this Docker review |
-| Backup application-layer encryption | Implemented in current repository; evidence pending | BSE1 AES-256-GCM-SIV and AWS KMS policy/custody require new exact-release and live restore proof |
-| Private staging and ciphertext handoff | Implemented in current repository; evidence pending | Per-lane work volumes and fenced forward/reverse transfers require fresh cross-UID/live proof |
-| Database/broker lane identity | Implemented in current repository; evidence pending | Generation-3 database roles and signed broker task contracts require fresh rollout evidence |
+| Backup application-layer encryption | Local candidate pass; operational proof pending | BSE1 AES-256-GCM-SIV and AWS KMS policy/custody require signed-release and live restore proof |
+| Private staging and ciphertext handoff | Local candidate pass; deployment proof pending | Per-lane work volumes and fenced forward/reverse transfers passed local cross-UID gates; repeat on exact deployment |
+| Database/broker lane identity | Local candidate pass; deployment proof pending | Generation-3 database roles and signed broker task contracts passed local gates; exact rollout evidence remains required |
 | Container egress policy | Implemented with residual | Generation-2 deny default, exact DB/broker and outward TCP tuples, split strict DNS boundary; same-IP/same-port shared tenancy and deployment-specific NAT64 remain residuals |
 
 ## Scope and responsibility boundary
@@ -362,6 +377,16 @@ blockers can be closed operationally.
   a fresh renewal within the lease rather than PID-1 liveness alone. Workload health
   separately proves local web/worker readiness and fresh database/broker TCP connections
   through those current sets, making guard loss or a stranded namespace visible.
+- Every libc peer lookup is bounded to one second by the pinned GNU coreutils 9.7
+  `timeout --foreground` supervisor. Foreground supervision ensures a killed lookup is
+  reaped instead of accumulating under the deliberately minimal PID 1. The lease is
+  three polling intervals plus twelve seconds (15 seconds at the stock one-second
+  interval), exceeding the 8.4-second worst sequential two-peer lookup budget while
+  retaining a kernel-enforced deadline. The current hostile harness replaced `getent`
+  with a never-returning fixture and proved health became blocked, peer tuples and the
+  workload lease expired, the database connection was denied, and no zombie remained.
+  The exact no-cache ARM64 image used by that harness contained 38 Alpine packages;
+  pinned Trivy 0.74.0 reported zero High/Critical matches for the saved image archive.
 - `BACKUPSHEEP_EGRESS_POLICY_GENERATION=2` is mandatory and address-only allowlist values
   fail closed. The one-time `--migrate-egress-policy` installer authorization accepts
   only uniform stock public/blank, blank/blank, or deny/blank state, resets all six roles
@@ -444,16 +469,23 @@ also closed connected attack paths:
   ciphertext fingerprints and makes secret-key rotation invalidate prior witnesses. A
   CodeQL report about the earlier plain SHA-256 construction did not establish plaintext
   dictionary exposure because its inputs were encrypted BinaryField ciphertext; the HMAC
-  change resolves that alert cleanly, pending confirmation from the next scan;
+  construction is now covered by the pull-request CodeQL gate;
 - MySQL/MariaDB local option files now use mode-`0600` `mkstemp` staging plus atomic
   replacement without following a symlink or hard link. Remote SFTP option files use
   exclusive creation and chmod the empty inode before any credential byte is written.
   Paramiko-normalized private-key output is likewise precreated mode `0600` before
-  unencrypted key bytes are emitted. These changes address the temporary-file paths
-  behind the prior CodeQL 48-51/55 findings; the next scan is authoritative;
-- Vultr API error handling no longer returns `str(exception)` to a caller. Public errors
-  are selected from constant allowlisted messages, addressing that exception-data sink
-  pending the next CodeQL scan;
+  unencrypted key bytes are emitted. These changes close the temporary-file paths behind
+  the prior CodeQL findings and are exercised by the pull-request security suite;
+- connection-test failures no longer return or log exception text. Database and website
+  endpoints classify failures into fixed public codes/messages and record only a fixed
+  stage and classification, keeping provider responses, URLs and credential-bearing
+  diagnostics out of API bodies and telemetry;
+- the UpCloud live-acceptance harness registers runtime secrets for output rejection and
+  sources emitted bucket/prefix fields from canonical run state rather than credential
+  responses. Its public JSON path screens every result and rejects compact and
+  camel-case secret keys, authorization schemes, URL userinfo, query/fragment tokens,
+  raw or nested percent encoding, registered secret values and noncanonical credential
+  paths; its error path always emits one fixed diagnostic rather than provider text;
 - shell-string execution was removed from reviewed backup/restore paths, credentials
   are passed through protected files or stdin, and GNU tar operands are separated with
   `--` after reviewed options;
@@ -467,9 +499,9 @@ also closed connected attack paths:
 
 ## Adversarial validation
 
-### Live web-container attack checks
+### Historical live web-container attack checks (`7be0729...`)
 
-Observed on `demo.backupsheep.com` after final deployment:
+Observed on `demo.backupsheep.com` after the historical `7be0729...` deployment:
 
 | Check | Result |
 | --- | --- |
@@ -498,7 +530,7 @@ of an ordinary web-process compromise. It does not prove
 containment from a kernel/container-runtime vulnerability, Docker-daemon compromise, or
 credentials intentionally readable by the web process.
 
-### Live database and broker checks
+### Historical live database and broker checks (`7be0729...`)
 
 - PostgreSQL is healthy as `999:999`, read-only, capability-free, NNP/seccomp enabled,
   bounded to 256 PIDs, 2 GiB, and 2 CPUs. `gosu` is absent. An authenticated TCP query
@@ -509,7 +541,7 @@ credentials intentionally readable by the web process.
 - The application could not discover a Docker socket or write immutable source/system
   paths. PostgreSQL/RabbitMQ are not reachable directly from the public host network.
 
-### HTTP attacker probes
+### Historical HTTP attacker probes (`7be0729...`)
 
 - Public `/healthz/`: `200`.
 - Direct invalid `Host`: `400` from Django.
@@ -526,9 +558,9 @@ was intentionally not changed in this Docker-only phase. The Django endpoint its
 rejects the methods and invalid Host. The edge behavior remains a documented host-layer
 residual.
 
-### Regression tests
+### Historical deployed regression tests (`7be0729...`)
 
-The final source state passed:
+The historical deployed source state passed:
 
 ```text
 Found 2298 test(s).
@@ -545,7 +577,7 @@ execute shell fixtures. Production Compose retains `noexec,nosuid,nodev` tmpfs.
 The final secure-transport subset also passed 30/30 tests covering FTPS restore behavior
 and explicit plaintext-FTP rejection together.
 
-## Image and source scanning
+## Historical image and source scanning (`7be0729...`)
 
 The final `7be0729...` build produced the same runtime platform manifests and config
 digests as the exact scanned `c9d0d72...` build; intervening commits changed only tests,
@@ -667,6 +699,21 @@ their upstream package URLs. Trivy 0.74.0, with database version 2 updated 2026-
 an empty ignore file and exit code 1. It exited 0 with zero matched High/Critical
 advisories. No allowlist or policy relaxation was used.
 
+Replaying the strengthened current image validator against this exact saved predecessor
+archive also parsed all 120 top-level hash-locked Python requirements and required exact
+normalized name/version equality in both scanner reports. Syft and Trivy each reported
+132 Python components, of which exactly 120 were top-level and matched the lock; the
+remaining 12 were separately scanned setuptools-vendored components and could not
+satisfy a top-level requirement. Missing, wrong-version, duplicate, unlocked,
+vendored-only, inactive-runtime, legacy-metadata, malformed, or scanner-omitted
+inventory now fails closed. The direct inventory is bound to
+`/usr/local/lib/python3.14/site-packages` and recognizes case variants plus `.dist-info`,
+`.egg-info`, and `.egg/EGG-INFO` metadata. Both scanners also agreed on all 138 OS
+package names. This metadata gate does not independently verify every installed module
+or `RECORD` byte, and identical omissions by both scanners remain a residual. The
+canonical top-level inventory SHA-256 was
+`0a4b340e77002b845d37e136bf41f40d01cd97cb645c9fe68df588855007a5f1`.
+
 | Validated evidence | SHA-256 |
 | --- | --- |
 | Docker archive | `4bfb975f12d0b3ddfbb396ad2b6fd3cfbcd090af60a2f0ce6d3824bd1c2ee253` |
@@ -747,15 +794,59 @@ heuristic results were triaged rather than silently counted as proof of safety.
 
 The 2026-08-25 follow-up converted that triage into a release-blocking control. The
 reusable supply-chain workflow (which the signed-image workflow must complete before
-building) installs exact `bandit==1.9.4`, scans `apps`, `backupsheep`, and `scripts` at
-Medium-or-higher severity, and validates every accepted result against
-`deploy/static-analysis-policy.json`. The current report contains 60 Medium and zero
-High findings: B104 (1), B108 (8), B310 (3), B601 (7), and B608 (41). Each accepted
+building) installs `bandit==1.9.4` and its complete CPython 3.14/Linux dependency closure
+from a whole-file and artifact-hash-locked binary-wheel manifest, scans `apps`,
+`backupsheep`, and `scripts` at Medium-or-higher severity, and validates every accepted
+result against `deploy/static-analysis-policy.json`. Repository `.bandit`/YAML
+configuration and inline `# nosec` suppression are explicitly disabled and covered by a
+malicious-suppression canary. The current report contains 60 Medium and one High
+heuristic: B104 (1), B108 (8), B310 (3), B402 (1), B601 (7), and B608 (41). B402 is the
+content-pinned standard-library `ftplib` import required by `FTP_TLS`; its plaintext
+subclass checks the default-off `ALLOW_INSECURE_FTP` gate before network access.
+Each accepted
 finding has a code-content fingerprint and a written review; a new result, removed
 result, scanner error, or changed code sample fails the gate. An AST policy separately
 rejects `AutoAddPolicy`, `WarningPolicy`, and any unapproved
 `set_missing_host_key_policy(...)` expression, including conditional patterns Bandit
 can miss.
+
+The dependency-audit job now applies the same installer discipline to `pip-audit`
+2.10.1: its complete CPython 3.14/Linux wheel closure and the lockfile itself are
+SHA-256 pinned before it audits the exact hash-locked application runtime inventory
+with dependency resolution disabled. The current exact-lock replay reported no known
+advisories; the current PR run remains authoritative.
+
+### Current full-tree source and secret gate
+
+The current candidate adds a separate fail-closed Trivy 0.74.0 filesystem gate to the
+pinned static-analysis job. It verifies the scanner asset hash, requires a clean checkout
+at the exact GitHub SHA, clears ambient configuration, scans the full dependency tree
+for High/Critical vulnerabilities, and requires Trivy configuration coverage for all
+three repository Dockerfiles. Compose and workflow semantics are covered separately by
+the rendered deployment tests and hash-verified actionlint 1.7.12 running over every
+workflow in the same required job. The source validator requires the exact Python and
+npm dependency-result identities plus all three Dockerfile results, so losing either
+dependency ecosystem or a clean Dockerfile result cannot pass on aggregate package counts.
+Secret scanning is deliberately a separate all-severity pass: its generated immutable configuration disables every Trivy
+0.74 built-in path allow rule and default skip pattern, including tests, examples,
+vendor, Markdown and lockfiles. Five private canaries prove those normally skipped paths
+are actually inspected on every run. The secret report must retain the exact Python
+inventory identity as well; an unrelated inventory cannot mask its disappearance.
+
+The exact local gate exercise reported zero High/Critical dependency findings and zero
+secret findings at any severity. Trivy reported two High Dockerfile heuristics: DS-0017
+for the authenticated, version/hash-pinned APT download/repackaging stage and DS-0002 for
+the egress guard's root-only nftables bootstrap before it drops to UID 10020 with only
+`NET_ADMIN`. Both reviews pin the complete target bytes and complete finding JSON; an
+extra, missing, duplicated or changed result fails. Raw secret reports remain mode 0600
+in a private runner directory, are deleted before upload, and only a zero-sensitive
+summary is retained. The current PR's exact-SHA execution remains authoritative.
+
+Repository secret scanning, push protection, Dependabot updates and private vulnerability
+reporting are enabled. Provider validity checks and non-provider secret patterns remained
+disabled when requested through the GitHub API, so they are treated as a platform/account
+capability gap rather than silently claimed as active. Current-tree scanning also does
+not close the historical Google credential incident described below.
 
 Two real issues found during that review were remediated rather than allowlisted:
 
@@ -775,7 +866,7 @@ Two real issues found during that review were remediated rather than allowlisted
   prevents names such as `--result-file=...` or `--tab=...` from becoming client
   options while preserving ordinary database identifiers.
 
-## Demo deployment and recovery evidence
+## Historical demo deployment and recovery evidence (`7be0729...`)
 
 ### Pre-change recovery boundary
 
@@ -794,7 +885,7 @@ were validated. Original legacy core containers/volumes were retained cold; unre
 remediation containers were not deleted or moved. No prune, orphan removal, or volume
 deletion was used.
 
-### Final live state
+### Historical final live state
 
 | Component | Exact image | State |
 | --- | --- | --- |
@@ -820,17 +911,30 @@ documented demo exception, not evidence that the installer should weaken its own
 model. Installer behavior is covered by the clean regression suite; a separate fresh
 user-owned host acceptance test is still recommended.
 
+On 2026-08-25 the public HTTPS endpoint remained reachable, but every available SSH
+identity was rejected by the server. The current candidate therefore has not been
+deployed or inspected on the demo host; no historical live fact in this section should
+be read as current-candidate deployment evidence.
+
 ## Residual risk register
 
 ### Critical
 
-1. **The new artifact-custody and staging boundary is implemented but not
+1. **A historically committed Google API key remains an open credential incident.**
+   GitHub secret scanning identifies one publicly leaked Google API key introduced in
+   2024. The unused helper that contained it is absent from the current main, develop and
+   candidate tips, but deleting source does not revoke a credential and public forks
+   retain historical copies. The Google Cloud owner must revoke or rotate the key,
+   inspect its restrictions, usage, audit/billing records and downstream dependencies,
+   and then resolve the GitHub alert as revoked. A history rewrite may reduce casual
+   discovery only after revocation; it cannot erase existing clones or forks.
+2. **The new artifact-custody and staging boundary is implemented but not
    release-proven.** The original demo/digests do not include BSE1, the KMS policy boundary or
    private layout v3. Do not treat the old 2,298-test run as closure. Cut and attest an
    exact release, exercise the fresh installer and existing-volume migration, prove
    denied cross-lane KMS calls and filesystem access, and run tamper, tenant/context-swap,
    rotation, key-loss, provider-upload and authenticated restore-before-write tests.
-2. **A source-lane compromise remains high-impact by design.** Database/files workers
+3. **A source-lane compromise remains high-impact by design.** Database/files workers
    must temporarily read the plaintext they collect and hold their own KMS identity.
    Stock egress now denies outward traffic, but a role must receive some network path to
    perform Internet-dependent work. A remote-code-execution flaw in one of those lanes
@@ -911,27 +1015,34 @@ user-owned host acceptance test is still recommended.
    an isolated default route with regression proof, not by weakening the app.
 7. The demo's administrative deployment exception means fresh-host installer behavior
    is test-proven but not live-proven on that root-owned path.
+8. GitHub provider validity checks and non-provider secret patterns remain disabled at
+   the repository capability layer. Core secret scanning and push protection are active,
+   but provider-side revocation and the strict repository CI scan remain necessary.
 
 ## Enterprise remediation order
 
 ### P0 — before claiming enterprise protection for sensitive backups
 
-1. Cut an exact release and run the complete tests, CodeQL/source/secret scans and image
+1. Revoke or rotate the historically exposed Google API key at the provider, review
+   restrictions, use, audit and billing evidence, update any legitimate dependent
+   workload, and resolve the repository alert only after provider-side revocation is
+   proven.
+2. Cut an exact release and run the complete tests, CodeQL/source/secret scans and image
    scans; publish signed multi-architecture images, SBOMs and provenance tied to the
    protected commit.
-2. Exercise the exact-ref installer on a fresh user-owned host and the fail-closed v3
+3. Exercise the exact-ref installer on a fresh user-owned host and the fail-closed v3
    migration on a recoverable existing-volume copy. Inspect every resulting mount,
    identity, capability, healthcheck, restart policy and egress namespace.
-3. Review the AWS IAM/key policies and prove allowed same-lane plus denied cross-lane KMS
+4. Review the AWS IAM/key policies and prove allowed same-lane plus denied cross-lane KMS
    operations, BSE1 context/tamper/swap rejection, key-wrap rotation and key-loss
    recovery. Keep the old key until every durable envelope is rewrapped and rehearsed.
-4. Prove storage and Local Storage contain BSE1 ciphertext only, source lanes cannot
+5. Prove storage and Local Storage contain BSE1 ciphertext only, source lanes cannot
    mount `/backups`, and no role can read or mutate another lane's private/transfer data.
-5. Put database/files lanes in reviewed egress `allowlist` mode (or a controlled proxy)
+6. Put database/files lanes in reviewed egress `allowlist` mode (or a controlled proxy)
    before sensitive operation, without broadening the exact internal DB/broker tuples.
-6. Deploy and retain evidence for generation-3 database identity, generation-2 RabbitMQ
+7. Deploy and retain evidence for generation-3 database identity, generation-2 RabbitMQ
    identity and generation-3 signed-task/replay enforcement.
-7. Run provider-specific backup, restore, crash, retry, duplicate and unknown-outcome
+8. Run provider-specific backup, restore, crash, retry, duplicate and unknown-outcome
    reconciliation gates with fresh ownership evidence.
 
 ### P1 — production hardening
@@ -1025,6 +1136,9 @@ state, or installation-identity witness. Follow
 ## Evidence limitations
 
 - Scanners report known data in their databases, not absence of exploitable behavior.
+- A clean current-tree source/secret scan does not prove that Git history, forks, build
+  logs or previously published artifacts are clean; the historical Google key alert is
+  direct evidence of that distinction.
 - Static and unit/integration tests cannot prove kernel/runtime isolation against an
   unknown container escape.
 - Core health and an empty consumer set intentionally do not prove providers, backups,
@@ -1034,6 +1148,8 @@ state, or installation-identity witness. Follow
   validation.
 - The rollback bundle was validated for integrity/decryption/listing. A full destructive
   rollback rehearsal was not performed on the live demo after the final deployment.
+- Current demo server inspection and rollout were blocked by SSH public-key rejection;
+  the current candidate therefore has no live-demo containment or migration proof.
 - Host reverse-proxy, daemon, firewall, MAC, patching, encryption, and rootless posture
   are explicitly outside this Docker-owned boundary.
 
@@ -1042,13 +1158,16 @@ state, or installation-identity witness. Follow
 The assessed Docker setup was defensible as a hardened core-only baseline against common
 web-RCE, secret-leakage, persistence, lateral-movement, supply-chain, unsafe-startup and
 resource-exhaustion attacks. The original demo deployment and regression evidence support
-that historical conclusion. The current repository adds materially stronger artifact,
-identity, staging and egress boundaries, but those additions require a new evidence cut.
+that historical conclusion. The current candidate adds materially stronger artifact,
+identity, staging and egress boundaries plus fail-closed project-name, output-redaction,
+exception and source-scan controls. Its exact PR checks are the repository evidence cut;
+they are not signed-release, provider, KMS or live-deployment evidence.
 
-Enterprise use should remain conditional, not marketed as attack-proof. The P0 items—
-especially exact-release proof of external-KMS BSE1, per-lane identities/staging/egress,
-signed release provenance, and real provider/restore/chaos proof—must close before
-BackupSheep can credibly claim enterprise-grade protection for high-value backup data.
+Enterprise use should remain conditional, not marketed as attack-proof. The historical
+Google key must first be revoked and investigated. Exact-release proof of external-KMS
+BSE1, per-lane identities/staging/egress, signed provenance, deployed containment and
+real provider/restore/chaos proof must also close before BackupSheep can credibly claim
+enterprise-grade protection for high-value backup data.
 
 ## Authoritative references
 

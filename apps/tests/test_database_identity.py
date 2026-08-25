@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from unittest import TestCase, mock
@@ -21,7 +22,9 @@ class DatabaseIdentityConfigurationTests(TestCase):
             prefix="backupsheep-database-identity-"
         )
         self.secret_root = Path(self.temporary_directory.name)
-        self.secrets = {
+        # Unique canaries stand in for generated credentials; they are never
+        # usable outside this temporary test directory.
+        self.canaries = {
             "bootstrap": "b" * 32,
             "migrator": "m" * 32,
             **{
@@ -29,7 +32,7 @@ class DatabaseIdentityConfigurationTests(TestCase):
                 for index, lane in enumerate(LANES)
             },
         }
-        for name, value in self.secrets.items():
+        for name, value in self.canaries.items():
             path = self.secret_root / name
             path.write_text(value + "\n", encoding="utf-8")
             path.chmod(0o444)
@@ -65,13 +68,13 @@ class DatabaseIdentityConfigurationTests(TestCase):
 
         self.assertEqual(config.bootstrap_user, "backupsheep_bootstrap")
         self.assertEqual(config.migrator_user, "backupsheep_migrator")
-        self.assertEqual(config.bootstrap_password, self.secrets["bootstrap"])
+        self.assertEqual(config.bootstrap_password, self.canaries["bootstrap"])
         self.assertEqual(
             dict(config.lane_users),
             {lane: f"backupsheep_{lane}" for lane in LANES},
         )
         self.assertEqual(dict(config.lane_passwords), {
-            lane: self.secrets[lane] for lane in LANES
+            lane: self.canaries[lane] for lane in LANES
         })
         self.assertEqual(
             config.marker("storage"),
@@ -86,11 +89,14 @@ class DatabaseIdentityConfigurationTests(TestCase):
                 reused_role, secret_root=self.secret_root
             )
 
-        (self.secret_root / "storage").chmod(0o644)
-        (self.secret_root / "storage").write_text(
-            self.secrets["migrator"] + "\n", encoding="utf-8"
+        storage_canary = self.secret_root / "storage"
+        storage_canary.unlink()
+        shutil.copyfile(self.secret_root / "migrator", storage_canary)
+        storage_canary.chmod(0o444)
+        self.assertEqual(
+            storage_canary.read_bytes(),
+            (self.secret_root / "migrator").read_bytes(),
         )
-        (self.secret_root / "storage").chmod(0o444)
         with self.assertRaisesRegex(ProvisioningError, "credential must be distinct"):
             IdentityConfiguration.from_environment(
                 self.environment(), secret_root=self.secret_root

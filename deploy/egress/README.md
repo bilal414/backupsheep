@@ -43,9 +43,10 @@ an already-running `network_mode: service:...` application in its old namespace.
 If either peer is absent or ambiguous, both internal sets and the strict lease are
 revoked and health becomes blocked until a complete valid snapshot returns.
 
-The kernel deadline is three polling intervals plus five seconds (eight seconds
-with the stock one-second interval). It is independent of the reconciler: if DNS
-resolution hangs, the monitor is killed, an nft update fails, and even the emergency
+The kernel deadline is three polling intervals plus twelve seconds (fifteen seconds
+with the stock one-second interval). That exceeds the complete 8.4-second worst-case
+sequential peer-lookup budget and remains independent of the reconciler: if DNS
+resolution hangs, each lookup child is killed, an nft update fails, and even the emergency
 empty-set transaction also fails, old internal tuples expire. In `deny` and
 `allowlist` mode all
 socket egress from the workload UID expires as well, including an established flow;

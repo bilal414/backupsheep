@@ -23,7 +23,7 @@ import urllib
 import urllib.parse
 # Plain FTP support is retained only behind the default-off ALLOW_INSECURE_FTP
 # compatibility gate; FTPS subclasses use the same standard-library module.
-import ftplib  # nosec B402
+import ftplib
 import ssl
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account

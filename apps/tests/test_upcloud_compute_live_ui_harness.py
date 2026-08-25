@@ -169,10 +169,37 @@ class UpCloudComputeLiveUIHarnessSafetyTests(SimpleTestCase):
 
     def test_cli_dispatches_all_compute_and_workload_commands(self):
         fake = mock.Mock()
-        fake.setup_compute.return_value = {"status": "setup"}
-        fake.verify_compute.return_value = {"status": "compute"}
-        fake.verify_workloads.return_value = {"status": "workloads"}
-        fake.cleanup_compute.return_value = {"status": "cleanup"}
+        fake.setup_compute.return_value = {
+            "status": "ready_for_ui_attachment",
+            "source_server_id": "11111111-1111-4111-8111-111111111111",
+            "source_volume_id": "22222222-2222-4222-8222-222222222222",
+            "source_boot_storage_id": "33333333-3333-4333-8333-333333333333",
+            "zone": "fi-hel1",
+            "plan": {},
+            "fixture": {},
+            "workloads": {},
+            "ui_resource_types": {},
+            "safe_config_sha256": "a" * 64,
+        }
+        fake.verify_compute.return_value = {
+            "status": "verified",
+            "source_server_id": "11111111-1111-4111-8111-111111111111",
+            "source_volume_id": "22222222-2222-4222-8222-222222222222",
+            "volume": {},
+            "server": {},
+        }
+        fake.verify_workloads.return_value = {
+            "status": "verified",
+            "source": {},
+            "restored": {},
+            "backup_artifact_verification": "verified",
+        }
+        fake.cleanup_compute.return_value = {
+            "status": "completed",
+            "deleted_storage_ids": [],
+            "source_server_id": None,
+            "restored_server_id": None,
+        }
         commands = (
             (["setup-compute"], "setup_compute"),
             (["verify-compute", "--manifest", "manifest.json"], "verify_compute"),

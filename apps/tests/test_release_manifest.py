@@ -471,7 +471,73 @@ class ReleaseToolInstallerTests(TestCase):
         with mock.patch.object(installer, "_download", return_value=asset):
             installer.install(policy, temporary / "bin", ["syft"])
         self.assertEqual(stat.S_IMODE((temporary / "bin" / "syft").stat().st_mode), 0o500)
+        self.assertEqual(
+            (temporary / "bin" / "empty-actionlint.yaml").read_text(encoding="utf-8"),
+            "{}\n",
+        )
+        self.assertEqual(
+            stat.S_IMODE(
+                (temporary / "bin" / "empty-actionlint.yaml").stat().st_mode
+            ),
+            0o600,
+        )
+        self.assertEqual(
+            (temporary / "bin" / "empty-bandit.ini").read_text(encoding="utf-8"),
+            "[bandit]\n",
+        )
+        self.assertEqual(
+            (temporary / "bin" / "empty-bandit.yaml").read_text(encoding="utf-8"),
+            "{}\n",
+        )
+        self.assertEqual(
+            stat.S_IMODE(
+                (temporary / "bin" / "empty-bandit.ini").stat().st_mode
+            ),
+            0o600,
+        )
+        self.assertEqual(
+            stat.S_IMODE(
+                (temporary / "bin" / "empty-bandit.yaml").stat().st_mode
+            ),
+            0o600,
+        )
         self.assertEqual(stat.S_IMODE((temporary / "bin" / "empty-syft.yaml").stat().st_mode), 0o600)
+        self.assertEqual(
+            (temporary / "bin" / "empty-trivy-secret.yaml").read_text(encoding="utf-8"),
+            "{}\n",
+        )
+        self.assertEqual(
+            stat.S_IMODE(
+                (temporary / "bin" / "empty-trivy-secret.yaml").stat().st_mode
+            ),
+            0o600,
+        )
+        self.assertEqual(
+            (temporary / "bin" / "strict-trivy-secret.yaml").read_text(
+                encoding="utf-8"
+            ),
+            "disable-allow-rules:\n"
+            "  - dist-info\n"
+            "  - tests\n"
+            "  - examples\n"
+            "  - vendor\n"
+            "  - usr-dirs\n"
+            "  - locale-dir\n"
+            "  - markdown\n"
+            "  - node.js\n"
+            "  - golang\n"
+            "  - python\n"
+            "  - rubygems\n"
+            "  - wordpress\n"
+            "  - anaconda-log\n"
+            "skip-patterns: []\n",
+        )
+        self.assertEqual(
+            stat.S_IMODE(
+                (temporary / "bin" / "strict-trivy-secret.yaml").stat().st_mode
+            ),
+            0o600,
+        )
 
     def test_installer_rejects_hash_mismatch(self):
         temporary = Path(tempfile.mkdtemp(prefix="backupsheep-tools-"))
@@ -798,9 +864,16 @@ class ReleaseWorkflowContractTests(TestCase):
         static_job = self.supply_chain_workflow.split(
             "  static-python-security:", 1
         )[1].split("  application-security-regression:", 1)[0]
-        self.assertIn("bandit==1.9.4", static_job)
+        self.assertIn("deploy/static-analysis-requirements.lock", static_job)
+        self.assertIn("--require-hashes", static_job)
+        self.assertIn("--only-binary=:all:", static_job)
+        self.assertIn("actionlint", static_job)
+        self.assertIn("--ignore-nosec", static_job)
+        self.assertIn("empty-bandit.ini", static_job)
+        self.assertIn("empty-bandit.yaml", static_job)
         self.assertIn("python -m bandit -q -r apps backupsheep scripts", static_job)
-        self.assertIn("-x apps/tests -f json -ll", static_job)
+        self.assertIn("-x apps/tests", static_job)
+        self.assertIn("-f json -ll", static_job)
         self.assertIn("scripts/validate_static_security.py", static_job)
         self.assertIn("deploy/static-analysis-policy.json", static_job)
         self.assertIn("uses: ./.github/workflows/supply-chain-security.yml", self.workflow)

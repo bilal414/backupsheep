@@ -9,7 +9,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 
-from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects
 from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.connection.managed_ssh import (
@@ -189,10 +188,7 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         connection = self.get_object()
         if connection_uses_managed_key(connection):
             return self._launch_managed(connection, "discover")
-        try:
-            return Response(connection.auth_database.get_eligible_objects())
-        except Exception as error:
-            raise NodeConnectionErrorEligibleObjects(str(error)) from error
+        return Response(connection.auth_database.get_eligible_objects())
 
     @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
@@ -214,10 +210,7 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         connection = self.get_object()
         if connection_uses_managed_key(connection):
             return self._launch_managed(connection, "update_metadata")
-        try:
-            result = connection.auth_database.update_db_type_and_version()
-        except Exception as error:
-            raise NodeConnectionErrorEligibleObjects(str(error)) from error
+        result = connection.auth_database.update_db_type_and_version()
         return Response(
             {
                 "detail": (

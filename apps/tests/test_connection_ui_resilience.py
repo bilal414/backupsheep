@@ -43,13 +43,24 @@ class ConnectionViewErrorContractTests(SimpleTestCase):
         self.assertEqual(response.data["detail"], response.data["connection_error"]["detail"])
 
     def test_timeout_is_typed_retryable_and_secret_safe(self):
-        response = connection_error_response(
-            socket.timeout("password=never-return-this"),
-            stage="validation",
-        )
+        with mock.patch(
+            "apps.console.connection.reliability.logger.warning"
+        ) as warning:
+            response = connection_error_response(
+                socket.timeout("password=never-return-this"),
+                stage="validation",
+            )
         self.assertEqual(response.status_code, status.HTTP_504_GATEWAY_TIMEOUT)
         self.assert_contract(response, code="TCP_TIMEOUT", retryable=True)
         self.assertNotIn("never-return-this", str(response.data))
+        warning.assert_called_once_with(
+            "Connection operation failed.",
+            extra={
+                "connection_failure_code": "TCP_TIMEOUT",
+                "connection_failure_stage": "tcp",
+            },
+        )
+        self.assertNotIn("never-return-this", repr(warning.call_args))
 
     def test_dns_auth_and_host_key_failures_are_distinct(self):
         cases = (
@@ -141,7 +152,9 @@ class LiveConnectionViewContractTests(BaseTestCase):
             CoreAuthWebsite,
             "get_eligible_objects",
             side_effect=socket.gaierror("private.database.internal"),
-        ):
+        ), mock.patch(
+            "apps.console.connection.reliability.logger.warning"
+        ) as warning:
             response = self.client.post(
                 f"/api/v1/connections/website/{self.node.connection_id}/objects/",
                 {},
@@ -151,6 +164,70 @@ class LiveConnectionViewContractTests(BaseTestCase):
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertEqual(response.json()["connection_error"]["code"], "DNS_FAILURE")
         self.assertNotIn("private.database.internal", response.content.decode())
+        warning.assert_called_once_with(
+            "Connection operation failed.",
+            extra={
+                "connection_failure_code": "DNS_FAILURE",
+                "connection_failure_stage": "dns",
+            },
+        )
+        self.assertNotIn("private.database.internal", repr(warning.call_args))
+
+    def test_database_discovery_endpoints_never_return_exception_text(self):
+        connection = factories.make_connection(
+            self.account,
+            self.member,
+            code="database",
+        )
+        CoreAuthDatabase.objects.create(
+            connection=connection,
+            host="db.example.com",
+            port=5432,
+            database_name="appdb",
+            type=CoreAuthDatabase.DatabaseType.POSTGRESQL,
+            version=CoreAuthDatabase.DatabaseVersion.POSTGRESQL_18,
+        )
+        cases = (
+            ("get_eligible_objects", "objects", "object_discovery"),
+            (
+                "update_db_type_and_version",
+                "update_db_type_and_version",
+                "metadata_discovery",
+            ),
+        )
+        for method_name, action_name, expected_stage in cases:
+            secret = f"password={action_name}-must-not-leak"
+            with self.subTest(action=action_name), mock.patch.object(
+                CoreAuthDatabase,
+                method_name,
+                side_effect=RuntimeError(secret),
+            ), mock.patch(
+                "apps.console.connection.reliability.logger.warning"
+            ) as warning:
+                response = self.client.post(
+                    f"/api/v1/connections/database/{connection.id}/{action_name}/",
+                    {},
+                    format="json",
+                )
+
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(
+                response.json()["connection_error"]["code"],
+                "CONNECTION_VALIDATION_FAILED",
+            )
+            self.assertEqual(
+                response.json()["connection_error"]["stage"],
+                expected_stage,
+            )
+            self.assertNotIn(secret, response.content.decode())
+            self.assertNotIn(secret, repr(warning.call_args))
+            warning.assert_called_once_with(
+                "Connection operation failed.",
+                extra={
+                    "connection_failure_code": "CONNECTION_VALIDATION_FAILED",
+                    "connection_failure_stage": expected_stage,
+                },
+            )
 
     def test_database_event_privilege_validation_keeps_specific_safe_contract(self):
         connection = factories.make_connection(

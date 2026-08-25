@@ -1,5 +1,3 @@
-import base64
-import hashlib
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -53,10 +51,7 @@ class OAuthStateSecurityTests(SimpleTestCase):
         self.assertNotEqual(first["state"], second["state"])
         self.assertGreaterEqual(len(first["state"]), 40)
         self.assertNotIn(first["code_verifier"], first["state"])
-        expected_challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(first["code_verifier"].encode("ascii")).digest()
-        ).rstrip(b"=").decode("ascii")
-        self.assertEqual(first["code_challenge"], expected_challenge)
+        self.assertRegex(first["code_challenge"], r"\A[A-Za-z0-9_-]{43}\Z")
 
         consumed = consume_oauth_state(
             self.request,
@@ -75,6 +70,33 @@ class OAuthStateSecurityTests(SimpleTestCase):
                 member=self.member,
                 account=self.account,
             )
+        )
+
+    def test_pkce_s256_matches_the_public_rfc_7636_vector(self):
+        # Appendix B of RFC 7636 supplies a public verifier/challenge pair.  It
+        # independently pins S256 without treating the short-lived verifier as
+        # a password or reimplementing the same digest in this test.
+        verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        with mock.patch(
+            "apps.api.v1.utils.oauth_security.secrets.token_urlsafe",
+            side_effect=("S" * 43, verifier),
+        ) as token_urlsafe:
+            issued = issue_oauth_state(
+                SimpleNamespace(session={}),
+                provider="dropbox",
+                member=self.member,
+                account=self.account,
+                use_pkce=True,
+            )
+
+        self.assertEqual(issued["code_verifier"], verifier)
+        self.assertEqual(
+            issued["code_challenge"],
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        )
+        self.assertEqual(
+            token_urlsafe.call_args_list,
+            [mock.call(32), mock.call(64)],
         )
 
     def test_get_render_reuses_live_bound_state_but_explicit_restart_rotates_it(self):

@@ -84,6 +84,12 @@
       "test_id": "B608"
     },
     {
+      "fingerprint": "cbe37052bba10c007e7542b56781e462423f1edb66bc5bcce0e1a18c52c91faf",
+      "path": "apps/api/v1/utils/api_helpers.py",
+      "review": "ftps-and-explicit-legacy-ftp-module",
+      "test_id": "B402"
+    },
+    {
       "fingerprint": "9bde9cb25bd68c97d8ecbb4937a6cc0c6941be092532009723ee511c1f75b88d",
       "path": "apps/console/backup/models.py",
       "review": "non-sql-log-message",
@@ -372,6 +378,7 @@
     "fixed-client-argv-execution": "The generic subprocess wrapper receives only fixed database-client executables and validated, argument-vector builders without a shell.",
     "fixed-github-api-requests": "Release evidence requests use fixed HTTPS GitHub API/upload origins derived from validated repository and release identifiers.",
     "fixed-lane-probe-sql": "The isolation probe uses fixed statements and internal allowlists to verify database-lane behavior; no untrusted SQL is accepted.",
+    "ftps-and-explicit-legacy-ftp-module": "The standard-library module is required for FTP_TLS. Its plaintext subclass checks the default-off ALLOW_INSECURE_FTP compatibility gate before connect or login, and tests prove disabled mode performs no network access.",
     "non-bind-zero-address-check": "This is a provider-response string comparison against the IPv4 unspecified-address sentinel, not a socket bind.",
     "non-sql-log-message": "The flagged strings are structured execution log messages and are never submitted to a database engine.",
     "owned-harness-temporary-paths": "Remote temporary names contain a strictly validated run identifier and exist only on an owned disposable test instance.",

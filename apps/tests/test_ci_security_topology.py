@@ -65,6 +65,7 @@ class CISecurityTopologyContractTests(TestCase):
             "--severity HIGH,CRITICAL",
             "--exit-code 1",
             "deploy/ci/validate-image-scan.py",
+            '--requirements-lock "$GITHUB_WORKSPACE/requirements.lock"',
             "app\t$TEST_APP_IMAGE",
             "postgres\t$TEST_POSTGRES_IMAGE",
             "egress\t$TEST_EGRESS_IMAGE",
@@ -98,7 +99,7 @@ class CISecurityTopologyContractTests(TestCase):
         self.assertIn('artifact.get("name") == "postgresql"', validator)
         self.assertIn('version == "18.6"', validator)
 
-    def test_scan_validator_rejects_empty_inventory_and_high_critical_results(self):
+    def test_scan_validator_rejects_omitted_python_and_unsafe_results(self):
         validator = ROOT / "deploy" / "ci" / "validate-image-scan.py"
         expected_packages = (
             "backupsheep-mariadb-dump",
@@ -115,7 +116,15 @@ class CISecurityTopologyContractTests(TestCase):
             archive.write_bytes(b"exact-test-archive")
             syft = root / "app.syft.json"
             trivy = root / "app.trivy.json"
+            requirements_lock = root / "requirements.lock"
             summary = root / "app.summary.json"
+            locked_requirements = (
+                "django==6.0.8 \\\n"
+                f"    --hash=sha256:{'1' * 64}\n"
+                "typing-extensions==4.16.0 \\\n"
+                f"    --hash=sha256:{'2' * 64}\n"
+            )
+            requirements_lock.write_text(locked_requirements, encoding="utf-8")
 
             def write_archive(
                 *,
@@ -123,6 +132,7 @@ class CISecurityTopologyContractTests(TestCase):
                 config_name=None,
                 manifest_entries=1,
                 declared_digest=None,
+                repo_tags=None,
             ):
                 digest = declared_digest or hashlib.sha256(config_bytes).hexdigest()
                 name = config_name or f"blobs/sha256/{digest}"
@@ -173,7 +183,7 @@ class CISecurityTopologyContractTests(TestCase):
                     separators=(",", ":"),
                 ).encode()
                 manifest = json.dumps(
-                    [{"Config": name, "RepoTags": None, "Layers": []}]
+                    [{"Config": name, "RepoTags": repo_tags, "Layers": []}]
                     * manifest_entries
                 ).encode()
                 with tarfile.open(archive, mode="w") as bundle:
@@ -196,10 +206,43 @@ class CISecurityTopologyContractTests(TestCase):
                 )
 
             archive_image_id, docker_image_id = write_archive()
+            os_package_names = (*expected_packages, "ca-certificates")
             valid_syft = {
+                "schema": {
+                    "version": "16.1.10",
+                    "url": (
+                        "https://raw.githubusercontent.com/anchore/syft/main/"
+                        "schema/json/schema-16.1.10.json"
+                    ),
+                },
+                "descriptor": {"name": "syft", "version": "1.51.0"},
                 "artifacts": [
                     {"name": name, "version": "1", "type": "deb"}
-                    for name in expected_packages
+                    for name in os_package_names
+                ]
+                + [
+                    {
+                        "name": "Django",
+                        "version": "6.0.8",
+                        "type": "python",
+                        "locations": [
+                            {
+                                "path": "/usr/local/lib/python3.14/site-packages/"
+                                "django-6.0.8.dist-info/METADATA"
+                            }
+                        ],
+                    },
+                    {
+                        "name": "typing_extensions",
+                        "version": "4.16.0",
+                        "type": "python",
+                        "locations": [
+                            {
+                                "path": "/usr/local/lib/python3.14/site-packages/"
+                                "typing_extensions-4.16.0.dist-info/METADATA"
+                            }
+                        ],
+                    },
                 ],
                 "source": {
                     "type": "image",
@@ -211,14 +254,41 @@ class CISecurityTopologyContractTests(TestCase):
             }
             valid_trivy = {
                 "SchemaVersion": 2,
+                "Trivy": {"Version": "0.74.0"},
+                "ArtifactID": archive_image_id,
                 "ArtifactName": str(archive),
                 "ArtifactType": "container_image",
                 "Metadata": {"ImageID": archive_image_id},
                 "Results": [
                     {
-                        "Target": "app",
-                        "Packages": [{"Name": "python", "Version": "3.14"}],
-                    }
+                        "Target": "app (ubuntu 26.04)",
+                        "Class": "os-pkgs",
+                        "Type": "ubuntu",
+                        "Packages": [
+                            {"Name": name, "Version": "1"}
+                            for name in os_package_names
+                        ],
+                    },
+                    {
+                        "Target": "Python",
+                        "Class": "lang-pkgs",
+                        "Type": "python-pkg",
+                        "Packages": [
+                            {
+                                "Name": "Django",
+                                "Version": "6.0.8",
+                                "FilePath": "usr/local/lib/python3.14/"
+                                "site-packages/django-6.0.8.dist-info/METADATA",
+                            },
+                            {
+                                "Name": "typing_extensions",
+                                "Version": "4.16.0",
+                                "FilePath": "usr/local/lib/python3.14/"
+                                "site-packages/typing_extensions-4.16.0.dist-info/"
+                                "METADATA",
+                            },
+                        ],
+                    },
                 ],
             }
 
@@ -241,6 +311,8 @@ class CISecurityTopologyContractTests(TestCase):
                         str(syft),
                         "--trivy",
                         str(trivy),
+                        "--requirements-lock",
+                        str(requirements_lock),
                         "--summary",
                         str(summary),
                     ],
@@ -259,6 +331,280 @@ class CISecurityTopologyContractTests(TestCase):
             self.assertEqual(
                 valid_summary["archive_config_image_id"], archive_image_id
             )
+            self.assertEqual(valid_summary["os_package_count"], 8)
+            self.assertEqual(valid_summary["expected_python_package_count"], 2)
+            self.assertEqual(valid_summary["syft_python_package_count"], 2)
+            self.assertEqual(
+                valid_summary["syft_top_level_python_package_count"], 2
+            )
+            self.assertEqual(valid_summary["syft_locked_python_package_count"], 2)
+            self.assertEqual(valid_summary["trivy_python_package_count"], 2)
+            self.assertEqual(
+                valid_summary["trivy_top_level_python_package_count"], 2
+            )
+            self.assertEqual(valid_summary["trivy_locked_python_package_count"], 2)
+            self.assertEqual(
+                valid_summary["requirements_lock_sha256"],
+                hashlib.sha256(locked_requirements.encode()).hexdigest(),
+            )
+            self.assertEqual(
+                valid_summary["expected_python_inventory_sha256"],
+                hashlib.sha256(
+                    b"django==6.0.8\ntyping-extensions==4.16.0\n"
+                ).hexdigest(),
+            )
+
+            syft_without_schema = json.loads(json.dumps(valid_syft))
+            del syft_without_schema["schema"]
+            missing_syft_schema = run_validator(
+                syft_without_schema, valid_trivy
+            )
+            self.assertNotEqual(missing_syft_schema.returncode, 0)
+            self.assertIn("Syft report schema is absent", missing_syft_schema.stderr)
+
+            wrong_syft_tool = json.loads(json.dumps(valid_syft))
+            wrong_syft_tool["descriptor"]["version"] = "1.50.0"
+            unsupported_syft = run_validator(wrong_syft_tool, valid_trivy)
+            self.assertNotEqual(unsupported_syft.returncode, 0)
+            self.assertIn("Syft report tool identity", unsupported_syft.stderr)
+
+            wrong_trivy_schema = json.loads(json.dumps(valid_trivy))
+            wrong_trivy_schema["SchemaVersion"] = 999
+            unsupported_trivy_schema = run_validator(
+                valid_syft, wrong_trivy_schema
+            )
+            self.assertNotEqual(unsupported_trivy_schema.returncode, 0)
+            self.assertIn("Trivy schema version", unsupported_trivy_schema.stderr)
+
+            wrong_trivy_tool = json.loads(json.dumps(valid_trivy))
+            wrong_trivy_tool["Trivy"]["Version"] = "0.73.0"
+            unsupported_trivy_tool = run_validator(valid_syft, wrong_trivy_tool)
+            self.assertNotEqual(unsupported_trivy_tool.returncode, 0)
+            self.assertIn("Trivy report tool identity", unsupported_trivy_tool.stderr)
+
+            malformed_trivy_artifact_id = json.loads(json.dumps(valid_trivy))
+            malformed_trivy_artifact_id["ArtifactID"] = "sha256:not-a-digest"
+            malformed_trivy_identity = run_validator(
+                valid_syft, malformed_trivy_artifact_id
+            )
+            self.assertNotEqual(malformed_trivy_identity.returncode, 0)
+            self.assertIn("Trivy artifact ID", malformed_trivy_identity.stderr)
+
+            wrong_trivy_artifact_id = json.loads(json.dumps(valid_trivy))
+            wrong_trivy_artifact_id["ArtifactID"] = "sha256:" + "e" * 64
+            mismatched_trivy_identity = run_validator(
+                valid_syft, wrong_trivy_artifact_id
+            )
+            self.assertNotEqual(mismatched_trivy_identity.returncode, 0)
+            self.assertIn(
+                "Trivy artifact ID does not match",
+                mismatched_trivy_identity.stderr,
+            )
+
+            syft_without_python = json.loads(json.dumps(valid_syft))
+            syft_without_python["artifacts"] = [
+                artifact
+                for artifact in syft_without_python["artifacts"]
+                if artifact["type"] != "python"
+            ]
+            missing_syft_python = run_validator(
+                syft_without_python, valid_trivy
+            )
+            self.assertNotEqual(missing_syft_python.returncode, 0)
+            self.assertIn(
+                "Syft Python inventory is missing locked top-level package identities",
+                missing_syft_python.stderr,
+            )
+            self.assertIn("django==6.0.8", missing_syft_python.stderr)
+
+            trivy_without_python = json.loads(json.dumps(valid_trivy))
+            trivy_without_python["Results"] = [
+                result
+                for result in trivy_without_python["Results"]
+                if result.get("Type") != "python-pkg"
+            ]
+            missing_trivy_python = run_validator(
+                valid_syft, trivy_without_python
+            )
+            self.assertNotEqual(missing_trivy_python.returncode, 0)
+            self.assertIn(
+                "Trivy Python inventory is missing locked top-level package identities",
+                missing_trivy_python.stderr,
+            )
+            self.assertIn("typing-extensions==4.16.0", missing_trivy_python.stderr)
+
+            syft_wrong_runtime = json.loads(json.dumps(valid_syft))
+            for artifact in syft_wrong_runtime["artifacts"]:
+                for location in artifact.get("locations", []):
+                    location["path"] = location["path"].replace(
+                        "/python3.14/", "/python3.13/"
+                    )
+            inactive_syft_runtime = run_validator(
+                syft_wrong_runtime, valid_trivy
+            )
+            self.assertNotEqual(inactive_syft_runtime.returncode, 0)
+            self.assertIn("django==6.0.8", inactive_syft_runtime.stderr)
+
+            trivy_wrong_runtime = json.loads(json.dumps(valid_trivy))
+            for result in trivy_wrong_runtime["Results"]:
+                for package in result.get("Packages", []):
+                    if "FilePath" in package:
+                        package["FilePath"] = package["FilePath"].replace(
+                            "/python3.14/", "/python3.13/"
+                        )
+            inactive_trivy_runtime = run_validator(
+                valid_syft, trivy_wrong_runtime
+            )
+            self.assertNotEqual(inactive_trivy_runtime.returncode, 0)
+            self.assertIn("typing-extensions==4.16.0", inactive_trivy_runtime.stderr)
+
+            wrong_python_version = json.loads(json.dumps(valid_syft))
+            next(
+                artifact
+                for artifact in wrong_python_version["artifacts"]
+                if artifact["name"] == "Django"
+            )["version"] = "6.0.7"
+            wrong_version = run_validator(wrong_python_version, valid_trivy)
+            self.assertNotEqual(wrong_version.returncode, 0)
+            self.assertIn("django==6.0.8", wrong_version.stderr)
+
+            wrong_trivy_version = json.loads(json.dumps(valid_trivy))
+            next(
+                package
+                for result in wrong_trivy_version["Results"]
+                for package in result.get("Packages", [])
+                if package["Name"] == "typing_extensions"
+            )["Version"] = "4.15.0"
+            wrong_trivy = run_validator(valid_syft, wrong_trivy_version)
+            self.assertNotEqual(wrong_trivy.returncode, 0)
+            self.assertIn("typing-extensions==4.16.0", wrong_trivy.stderr)
+
+            vendored_trivy_identity = json.loads(json.dumps(valid_trivy))
+            next(
+                package
+                for result in vendored_trivy_identity["Results"]
+                for package in result.get("Packages", [])
+                if package["Name"] == "Django"
+            )["FilePath"] = (
+                "usr/local/lib/python3.14/site-packages/setuptools/_vendor/"
+                "django-6.0.8.dist-info/METADATA"
+            )
+            vendored_only = run_validator(valid_syft, vendored_trivy_identity)
+            self.assertNotEqual(vendored_only.returncode, 0)
+            self.assertIn("django==6.0.8", vendored_only.stderr)
+
+            syft_with_unlocked_python = json.loads(json.dumps(valid_syft))
+            syft_with_unlocked_python["artifacts"].append(
+                {
+                    "name": "undeclared-package",
+                    "version": "1.0",
+                    "type": "python",
+                    "locations": [
+                        {
+                            "path": "/usr/local/lib/python3.14/site-packages/"
+                            "undeclared_package-1.0.dist-info/METADATA"
+                        }
+                    ],
+                }
+            )
+            unlocked_python = run_validator(
+                syft_with_unlocked_python, valid_trivy
+            )
+            self.assertNotEqual(unlocked_python.returncode, 0)
+            self.assertIn(
+                "unlocked top-level package identities", unlocked_python.stderr
+            )
+            self.assertIn("undeclared-package==1.0", unlocked_python.stderr)
+
+            syft_with_unlocked_egg = json.loads(json.dumps(valid_syft))
+            syft_with_unlocked_egg["artifacts"].append(
+                {
+                    "name": "unlocked-egg",
+                    "version": "9.9",
+                    "type": "python",
+                    "locations": [
+                        {
+                            "path": "/usr/local/lib/python3.14/site-packages/"
+                            "unlocked_egg.egg-info/PKG-INFO"
+                        }
+                    ],
+                }
+            )
+            unlocked_egg = run_validator(syft_with_unlocked_egg, valid_trivy)
+            self.assertNotEqual(unlocked_egg.returncode, 0)
+            self.assertIn("unlocked-egg==9.9", unlocked_egg.stderr)
+
+            trivy_with_unlocked_uppercase = json.loads(json.dumps(valid_trivy))
+            next(
+                result
+                for result in trivy_with_unlocked_uppercase["Results"]
+                if result.get("Type") == "python-pkg"
+            )["Packages"].append(
+                {
+                    "Name": "uppercase-metadata",
+                    "Version": "9.8",
+                    "FilePath": "usr/local/lib/python3.14/site-packages/"
+                    "UPPERCASE_METADATA-9.8.DIST-INFO/METADATA",
+                }
+            )
+            unlocked_uppercase = run_validator(
+                valid_syft, trivy_with_unlocked_uppercase
+            )
+            self.assertNotEqual(unlocked_uppercase.returncode, 0)
+            self.assertIn("uppercase-metadata==9.8", unlocked_uppercase.stderr)
+
+            trivy_without_os = json.loads(json.dumps(valid_trivy))
+            trivy_without_os["Results"] = [
+                result
+                for result in trivy_without_os["Results"]
+                if result.get("Class") != "os-pkgs"
+            ]
+            missing_os_inventory = run_validator(valid_syft, trivy_without_os)
+            self.assertNotEqual(missing_os_inventory.returncode, 0)
+            self.assertIn("no unique ubuntu OS package", missing_os_inventory.stderr)
+
+            syft_missing_one_os_package = json.loads(json.dumps(valid_syft))
+            syft_missing_one_os_package["artifacts"] = [
+                artifact
+                for artifact in syft_missing_one_os_package["artifacts"]
+                if artifact.get("name") != "ca-certificates"
+            ]
+            asymmetric_os_inventory = run_validator(
+                syft_missing_one_os_package, valid_trivy
+            )
+            self.assertNotEqual(asymmetric_os_inventory.returncode, 0)
+            self.assertIn(
+                "missing from Syft=['ca-certificates']",
+                asymmetric_os_inventory.stderr,
+            )
+
+            requirements_lock.write_text(
+                "django>=6.0.8\n", encoding="utf-8"
+            )
+            malformed_lock = run_validator(valid_syft, valid_trivy)
+            self.assertNotEqual(malformed_lock.returncode, 0)
+            self.assertIn("unsupported or unpinned line", malformed_lock.stderr)
+            requirements_lock.write_text(locked_requirements, encoding="utf-8")
+
+            requirements_lock.write_text(
+                "django==6.0.8 \\\n",
+                encoding="utf-8",
+            )
+            unhashed_lock = run_validator(valid_syft, valid_trivy)
+            self.assertNotEqual(unhashed_lock.returncode, 0)
+            self.assertIn("has no SHA-256 artifact hash", unhashed_lock.stderr)
+
+            requirements_lock.write_text(
+                "django==6.0.8 \\\n"
+                f"    --hash=sha256:{'1' * 64}\n"
+                "Django==6.0.8 \\\n"
+                f"    --hash=sha256:{'2' * 64}\n",
+                encoding="utf-8",
+            )
+            duplicate_lock = run_validator(valid_syft, valid_trivy)
+            self.assertNotEqual(duplicate_lock.returncode, 0)
+            self.assertIn("duplicate normalized package name", duplicate_lock.stderr)
+            requirements_lock.write_text(locked_requirements, encoding="utf-8")
 
             empty = run_validator({**valid_syft, "artifacts": []}, valid_trivy)
             self.assertNotEqual(empty.returncode, 0)
@@ -302,7 +648,10 @@ class CISecurityTopologyContractTests(TestCase):
                 valid_syft, valid_trivy, "sha256:" + "d" * 64
             )
             self.assertNotEqual(swapped_archive.returncode, 0)
-            self.assertIn("does not identify the image archive root", swapped_archive.stderr)
+            self.assertIn(
+                "does not identify the image archive root",
+                swapped_archive.stderr,
+            )
 
             write_archive(manifest_entries=2)
             multiple = run_validator(valid_syft, valid_trivy)
@@ -318,6 +667,17 @@ class CISecurityTopologyContractTests(TestCase):
             invalid_digest = run_validator(valid_syft, valid_trivy)
             self.assertNotEqual(invalid_digest.returncode, 0)
             self.assertIn("config digest does not match", invalid_digest.stderr)
+
+            tagged_reference = "registry.example.com/team/backupsheep:test"
+            write_archive(repo_tags=[tagged_reference])
+            tagged_trivy = json.loads(json.dumps(valid_trivy))
+            tagged_trivy["Metadata"]["RepoTags"] = [tagged_reference]
+            tagged_trivy["Metadata"]["Reference"] = tagged_reference
+            tagged_trivy["ArtifactID"] = "sha256:" + hashlib.sha256(
+                f"{archive_image_id}:registry.example.com/team/backupsheep".encode()
+            ).hexdigest()
+            tagged_identity = run_validator(valid_syft, tagged_trivy)
+            self.assertEqual(tagged_identity.returncode, 0, tagged_identity.stderr)
 
     def test_regression_postgres_entrypoint_receives_explicit_server_command(self):
         launch_start = self.workflow.index("          docker run --detach \\\n")

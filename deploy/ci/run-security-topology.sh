@@ -605,7 +605,7 @@ assert_pair_fails_closed_and_recovers() {
         awk -F= '$1 == "lease_seconds" { print $2; exit }' \
         /run/backupsheep-egress/reconciler-state)"
     [[ "$lease_seconds" =~ ^[0-9]+$ ]] \
-        && (( lease_seconds >= 8 && lease_seconds <= 905 )) \
+        && (( lease_seconds >= 15 && lease_seconds <= 912 )) \
         || fail "${guard_service} did not publish a bounded kernel lease."
 
     peer_tuple="$(docker exec "$workload_container" /usr/local/bin/python3 -c '

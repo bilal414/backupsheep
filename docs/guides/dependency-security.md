@@ -2,9 +2,12 @@
 
 `requirements.txt` is the reviewed list of direct Python constraints and
 `requirements.lock` is the generated, fully pinned hash lock consumed by the image build.
-The supply-chain workflow resolves it on Python 3.14 and fails when `pip-audit` reports a
-known advisory. The root `package-lock.json` remains the single frontend lock and is
-audited separately.
+The supply-chain workflow installs `pip-audit` and its complete CPython 3.14/Linux
+dependency closure from the whole-file and artifact-hash-locked
+`deploy/dependency-audit-requirements.lock`, then audits the exact application
+`requirements.lock` with hash enforcement and dependency resolution disabled. It fails
+when the locked runtime inventory has a known advisory. The root `package-lock.json`
+remains the single frontend lock and is audited separately.
 
 ## Current hash-lock boundary
 

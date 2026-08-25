@@ -9,7 +9,7 @@ from rest_framework.response import Response
 
 from apps.console.connection.reliability import (
     ClassifiedConnectionError,
-    classify_connection_error,
+    classify_and_record_connection_error,
 )
 
 
@@ -48,7 +48,7 @@ def connection_error_response(error, *, stage, status_code=None):
             break
         seen.add(id(classified_error))
         classified_error = next_error
-    failure = classify_connection_error(classified_error, stage=stage)
+    failure = classify_and_record_connection_error(classified_error, stage=stage)
     return Response(
         {
             "detail": failure.detail,

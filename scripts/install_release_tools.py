@@ -136,8 +136,37 @@ def install(policy: dict[str, Any], destination: Path, names: list[str]) -> None
 
     # Explicit empty configuration is passed to scanners so repository-local
     # .syft.yaml, trivy.yaml, and .trivyignore files cannot weaken a release.
+    _atomic_write(destination / "empty-actionlint.yaml", b"{}\n", 0o600)
+    _atomic_write(destination / "empty-bandit.ini", b"[bandit]\n", 0o600)
+    _atomic_write(destination / "empty-bandit.yaml", b"{}\n", 0o600)
     _atomic_write(destination / "empty-syft.yaml", b"{}\n", 0o600)
     _atomic_write(destination / "empty-trivy.yaml", b"{}\n", 0o600)
+    # Trivy's secret scanner has a separate, repository-discoverable config
+    # path. Passing an explicit config prevents a checkout trivy-secret.yaml
+    # from disabling or replacing the built-in rules. The strict source config
+    # additionally scans Markdown and the file patterns skipped by default.
+    _atomic_write(destination / "empty-trivy-secret.yaml", b"{}\n", 0o600)
+    _atomic_write(
+        destination / "strict-trivy-secret.yaml",
+        (
+            b"disable-allow-rules:\n"
+            b"  - dist-info\n"
+            b"  - tests\n"
+            b"  - examples\n"
+            b"  - vendor\n"
+            b"  - usr-dirs\n"
+            b"  - locale-dir\n"
+            b"  - markdown\n"
+            b"  - node.js\n"
+            b"  - golang\n"
+            b"  - python\n"
+            b"  - rubygems\n"
+            b"  - wordpress\n"
+            b"  - anaconda-log\n"
+            b"skip-patterns: []\n"
+        ),
+        0o600,
+    )
     _atomic_write(destination / "empty-trivy.ignore", b"", 0o600)
     _atomic_write(
         destination / "installed-tools.json",

@@ -403,6 +403,8 @@ raise SystemExit(99)
             "Refusing a pre-existing CI image-tag collision",
             'com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE',
             ".backupsheep-ci-owner",
+            "--network-alias db",
+            "--env DB_HOST=db",
             '--file Dockerfile --tag "$TEST_APP_IMAGE"',
             '--file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE"',
             "docker network create --driver bridge --internal",
@@ -434,6 +436,8 @@ raise SystemExit(99)
         ):
             with self.subTest(required=required):
                 self.assertIn(required, gate)
+        self.assertNotIn("--network-alias database", gate)
+        self.assertNotIn("--env DB_HOST=database", gate)
 
         self.assertEqual(gate.count("docker build --pull --no-cache"), 3)
         self.assertNotIn("continue-on-error", gate)
@@ -1103,6 +1107,24 @@ raise SystemExit(99)
         self.assertIn("set strict_workload_lease { type uid; flags timeout", entrypoint)
         self.assertIn("Renew on every complete observation", entrypoint)
         self.assertIn("short-lived proof", entrypoint)
+        self.assertIn(
+            'timeout --foreground -s KILL 1 getent "$database" "$peer_host"',
+            entrypoint,
+        )
+        self.assertIn("$(($1 * 3 + 12))", entrypoint)
+        self.assertIn(
+            '[ "$lease_seconds" -ge 15 ] && [ "$lease_seconds" -le 912 ]',
+            healthcheck,
+        )
+        self.assertIn("hung-getent-fixture.sh", egress_harness)
+        self.assertIn(
+            "hung DNS left the egress guard healthy beyond its kernel lease",
+            egress_harness,
+        )
+        self.assertIn(
+            "timeout --version | grep -Fqx 'timeout (GNU coreutils) 9.7'",
+            dockerfile,
+        )
         self.assertIn(
             "meta skuid != 10020 meta skuid != @strict_workload_lease reject",
             entrypoint,

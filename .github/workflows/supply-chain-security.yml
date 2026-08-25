@@ -54,8 +54,21 @@ jobs:
 
       - name: Audit Python dependency resolution
         run: |
-          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit==2.10.1
-          python -m pip_audit --requirement requirements.txt
+          echo '123d99c57ebca7ae13478cf0a4dfbb5925fa2ea08769d7aa9117b91393a5d540  deploy/dependency-audit-requirements.lock' \
+            | sha256sum -c -
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement deploy/dependency-audit-requirements.lock
+          test "$(python -m pip_audit --version)" = "pip-audit 2.10.1"
+          python -m pip_audit \
+            --requirement requirements.lock \
+            --require-hashes \
+            --disable-pip \
+            --strict \
+            --progress-spinner off
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -119,7 +132,7 @@ jobs:
   static-python-security:
     name: Pinned Python static-analysis gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - name: Check out exact source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -131,14 +144,139 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install hash-verified source-analysis tools
+        shell: bash
+        env:
+          CI_SOURCE_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-source-scan-tools"
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -e "$CI_SOURCE_SCAN_TOOL_DIR" ] || [ -L "$CI_SOURCE_SCAN_TOOL_DIR" ]; then
+            printf '%s\n' 'Refusing a pre-existing source-scan tool path.' >&2
+            exit 1
+          fi
+          python3 scripts/install_release_tools.py \
+            --policy deploy/release-policy.json \
+            --destination "$CI_SOURCE_SCAN_TOOL_DIR" \
+            --tool actionlint \
+            --tool trivy
+          test "$("$CI_SOURCE_SCAN_TOOL_DIR/actionlint" -version | sed -n '1p')" = "1.7.12"
+          "$CI_SOURCE_SCAN_TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          echo 'ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356  '"$CI_SOURCE_SCAN_TOOL_DIR/empty-actionlint.yaml" \
+            | sha256sum -c -
+          echo '1ac8b7ca6758d27c826f2e2389d315d2449b636596ca15557871d9992e47bb04  '"$CI_SOURCE_SCAN_TOOL_DIR/empty-bandit.ini" \
+            | sha256sum -c -
+          echo 'ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356  '"$CI_SOURCE_SCAN_TOOL_DIR/empty-bandit.yaml" \
+            | sha256sum -c -
+          grep -qx '{}' "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml"
+          echo '320a51020ff8a0a20506153a900e5dc74cb7014d6ca1a5fa653294dac9d7681d  '"$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml" \
+            | sha256sum -c -
+          test ! -s "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore"
+
+      - name: Validate every GitHub Actions workflow
+        shell: bash
+        env:
+          CI_SOURCE_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-source-scan-tools"
+        run: |
+          set -euo pipefail
+          test -z "$(find .github/workflows -maxdepth 1 -type l -print -quit)"
+          actionlint_canary_dir="$RUNNER_TEMP/backupsheep-actionlint-canary"
+          if [ -e "$actionlint_canary_dir" ] || [ -L "$actionlint_canary_dir" ]; then
+            printf '%s\n' 'Refusing a pre-existing actionlint canary path.' >&2
+            exit 1
+          fi
+          install -d -m 0700 "$actionlint_canary_dir/.github/workflows"
+          git -C "$actionlint_canary_dir" init --quiet
+          printf '%s\n' \
+            'paths:' \
+            '  .github/workflows/bad.yml:' \
+            '    ignore: [".*"]' \
+            > "$actionlint_canary_dir/.github/actionlint.yaml"
+          printf '%s\n' \
+            'name: canary' \
+            'on: push' \
+            'jobs:' \
+            '  bad:' \
+            '    runs-on: ubuntu-latest' \
+            '    steps:' \
+            '      - runz: echo suppressed' \
+            > "$actionlint_canary_dir/.github/workflows/bad.yml"
+          if (
+            cd "$actionlint_canary_dir"
+            "$CI_SOURCE_SCAN_TOOL_DIR/actionlint" \
+              -config-file "$CI_SOURCE_SCAN_TOOL_DIR/empty-actionlint.yaml" \
+              -shellcheck= \
+              -pyflakes= \
+              .github/workflows/bad.yml \
+              >/dev/null 2>&1
+          ); then
+            printf '%s\n' 'Explicit actionlint configuration did not reject the suppression canary.' >&2
+            exit 1
+          fi
+          mapfile -d '' workflows < <(
+            find .github/workflows -maxdepth 1 -type f \
+              \( -name '*.yml' -o -name '*.yaml' \) -print0 | sort -z
+          )
+          test "${#workflows[@]}" -gt 0
+          "$CI_SOURCE_SCAN_TOOL_DIR/actionlint" \
+            -config-file "$CI_SOURCE_SCAN_TOOL_DIR/empty-actionlint.yaml" \
+            -shellcheck= \
+            -pyflakes= \
+            "${workflows[@]}"
+
       - name: Run pinned Bandit and fail-closed source policy
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check --no-cache-dir bandit==1.9.4
+          CI_SOURCE_SCAN_TOOL_DIR="$RUNNER_TEMP/backupsheep-source-scan-tools"
+          echo 'c7234adc0f4ccc3e17fee62e41971c73bdfdf717623b43faf9bfd0b32bb8d76d  deploy/static-analysis-requirements.lock' \
+            | sha256sum -c -
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement deploy/static-analysis-requirements.lock
+          test "$(bandit --version | awk 'NR == 1 {print $2}')" = "1.9.4"
+          bandit_canary_dir="$RUNNER_TEMP/backupsheep-bandit-canary"
+          if [ -e "$bandit_canary_dir" ] || [ -L "$bandit_canary_dir" ]; then
+            printf '%s\n' 'Refusing a pre-existing Bandit canary path.' >&2
+            exit 1
+          fi
+          install -d -m 0700 "$bandit_canary_dir"
+          printf '%s\n' '[bandit]' 'skips: B307' > "$bandit_canary_dir/.bandit"
+          printf '%s\n' 'eval(input())  # nosec B307' > "$bandit_canary_dir/bad.py"
+          bandit_canary_exit=0
+          python -m bandit \
+            -q -r "$bandit_canary_dir" \
+            --ignore-nosec \
+            --ini "$CI_SOURCE_SCAN_TOOL_DIR/empty-bandit.ini" \
+            -c "$CI_SOURCE_SCAN_TOOL_DIR/empty-bandit.yaml" \
+            -f json -ll -o "$bandit_canary_dir/report.json" \
+            || bandit_canary_exit=$?
+          test "$bandit_canary_exit" -eq 1
+          python - "$bandit_canary_dir/report.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          results = report.get("results")
+          if (
+              not isinstance(results, list)
+              or len(results) != 1
+              or results[0].get("test_id") != "B307"
+              or results[0].get("issue_severity") != "MEDIUM"
+          ):
+              raise SystemExit("Bandit suppression canary did not produce exact B307 evidence.")
+          PY
           bandit_exit=0
           python -m bandit -q -r apps backupsheep scripts \
-            -x apps/tests -f json -ll -o "$RUNNER_TEMP/bandit.json" \
+            -x apps/tests \
+            --ignore-nosec \
+            --ini "$CI_SOURCE_SCAN_TOOL_DIR/empty-bandit.ini" \
+            -c "$CI_SOURCE_SCAN_TOOL_DIR/empty-bandit.yaml" \
+            -f json -ll -o "$RUNNER_TEMP/bandit.json" \
             || bandit_exit=$?
           if [ "$bandit_exit" -ne 0 ] && [ "$bandit_exit" -ne 1 ]; then
             printf '%s\n' "Bandit failed with scanner status $bandit_exit." >&2
@@ -148,6 +286,187 @@ jobs:
             --report "$RUNNER_TEMP/bandit.json" \
             --policy deploy/static-analysis-policy.json \
             --repository-root "$GITHUB_WORKSPACE"
+
+      - name: Scan the full final-SHA checkout without exposing secret matches
+        shell: bash
+        env:
+          CI_SOURCE_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-source-scan-tools"
+          CI_SOURCE_SCAN_PRIVATE_DIR: "${{ runner.temp }}/backupsheep-source-scan-private"
+          CI_SOURCE_SCAN_EVIDENCE_DIR: "${{ runner.temp }}/backupsheep-source-scan-evidence"
+          CI_SOURCE_SCAN_CACHE_DIR: "${{ runner.temp }}/backupsheep-source-scan-cache"
+          CI_SOURCE_SCAN_HOME: "${{ runner.temp }}/backupsheep-source-scan-home"
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          umask 077
+
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          for path in \
+            "$CI_SOURCE_SCAN_PRIVATE_DIR" \
+            "$CI_SOURCE_SCAN_EVIDENCE_DIR" \
+            "$CI_SOURCE_SCAN_CACHE_DIR" \
+            "$CI_SOURCE_SCAN_HOME"; do
+            if [ -e "$path" ] || [ -L "$path" ]; then
+              printf '%s\n' 'Refusing a pre-existing source-scan evidence path.' >&2
+              exit 1
+            fi
+          done
+          install -d -m 0700 \
+            "$CI_SOURCE_SCAN_PRIVATE_DIR" \
+            "$CI_SOURCE_SCAN_EVIDENCE_DIR" \
+            "$CI_SOURCE_SCAN_CACHE_DIR" \
+            "$CI_SOURCE_SCAN_HOME"
+          private_report="$CI_SOURCE_SCAN_PRIVATE_DIR/vulnerability-misconfiguration.json"
+          secret_report="$CI_SOURCE_SCAN_PRIVATE_DIR/all-severity-secrets.json"
+          canary_report="$CI_SOURCE_SCAN_PRIVATE_DIR/secret-canaries.json"
+          canary_dir="$CI_SOURCE_SCAN_PRIVATE_DIR/canary"
+          summary="$CI_SOURCE_SCAN_EVIDENCE_DIR/summary.json"
+          cleanup_private_report() {
+            find "$CI_SOURCE_SCAN_PRIVATE_DIR" -mindepth 1 -depth -delete
+          }
+          trap cleanup_private_report EXIT HUP INT TERM
+
+          trivy_status=0
+          env -i \
+            HOME="$CI_SOURCE_SCAN_HOME" \
+            LC_ALL=C \
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            XDG_CACHE_HOME="$CI_SOURCE_SCAN_CACHE_DIR" \
+            "$CI_SOURCE_SCAN_TOOL_DIR/trivy" filesystem \
+              --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+              --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
+              --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+              --scanners vuln,misconfig \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed=false \
+              --include-dev-deps \
+              --list-all-pkgs \
+              --disable-telemetry \
+              --skip-version-check \
+              --no-progress \
+              --quiet \
+              --exit-code 7 \
+              --timeout 30m \
+              --format json \
+              --output "$private_report" \
+              . \
+            || trivy_status=$?
+          if [ "$trivy_status" -ne 0 ] && [ "$trivy_status" -ne 7 ]; then
+            printf '%s\n' "Trivy returned unexpected scanner status $trivy_status." >&2
+            exit 1
+          fi
+
+          secret_status=0
+          env -i \
+            HOME="$CI_SOURCE_SCAN_HOME" \
+            LC_ALL=C \
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            XDG_CACHE_HOME="$CI_SOURCE_SCAN_CACHE_DIR" \
+            "$CI_SOURCE_SCAN_TOOL_DIR/trivy" filesystem \
+              --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+              --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
+              --secret-config "$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml" \
+              --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+              --scanners secret \
+              --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+              --disable-telemetry \
+              --skip-version-check \
+              --no-progress \
+              --quiet \
+              --exit-code 9 \
+              --timeout 30m \
+              --format json \
+              --output "$secret_report" \
+              . \
+            || secret_status=$?
+          if [ "$secret_status" -ne 0 ] && [ "$secret_status" -ne 9 ]; then
+            printf '%s\n' "Trivy secret scan returned unexpected status $secret_status." >&2
+            exit 1
+          fi
+
+          install -d -m 0700 \
+            "$canary_dir" \
+            "$canary_dir/examples" \
+            "$canary_dir/tests" \
+            "$canary_dir/vendor"
+          printf '%s%s\n' 'SK' '0123456789abcdef0123456789abcdef' \
+            > "$canary_dir/canary.md"
+          printf '%s%s\n' 'SK' 'fedcba9876543210fedcba9876543210' \
+            > "$canary_dir/canary.lock"
+          printf '%s%s\n' 'SK' '00112233445566778899aabbccddeeff' \
+            > "$canary_dir/examples/canary.txt"
+          printf '%s%s\n' 'SK' 'ffeeddccbbaa99887766554433221100' \
+            > "$canary_dir/tests/canary.txt"
+          printf '%s%s\n' 'SK' '11223344556677889900aabbccddeeff' \
+            > "$canary_dir/vendor/canary.txt"
+          chmod 0600 \
+            "$canary_dir/canary.md" \
+            "$canary_dir/canary.lock" \
+            "$canary_dir/examples/canary.txt" \
+            "$canary_dir/tests/canary.txt" \
+            "$canary_dir/vendor/canary.txt"
+          canary_status=0
+          (
+            cd "$canary_dir"
+            env -i \
+              HOME="$CI_SOURCE_SCAN_HOME" \
+              LC_ALL=C \
+              PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+              XDG_CACHE_HOME="$CI_SOURCE_SCAN_CACHE_DIR" \
+              "$CI_SOURCE_SCAN_TOOL_DIR/trivy" filesystem \
+                --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+                --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
+                --secret-config "$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml" \
+                --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+                --scanners secret \
+                --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+                --disable-telemetry \
+                --skip-version-check \
+                --no-progress \
+                --quiet \
+                --exit-code 9 \
+                --timeout 5m \
+                --format json \
+                --output "$canary_report" \
+                .
+          ) || canary_status=$?
+          if [ "$canary_status" -ne 0 ] && [ "$canary_status" -ne 9 ]; then
+            printf '%s\n' "Trivy canary scan returned unexpected status $canary_status." >&2
+            exit 1
+          fi
+
+          test -f "$private_report"
+          test ! -L "$private_report"
+          test -f "$secret_report"
+          test ! -L "$secret_report"
+          test -f "$canary_report"
+          test ! -L "$canary_report"
+          chmod 0600 "$private_report" "$secret_report" "$canary_report"
+          python3 scripts/validate_source_scan.py \
+            --report "$private_report" \
+            --secret-report "$secret_report" \
+            --canary-report "$canary_report" \
+            --policy deploy/source-scan-policy.json \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --source-revision "$GITHUB_SHA" \
+            --summary "$summary"
+          test "$trivy_status" -eq 7
+          test "$secret_status" -eq 0
+          test "$canary_status" -eq 9
+          cleanup_private_report
+          trap - EXIT HUP INT TERM
+          test ! -e "$private_report"
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Retain zero-sensitive final-SHA source-scan evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-source-evidence-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/backupsheep-source-scan-evidence/summary.json
+          if-no-files-found: error
+          retention-days: 14
 
   application-security-regression:
     name: Full application/security regression gate
@@ -312,6 +631,7 @@ jobs:
               --archive "$archive" \
               --syft "$syft_report" \
               --trivy "$trivy_report" \
+              --requirements-lock "$GITHUB_WORKSPACE/requirements.lock" \
               --summary "$summary"
             [[ "$trivy_status" -eq 0 ]]
             chmod 0600 "$syft_report" "$trivy_report" "$summary"
@@ -423,7 +743,7 @@ jobs:
             --name "$TEST_POSTGRES_CONTAINER" \
             --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
             --network "$TEST_NETWORK" \
-            --network-alias database \
+            --network-alias db \
             --read-only \
             --cap-drop ALL \
             --security-opt no-new-privileges:true \
@@ -525,7 +845,7 @@ jobs:
             --env DB_NAME="$database_name" \
             --env DB_USER="$database_user" \
             --env DB_PASSWORD="$database_password" \
-            --env DB_HOST=database \
+            --env DB_HOST=db \
             --env DB_PORT=5432 \
             --env DATABASE_URL= \
             --env BACKUPSHEEP_INSTALLATION_ID=0000000000000000000000000000000000000000000000000000000000000002 \
@@ -683,7 +1003,7 @@ jobs:
             --env BACKUPSHEEP_DATABASE_LANE=app \
             --env DB_NAME="$database_name" --env DB_USER="$database_user" \
             --env DB_PASSWORD= --env DB_PASSWORD_FILE=/run/secrets/db_app_password \
-            --env DB_HOST=database --env DB_PORT=5432 --env DATABASE_URL= \
+            --env DB_HOST=db --env DB_PORT=5432 --env DATABASE_URL= \
             --env RABBITMQ_HOST=rabbitmq --env RABBITMQ_PORT=5672 \
             --env RABBITMQ_USER=backupsheep_app --env RABBITMQ_PASSWORD= \
             --env RABBITMQ_PASSWORD_FILE=/run/secrets/rabbitmq_app_password \

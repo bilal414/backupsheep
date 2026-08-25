@@ -9,7 +9,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 
-from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects
 from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.connection.managed_ssh import (
@@ -215,10 +214,7 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 "discover",
                 requested_path=path,
             )
-        try:
-            eligible_objects = connection.auth_website.get_eligible_objects(path=path)
-        except Exception as error:
-            raise NodeConnectionErrorEligibleObjects(str(error)) from error
+        eligible_objects = connection.auth_website.get_eligible_objects(path=path)
         return Response(
             {"eligible_objects": eligible_objects, "path_tree": path_tree}
         )

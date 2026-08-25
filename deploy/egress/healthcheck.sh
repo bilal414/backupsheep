@@ -62,7 +62,7 @@ current_monotonic_seconds="$(cut -d. -f1 /proc/uptime)"
 case "$lease_seconds" in ''|*[!0-9]*) exit 1 ;; esac
 case "$renewed_monotonic_seconds" in ''|*[!0-9]*) exit 1 ;; esac
 case "$current_monotonic_seconds" in ''|*[!0-9]*) exit 1 ;; esac
-[ "$lease_seconds" -ge 8 ] && [ "$lease_seconds" -le 905 ]
+[ "$lease_seconds" -ge 15 ] && [ "$lease_seconds" -le 912 ]
 renewal_age=$((current_monotonic_seconds - renewed_monotonic_seconds))
 [ "$renewal_age" -ge 0 ] && [ "$renewal_age" -lt "$lease_seconds" ]
 tr '\000' '\n' < /proc/1/cmdline | grep -qx monitor

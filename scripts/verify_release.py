@@ -265,8 +265,10 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         raise ReleaseVerificationError("both CycloneDX JSON and SPDX JSON attestations are required")
 
     tools = _mapping(policy["tools"], "policy.tools")
-    if set(tools) != {"cosign", "oras", "syft", "trivy"}:
-        raise ReleaseVerificationError("policy.tools must contain exactly cosign, oras, syft, and trivy")
+    if set(tools) != {"actionlint", "cosign", "oras", "syft", "trivy"}:
+        raise ReleaseVerificationError(
+            "policy.tools must contain exactly actionlint, cosign, oras, syft, and trivy"
+        )
     for name, raw_tool in tools.items():
         tool = _mapping(raw_tool, f"policy.tools.{name}")
         _exact_keys(tool, {"version", "url", "sha256", "archive_member"}, f"policy.tools.{name}")

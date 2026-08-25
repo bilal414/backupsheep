@@ -524,7 +524,10 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
         )
         self.assertEqual(loaded.payload(), payload)
 
-        os.chmod(path, 0o640)
+        # Deliberately create a non-private negative fixture and prove its mode
+        # before exercising the fail-closed loader.
+        path.chmod(0o640)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
         with self.assertRaisesRegex(HarnessError, "regular 0600"):
             RuntimeScope.load(path)
         os.chmod(path, 0o600)
@@ -1212,7 +1215,9 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
         client.save_host_keys.assert_not_called()
         client.connect.assert_called_once()
 
-        os.chmod(scope["ssh_private_key_path"], 0o640)
+        private_key_path = Path(scope["ssh_private_key_path"])
+        private_key_path.chmod(0o640)
+        self.assertEqual(private_key_path.stat().st_mode & 0o777, 0o640)
         with self.assertRaisesRegex(HarnessError, "regular 0600"):
             harness._validate_workload_guest_files(scope)
 
@@ -1700,7 +1705,8 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
         secret = self.storage_secret(harness)
         harness._write_storage_secret(secret)
 
-        os.chmod(secret_path, 0o640)
+        secret_path.chmod(0o640)
+        self.assertEqual(secret_path.stat().st_mode & 0o777, 0o640)
         with self.assertRaisesRegex(HarnessError, "0600"):
             harness._read_storage_secret()
 
@@ -1737,8 +1743,9 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
 
         self.establish_storage_scope(harness)
         changed = dict(secret, bucket="other-bucket")
-        secret_path.write_text(json.dumps(changed), encoding="utf-8")
-        os.chmod(secret_path, 0o600)
+        secret_path.unlink()
+        harness._write_storage_secret(changed)
+        self.assertEqual(secret_path.stat().st_mode & 0o777, 0o600)
         with mock.patch("boto3.client") as client:
             with self.assertRaisesRegex(HarnessError, "scope does not match"):
                 harness._storage_s3_client()
@@ -1814,8 +1821,9 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
             harness.repair_storage_scope(secret_path)
 
         secret = self.storage_secret(harness, bucket="foreign-bucket")
-        secret_path.write_text(json.dumps(secret), encoding="utf-8")
-        os.chmod(secret_path, 0o600)
+        secret_path.unlink()
+        harness._write_storage_secret(secret)
+        self.assertEqual(secret_path.stat().st_mode & 0o777, 0o600)
         with self.assertRaisesRegex(HarnessError, "durable ownership|disagree"):
             harness.repair_storage_scope(self.root / "drifted-scope.json")
 

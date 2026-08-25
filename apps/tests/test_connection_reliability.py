@@ -6,6 +6,7 @@ import socket
 import stat
 import struct
 import tempfile
+from pathlib import Path
 from unittest import mock
 
 import paramiko
@@ -776,7 +777,9 @@ class StrictSSHClientTests(SimpleTestCase):
                 _temporary_private_key("private-key-material")
 
         with tempfile.TemporaryDirectory() as runtime_dir:
-            os.chmod(runtime_dir, 0o755)
+            runtime_path = Path(runtime_dir)
+            runtime_path.chmod(0o755)
+            self.assertEqual(stat.S_IMODE(runtime_path.stat().st_mode), 0o755)
             with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime_dir}):
                 with self.assertRaisesRegex(ValueError, "not private"):
                     _temporary_private_key("private-key-material")

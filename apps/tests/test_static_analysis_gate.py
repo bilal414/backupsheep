@@ -111,7 +111,7 @@ class StaticAnalysisGateTests(TestCase):
         )
         self.assertEqual(policy["bandit_version"], "1.9.4")
         self.assertEqual(policy["minimum_severity"], "MEDIUM")
-        self.assertEqual(len(policy["reviewed_findings"]), 60)
+        self.assertEqual(len(policy["reviewed_findings"]), 61)
         self.assertTrue(
             all(item["review"] in policy["reviews"] for item in policy["reviewed_findings"])
         )

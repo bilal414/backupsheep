@@ -41,10 +41,12 @@ workload_uid_for_role() {
 }
 
 policy_lease_seconds() {
-  # Three complete polling intervals plus a small scheduling allowance keeps
-  # ordinary DNS jitter available while placing a hard kernel deadline on every
-  # authorization that the userspace reconciler is responsible for renewing.
-  printf '%s' $(($1 * 3 + 5))
+  # Three complete polling intervals plus a twelve-second lookup/scheduling
+  # allowance keeps the lease longer than the worst sequential resolution cycle:
+  # two peers, each with three one-second IPv4 attempts, two 0.1s retry delays,
+  # and one one-second IPv6 attempt consume at most 8.4s before route/nft work.
+  # The independent kernel deadline still bounds every authorization.
+  printf '%s' $(($1 * 3 + 12))
 }
 
 validate_dns_name() {
@@ -135,12 +137,15 @@ resolved_addresses() {
   # and duplicate STREAM/DGRAM rows cannot cause a spurious policy refresh. Docker's
   # embedded DNS can transiently miss one query while endpoints are being updated;
   # retry required IPv4 discovery immediately before declaring the peer absent.
+  # Bound every libc lookup below the kernel authorization lease. Some Docker DNS
+  # implementations otherwise hold an absent-name query long enough for the exact
+  # tuple to expire while the reconciler still advertises its previous state.
   attempts=1
   [ "$address_family" = 6 ] || attempts=3
   attempt=1
   while [ "$attempt" -le "$attempts" ]; do
     resolved="$(
-      getent "$database" "$peer_host" 2>/dev/null \
+      timeout --foreground -s KILL 1 getent "$database" "$peer_host" 2>/dev/null \
         | awk -v pattern="$address_pattern" '$1 ~ pattern { print $1 }' \
         | sort -u
     )"

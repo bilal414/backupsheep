@@ -135,6 +135,7 @@ run_guard() {
   mode="$2"
   allow_ipv4_tcp_endpoints="$3"
   allow_dns_names="$4"
+  getent_fixture="${5:-}"
   case "$role" in
     app) workload_uid=10001 ;;
     database) workload_uid=10002 ;;
@@ -144,14 +145,22 @@ run_guard() {
     cloud) workload_uid=10008 ;;
     *) fail "the test requested an unsupported workload role." ;;
   esac
-  docker run -d --name "$guard" --restart on-failure:20 \
+  set -- docker run -d --name "$guard" --restart on-failure:20 \
     --network "$external_net" --network "$database_net" --network "$broker_net" \
     --cap-drop ALL \
     --cap-add CHOWN --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
     --security-opt no-new-privileges:true \
     --read-only \
     --tmpfs /run/backupsheep-egress:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
-    --pids-limit 32 --memory 64m --cpus 0.25 \
+    --pids-limit 32 --memory 64m --cpus 0.25
+  if [ -n "$getent_fixture" ]; then
+    [ -f "$getent_fixture" ] && [ ! -L "$getent_fixture" ] \
+      && [ -x "$getent_fixture" ] \
+      || fail "the hung-DNS getent fixture is not a regular executable."
+    set -- "$@" \
+      --mount "type=bind,src=${getent_fixture},dst=/usr/local/bin/getent,readonly"
+  fi
+  set -- "$@" \
     -e "BACKUPSHEEP_EGRESS_ROLE=${role}" \
     -e BACKUPSHEEP_EGRESS_POLICY_GENERATION=2 \
     -e "BACKUPSHEEP_EGRESS_MODE=${mode}" \
@@ -162,7 +171,8 @@ run_guard() {
     -e BACKUPSHEEP_EGRESS_BROKER_HOST=egress-test-broker \
     -e BACKUPSHEEP_EGRESS_BROKER_PORT=5672 \
     -e BACKUPSHEEP_EGRESS_DNS_REFRESH_SECONDS=1 \
-    "$image" >/dev/null
+    "$image"
+  "$@" >/dev/null
   wait_for_guard
 }
 
@@ -344,7 +354,7 @@ fi
 # the reconciler cannot run, a stale/reassigned database address loses access
 # without changing public mode's intentionally permissive outward behavior.
 docker kill --signal STOP "$guard" >/dev/null
-sleep 10
+sleep 17
 must_connect "$external_allowed_ip" 8080 \
   "public outward mode changed while its reconciler was stopped."
 must_block "$(container_ip "$database_server" "$database_net")" 5432 \
@@ -527,7 +537,7 @@ docker exec "$namespace_client" /bin/sh -c \
 # run in this state, so this directly proves the kernel deadline closes strict
 # egress (including established-flow handling) for a still-running workload.
 docker kill --signal STOP "$guard" >/dev/null
-sleep 10
+sleep 17
 strict_lease_after_expiry="$(docker exec "$guard" \
   nft list set inet backupsheep_egress strict_workload_lease 2>/dev/null || true)"
 if printf '%s\n' "$strict_lease_after_expiry" | grep -Fq 'elements = {'; then
@@ -788,5 +798,45 @@ fi
 docker logs "$probe" 2>&1 | grep -Fq 'BACKUPSHEEP_EGRESS_POLICY_GENERATION=2 is required' \
   || fail "a missing egress policy generation did not fail closed."
 docker rm "$probe" >/dev/null
+
+# A libc resolver that never returns must not outlive the kernel authorization
+# lease or leave health green. The root bootstrap resolves normally; once the
+# monitor drops to UID 10020, the mounted fixture hangs every lookup and each
+# child is forcibly bounded by the production timeout.
+hung_getent_fixture="$(cd "$(dirname "$0")" && pwd -P)/hung-getent-fixture.sh"
+run_guard database deny '' '' "$hung_getent_fixture"
+initial_lease="$(docker exec --user 10020:10020 "$guard" awk -F= \
+  '$1 == "lease_seconds" { print $2; exit }' \
+  /run/backupsheep-egress/reconciler-state)"
+[ "$initial_lease" = 15 ] \
+  || fail "the stock kernel lease does not exceed the complete lookup budget."
+sleep 17
+if docker exec "$guard" /usr/local/bin/backupsheep-egress-healthcheck \
+    >/dev/null 2>&1; then
+  fail "hung DNS left the egress guard healthy beyond its kernel lease."
+fi
+docker exec --user 10020:10020 "$guard" grep -qx status=blocked \
+  /run/backupsheep-egress/reconciler-state \
+  || fail "hung DNS did not publish a blocked reconciliation witness."
+hung_internal_set="$(docker exec "$guard" \
+  nft list set inet backupsheep_egress internal_ipv4 2>/dev/null || true)"
+if printf '%s\n' "$hung_internal_set" | grep -Fq 'elements = {'; then
+  fail "hung DNS preserved an internal peer tuple beyond its kernel lease."
+fi
+hung_strict_lease="$(docker exec "$guard" \
+  nft list set inet backupsheep_egress strict_workload_lease 2>/dev/null || true)"
+if printf '%s\n' "$hung_strict_lease" | grep -Fq 'elements = {'; then
+  fail "hung DNS preserved the workload authorization beyond its kernel lease."
+fi
+must_block "$(container_ip "$database_server" "$database_net")" 5432 \
+  "hung DNS left the database tuple reachable beyond its kernel lease."
+docker exec "$guard" /bin/sh -ec '
+  for process_status in /proc/[0-9]*/status; do
+    process_state="$(awk "/^State:/ { print \$2; exit }" \
+      "$process_status" 2>/dev/null || true)"
+    [ "$process_state" != Z ]
+  done
+' || fail "the forcibly bounded resolver left a zombie process."
+docker rm -f "$guard" >/dev/null
 
 printf '%s\n' 'BackupSheep exact-peer egress policy acceptance passed.'

@@ -32,7 +32,11 @@ from apps._tasks.helper.tasks import delete_requested_integrations
 from apps.api.v1.account.views import CoreAccountView
 from apps.api.v1.connection.views import CoreConnectionView
 from apps.api.v1.connection.database.serializers import (
+    CoreAuthDatabaseWriteSerializer,
     CoreDatabaseConnectionWriteSerializer,
+)
+from apps.api.v1.connection.serializer_helpers import (
+    MANAGED_SSH_SINGLE_ACCOUNT_VALIDATION_DETAIL,
 )
 from apps.api.v1.connection.website.serializers import (
     CoreAuthWebsiteWriteSerializer,
@@ -336,6 +340,70 @@ class ManagedSSHIsolationTests(BaseTestCase):
         with mock.patch.object(CoreAuthWebsite, "check_connection") as check:
             self.assertTrue(serializer.is_valid(), serializer.errors)
         check.assert_not_called()
+
+    def test_managed_ssh_serializer_policy_errors_are_constant_and_secret_safe(self):
+        context = {
+            "encryption_key": self.account.get_encryption_key(),
+            "request": SimpleNamespace(user=self.user),
+        }
+        cases = (
+            (
+                "website",
+                CoreAuthWebsiteWriteSerializer,
+                {
+                    "host": "website.internal.test",
+                    "port": 22,
+                    "protocol": CoreAuthWebsite.Protocol.SFTP,
+                    "username": "website-user",
+                    "use_public_key": True,
+                    "use_private_key": False,
+                },
+            ),
+            (
+                "database",
+                CoreAuthDatabaseWriteSerializer,
+                {
+                    "host": "database.internal.test",
+                    "port": 5432,
+                    "database_name": "application",
+                    "all_databases": False,
+                    "username": "database-user",
+                    "password": "database-password",
+                    "type": CoreAuthDatabase.DatabaseType.POSTGRESQL,
+                    "version": CoreAuthDatabase.DatabaseVersion.POSTGRESQL_18,
+                    "ssh_host": "bastion.internal.test",
+                    "ssh_port": 22,
+                    "ssh_username": "ssh-user",
+                    "use_public_key": True,
+                    "use_private_key": False,
+                },
+            ),
+        )
+        secret = "password=managed-policy-must-not-leak"
+        for lane, serializer_class, data in cases:
+            with self.subTest(lane=lane), mock.patch(
+                f"apps.api.v1.connection.{lane}.serializers."
+                "assert_managed_ssh_single_account",
+                side_effect=ManagedSSHOperationError(secret),
+            ), mock.patch(
+                "apps.console.connection.reliability.logger.warning"
+            ) as warning:
+                serializer = serializer_class(data=data, context=context)
+                self.assertFalse(serializer.is_valid())
+
+            self.assertEqual(
+                serializer.errors["use_public_key"],
+                [MANAGED_SSH_SINGLE_ACCOUNT_VALIDATION_DETAIL],
+            )
+            self.assertNotIn(secret, repr(serializer.errors))
+            self.assertNotIn(secret, repr(warning.call_args))
+            warning.assert_called_once_with(
+                "Connection operation failed.",
+                extra={
+                    "connection_failure_code": "CONNECTION_VALIDATION_FAILED",
+                    "connection_failure_stage": "managed_ssh_policy",
+                },
+            )
 
     def test_second_account_without_connections_blocks_worker_private_key_load(self):
         self._website_connection()

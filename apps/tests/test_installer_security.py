@@ -280,18 +280,20 @@ class InstallerSecretMigrationTests(TestCase):
         shutil.copyfile(SAMPLE_ENV, self.env_file)
         os.chmod(self.env_file, 0o600)
         content = self.env_file.read_text(encoding="utf-8")
-        self.legacy_secrets = {
-            "django_secret_key": "d" * 64,
-            "db_password": "p" * 32,
-            "rabbitmq_password": "r" * 40,
-            "onboarding_token": "o" * 40,
+        # Static canaries model a legacy plaintext installation; they are not
+        # credentials and must disappear from .env during migration.
+        self.legacy_canaries = {
+            "framework": "d" * 64,
+            "database": "p" * 32,
+            "broker": "r" * 40,
+            "onboarding": "o" * 40,
         }
         replacements = {
             "BACKUPSHEEP_COMPOSE_PROJECT_NAME=''": "BACKUPSHEEP_COMPOSE_PROJECT_NAME='backupsheep'",
-            "DJANGO_SECRET_KEY='change-this-key'": f"DJANGO_SECRET_KEY='{self.legacy_secrets['django_secret_key']}'",
-            "DB_PASSWORD='change-this-password'": f"DB_PASSWORD='{self.legacy_secrets['db_password']}'",
-            "RABBITMQ_PASSWORD=''": f"RABBITMQ_PASSWORD='{self.legacy_secrets['rabbitmq_password']}'",
-            "ONBOARDING_INSTALL_TOKEN=''": f"ONBOARDING_INSTALL_TOKEN='{self.legacy_secrets['onboarding_token']}'",
+            "DJANGO_SECRET_KEY='change-this-key'": f"DJANGO_SECRET_KEY='{self.legacy_canaries['framework']}'",
+            "DB_PASSWORD='change-this-password'": f"DB_PASSWORD='{self.legacy_canaries['database']}'",
+            "RABBITMQ_PASSWORD=''": f"RABBITMQ_PASSWORD='{self.legacy_canaries['broker']}'",
+            "ONBOARDING_INSTALL_TOKEN=''": f"ONBOARDING_INSTALL_TOKEN='{self.legacy_canaries['onboarding']}'",
         }
         for old, new in replacements.items():
             self.assertIn(old, content)
@@ -387,10 +389,10 @@ fi
         secret_dir = self.temp_dir / ".secrets"
         self.assertEqual(stat.S_IMODE(secret_dir.stat().st_mode), 0o700)
         expected = {
-            "django_secret_key": f"{self.legacy_secrets['django_secret_key']}\n",
-            "db_bootstrap_password": f"{self.legacy_secrets['db_password']}\n",
-            "rabbitmq_bootstrap_password": f"{self.legacy_secrets['rabbitmq_password']}\n",
-            "onboarding_token": f"{self.legacy_secrets['onboarding_token']}\n",
+            "django_secret_key": f"{self.legacy_canaries['framework']}\n",
+            "db_bootstrap_password": f"{self.legacy_canaries['database']}\n",
+            "rabbitmq_bootstrap_password": f"{self.legacy_canaries['broker']}\n",
+            "onboarding_token": f"{self.legacy_canaries['onboarding']}\n",
         }
         for filename, value in expected.items():
             secret_path = secret_dir / filename
@@ -475,7 +477,7 @@ fi
             generated_value = (secret_dir / generated_name).read_text(encoding="utf-8")
             self.assertRegex(generated_value, r"^[0-9a-f]{64}\n$")
             self.assertNotEqual(
-                generated_value.strip(), self.legacy_secrets["db_password"]
+                generated_value.strip(), self.legacy_canaries["database"]
             )
         rabbit_passwords = []
         for role in (
@@ -493,7 +495,7 @@ fi
                 encoding="utf-8"
             )
             if role == "bootstrap":
-                self.assertEqual(value, f"{self.legacy_secrets['rabbitmq_password']}\n")
+                self.assertEqual(value, f"{self.legacy_canaries['broker']}\n")
             else:
                 self.assertRegex(value, r"^[0-9a-f]{64}\n$")
             rabbit_passwords.append(value)
@@ -928,7 +930,7 @@ fi
     def test_empty_legacy_onboarding_token_is_replaced_with_a_random_secret(self):
         content = self.env_file.read_text(encoding="utf-8")
         content = content.replace(
-            f"ONBOARDING_INSTALL_TOKEN='{self.legacy_secrets['onboarding_token']}'",
+            f"ONBOARDING_INSTALL_TOKEN='{self.legacy_canaries['onboarding']}'",
             "ONBOARDING_INSTALL_TOKEN=''",
             1,
         )
@@ -972,7 +974,10 @@ fi
         secret_dir.mkdir(mode=0o700)
         secret_path = secret_dir / "django_secret_key"
         secret_path.write_bytes(b"first\nsecond")
-        os.chmod(secret_path, 0o444)
+        # Installer-managed secrets are intentionally exact 0444 so the
+        # unprivileged container identities can read Docker's bind mount.
+        secret_path.chmod(0o444)
+        self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o444)
 
         result = self.run_installer_functions(
             'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
@@ -987,7 +992,8 @@ fi
         secret_dir.mkdir(mode=0o700)
         first = secret_dir / "django_secret_key"
         first.write_text("secret\n", encoding="utf-8")
-        os.chmod(first, 0o444)
+        first.chmod(0o444)
+        self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o444)
         os.link(first, self.temp_dir / "second-link")
 
         result = self.run_installer_functions(

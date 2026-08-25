@@ -1,6 +1,15 @@
 from rest_framework import serializers
 
-from apps.console.connection.reliability import classify_connection_error
+from apps.console.connection.reliability import (
+    classify_and_record_connection_error,
+)
+
+
+MANAGED_SSH_SINGLE_ACCOUNT_VALIDATION_DETAIL = (
+    "Installation-managed SSH authentication is available only for a "
+    "single-account installation. Multi-account installations must use a "
+    "customer-supplied private key."
+)
 
 
 def _restore_retryable_booleans(value):
@@ -34,7 +43,7 @@ def safe_connection_validation_error(error, *, stage="connection"):
     The original exception is deliberately never included. Client libraries can put
     usernames, hostnames, SQL, and command fragments in exception messages.
     """
-    failure = classify_connection_error(error, stage=stage)
+    failure = classify_and_record_connection_error(error, stage=stage)
     detail = serializers.ErrorDetail(
         failure.detail,
         code=failure.code.lower(),

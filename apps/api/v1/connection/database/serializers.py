@@ -22,6 +22,7 @@ from apps.console.connection.models import (
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreConnectionLocationSerializer
 from apps.api.v1.connection.serializer_helpers import (
+    MANAGED_SSH_SINGLE_ACCOUNT_VALIDATION_DETAIL,
     StructuredConnectionValidationMixin,
     safe_connection_validation_error,
 )
@@ -34,6 +35,7 @@ from apps.console.connection.managed_ssh import (
     managed_public_key_fingerprint,
 )
 from apps.console.connection.ssh import normalize_ssh_host
+from apps.console.connection.reliability import classify_and_record_connection_error
 
 
 class CoreAuthDatabaseReadSerializer(serializers.ModelSerializer):
@@ -368,7 +370,13 @@ class CoreAuthDatabaseWriteSerializer(serializers.ModelSerializer):
                     self.context["request"].user.member.get_current_account().pk
                 )
             except ManagedSSHOperationError as error:
-                errors["use_public_key"] = [str(error)]
+                classify_and_record_connection_error(
+                    error,
+                    stage="managed_ssh_policy",
+                )
+                errors["use_public_key"] = [
+                    MANAGED_SSH_SINGLE_ACCOUNT_VALIDATION_DETAIL
+                ]
 
         if "password" in data and data.get("password"):
             if "'" in data["password"] or '"' in data["password"]:
