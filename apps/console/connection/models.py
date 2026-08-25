@@ -1,9 +1,12 @@
+import contextlib
 import ipaddress
 import json
 import math
 import os
+import posixpath
 import re
 import shlex
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -15,7 +18,7 @@ from botocore.exceptions import ClientError
 from django.conf import settings
 from django.core.cache import cache
 from django.core.validators import RegexValidator
-from django.db import models
+from django.db import models, transaction
 import time
 
 from django.utils.text import slugify
@@ -56,7 +59,13 @@ from .reliability import (
     classified_connection_error,
     database_tls_required_message,
 )
-from .ssh import cleanup_temporary_key, configure_host_keys, open_ssh_client
+from .ssh import (
+    cleanup_temporary_key,
+    configure_host_keys,
+    normalize_ssh_host,
+    open_ssh_client,
+    materialize_approved_known_hosts,
+)
 
 
 _PROVIDER_SDK_TIMEOUT_DEFAULT = (10.0, 60.0)
@@ -64,8 +73,10 @@ _PROVIDER_SDK_TIMEOUT_FLOOR = 0.1
 _PROVIDER_SDK_TIMEOUT_MAX_DEFAULT = 300.0
 _GOOGLE_TIMEOUT_UNSET = object()
 _GOOGLE_REFRESH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_REMOTE_DATABASE_CREDENTIAL_NAME_RE = re.compile(
+    r"^\.backupsheep-[0-9a-f]{32}\.(?:cnf|pgpass)$"
+)
 WORDPRESS_SECRET_PREFIX = "bs-wordpress-fernet-v1:"
-WORDPRESS_KEY_HEADER = "X-BackupSheep-Key"
 _WORDPRESS_ROUTES = frozenset(
     {
         "backup",
@@ -77,6 +88,112 @@ _WORDPRESS_ROUTES = frozenset(
         "validate",
     }
 )
+
+
+def _persisted_auth_witness(instance):
+    """Return an exact, non-deferred ORM row witness for SSH linearization."""
+
+    deferred = instance.get_deferred_fields()
+    values = []
+    for field in instance._meta.concrete_fields:
+        if field.name in {"created", "modified"}:
+            continue
+        if field.attname in deferred or field.name in deferred:
+            raise ValueError("A deferred SSH authentication row cannot be used")
+        value = getattr(instance, field.attname)
+        if isinstance(value, memoryview):
+            value = value.tobytes()
+        elif isinstance(value, bytearray):
+            value = bytes(value)
+        values.append((field.attname, value))
+    return tuple(values)
+
+
+@contextlib.contextmanager
+def _locked_persisted_ssh_auth(auth, *, integration_code):
+    """Snapshot ACTIVE state and one account-scoped host-key witness.
+
+    Locks are held only while copying the immutable configuration and trust
+    witness. Attacker-controlled network I/O starts after the transaction exits.
+    """
+
+    caller_auth_witness = _persisted_auth_witness(auth)
+    caller_connection = auth.connection
+    caller_connection_witness = (
+        caller_connection.pk,
+        caller_connection.account_id,
+        caller_connection.integration_id,
+        caller_connection.status,
+        caller_connection.managed_ssh_generation,
+    )
+    connection_id = auth.connection_id
+    account_id = caller_connection.account_id
+    with transaction.atomic():
+        account = CoreAccount.objects.select_for_update().get(pk=account_id)
+        connection = (
+            CoreConnection.objects.select_for_update()
+            .select_related("integration", "account")
+            .get(pk=connection_id, account=account)
+        )
+        if connection.status != CoreConnection.Status.ACTIVE:
+            raise ValueError("The SSH connection is not active")
+        if connection.integration.code != integration_code:
+            raise ValueError("The SSH connection lane changed")
+        auth_model = CoreAuthDatabase if integration_code == "database" else CoreAuthWebsite
+        locked_auth = auth_model.objects.select_for_update().get(connection=connection)
+        locked_connection_witness = (
+            connection.pk,
+            connection.account_id,
+            connection.integration_id,
+            connection.status,
+            connection.managed_ssh_generation,
+        )
+        if (
+            _persisted_auth_witness(locked_auth) != caller_auth_witness
+            or locked_connection_witness != caller_connection_witness
+        ):
+            raise ValueError(
+                "The SSH connection changed after this work item was loaded; retry it"
+            )
+        if integration_code == "database":
+            if not (locked_auth.use_public_key or locked_auth.use_private_key):
+                raise ValueError("The database connection does not use SSH")
+            host, port = locked_auth.ssh_host, locked_auth.ssh_port
+        else:
+            if locked_auth.protocol != CoreAuthWebsite.Protocol.SFTP:
+                raise ValueError("The website connection does not use SFTP")
+            host, port = locked_auth.host, locked_auth.port
+        approval = CoreSSHHostKeyApproval.objects.select_for_update().get(
+            account=account,
+            normalized_host=normalize_ssh_host(host),
+            port=port,
+        )
+        locked_auth._managed_ssh_host_key_witness = {
+            "approval_id": approval.pk,
+            "generation": approval.generation,
+            "normalized_host": approval.normalized_host,
+            "port": approval.port,
+            "wire_key_type": approval.wire_key_type,
+            "public_key_base64": approval.public_key_base64,
+            "fingerprint": approval.fingerprint,
+            "negotiated_host_key_algorithm": approval.negotiated_host_key_algorithm,
+            "bits": approval.bits,
+        }
+        locked_auth._ssh_trust_lock_held = True
+        if bool(getattr(locked_auth, "use_public_key", False)):
+            from .managed_ssh import managed_public_key_fingerprint
+
+            locked_auth._managed_ssh_public_key_fingerprint_witness = (
+                managed_public_key_fingerprint(
+                    source_lane=(
+                        "database" if integration_code == "database" else "files"
+                    )
+                )
+            )
+        locked_auth._state.fields_cache["connection"] = connection
+    # The approved key and decrypted configuration are now an immutable in-memory
+    # snapshot. Never hold database locks while an attacker-controlled host stalls.
+    yield locked_auth
 
 
 def _provider_sdk_timeout():
@@ -2008,7 +2125,40 @@ class CoreAuthWebsite(TimeStampedModel):
             except Exception as e:
                 raise NodeConnectionErrorWebsite(e.__str__())
 
+    def materialize_lftp_known_hosts(self):
+        """Pin this tenant's exact approved host key for one lftp execution."""
+
+        if self.protocol != self.Protocol.SFTP:
+            raise ValueError("An SFTP connection is required")
+        if not getattr(self, "_ssh_trust_lock_held", False):
+            with _locked_persisted_ssh_auth(
+                self, integration_code="website"
+            ) as locked_auth:
+                path = locked_auth.materialize_lftp_known_hosts()
+                algorithm = getattr(
+                    locked_auth, "_approved_host_key_algorithm", ""
+                )
+                if not algorithm:
+                    raise ValueError("An exact SSH host-key algorithm is required")
+        else:
+            witness = getattr(self, "_managed_ssh_host_key_witness", None)
+            if not witness:
+                raise ValueError("An exact SSH host-key witness is required")
+            path, algorithm = materialize_approved_known_hosts(
+                self.host,
+                self.port,
+                witness,
+            )
+        self._approved_known_hosts_path = path
+        self._approved_host_key_algorithm = algorithm
+        return path
+
     def get_sftp_client(self, data=None):
+        if data is None and not getattr(self, "_ssh_trust_lock_held", False):
+            with _locked_persisted_ssh_auth(
+                self, integration_code="website"
+            ) as locked_auth:
+                return locked_auth.get_sftp_client()
         if data:
             username = data.get("username")
             password = data.get("password")
@@ -2018,6 +2168,9 @@ class CoreAuthWebsite(TimeStampedModel):
             use_public_key = data.get("use_public_key")
             use_private_key = data.get("use_private_key")
             flag_use_sha1_key_verification = data.get("flag_use_sha1_key_verification")
+            account_id = data.get("_account_id")
+            host_key_witness = data.get("_host_key_witness")
+            managed_key_fingerprint = data.get("_managed_key_fingerprint")
         else:
             encryption_key = self.connection.account.get_encryption_key()
             username = bs_decrypt(self.username, encryption_key)
@@ -2028,6 +2181,11 @@ class CoreAuthWebsite(TimeStampedModel):
             use_public_key = self.use_public_key
             use_private_key = self.use_private_key
             flag_use_sha1_key_verification = self.flag_use_sha1_key_verification
+            account_id = self.connection.account_id
+            host_key_witness = getattr(self, "_managed_ssh_host_key_witness", None)
+            managed_key_fingerprint = getattr(
+                self, "_managed_ssh_public_key_fingerprint_witness", None
+            )
 
         ssh, ssh_key_path = open_ssh_client(
             host=host,
@@ -2038,9 +2196,15 @@ class CoreAuthWebsite(TimeStampedModel):
             private_key_passphrase=password if use_private_key else None,
             use_managed_key=bool(use_public_key),
             allow_legacy_rsa=bool(flag_use_sha1_key_verification),
+            account_id=account_id,
+            host_key_witness=host_key_witness,
+            managed_key_fingerprint=managed_key_fingerprint,
         )
         try:
             sftp = ssh.open_sftp()
+            channel = getattr(sftp, "get_channel", lambda: None)()
+            if channel is not None:
+                channel.settimeout(int(getattr(settings, "SSH_IO_TIMEOUT", 30)))
         except Exception as error:
             ssh.close()
             cleanup_temporary_key(ssh_key_path)
@@ -2155,49 +2319,72 @@ class CoreAuthWebsite(TimeStampedModel):
 
             elif self.protocol == self.Protocol.SFTP:
                 sftp, ssh, ssh_key_path = self.get_sftp_client()
-                # Some files and dir won't have correct permission so we will ignore them.
                 try:
-                    names = sftp.listdir(path or ".")
-                except (IOError, OSError):
-                    names = []
-
-                for name in names:
-                    full_path = (path if path != "." else "") + ("/" if path != "." else "") + name
-
-                    if isFile(full_path, sftp):
-                        obj_type = "file"
-                        eligible_objects.append(
-                            {
-                                "directory": path,
-                                "path": (path if (path != "." and path != "/") else "")
-                                + ("/" if path != "." else "")
-                                + name,
-                                "type": obj_type,
-                                "name": name,
-                            }
+                    max_entries = int(settings.SSH_DISCOVERY_MAX_ENTRIES)
+                    max_name_bytes = int(settings.SSH_DISCOVERY_MAX_NAME_BYTES)
+                    max_result_bytes = int(settings.SSH_DISCOVERY_MAX_RESULT_BYTES)
+                    deadline = time.monotonic() + int(
+                        settings.SSH_DISCOVERY_TIMEOUT_SECONDS
+                    )
+                    result_bytes = 2  # JSON list brackets.
+                    entries_seen = 0
+                    for entry in sftp.listdir_iter(path or ".", read_aheads=10):
+                        entries_seen += 1
+                        if entries_seen > max_entries:
+                            raise ValueError(
+                                "The remote directory exceeded the safe entry limit"
+                            )
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(
+                                "The remote directory exceeded the safe time limit"
+                            )
+                        name = str(entry.filename)
+                        name_bytes = name.encode("utf-8")
+                        if (
+                            not name
+                            or len(name_bytes) > max_name_bytes
+                            or name in {".", ".."}
+                            or "/" in name
+                            or any(ord(character) < 32 for character in name)
+                        ):
+                            raise ValueError(
+                                "The remote directory returned an invalid file name"
+                            )
+                        full_path = posixpath.join(
+                            "" if path == "." else path,
+                            name,
                         )
-                    elif isdir(full_path, sftp):
-                        obj_type = "directory"
-                        eligible_objects.append(
-                            {
-                                "directory": path,
-                                "path": (path if (path != "." and path != "/") else "")
-                                + ("/" if path != "." else "")
-                                + name,
-                                "type": obj_type,
-                                "name": name,
-                            }
-                        )
+                        mode = getattr(entry, "st_mode", None)
+                        if mode is not None and stat.S_ISREG(mode):
+                            obj_type = "file"
+                        elif mode is not None and stat.S_ISDIR(mode):
+                            obj_type = "directory"
+                        else:
+                            continue
+                        item = {
+                            "directory": path,
+                            "path": full_path,
+                            "type": obj_type,
+                            "name": name,
+                        }
+                        result_bytes += len(
+                            json.dumps(
+                                item,
+                                ensure_ascii=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ) + 1
+                        if result_bytes > max_result_bytes:
+                            raise ValueError(
+                                "The remote directory exceeded the safe response limit"
+                            )
+                        eligible_objects.append(item)
 
-                # Sort by type and then by object type(file or dir)
-                eligible_objects = sorted(eligible_objects, key=lambda k: k["type"])
-                eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
-
-                # Now close connections and remove key file.
-                sftp.close()
-                ssh.close()
-                if ssh_key_path:
-                    os.remove(ssh_key_path)
+                    eligible_objects.sort(key=lambda item: (item["name"], item["type"]))
+                finally:
+                    sftp.close()
+                    ssh.close()
+                    cleanup_temporary_key(ssh_key_path)
 
         except Exception as e:
             raise NodeConnectionErrorEligibleObjects()
@@ -2799,16 +2986,48 @@ class CoreAuthDatabase(TimeStampedModel):
             f"{self._pgpass_value(username)}:{self._pgpass_value(password)}\n"
         )
         sftp = ssh.open_sftp()
+        channel = getattr(sftp, "get_channel", lambda: None)()
+        if channel is not None:
+            channel.settimeout(
+                min(
+                    int(settings.SSH_IO_TIMEOUT),
+                    int(settings.SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS),
+                )
+            )
         created = []
         try:
+            self._sweep_stale_remote_database_credentials(sftp)
             for name, content in (
                 (mysql_name, mysql_content),
                 (pgpass_name, pgpass_content),
             ):
-                with sftp.open(name, "w") as handle:
+                if len(content.encode("utf-8")) > 64 * 1024:
+                    raise ValueError("Remote database credential material is too large")
+                # O_EXCL prevents a pre-created path from redirecting or replacing
+                # the credential file. Set and verify 0600 on the open handle before
+                # the first secret byte is sent to the remote filesystem.
+                with sftp.open(name, "wx") as handle:
+                    created.append(name)
+                    handle.chmod(0o600)
+                    before = handle.stat()
+                    if (
+                        not stat.S_ISREG(before.st_mode)
+                        or stat.S_IMODE(before.st_mode) != 0o600
+                        or before.st_size != 0
+                    ):
+                        raise PermissionError(
+                            "Remote database credential file is not a private empty regular file"
+                        )
                     handle.write(content)
-                sftp.chmod(name, 0o600)
-                created.append(name)
+                    handle.flush()
+                    after = handle.stat()
+                    if (
+                        not stat.S_ISREG(after.st_mode)
+                        or stat.S_IMODE(after.st_mode) != 0o600
+                    ):
+                        raise PermissionError(
+                            "Remote database credential file permissions changed while writing"
+                        )
         except Exception:
             for name in created:
                 try:
@@ -2825,6 +3044,36 @@ class CoreAuthDatabase(TimeStampedModel):
             ),
             "pgpass_env": f'PGPASSFILE="$HOME/{pgpass_name}"',
         }
+
+    @staticmethod
+    def _sweep_stale_remote_database_credentials(sftp):
+        """Remove only expired BackupSheep credential artifacts from this home."""
+
+        stale_after = int(settings.SSH_REMOTE_CREDENTIAL_STALE_SECONDS)
+        maximum_entries = int(settings.SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES)
+        deadline = time.monotonic() + int(
+            settings.SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS
+        )
+        cutoff = time.time() - stale_after
+        for index, entry in enumerate(sftp.listdir_iter(".", read_aheads=4)):
+            if index >= maximum_entries:
+                raise RuntimeError(
+                    "Remote home contains too many entries for safe credential cleanup"
+                )
+            if time.monotonic() > deadline:
+                raise TimeoutError("Remote database credential cleanup timed out")
+            name = str(getattr(entry, "filename", "") or "")
+            mode = getattr(entry, "st_mode", None)
+            modified = getattr(entry, "st_mtime", None)
+            if (
+                _REMOTE_DATABASE_CREDENTIAL_NAME_RE.fullmatch(name) is None
+                or mode is None
+                or not stat.S_ISREG(mode)
+                or modified is None
+                or modified > cutoff
+            ):
+                continue
+            sftp.remove(name)
 
     @staticmethod
     def _remove_remote_database_credentials(ssh, credentials):
@@ -2877,25 +3126,99 @@ class CoreAuthDatabase(TimeStampedModel):
     @staticmethod
     def _run_remote_database_command(ssh, command):
         """Run a bounded remote client command and require a successful exit."""
+        command_timeout = int(settings.DATABASE_VALIDATION_COMMAND_TIMEOUT)
+        maximum_bytes = int(settings.SSH_REMOTE_COMMAND_MAX_BYTES)
         _stdin, stdout, stderr = ssh.exec_command(
             command,
-            timeout=int(
-                getattr(settings, "DATABASE_VALIDATION_COMMAND_TIMEOUT", 30)
-            ),
+            timeout=command_timeout,
         )
 
-        def decode_lines(stream):
-            return "".join(
-                line.decode("utf-8", "replace")
-                if isinstance(line, bytes)
-                else str(line)
-                for line in (stream.readlines() or [])
-            ).strip()
-
-        output = decode_lines(stdout)
-        error = decode_lines(stderr)
         channel = getattr(stdout, "channel", None)
-        status = channel.recv_exit_status() if channel is not None else 0
+        streaming_channel = channel is not None and all(
+            callable(getattr(channel, method, None))
+            for method in (
+                "recv_ready",
+                "recv",
+                "recv_stderr_ready",
+                "recv_stderr",
+                "exit_status_ready",
+                "recv_exit_status",
+            )
+        )
+
+        def as_bytes(value):
+            if value is None:
+                return b""
+            if isinstance(value, bytes):
+                return value
+            if isinstance(value, str):
+                return value.encode("utf-8")
+            raise ValueError("The remote database client returned invalid output")
+
+        output_bytes = bytearray()
+        error_bytes = bytearray()
+
+        def append_bounded(target, value):
+            chunk = as_bytes(value)
+            if len(output_bytes) + len(error_bytes) + len(chunk) > maximum_bytes:
+                raise ValueError(
+                    "The remote database client exceeded the safe output limit"
+                )
+            target.extend(chunk)
+
+        if streaming_channel:
+            deadline = time.monotonic() + command_timeout
+            try:
+                while True:
+                    progressed = False
+                    while channel.recv_ready():
+                        chunk = channel.recv(32 * 1024)
+                        if not chunk:
+                            break
+                        append_bounded(output_bytes, chunk)
+                        progressed = True
+                    while channel.recv_stderr_ready():
+                        chunk = channel.recv_stderr(32 * 1024)
+                        if not chunk:
+                            break
+                        append_bounded(error_bytes, chunk)
+                        progressed = True
+                    if (
+                        channel.exit_status_ready()
+                        and not channel.recv_ready()
+                        and not channel.recv_stderr_ready()
+                    ):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "The remote database client exceeded the safe time limit"
+                        )
+                    if not progressed:
+                        time.sleep(0.01)
+                status = channel.recv_exit_status()
+            except Exception:
+                close_channel = getattr(channel, "close", None)
+                if callable(close_channel):
+                    close_channel()
+                raise
+        else:
+            # Lightweight test adapters and alternate SSH implementations may
+            # expose only bounded file reads. Never use readlines(), which lets a
+            # hostile peer allocate memory until EOF.
+            output_value = stdout.read(maximum_bytes + 1)
+            append_bounded(output_bytes, output_value)
+            remaining = maximum_bytes - len(output_bytes)
+            error_value = stderr.read(remaining + 1)
+            append_bounded(error_bytes, error_value)
+            status = (
+                channel.recv_exit_status()
+                if channel is not None
+                and callable(getattr(channel, "recv_exit_status", None))
+                else 0
+            )
+
+        output = bytes(output_bytes).decode("utf-8", "replace").strip()
+        error = bytes(error_bytes).decode("utf-8", "replace").strip()
         if status != 0:
             combined = f"{output}\n{error}"
             if database_tls_required_message(combined):
@@ -3258,14 +3581,19 @@ class CoreAuthDatabase(TimeStampedModel):
             for available_db_versions in available_db_versions:
                 if available_db_versions in db_version:
                     self.version = available_db_versions
-                    self.save()
+                    self.save(update_fields=("version",))
             for available_db_type in available_db_types:
                 if available_db_type[1].lower() in db_version:
                     self.type = available_db_type[0]
-                    self.save()
+                    self.save(update_fields=("type",))
         return {"type": self.get_type_display(), "version": self.get_version_display()}
 
     def get_ssh_client(self, data=None):
+        if data is None and not getattr(self, "_ssh_trust_lock_held", False):
+            with _locked_persisted_ssh_auth(
+                self, integration_code="database"
+            ) as locked_auth:
+                return locked_auth.get_ssh_client()
         if data:
             ssh_username = data.get("ssh_username")
             ssh_password = data.get("ssh_password")
@@ -3275,6 +3603,9 @@ class CoreAuthDatabase(TimeStampedModel):
             use_public_key = data.get("use_public_key")
             use_private_key = data.get("use_private_key")
             flag_use_sha1_key_verification = data.get("flag_use_sha1_key_verification")
+            account_id = data.get("_account_id")
+            host_key_witness = data.get("_host_key_witness")
+            managed_key_fingerprint = data.get("_managed_key_fingerprint")
         else:
             encryption_key = self.connection.account.get_encryption_key()
             ssh_username = bs_decrypt(self.ssh_username, encryption_key)
@@ -3285,6 +3616,11 @@ class CoreAuthDatabase(TimeStampedModel):
             use_public_key = self.use_public_key
             use_private_key = self.use_private_key
             flag_use_sha1_key_verification = self.flag_use_sha1_key_verification
+            account_id = self.connection.account_id
+            host_key_witness = getattr(self, "_managed_ssh_host_key_witness", None)
+            managed_key_fingerprint = getattr(
+                self, "_managed_ssh_public_key_fingerprint_witness", None
+            )
 
         ssh, ssh_key_path = open_ssh_client(
             host=ssh_host,
@@ -3294,6 +3630,9 @@ class CoreAuthDatabase(TimeStampedModel):
             private_key_passphrase=ssh_password if use_private_key else None,
             use_managed_key=bool(use_public_key),
             allow_legacy_rsa=bool(flag_use_sha1_key_verification),
+            account_id=account_id,
+            host_key_witness=host_key_witness,
+            managed_key_fingerprint=managed_key_fingerprint,
         )
         try:
             sftp = ssh.open_sftp()
@@ -3623,15 +3962,21 @@ class CoreAuthWordPress(TimeStampedModel):
     def request(self, route, *, params=None, data=None, stream=False, timeout=None):
         """Call one exact WordPress origin without placing credentials in its URL."""
 
+        from apps.api.v1.utils.wordpress_transport import (
+            build_wordpress_v2_request,
+            pinned_wordpress_request,
+            require_wordpress_protocol_v2,
+            resolve_wordpress_target,
+        )
+
+        # Refuse the legacy public plugin contract before resolving a target or
+        # decrypting any credential.  Re-enabling requires the reviewed v2 protocol;
+        # there is deliberately no query-string-key compatibility mode.
+        require_wordpress_protocol_v2()
         if route not in _WORDPRESS_ROUTES:
             raise ValueError("Unsupported WordPress API route")
         supplied = data or {}
         base_url = self._normalized_base_url(supplied.get("url", self.url))
-
-        from apps.api.v1.utils.wordpress_transport import (
-            pinned_wordpress_get,
-            resolve_wordpress_target,
-        )
 
         # Resolve and approve the target before decrypting any credential. The
         # transport later connects to this exact IP and never resolves again.
@@ -3650,24 +3995,31 @@ class CoreAuthWordPress(TimeStampedModel):
                 "WordPress HTTP username and password must be configured together"
             )
 
-        headers = self.get_client()
-        headers[WORDPRESS_KEY_HEADER] = key
-        query = {"rest_route": f"/backupsheep/updraftplus/{route}"}
+        payload = {}
         for name, value in (params or {}).items():
             if str(name).lower() in {"key", "x-backupsheep-key", "authorization"}:
                 raise ValueError("WordPress credentials must not be query parameters")
-            query[name] = value
+            payload[str(name)] = value
+        body, authentication_headers = build_wordpress_v2_request(
+            route,
+            payload,
+            key,
+        )
+        headers = self.get_client()
+        headers.update(authentication_headers)
         request_kwargs = {
-            "params": query,
+            "route": route,
+            "body": body,
             "headers": headers,
             "auth": (http_user, http_pass) if http_user and http_pass else None,
             "stream": stream,
         }
         if timeout is not None:
             request_kwargs["timeout"] = timeout
-        return pinned_wordpress_get(
+        return pinned_wordpress_request(
             target,
-            params=request_kwargs["params"],
+            route=request_kwargs["route"],
+            body=request_kwargs["body"],
             headers=request_kwargs["headers"],
             auth=request_kwargs["auth"],
             stream=request_kwargs["stream"],
@@ -3676,7 +4028,7 @@ class CoreAuthWordPress(TimeStampedModel):
 
     def get_client(self):
         return {
-            "User-Agent": "BackupSheep-WordPress/1",
+            "User-Agent": "BackupSheep-WordPress/2",
             "content-type": "application/json",
         }
 
@@ -3741,27 +4093,26 @@ class CoreAuthWordPress(TimeStampedModel):
             return False
         if result.status_code == 200:
             try:
-                if result.json().get("plugins", {}).get("backupsheep") and result.json().get("plugins", {}).get(
-                    "updraftplus"
-                ):
-                    return True
-                elif not result.json().get("validate_backupsheep_key"):
+                response_data = result.json()
+                if response_data.get("protocol") != 2:
                     raise ValueError(
-                        "Invalid WordPress Key. Please get correct WordPress Key from your integration "
-                        f"and add it to BackupSheep Wordpress plugin. Validation URL: {safe_url}"
+                        "WordPress connector did not confirm authenticated protocol v2. "
+                        f"Validation URL: {safe_url}"
                     )
-                elif not result.json().get("plugins", {}).get("backupsheep") and not result.json().get(
-                    "plugins", {}
-                ).get("updraftplus"):
-                    raise ValueError(f"Your BackupSheep & UpdraftPlus plugins are not active. Validation URL: {safe_url}")
-                elif not result.json().get("plugins", {}).get("backupsheep") and not result.json().get(
-                    "plugins", {}
-                ).get("updraftplus"):
-                    raise ValueError(f"Your BackupSheep & UpdraftPlus plugins are not active. Validation URL: {safe_url}")
-                elif not result.json().get("plugins", {}).get("backupsheep"):
-                    raise ValueError(f"Your BackupSheep plugin is not active. Validation URL: {safe_url}")
-                elif not result.json().get("plugins", {}).get("updraftplus"):
-                    raise ValueError(f"Your UpdraftPlus plugin is not active. Validation URL: {safe_url}")
+                if response_data.get("plugins", {}).get(
+                    "backupsheep"
+                ) and response_data.get("plugins", {}).get("updraftplus"):
+                    return True
+                elif not response_data.get("plugins", {}).get("backupsheep"):
+                    raise ValueError(
+                        "The BackupSheep Secure Connector is not active. "
+                        f"Validation URL: {safe_url}"
+                    )
+                elif not response_data.get("plugins", {}).get("updraftplus"):
+                    raise ValueError(
+                        "UpdraftPlus is not active. "
+                        f"Validation URL: {safe_url}"
+                    )
             except JSONDecodeError:
                 if check_errors:
                     raise ValueError(
@@ -3803,6 +4154,12 @@ class CoreAuthBasecamp(TimeStampedModel):
         db_table = "core_auth_basecamp"
 
     def get_client(self):
+        # Refuse before decrypting OAuth credentials. Enterprise/BSE1 installs do
+        # not have a complete Basecamp recovery path, and the non-enterprise
+        # compatibility path must be explicitly enabled.
+        from backupsheep.source_recovery_policy import require_source_backup_creation
+
+        require_source_backup_creation("basecamp")
         encryption_key = self.connection.account.get_encryption_key()
 
         access_token = bs_decrypt(self.access_token, encryption_key)
@@ -3819,7 +4176,11 @@ class CoreAuthBasecamp(TimeStampedModel):
         from django.conf import settings
         from datetime import datetime
         from apps.api.v1.utils.oauth_security import validated_https_endpoint
+        from backupsheep.source_recovery_policy import require_source_backup_creation
 
+        # A disabled source must not keep decrypting or refreshing OAuth
+        # credentials in the background. Existing rows remain readable.
+        require_source_backup_creation("basecamp")
         encryption_key = self.connection.account.get_encryption_key()
 
         refresh_token = bs_decrypt(self.refresh_token, encryption_key)
@@ -4041,6 +4402,12 @@ class CoreConnection(TimeStampedModel):
     )
     status = models.IntegerField(choices=Status.choices, default=Status.ACTIVE)
     notification = models.IntegerField(choices=Notification.choices, default=Notification.NOT_SENT)
+    # Incremented by database triggers whenever a managed-key connection's SSH
+    # target or credentials change. Runtime principals cannot write this latch.
+    managed_ssh_generation = models.PositiveBigIntegerField(
+        default=0,
+        editable=False,
+    )
     integration = models.ForeignKey(CoreIntegration, related_name="connections", on_delete=models.PROTECT)
     location = models.ForeignKey(
         CoreConnectionLocation,
@@ -4102,3 +4469,384 @@ class CoreConnection(TimeStampedModel):
     def incremental_backup_available(self):
         if self.integration.code == "website":
             return self.auth_website.use_public_key or self.auth_website.use_private_key
+
+
+class CoreSSHHostKeyApproval(TimeStampedModel):
+    """Tenant-scoped SSH server identity approved before authentication."""
+
+    account = models.ForeignKey(
+        CoreAccount,
+        related_name="ssh_host_key_approvals",
+        # PostgreSQL owns this cascade so an app-role account deletion does not
+        # require a directly forgeable DELETE grant on the approval ledger.
+        on_delete=models.DO_NOTHING,
+        db_constraint=False,
+        editable=False,
+    )
+    normalized_host = models.CharField(max_length=255, editable=False)
+    port = models.PositiveIntegerField(editable=False)
+    wire_key_type = models.CharField(max_length=64, editable=False)
+    public_key_base64 = models.TextField(editable=False)
+    fingerprint = models.CharField(max_length=128, editable=False)
+    negotiated_host_key_algorithm = models.CharField(max_length=64, editable=False)
+    bits = models.PositiveIntegerField(editable=False)
+    generation = models.PositiveBigIntegerField(default=1, editable=False)
+    approved_by_member_pk_snapshot = models.PositiveBigIntegerField(editable=False)
+    approved_by_user_pk_snapshot = models.PositiveBigIntegerField(editable=False)
+
+    class Meta:
+        db_table = "core_ssh_host_key_approval"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("account", "normalized_host", "port"),
+                name="unique_account_ssh_host_key_approval",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(port__gte=1, port__lte=65535),
+                name="ssh_host_key_approval_port_valid",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("account", "normalized_host", "port"),
+                name="ssh_host_key_account_endpoint",
+            )
+        ]
+
+
+class CoreSSHHostKeyApprovalEvent(TimeStampedModel):
+    """Append-only trust history for approval, replacement, and revocation."""
+
+    class Action(models.TextChoices):
+        APPROVE = "approve", "Approve"
+        REPLACE = "replace", "Replace"
+        REVOKE = "revoke", "Revoke"
+
+    class ActorKind(models.TextChoices):
+        MEMBER = "member", "Member"
+        APPLICATION = "application", "Application"
+        SYSTEM = "system", "System"
+
+    approval_pk_snapshot = models.PositiveBigIntegerField(editable=False)
+    account_pk_snapshot = models.PositiveBigIntegerField(editable=False)
+    normalized_host = models.CharField(max_length=255, editable=False)
+    port = models.PositiveIntegerField(editable=False)
+    generation = models.PositiveBigIntegerField(editable=False)
+    action = models.CharField(
+        max_length=16,
+        choices=Action.choices,
+        editable=False,
+    )
+    old_wire_key_type = models.CharField(max_length=64, blank=True, editable=False)
+    new_wire_key_type = models.CharField(max_length=64, blank=True, editable=False)
+    old_public_key_base64 = models.TextField(blank=True, editable=False)
+    new_public_key_base64 = models.TextField(blank=True, editable=False)
+    old_fingerprint = models.CharField(max_length=128, blank=True, editable=False)
+    new_fingerprint = models.CharField(max_length=128, blank=True, editable=False)
+    old_negotiated_host_key_algorithm = models.CharField(
+        max_length=64, blank=True, editable=False
+    )
+    new_negotiated_host_key_algorithm = models.CharField(
+        max_length=64, blank=True, editable=False
+    )
+    old_bits = models.PositiveIntegerField(null=True, editable=False)
+    new_bits = models.PositiveIntegerField(null=True, editable=False)
+    actor_kind = models.CharField(
+        max_length=16,
+        choices=ActorKind.choices,
+        editable=False,
+    )
+    actor_member_pk_snapshot = models.PositiveBigIntegerField(
+        null=True, editable=False
+    )
+    actor_user_pk_snapshot = models.PositiveBigIntegerField(null=True, editable=False)
+
+    class Meta:
+        db_table = "core_ssh_host_key_approval_event"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("approval_pk_snapshot", "generation", "action"),
+                name="unique_ssh_host_key_approval_event",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(port__gte=1, port__lte=65535),
+                name="ssh_host_key_event_port_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(action__in=("approve", "replace", "revoke")),
+                name="ssh_host_key_event_action_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        actor_kind="member",
+                        actor_member_pk_snapshot__isnull=False,
+                        actor_user_pk_snapshot__isnull=False,
+                    )
+                    | models.Q(
+                        actor_kind__in=("application", "system"),
+                        actor_member_pk_snapshot__isnull=True,
+                        actor_user_pk_snapshot__isnull=True,
+                    )
+                ),
+                name="ssh_host_key_event_actor_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        action="approve",
+                        old_fingerprint="",
+                        new_fingerprint__gt="",
+                    )
+                    | models.Q(
+                        action="replace",
+                        old_fingerprint__gt="",
+                        new_fingerprint__gt="",
+                    )
+                    | models.Q(
+                        action="revoke",
+                        old_fingerprint__gt="",
+                        new_fingerprint="",
+                    )
+                ),
+                name="ssh_host_key_event_transition_valid",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=(
+                    "account_pk_snapshot",
+                    "normalized_host",
+                    "port",
+                    "generation",
+                ),
+                name="ssh_host_key_event_endpoint",
+            )
+        ]
+
+
+class CoreManagedSSHOperation(TimeStampedModel):
+    """Durable, lane-bound request for use of the installation managed SSH key.
+
+    The web process may create and observe these rows, but it never receives the
+    managed private key.  Database and files workers may update only the mutable
+    execution columns granted by the generation-3 database policy.  The immutable
+    intent columns are repeated and hashed so a worker can fail closed if the
+    connection, public key, Celery message, or requested path changed after the
+    request was authorized.
+    """
+
+    class SourceLane(models.TextChoices):
+        DATABASE = "database", "Database"
+        FILES = "files", "Files"
+
+    class Operation(models.TextChoices):
+        VALIDATE = "validate", "Validate connection"
+        DISCOVER = "discover", "Discover objects"
+        UPDATE_METADATA = "update_metadata", "Update database metadata"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RUNNING = "running", "Running"
+        COMPLETE = "complete", "Complete"
+        FAILED = "failed", "Failed"
+        EXPIRED = "expired", "Expired"
+
+    class ActorKind(models.TextChoices):
+        MEMBER = "member", "Member"
+
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    connection = models.ForeignKey(
+        CoreConnection,
+        related_name="managed_ssh_operations",
+        # PostgreSQL owns this cascade so the web role never needs direct DELETE
+        # on the append-only execution proof. Migration 0046 installs the exact
+        # ON DELETE CASCADE constraint; Django's Collector must not pre-delete it.
+        on_delete=models.DO_NOTHING,
+        db_constraint=False,
+        editable=False,
+    )
+    account = models.ForeignKey(
+        CoreAccount,
+        related_name="managed_ssh_operations",
+        on_delete=models.DO_NOTHING,
+        db_constraint=False,
+        editable=False,
+    )
+    # Audit snapshots deliberately are not foreign keys: deleting a member does
+    # not strand an operation row or retain the member record. The operation UUID
+    # is the request correlation identifier shown to operators.
+    requested_by_member_pk_snapshot = models.PositiveBigIntegerField(editable=False)
+    requested_by_user_pk_snapshot = models.PositiveBigIntegerField(editable=False)
+    request_actor_kind = models.CharField(
+        max_length=16,
+        choices=ActorKind.choices,
+        default=ActorKind.MEMBER,
+        editable=False,
+    )
+    request_source = models.CharField(max_length=16, default="api", editable=False)
+    source_lane = models.CharField(
+        max_length=16,
+        choices=SourceLane.choices,
+        editable=False,
+    )
+    operation = models.CharField(
+        max_length=32,
+        choices=Operation.choices,
+        editable=False,
+    )
+    requested_path = models.CharField(max_length=2048, blank=True, editable=False)
+    managed_public_key_fingerprint = models.CharField(
+        max_length=64,
+        editable=False,
+    )
+    connection_config_digest = models.CharField(max_length=64, editable=False)
+    connection_generation = models.PositiveBigIntegerField(editable=False)
+    host_key_approval_pk_snapshot = models.PositiveBigIntegerField(editable=False)
+    host_key_approval_generation = models.PositiveBigIntegerField(editable=False)
+    host_key_fingerprint = models.CharField(max_length=128, editable=False)
+    host_key_negotiated_algorithm = models.CharField(max_length=64, editable=False)
+    celery_task_id = models.UUIDField(unique=True, editable=False)
+    idempotency_key = models.CharField(max_length=64, unique=True, editable=False)
+    intent_digest = models.CharField(max_length=64, editable=False)
+    expires_at = models.DateTimeField(editable=False)
+
+    # Only these execution/result fields are mutable after insertion. Database
+    # grants independently enforce that boundary even if a worker is compromised.
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    result_payload = models.JSONField(default=dict, blank=True)
+    result_digest = models.CharField(max_length=64, blank=True)
+    error_payload = models.JSONField(default=dict, blank=True)
+    execution_witness_digest = models.CharField(max_length=64, blank=True)
+    publish_attempts = models.PositiveIntegerField(default=0)
+    last_publish_attempt_at = models.DateTimeField(null=True, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    publish_error_code = models.CharField(max_length=32, blank=True)
+
+    class Meta:
+        db_table = "core_managed_ssh_operation"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(source_lane__in=("database", "files")),
+                name="managed_ssh_source_lane_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(request_source="api"),
+                name="managed_ssh_request_source_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(request_actor_kind="member"),
+                name="managed_ssh_actor_kind_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    operation__in=("validate", "discover", "update_metadata")
+                ),
+                name="managed_ssh_operation_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    status__in=(
+                        "pending",
+                        "running",
+                        "complete",
+                        "failed",
+                        "expired",
+                    )
+                ),
+                name="managed_ssh_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(operation="validate")
+                | models.Q(requested_path=""),
+                name="managed_ssh_validate_path_empty",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        managed_public_key_fingerprint__regex=r"^[0-9a-f]{64}$"
+                    )
+                    & models.Q(connection_config_digest__regex=r"^[0-9a-f]{64}$")
+                    & models.Q(idempotency_key__regex=r"^[0-9a-f]{64}$")
+                    & models.Q(intent_digest__regex=r"^[0-9a-f]{64}$")
+                ),
+                name="managed_ssh_intent_digests_valid",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(
+                    status__in=("complete", "failed", "expired")
+                )
+                | models.Q(completed_at__isnull=False),
+                name="managed_ssh_terminal_completed_at",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        status="pending",
+                        attempts=0,
+                        lease_token__isnull=True,
+                        lease_expires_at__isnull=True,
+                        claimed_at__isnull=True,
+                        completed_at__isnull=True,
+                        result_payload={},
+                        result_digest="",
+                        error_payload={},
+                        execution_witness_digest="",
+                    )
+                    | models.Q(
+                        status="running",
+                        attempts__gte=1,
+                        lease_token__isnull=False,
+                        lease_expires_at__isnull=False,
+                        claimed_at__isnull=False,
+                        completed_at__isnull=True,
+                        result_payload={},
+                        result_digest="",
+                        error_payload={},
+                        execution_witness_digest="",
+                    )
+                    | models.Q(
+                        status="complete",
+                        lease_token__isnull=True,
+                        lease_expires_at__isnull=True,
+                        claimed_at__isnull=False,
+                        completed_at__isnull=False,
+                        result_digest__regex=r"^[0-9a-f]{64}$",
+                        error_payload={},
+                        execution_witness_digest__regex=r"^[0-9a-f]{64}$",
+                    )
+                    | (
+                        models.Q(
+                            status__in=("failed", "expired"),
+                            lease_token__isnull=True,
+                            lease_expires_at__isnull=True,
+                            completed_at__isnull=False,
+                            result_payload={},
+                            result_digest="",
+                            execution_witness_digest__regex=r"^[0-9a-f]{64}$",
+                        )
+                        & ~models.Q(error_payload={})
+                    )
+                ),
+                name="managed_ssh_execution_state_valid",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("connection", "status"),
+                name="managed_ssh_connection_status",
+            ),
+            models.Index(
+                fields=("status", "expires_at"),
+                name="managed_ssh_status_expiry",
+            ),
+        ]

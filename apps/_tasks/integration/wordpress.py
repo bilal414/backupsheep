@@ -20,6 +20,7 @@ from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup
 from celery.exceptions import SoftTimeLimitExceeded
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 @current_app.task(
@@ -41,6 +42,9 @@ def backup_wordpress(
     notes=None,
     resume=False,
 ):
+    # This fixed-family task can be called directly or replayed from an old
+    # broker message, so refuse before loading or mutating any source row.
+    require_source_backup_creation("wordpress")
     # capture_message('Executing task id {0.id}, args: {0.args!r} kwargs: {0.kwargs!r}'.format(self.request))
     # print('Executing task id {0.id}, args: {0.args!r} kwargs: {0.kwargs!r}'.format(self.request))
 
@@ -105,7 +109,7 @@ def backup_wordpress(
             email@bilal.me
             """
             node.status = CoreNode.Status.ACTIVE
-            node.save()
+            node.save(update_fields=["status", "modified"])
         except ConnectionValidationFailedError as error:
             node.notify_backup_fail(error, backup_type)
             node.backup_retrying_reset(self.request.id)

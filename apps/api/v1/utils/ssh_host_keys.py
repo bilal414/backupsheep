@@ -1,28 +1,27 @@
 """Crash-safe SSH host-key preview and approval workflow.
 
-The API intentionally separates key discovery from authenticated SSH use.  A
+The API intentionally separates key discovery from authenticated SSH use. A
 preview token identifies the exact account, user, endpoint, algorithm, and
-fingerprint that the user reviewed.  Approval re-fetches the key and performs a
-locked, atomic update of the shared OpenSSH known_hosts file.
+fingerprint that the user reviewed. Approval re-fetches the key and atomically
+updates the tenant-scoped database ledger; workers materialize exact ephemeral
+OpenSSH trust files only for the lifetime of a transfer.
 """
 
 from __future__ import annotations
 
 import base64
 import contextlib
-import errno
-import fcntl
 import hashlib
 import hmac
+import json
 import logging
 import os
-import stat
-import tempfile
 from dataclasses import dataclass
 
-import paramiko
 from django.conf import settings
 from django.core import signing
+from django.core.cache import cache
+from django.db import connection as db_connection, transaction
 from rest_framework import status
 
 from apps.console.connection import ssh
@@ -31,10 +30,8 @@ from apps.console.log.models import CoreLog
 
 logger = logging.getLogger(__name__)
 
-TOKEN_SALT = "backupsheep.ssh-host-key-approval.v1"
+TOKEN_SALT = "backupsheep.ssh-host-key-approval.v2"
 DEFAULT_TOKEN_MAX_AGE = 10 * 60
-
-
 class SSHHostKeyFlowError(Exception):
     """A client-safe, typed error for the host-key approval endpoints."""
 
@@ -44,21 +41,13 @@ class SSHHostKeyFlowError(Exception):
         self.detail = detail
         self.status_code = status_code
 
-
-class SSHHostKeyStorageError(SSHHostKeyFlowError):
-    def __init__(self):
-        super().__init__(
-            "known_hosts_unavailable",
-            "The SSH host-key database is temporarily unavailable.",
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-
 @dataclass(frozen=True)
 class ScannedHostKey:
     host: str
     port: int
     key_type: str
+    negotiated_host_key_algorithm: str
+    bits: int
     fingerprint: str
     key: object
 
@@ -71,15 +60,12 @@ def _token_max_age() -> int:
         return DEFAULT_TOKEN_MAX_AGE
 
 
-def _known_hosts_path() -> str:
-    return ssh.known_hosts_path()
-
-
 def _validate_endpoint(host, port):
     if not isinstance(host, str):
         raise SSHHostKeyFlowError("invalid_request", "A valid SSH host is required.")
-    host = host.strip()
-    if not host or len(host) > 255 or any(ord(char) < 32 for char in host):
+    try:
+        host = ssh.normalize_ssh_host(host)
+    except (TypeError, ValueError):
         raise SSHHostKeyFlowError("invalid_request", "A valid SSH host is required.")
     if isinstance(port, bool):
         raise SSHHostKeyFlowError("invalid_request", "A valid SSH port is required.")
@@ -110,14 +96,17 @@ def _fingerprint(key) -> str:
 
 def scan_remote_host_key(host: str, port: int) -> ScannedHostKey:
     try:
-        key = ssh.scan_host_key(host, port)
-        key_type = key.get_name()
+        scan = ssh.scan_host_key(host, port)
+        key = scan.key
+        key_type = scan.wire_key_type
         if not isinstance(key_type, str) or not key_type:
             raise ValueError("missing key type")
         return ScannedHostKey(
             host=host,
             port=port,
             key_type=key_type,
+            negotiated_host_key_algorithm=scan.negotiated_host_key_algorithm,
+            bits=scan.bits,
             fingerprint=_fingerprint(key),
             key=key,
         )
@@ -146,23 +135,65 @@ def _scan_for_approval(host: str, port: int) -> ScannedHostKey:
         )
 
 
-def _host_alias(host: str, port: int) -> str:
-    return host if port == 22 else f"[{host}]:{port}"
-
-
 def _token_signer() -> signing.TimestampSigner:
     return signing.TimestampSigner(salt=TOKEN_SALT)
 
 
-def _make_approval_token(request, account, scanned: ScannedHostKey) -> str:
+def _approval_witness(approval) -> str:
+    material = None
+    if approval is not None:
+        material = {
+            "id": approval.pk,
+            "generation": approval.generation,
+            "fingerprint": approval.fingerprint,
+            "negotiated_host_key_algorithm": approval.negotiated_host_key_algorithm,
+            "wire_key_type": approval.wire_key_type,
+        }
+    encoded = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _database_host_key_state(account, scanned):
+    from apps.console.connection.models import CoreSSHHostKeyApproval
+
+    approval = CoreSSHHostKeyApproval.objects.filter(
+        account=account,
+        normalized_host=scanned.host,
+        port=scanned.port,
+    ).first()
+    if approval is None:
+        return "unknown", False, None
+    approved = (
+        approval.wire_key_type == scanned.key_type
+        and approval.fingerprint == scanned.fingerprint
+        and approval.negotiated_host_key_algorithm
+        == scanned.negotiated_host_key_algorithm
+        and approval.bits == scanned.bits
+    )
+    return ("already_approved", False, approval) if approved else (
+        "changed",
+        True,
+        approval,
+    )
+
+
+def _make_approval_token(request, account, scanned: ScannedHostKey, approval) -> str:
     payload = {
-        "version": 1,
+        "version": 2,
         "account_id": str(account.pk),
         "user_id": str(request.user.pk),
         "host": scanned.host,
         "port": scanned.port,
         "key_type": scanned.key_type,
+        "negotiated_host_key_algorithm": scanned.negotiated_host_key_algorithm,
+        "bits": scanned.bits,
         "fingerprint": scanned.fingerprint,
+        "local_approval_witness": _approval_witness(approval),
     }
     return _token_signer().sign_object(payload)
 
@@ -181,171 +212,45 @@ def _current_account(request):
     return account
 
 
-def _read_known_hosts(path: str) -> paramiko.HostKeys:
-    try:
-        host_keys = paramiko.HostKeys()
-        if os.path.exists(path):
-            if not os.path.isfile(path):
-                raise OSError(errno.EINVAL, "known_hosts is not a file")
-            host_keys.load(path)
-        return host_keys
-    except Exception:
-        logger.warning("Unable to read the SSH host-key database")
-        raise SSHHostKeyStorageError()
-
-
-def _token_matches(hostname: str, token: str) -> bool:
-    if token == hostname:
-        return True
-    if not token.startswith("|1|"):
-        return False
-    try:
-        return paramiko.HostKeys.hash_host(hostname, token) == token
-    except Exception:
-        return False
-
-
-def _matching_entries(host_keys: paramiko.HostKeys, hostname: str):
-    entries = []
-    for entry in getattr(host_keys, "_entries", ()):
-        if any(_token_matches(hostname, token) for token in entry.hostnames):
-            entries.append(entry)
-    return entries
-
-
-def _host_key_state(host_keys: paramiko.HostKeys, scanned: ScannedHostKey):
-    hostname = _host_alias(scanned.host, scanned.port)
-    entries = _matching_entries(host_keys, hostname)
-    keys = [entry.key for entry in entries if entry.key is not None]
-    same_algorithm = [key for key in keys if key.get_name() == scanned.key_type]
-    approved = any(
-        hmac.compare_digest(_fingerprint(key), scanned.fingerprint)
-        for key in same_algorithm
-    )
-    if approved:
-        return "already_approved", False
-    if same_algorithm:
-        return "changed", True
-    if keys:
-        return "changed", False
-    return "unknown", False
-
-
 @contextlib.contextmanager
-def _known_hosts_lock(path: str):
-    directory = os.path.dirname(path) or "."
-    lock_path = f"{path}.lock"
-    descriptor = None
-    try:
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-    except Exception:
-        logger.warning("Unable to lock the SSH host-key database")
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        raise SSHHostKeyStorageError()
+def _account_scan_slot(account):
+    """Permit one bounded SSH handshake per account without cross-tenant blocking."""
+
+    key = f"security:ssh-host-key-scan:account:{int(account.pk)}"
+    token = os.urandom(16).hex()
+    if not cache.add(key, token, timeout=60):
+        raise SSHHostKeyFlowError(
+            "scan_busy",
+            "Another SSH host-key scan is already running for this account.",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
     try:
         yield
     finally:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(descriptor)
-
-
-def _remove_same_algorithm_entries(host_keys: paramiko.HostKeys, hostname: str, key_type: str):
-    """Remove all matching same-algorithm entries, preserving other aliases."""
-
-    retained = []
-    for entry in getattr(host_keys, "_entries", ()):
-        if entry.key is None or entry.key.get_name() != key_type:
-            retained.append(entry)
-            continue
-        remaining_hosts = [
-            token for token in entry.hostnames if not _token_matches(hostname, token)
-        ]
-        if remaining_hosts:
-            entry.hostnames = remaining_hosts
-            retained.append(entry)
-    host_keys._entries = retained
-
-
-def _fsync_directory(directory: str) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    descriptor = os.open(directory, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _atomic_save_known_hosts(host_keys: paramiko.HostKeys, path: str) -> None:
-    directory = os.path.dirname(path) or "."
-    basename = os.path.basename(path)
-    descriptor = None
-    temporary_path = None
-    try:
-        descriptor, temporary_path = tempfile.mkstemp(
-            prefix=f".{basename}.", suffix=".tmp", dir=directory
-        )
-        os.fchmod(descriptor, 0o600)
-        os.close(descriptor)
-        descriptor = None
-
-        host_keys.save(temporary_path)
-        descriptor = os.open(temporary_path, os.O_RDONLY)
-        os.fchmod(descriptor, 0o600)
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-
-        os.replace(temporary_path, path)
-        temporary_path = None
-        descriptor = os.open(path, os.O_RDONLY)
-        os.fchmod(descriptor, 0o600)
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-        _fsync_directory(directory)
-    except Exception:
-        logger.warning("Unable to atomically publish the SSH host-key database")
-        raise SSHHostKeyStorageError()
-    finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        if temporary_path:
-            try:
-                os.unlink(temporary_path)
-            except OSError:
-                pass
+        if cache.get(key) == token:
+            cache.delete(key)
 
 
 def preview_host_key(request, payload):
     payload = _request_payload(payload)
     account = _current_account(request)
     host, port = _validate_endpoint(payload.get("host"), payload.get("port"))
-    path = _known_hosts_path()
-    with _known_hosts_lock(path):
+    # Network I/O is deliberately outside every database/file lock. A slow or
+    # malicious endpoint cannot serialize trust changes for another tenant.
+    with _account_scan_slot(account):
         scanned = _scan_for_approval(host, port)
-        host_keys = _read_known_hosts(path)
-        state, replace_required = _host_key_state(host_keys, scanned)
+    state, replace_required, approval = _database_host_key_state(account, scanned)
     return {
         "host": scanned.host,
         "port": scanned.port,
         "key_type": scanned.key_type,
+        "negotiated_host_key_algorithm": scanned.negotiated_host_key_algorithm,
+        "bits": scanned.bits,
         "fingerprint": scanned.fingerprint,
         "status": state,
-        "approval_token": _make_approval_token(request, account, scanned),
+        "approval_token": _make_approval_token(
+            request, account, scanned, approval
+        ),
         "replace_required": replace_required,
     }
 
@@ -361,10 +266,21 @@ def _unsign_approval_token(request, account, token):
         raise SSHHostKeyFlowError("approval_invalid", "The approval token is invalid.")
     if not isinstance(payload, dict):
         raise SSHHostKeyFlowError("approval_invalid", "The approval token is invalid.")
-    required = ("version", "account_id", "user_id", "host", "port", "key_type", "fingerprint")
+    required = (
+        "version",
+        "account_id",
+        "user_id",
+        "host",
+        "port",
+        "key_type",
+        "negotiated_host_key_algorithm",
+        "bits",
+        "fingerprint",
+        "local_approval_witness",
+    )
     if any(field not in payload for field in required):
         raise SSHHostKeyFlowError("approval_invalid", "The approval token is invalid.")
-    if payload.get("version") != 1:
+    if payload.get("version") != 2:
         raise SSHHostKeyFlowError("approval_invalid", "The approval token is invalid.")
     if not hmac.compare_digest(str(payload["account_id"]), str(account.pk)):
         raise SSHHostKeyFlowError("approval_invalid", "The approval token is not valid for this account.")
@@ -374,7 +290,14 @@ def _unsign_approval_token(request, account, token):
         host, port = _validate_endpoint(payload["host"], payload["port"])
     except SSHHostKeyFlowError:
         raise SSHHostKeyFlowError("approval_invalid", "The approval token is invalid.")
-    if not isinstance(payload["key_type"], str) or not isinstance(payload["fingerprint"], str):
+    if (
+        not isinstance(payload["key_type"], str)
+        or not isinstance(payload["negotiated_host_key_algorithm"], str)
+        or isinstance(payload["bits"], bool)
+        or not isinstance(payload["bits"], int)
+        or not isinstance(payload["fingerprint"], str)
+        or not isinstance(payload["local_approval_witness"], str)
+    ):
         raise SSHHostKeyFlowError("approval_invalid", "The approval token is invalid.")
     payload["host"] = host
     payload["port"] = port
@@ -401,43 +324,117 @@ def approve_host_key(request, payload):
     if not isinstance(replacement, bool):
         raise SSHHostKeyFlowError("invalid_request", "The replace flag must be boolean.")
 
-    path = _known_hosts_path()
-    with _known_hosts_lock(path):
-        # The lock covers the second network read and local-file comparison. This
-        # prevents two workers from racing a replacement or publishing duplicates.
+    with _account_scan_slot(account):
         scanned = _scan_for_approval(approval["host"], approval["port"])
-        if (
-            scanned.key_type != approval["key_type"]
-            or not hmac.compare_digest(scanned.fingerprint, str(approval["fingerprint"]))
+    if (
+        scanned.key_type != approval["key_type"]
+        or scanned.negotiated_host_key_algorithm
+        != approval["negotiated_host_key_algorithm"]
+        or scanned.bits != approval["bits"]
+        or not hmac.compare_digest(
+            scanned.fingerprint, str(approval["fingerprint"])
+        )
+    ):
+        raise SSHHostKeyFlowError(
+            "host_key_changed",
+            "The SSH host key changed after preview; preview it again.",
+            status.HTTP_409_CONFLICT,
+        )
+
+    from apps.console.account.models import CoreAccount
+    from apps.console.connection.models import CoreConnection, CoreSSHHostKeyApproval
+    from apps.console.connection.managed_ssh import (
+        ManagedSSHOperationError,
+        _active_request_permission,
+        acquire_managed_ssh_mutation_lock,
+    )
+
+    with transaction.atomic():
+        acquire_managed_ssh_mutation_lock()
+        locked_account = CoreAccount.objects.select_for_update().get(pk=account.pk)
+        try:
+            _active_request_permission(
+                locked_account.pk,
+                request.user.member.pk,
+                "integration_changes",
+            )
+        except ManagedSSHOperationError:
+            raise SSHHostKeyFlowError(
+                "permission_denied",
+                "Integration-change permission is required.",
+                status.HTTP_403_FORBIDDEN,
+            ) from None
+        # Match the same account -> connection -> approval lock order used by
+        # managed operation creation. Lock every account connection in PK order:
+        # legacy mixed host spellings must not create a trigger lock inversion.
+        list(
+            CoreConnection.objects.select_for_update()
+            .filter(account=locked_account)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        current = (
+            CoreSSHHostKeyApproval.objects.select_for_update()
+            .filter(
+                account=locked_account,
+                normalized_host=scanned.host,
+                port=scanned.port,
+            )
+            .first()
+        )
+        if not hmac.compare_digest(
+            _approval_witness(current), str(approval["local_approval_witness"])
         ):
             raise SSHHostKeyFlowError(
-                "host_key_changed",
-                "The SSH host key changed after preview; preview it again.",
+                "approval_conflict",
+                "The local SSH approval changed; preview it again.",
                 status.HTTP_409_CONFLICT,
             )
-        host_keys = _read_known_hosts(path)
-        state, replace_required = _host_key_state(host_keys, scanned)
+        state, replace_required, _unused = _database_host_key_state(
+            locked_account, scanned
+        )
         if state == "changed" and replace_required and not replacement:
             raise SSHHostKeyFlowError(
                 "host_key_changed",
                 "The approved SSH host key changed; explicit replacement is required.",
                 status.HTTP_409_CONFLICT,
             )
-        if state != "already_approved":
-            hostname = _host_alias(scanned.host, scanned.port)
-            if replace_required and replacement:
-                _remove_same_algorithm_entries(host_keys, hostname, scanned.key_type)
-            host_keys.add(hostname, scanned.key_type, scanned.key)
-            _atomic_save_known_hosts(host_keys, path)
-        else:
-            try:
-                needs_mode_repair = stat.S_IMODE(os.stat(path).st_mode) != 0o600
-            except OSError:
-                raise SSHHostKeyStorageError()
-            if needs_mode_repair:
-                # An operator may have pre-approved this key with a permissive
-                # mode; approval repairs that trust-store boundary atomically.
-                _atomic_save_known_hosts(host_keys, path)
+        if current is None:
+            current = CoreSSHHostKeyApproval.objects.create(
+                account=locked_account,
+                normalized_host=scanned.host,
+                port=scanned.port,
+                wire_key_type=scanned.key_type,
+                public_key_base64=scanned.key.get_base64(),
+                fingerprint=scanned.fingerprint,
+                negotiated_host_key_algorithm=scanned.negotiated_host_key_algorithm,
+                bits=scanned.bits,
+                approved_by_member_pk_snapshot=request.user.member.pk,
+                approved_by_user_pk_snapshot=request.user.pk,
+            )
+        elif state != "already_approved":
+            current.wire_key_type = scanned.key_type
+            current.public_key_base64 = scanned.key.get_base64()
+            current.fingerprint = scanned.fingerprint
+            current.negotiated_host_key_algorithm = (
+                scanned.negotiated_host_key_algorithm
+            )
+            current.bits = scanned.bits
+            current.approved_by_member_pk_snapshot = request.user.member.pk
+            current.approved_by_user_pk_snapshot = request.user.pk
+            current.save(
+                update_fields=(
+                    "wire_key_type",
+                    "public_key_base64",
+                    "fingerprint",
+                    "negotiated_host_key_algorithm",
+                    "bits",
+                    "approved_by_member_pk_snapshot",
+                    "approved_by_user_pk_snapshot",
+                    "modified",
+                )
+            )
+        current.refresh_from_db()
 
     CoreLog.record(
         account,
@@ -449,6 +446,9 @@ def approve_host_key(request, payload):
             "host": scanned.host,
             "port": scanned.port,
             "key_type": scanned.key_type,
+            "negotiated_host_key_algorithm": scanned.negotiated_host_key_algorithm,
+            "bits": scanned.bits,
+            "approval_generation": current.generation,
             "fingerprint": scanned.fingerprint,
             "replace": replacement,
             "status": state,
@@ -460,5 +460,109 @@ def approve_host_key(request, payload):
         "host": scanned.host,
         "port": scanned.port,
         "key_type": scanned.key_type,
+        "negotiated_host_key_algorithm": scanned.negotiated_host_key_algorithm,
+        "bits": scanned.bits,
+        "approval_generation": current.generation,
         "fingerprint": scanned.fingerprint,
+    }
+
+
+def revoke_host_key(request, payload):
+    """Revoke one account-scoped endpoint without requiring a live server scan."""
+
+    payload = _request_payload(payload)
+    account = _current_account(request)
+    host, port = _validate_endpoint(payload.get("host"), payload.get("port"))
+
+    from apps.console.account.models import CoreAccount
+    from apps.console.connection.models import CoreConnection, CoreSSHHostKeyApproval
+    from apps.console.connection.managed_ssh import (
+        ManagedSSHOperationError,
+        _active_request_permission,
+        acquire_managed_ssh_mutation_lock,
+    )
+
+    revoked = None
+    with transaction.atomic():
+        acquire_managed_ssh_mutation_lock()
+        locked_account = CoreAccount.objects.select_for_update().get(pk=account.pk)
+        try:
+            _active_request_permission(
+                locked_account.pk,
+                request.user.member.pk,
+                "integration_changes",
+            )
+        except ManagedSSHOperationError:
+            raise SSHHostKeyFlowError(
+                "permission_denied",
+                "Integration-change permission is required.",
+                status.HTTP_403_FORBIDDEN,
+            ) from None
+        list(
+            CoreConnection.objects.select_for_update()
+            .filter(account=locked_account)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        approval = (
+            CoreSSHHostKeyApproval.objects.select_for_update()
+            .filter(
+                account=locked_account,
+                normalized_host=host,
+                port=port,
+            )
+            .first()
+        )
+        if approval is not None:
+            revoked = {
+                "generation": approval.generation,
+                "fingerprint": approval.fingerprint,
+                "key_type": approval.wire_key_type,
+            }
+            with db_connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT public.backupsheep_revoke_ssh_host_key_approval("
+                    "%s, %s)",
+                    (
+                        approval.pk,
+                        locked_account.pk,
+                    ),
+                )
+                deleted = cursor.fetchone()
+            if deleted != (True,):
+                raise SSHHostKeyFlowError(
+                    "approval_changed",
+                    "SSH host-key approval changed while it was being revoked.",
+                    status.HTTP_409_CONFLICT,
+                )
+
+    if revoked is None:
+        return {
+            "detail": "SSH host key was already revoked for this account.",
+            "status": "already_revoked",
+            "host": host,
+            "port": port,
+        }
+
+    CoreLog.record(
+        account,
+        CoreLog.Type.CONNECTION,
+        {
+            "message": f"SSH host key revoked for {host}:{port}.",
+            "action": "ssh_host_key_revoke",
+            "actor_email": request.user.email,
+            "host": host,
+            "port": port,
+            "key_type": revoked["key_type"],
+            "approval_generation": revoked["generation"],
+            "fingerprint": revoked["fingerprint"],
+        },
+    )
+    return {
+        "detail": "SSH host key revoked. Matching connections are pending review.",
+        "status": "revoked",
+        "host": host,
+        "port": port,
+        "approval_generation": revoked["generation"] + 1,
+        "fingerprint": revoked["fingerprint"],
     }

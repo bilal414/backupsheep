@@ -1,0 +1,83 @@
+# syntax=docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
+
+# Compile the strict-mode DNS proxy as a static, PIE, stack-protected binary. The
+# compiler toolchain never enters the runtime image.
+FROM alpine:3.22.5@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS resolver-builder
+
+RUN apk add --no-cache \
+        gcc=14.2.0-r6 \
+        musl-dev=1.2.5-r12 \
+    && rm -rf /var/cache/apk/*
+COPY --link --chown=0:0 --chmod=0444 \
+    deploy/egress/dns-proxy.c /src/dns-proxy.c
+COPY --link --chown=0:0 --chmod=0444 \
+    deploy/egress/dns-forwarder.c /src/dns-forwarder.c
+RUN cc -std=c11 -Os -Wall -Wextra -Werror -Wconversion -Wformat=2 -fanalyzer \
+        -fstack-protector-strong -fstack-clash-protection \
+        -fPIE -static-pie \
+        -Wl,-z,relro,-z,now,-z,noexecstack -s \
+        -o /usr/local/bin/backupsheep-dns-proxy /src/dns-proxy.c \
+    && cc -std=c11 -Os -Wall -Wextra -Werror -Wconversion -Wformat=2 -fanalyzer \
+        -fstack-protector-strong -fstack-clash-protection \
+        -fPIE -static-pie \
+        -Wl,-z,relro,-z,now,-z,noexecstack -s \
+        -o /usr/local/bin/backupsheep-dns-forwarder /src/dns-forwarder.c \
+    && test "$(stat -c '%u:%g:%a' /usr/local/bin/backupsheep-dns-proxy)" = '0:0:755' \
+    && test "$(stat -c '%u:%g:%a' /usr/local/bin/backupsheep-dns-forwarder)" = '0:0:755'
+
+# A no-secret network-namespace guard for the stock Compose deployment. Application
+# services share this container's network namespace. The entrypoint installs the
+# reviewed nftables policy, becomes UID/GID 10020, and retains only NET_ADMIN so its
+# no-secret reconciler can update exact peer sets without abandoning the already-
+# running application's network namespace. Strict mode adds one zero-capability
+# loopback-only DNS proxy under a separate UID.
+FROM alpine:3.22.5@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+
+LABEL org.opencontainers.image.title="BackupSheep egress guard" \
+      org.opencontainers.image.description="No-secret outbound network policy guard" \
+      org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
+
+# Pin each requested package. The signed Alpine repository resolves the dependency
+# closure; the release SBOM and provenance bind the resulting exact packages/digests.
+RUN apk add --no-cache \
+        coreutils=9.7-r1 \
+        iproute2-minimal=6.15.0-r0 \
+        nftables=1.1.3-r0 \
+        setpriv=2.41-r9 \
+    && addgroup -S -g 10020 backupsheep-egress \
+    && adduser -S -D -H -h /nonexistent -s /sbin/nologin \
+        -u 10020 -G backupsheep-egress backupsheep-egress \
+    && addgroup -S -g 10021 backupsheep-dns \
+    && adduser -S -D -H -h /nonexistent -s /sbin/nologin \
+        -u 10021 -G backupsheep-dns backupsheep-dns \
+    && addgroup -S -g 10022 backupsheep-dns-upstream \
+    && adduser -S -D -H -h /nonexistent -s /sbin/nologin \
+        -u 10022 -G backupsheep-dns-upstream backupsheep-dns-upstream \
+    && command -v ip >/dev/null \
+    && command -v nft >/dev/null \
+    && command -v setpriv >/dev/null \
+    && command -v awk >/dev/null \
+    && command -v chown >/dev/null \
+    && command -v getent >/dev/null \
+    && command -v env >/dev/null \
+    && command -v grep >/dev/null \
+    && command -v sha256sum >/dev/null \
+    && command -v sleep >/dev/null \
+    && command -v sort >/dev/null \
+    && timeout --version | grep -Fqx 'timeout (GNU coreutils) 9.7' \
+    && command -v tr >/dev/null \
+    && rm -rf /var/cache/apk/*
+
+COPY --link --from=resolver-builder --chown=0:0 --chmod=0555 \
+    /usr/local/bin/backupsheep-dns-proxy /usr/local/bin/backupsheep-dns-proxy
+COPY --link --from=resolver-builder --chown=0:0 --chmod=0555 \
+    /usr/local/bin/backupsheep-dns-forwarder /usr/local/bin/backupsheep-dns-forwarder
+
+COPY --link --chown=0:0 --chmod=0555 \
+    deploy/egress/entrypoint.sh /usr/local/bin/backupsheep-egress-guard
+COPY --link --chown=0:0 --chmod=0555 \
+    deploy/egress/healthcheck.sh /usr/local/bin/backupsheep-egress-healthcheck
+
+USER 0:0
+ENTRYPOINT ["/usr/local/bin/backupsheep-egress-guard"]

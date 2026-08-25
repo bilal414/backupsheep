@@ -84,3 +84,12 @@ def retry_protected_storage_deletes(self):
                 point.soft_delete()
             except Exception as e:
                 capture_exception(e)
+
+
+@current_app.task(name="cleanup_celery_task_replays", bind=True, ignore_result=True)
+def cleanup_celery_task_replays(self):
+    """Prune terminal replay rows only after every signed message has expired."""
+
+    from backupsheep.celery_security import prune_completed_task_replays
+
+    return {"deleted": prune_completed_task_replays()}

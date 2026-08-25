@@ -15,6 +15,10 @@ from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
+from backupsheep.source_recovery_policy import (
+    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
+    source_backup_creation_available,
+)
 
 
 SOURCE_TYPE_FILTERS = (
@@ -221,6 +225,9 @@ def _attach_source_evidence(nodes):
         node.can_request_operation = (
             node.status in SOURCE_READY_STATES
             and node.connection.status == CoreConnection.Status.ACTIVE
+            and source_backup_creation_available(
+                node.connection.integration.code
+            )
         )
     return nodes
 
@@ -446,8 +453,13 @@ class NodeView(LoginRequiredMixin, TemplateView):
             .values_list("id", flat=True)
         )
         for node in page.object_list:
+            node.source_protection_available = source_backup_creation_available(
+                node.connection.integration.code
+            )
             node.can_run_operation = (
-                node.can_request_operation and node.id in operation_node_ids
+                node.source_protection_available
+                and node.can_request_operation
+                and node.id in operation_node_ids
             )
 
         query = request.GET.copy()
@@ -584,6 +596,14 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
         context["is_vultr_managed_database"] = (
             node.connection.integration.code == "vultr"
             and hasattr(node, "vultr_database")
+        )
+        context["source_backup_creation_available"] = (
+            source_backup_creation_available(
+                node.connection.integration.code
+            )
+        )
+        context["source_recovery_unavailable_message"] = (
+            SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
         )
         return context
 

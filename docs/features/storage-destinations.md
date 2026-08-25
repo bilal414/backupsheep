@@ -1,9 +1,10 @@
 # Storage destinations
 
-Storage destinations receive archives produced for website, logical database,
-WordPress, and Basecamp nodes. One run can target multiple destinations; uploads
-are dispatched independently and finalized only after all accepted destination
-states are terminal.
+Storage destinations receive authenticated BSE1 ciphertext artifacts produced for
+website, logical database, WordPress, and Basecamp nodes. One run can target multiple
+destinations; uploads are dispatched independently and finalized only after all accepted
+destination states are terminal. Destination workers store ciphertext and do not receive
+the source-lane KMS identity needed to decrypt it.
 
 ## Destination catalog
 
@@ -67,17 +68,23 @@ An early or duplicated finalizer waits while any destination remains in an
 upload state. Partial runs remain usable from their completed storage points and
 count toward the schedule's `keep_last` policy.
 
-From a completed copy, the console can request a download URL (or stream local
-storage through the application) and can copy the backup to another configured
-destination. Transfer and download are not substitutes for a tested restore.
+The console still renders a transfer surface, but the current server has no complete
+transfer action/task; do not depend on it. Direct browser/ZIP downloads are disabled for
+BSE1 artifacts: BackupSheep does not expose a provider URL or stream Local Storage
+ciphertext through the application as if it were a ZIP. Use an authenticated restore, in
+which storage publishes a fenced ciphertext handoff to the exact database or files lane
+and that source lane authenticates and decrypts it. A completed upload is not a substitute
+for a tested restore.
 
 ## Local Storage
 
-Local Storage writes plain zip archives under `LOCAL_STORAGE_ROOT`. Its optional
-path is a relative subdirectory; absolute paths and traversal outside the root
-are rejected. Validation creates the directory if needed and confirms local
-write/read/delete behavior. A `no_delete` option allows BackupSheep records to be
-removed without deleting the underlying file.
+Local Storage writes BSE1 ciphertext artifacts under `LOCAL_STORAGE_ROOT`. Stock Compose
+sets that root to `/backups` and mounts it read/write only in `worker-storage`; app and the
+source workers receive no `/backups` mount. Its optional path is a relative subdirectory;
+absolute paths and traversal outside the root are rejected. Validation creates the
+directory if needed and confirms local write/read/delete behavior. A `no_delete` option
+allows BackupSheep records to be removed without deleting the underlying ciphertext
+object.
 
 Local Storage is convenient for evaluation and nearby recovery, but it does not
 isolate data from failure of the BackupSheep host. Use an independent remote

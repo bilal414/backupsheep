@@ -1,0 +1,66 @@
+{
+  "reviewed_misconfigurations": [
+    {
+      "finding_sha256": "0999cc03ddc17614db90af2c22d22d0c8f2c2e8444ab37d785df46a9da6c6579",
+      "id": "DS-0017",
+      "reason": "The reported APT update is paired with authenticated apt-get downloads whose package versions, archive hashes, metadata, and repackaged payload hashes are verified before use.",
+      "severity": "HIGH",
+      "status": "FAIL",
+      "target": "Dockerfile",
+      "target_sha256": "cbf56816cfd910ee2fc3f1963951594e73dcdb1434c6dec1e4d85c9d4b0ca325"
+    },
+    {
+      "finding_sha256": "d63aab39cd66efda6cdce44afc349590c893f1afbfa3c33b33f78e85f80b57c6",
+      "id": "DS-0002",
+      "reason": "Root is used only to bootstrap the nftables policy; the entrypoint immediately drops to UID 10020 and retains only NET_ADMIN for the no-secret policy reconciler.",
+      "severity": "HIGH",
+      "status": "FAIL",
+      "target": "Dockerfile.egress",
+      "target_sha256": "d0cc5e9162a6619b90f67dbf66d491535221a2339f5f34f9243e7f2164745d22"
+    }
+  ],
+  "scanner": {
+    "artifact_type": "filesystem",
+    "name": "trivy",
+    "secret_scan": {
+      "disable_allow_rules": [
+        "dist-info",
+        "tests",
+        "examples",
+        "vendor",
+        "usr-dirs",
+        "locale-dir",
+        "markdown",
+        "node.js",
+        "golang",
+        "python",
+        "rubygems",
+        "wordpress",
+        "anaconda-log"
+      ],
+      "fail_severities": [
+        "UNKNOWN",
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ],
+      "scanners": [
+        "secret"
+      ],
+      "skip_patterns": []
+    },
+    "vulnerability_misconfiguration_scan": {
+      "fail_severities": [
+        "HIGH",
+        "CRITICAL"
+      ],
+      "scanners": [
+        "vuln",
+        "misconfig"
+      ]
+    },
+    "version": "0.74.0"
+  },
+  "schema_version": 1
+}

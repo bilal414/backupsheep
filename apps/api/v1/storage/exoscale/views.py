@@ -68,7 +68,7 @@ class CoreStorageExoscaleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return Response(regions)
 
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             storage = self.get_object()

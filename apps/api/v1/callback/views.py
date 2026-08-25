@@ -44,7 +44,6 @@ from cryptography.fernet import Fernet
 from google.oauth2 import id_token
 import google.oauth2.credentials
 from datetime import datetime, timedelta, timezone
-import secrets
 from urllib.parse import urlsplit
 
 from apps.api.v1.utils.api_permissions import (
@@ -52,6 +51,8 @@ from apps.api.v1.utils.api_permissions import (
     member_has_perm,
 )
 from apps.api.v1.utils.oauth_security import (
+    OAUTH_STATE_SESSION_KEY,
+    OAUTH_STATE_TTL_SECONDS,
     consume_oauth_state,
     validated_https_endpoint,
 )
@@ -60,11 +61,18 @@ from apps.api.v1.connection.ovh_oauth import (
     consume_ovh_transaction,
     ovh_member_has_integration_permission,
 )
+from backupsheep.source_recovery_policy import (
+    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
+    source_backup_creation_available,
+)
 
 
-PCLOUD_OAUTH_STATE_SESSION_KEY = "pcloud_oauth_state"
+# Backwards-compatible names for tests and integrations that imported the old
+# pCloud-only constants. pCloud now uses the same provider-keyed state ledger as
+# every other OAuth flow.
+PCLOUD_OAUTH_STATE_SESSION_KEY = OAUTH_STATE_SESSION_KEY
 PCLOUD_ALLOWED_HOSTNAMES = frozenset({"api.pcloud.com", "eapi.pcloud.com"})
-PCLOUD_OAUTH_STATE_TTL_SECONDS = 10 * 60
+PCLOUD_OAUTH_STATE_TTL_SECONDS = OAUTH_STATE_TTL_SECONDS
 
 
 def _post_oauth_token(
@@ -171,22 +179,16 @@ def _validated_pcloud_hostname(value=None):
 
 
 def _consume_pcloud_oauth_state(request, received_state, member, account):
-    expected = request.session.pop(PCLOUD_OAUTH_STATE_SESSION_KEY, None)
-    if not isinstance(expected, dict) or not isinstance(received_state, str):
-        return False
-    expected_state = expected.get("state")
-    if not isinstance(expected_state, str):
-        return False
-    try:
-        issued_at = float(expected.get("issued_at"))
-    except (TypeError, ValueError):
-        return False
-    age = time.time() - issued_at
     return (
-        0 <= age <= PCLOUD_OAUTH_STATE_TTL_SECONDS
-        and secrets.compare_digest(expected_state, received_state)
-        and str(expected.get("member_id")) == str(member.pk)
-        and str(expected.get("account_id")) == str(account.pk)
+        consume_oauth_state(
+            request,
+            provider="pcloud",
+            received_state=received_state,
+            member=member,
+            account=account,
+            legacy_session_key="pcloud_oauth_state",
+        )
+        is not None
     )
 
 
@@ -594,6 +596,15 @@ class APICallbackBasecamp(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request):
+        if not source_backup_creation_available("basecamp"):
+            messages.add_message(
+                request,
+                messages.ERROR,
+                SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
+            )
+            return redirect(
+                "console:setup:integration_open", integration_code="basecamp"
+            )
         data = self.request.query_params
         member = self.request.user.member
         account = member.get_current_account()

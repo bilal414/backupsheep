@@ -4,8 +4,8 @@ This collection is generated from the Django URL resolver on the `develop` branc
 It contains one Bruno request for every supported HTTP method on every active
 `/api/v1/` route, plus `/healthz/`. The generated `route-manifest.json` is the
 auditable mapping between Django route, HTTP method, view/action, safety class, and
-the corresponding `.bru` file. At generation time that is 916 API operations plus
-one health operation across 524 distinct paths.
+the corresponding `.bru` file. At generation time that is 920 API operations plus
+one health operation across 528 distinct paths.
 
 ## Start here
 

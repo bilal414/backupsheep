@@ -10,6 +10,7 @@ from rest_framework.viewsets import GenericViewSet
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.connection.models import CoreConnection, CoreConnectionLocation
 from apps.api.v1.utils.api_permissions import MemberGroupPermissions, member_has_perm
+from apps.api.v1.utils.api_authentication import ConsoleSessionAuthentication
 from apps.console.node.models import CoreOVHEU, CoreNode
 from .filters import CoreOVHEUFilter
 from .serializers import CoreOVHEUConnectionReadSerializer, CoreOVHEUConnectionWriteSerializer
@@ -79,7 +80,11 @@ class CoreOVHEUView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         endpoints = CoreConnectionLocation.objects.filter(integrations__code="ovh_eu").values()
         return Response(endpoints)
 
-    @action(detail=False, methods=["get"])
+    @action(
+        detail=False,
+        methods=["post"],
+        authentication_classes=[ConsoleSessionAuthentication],
+    )
     def oauth_url(self, request):
         if not member_has_perm(request, "integration_changes"):
             return Response(
@@ -101,7 +106,7 @@ class CoreOVHEUView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:

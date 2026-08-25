@@ -471,13 +471,11 @@ This required sequence is not complete:
 - Scan staged filenames/content for credentials without printing matches.
 - Commit intentionally on `develop`, push to `origin/develop`, and confirm local
   and remote ancestry.
-- On the demo host:
-
-  ```sh
-  cd /opt/backupsheep
-  git pull --ff-only origin develop
-  docker compose -f docker-compose.yml -f docker-compose.override.yml up --build -d
-  ```
+- On the demo host, follow the current [exact-commit upgrade and rollback
+  runbook](guides/upgrades.md). Do not use direct Compose or a broad `up` once any
+  guard/workload pair exists: the verified wrapper requires a reviewed whole-stack
+  `down`, then exact paired recreation so an old workload cannot remain attached to a
+  replaced guard namespace.
 
 - Verify exact deployed commit, migration exit `0`, healthy service state,
   internal/public health HTTP 200, deployed image credential-path absence,

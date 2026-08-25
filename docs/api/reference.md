@@ -42,10 +42,10 @@ Provider-specific connection families:
 | `connections/aws/` | CRUD, `endpoints`, `regions`, `objects`, `validate`. |
 | `connections/aws_rds/` | CRUD, `endpoints`, `regions`, `objects`, `validate`. |
 | `connections/lightsail/` | CRUD, `endpoints`, `regions`, `objects`, `validate`. |
-| `connections/digitalocean/` | CRUD, `endpoints`, `oauth_url`, `objects`, `validate`. |
-| `connections/ovh_ca/` | CRUD, `endpoints`, `oauth_url`, `objects`, `validate`. |
-| `connections/ovh_eu/` | CRUD, `endpoints`, `oauth_url`, `objects`, `validate`. |
-| `connections/ovh_us/` | CRUD, `endpoints`, `oauth_url`, `objects`, `validate`. |
+| `connections/digitalocean/` | CRUD, `endpoints`, `POST oauth_url`, `objects`, `validate`. |
+| `connections/ovh_ca/` | CRUD, `endpoints`, `POST oauth_url`, `objects`, `validate`. |
+| `connections/ovh_eu/` | CRUD, `endpoints`, `POST oauth_url`, `objects`, `validate`. |
+| `connections/ovh_us/` | CRUD, `endpoints`, `POST oauth_url`, `objects`, `validate`. |
 | `connections/vultr/` | CRUD, `endpoints`, `objects`, `validate`. |
 | `connections/hetzner/` | CRUD, `endpoints`, `objects`, `validate`. |
 | `connections/upcloud/` | CRUD, `endpoints`, `objects`, `validate`. |
@@ -118,7 +118,7 @@ All 26 destination families are represented:
 | `tencent` | Tencent COS | CRUD, totals, chart data, regions, validate. |
 | `rackcorp` | RackCorp Object Storage | CRUD, totals, chart data, regions, validate. |
 | `ibm` | IBM Cloud Object Storage | CRUD, totals, chart data, regions, validate. |
-| `local` | Local or bind-mounted storage | CRUD, validate, file download. |
+| `local` | Local or bind-mounted storage | CRUD, validate, file route (BSE1 direct download is refused). |
 
 `highcharts` endpoints return console chart data and are kept for client compatibility;
 new automation should prefer resource/status fields unless it specifically needs the
@@ -147,6 +147,17 @@ Every backup family exposes list/create, detail CRUD, and `cancel`. Most expose
 | `backups/oracle/` | provider snapshot CRUD, chart data, cancel. |
 | `backups/google_cloud/` | provider snapshot CRUD, chart data, cancel. |
 
+The archive-family `download` actions remain routed for API compatibility, but the stock
+enterprise pipeline refuses direct download for BSE1 artifacts. The Local Storage file
+route likewise returns a conflict for BSE1 rather than exposing ciphertext as a ZIP. Use
+the authenticated database/website restore actions; WordPress and Basecamp currently have
+no authenticated BSE1 plaintext-export or automatic-restore action. Stock enterprise mode
+therefore omits both from capability/connection choices and returns a generic HTTP `409`
+recovery-unavailable refusal at new-connection, node, schedule, on-demand, retry, outbox,
+and worker initiation boundaries. Durable outbox rows record
+`SOURCE_RECOVERY_UNAVAILABLE`. Read/list and destructive retention operations remain
+available for existing rows.
+
 ## Schedules, statistics, and notifications
 
 | Resource | Operations and actions |
@@ -163,7 +174,7 @@ Every backup family exposes list/create, detail CRUD, and `cancel`. Most expose
 |---|---|
 | `utils/test/` | Authenticated API connectivity test. |
 | `utils/ssh-host-keys/preview/` | Fetch and fingerprint SSH host keys for review. |
-| `utils/ssh-host-keys/approve/` | Add the reviewed SSH host key to the configured known-hosts file. |
+| `utils/ssh-host-keys/approve/` | Record an exact account-scoped SSH host-key approval and append its audit event. |
 | `callback/slack/` | Complete Slack authorization. |
 | `callback/digitalocean/` | Complete DigitalOcean authorization. |
 | `callback/ovh/ca/`, `eu/`, `us/` | Complete regional OVH authorization. |
@@ -176,3 +187,8 @@ Every backup family exposes list/create, detail CRUD, and `cancel`. Most expose
 
 OAuth callbacks are browser-flow endpoints. Their presence in the Bruno manifest is
 for completeness, not an instruction to replay authorization codes manually.
+DigitalOcean and OVH authorization starts are POST-only. A cookie-authenticated console
+request must carry Django's CSRF token; the POST deliberately replaces any older pending
+transaction for that provider. Ordinary console GET rendering reuses a still-live state
+bound to the same member and account, including its server-held PKCE verifier, and cannot
+silently invalidate an authorization already in flight.

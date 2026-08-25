@@ -20,6 +20,7 @@ from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup
 from celery.exceptions import SoftTimeLimitExceeded
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 @current_app.task(
@@ -41,6 +42,9 @@ def backup_basecamp(
     notes=None,
     resume=False,
 ):
+    # Refuse direct/replayed task delivery before loading OAuth credentials or
+    # creating a backup row.
+    require_source_backup_creation("basecamp")
     # capture_message('Executing task id {0.id}, args: {0.args!r} kwargs: {0.kwargs!r}'.format(self.request))
     # print('Executing task id {0.id}, args: {0.args!r} kwargs: {0.kwargs!r}'.format(self.request))
     # self.request.id = "cdbf7603-c262-4eec-b38f-80bc1055f283"
@@ -106,7 +110,7 @@ def backup_basecamp(
             email@bilal.me
             """
             node.status = CoreNode.Status.ACTIVE
-            node.save()
+            node.save(update_fields=["status", "modified"])
         except ConnectionValidationFailedError as error:
             node.notify_backup_fail(error, backup_type)
             node.backup_retrying_reset(self.request.id)

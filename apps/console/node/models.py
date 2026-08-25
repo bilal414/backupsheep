@@ -14,7 +14,6 @@ import uuid
 from contextlib import contextmanager
 from types import SimpleNamespace
 from urllib.parse import quote
-from celery import chord
 from django.conf import settings
 from django.db import models, transaction
 from django.db.models import UniqueConstraint
@@ -55,6 +54,10 @@ from ..vultr import (
 
 from ..utils.models import UtilBackup, UtilCloud
 from botocore.exceptions import ClientError
+from backupsheep.source_recovery_policy import (
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
 
 
 class _RestoreProviderError(ValueError):
@@ -12003,7 +12006,7 @@ class CoreGoogleCloud(UtilCloud):
 
 @contextmanager
 def _local_backup_phase_lock(backup):
-    """Serialize the dump/chord publication phase for one backup row.
+    """Serialize the dump/upload publication phase for one backup row.
 
     A database status is not enough to distinguish a live long-running dump from a
     worker that died mid-dump. A host-level flock gives us that distinction without a
@@ -12109,7 +12112,7 @@ def _resume_local_backup_owned(
 ):
     """Resume a local dump/upload pipeline from its persisted phase.
 
-    A worker can die after the dump has been created but before the chord is
+    A worker can die after the dump has been created but before upload tasks are
     published. Re-running the dump is wasteful and can produce a second upload;
     the parent status and each storage-point status are the durable phase markers.
     """
@@ -12138,6 +12141,13 @@ def _resume_local_backup_owned(
         # durable phase without silently changing object identity.
         backup.refresh_from_db()
         if backup.status in terminal:
+            return backup
+
+        authorized_point_ids = node.authorized_local_destination_point_ids(backup)
+        if not authorized_point_ids:
+            # Direct model callers and stale upgrade deliveries must observe the
+            # same fail-closed boundary as CoreNode.backup_initiate: source/provider
+            # access never starts without a storage-owned destination witness.
             return backup
 
         if backup.status not in upload_phase:
@@ -12184,7 +12194,10 @@ def _resume_local_backup_owned(
         )
         from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
 
-        pending_stored_backups = stored_backups.filter(status__in=pending_statuses)
+        pending_stored_backups = stored_backups.filter(
+            pk__in=authorized_point_ids,
+            status__in=pending_statuses,
+        )
         if pending_stored_backups.exists():
             # Recovery is allowed to reuse a source archive only after its CRC,
             # checksum, byte count, and local commit marker all still match.
@@ -12203,10 +12216,13 @@ def _resume_local_backup_owned(
             # ``source_ready``.  The first storage worker that acquires a fenced
             # point lease moves the parent to UPLOAD_IN_PROGRESS immediately before
             # touching the destination.
-            chord(
-                storage_upload_task_list,
-                finalize_backup.si(node.id, backup.id),
-            ).apply_async()
+            # Do not use a Celery chord here. Chords publish framework-owned
+            # ``celery.chord*`` messages that cannot be bound to BackupSheep's
+            # reviewed task manifest or durable business intent. Each terminal
+            # storage worker publishes the idempotent finalizer instead; an early
+            # duplicate safely retries while another point is still pending.
+            for storage_upload_task in storage_upload_task_list:
+                storage_upload_task.apply_async()
         else:
             # All points are already complete, or there are no accepted destinations.
             # The finalizer makes the correct COMPLETE/PARTIAL/UPLOAD_FAILED decision.
@@ -12342,6 +12358,7 @@ class CoreWordPress(TimeStampedModel):
         db_table = "core_wordpress"
 
     def create_snapshot(self, backup):
+        require_source_backup_creation("wordpress")
         from apps._tasks.integration.backup.wordpress import snapshot_wordpress
         from ..backup.models import CoreWordPressBackupStoragePoints
         return _resume_local_backup(
@@ -12366,6 +12383,7 @@ class CoreBasecamp(TimeStampedModel):
         db_table = "core_basecamp"
 
     def create_snapshot(self, backup):
+        require_source_backup_creation("basecamp")
         from apps._tasks.integration.backup.basecamp import snapshot_basecamp
         from ..backup.models import CoreBasecampBackupStoragePoints
         return _resume_local_backup(
@@ -12462,7 +12480,18 @@ class CoreSchedule(TimeStampedModel):
 
     @property
     def storage_ids(self):
-        return list(self.storage_points.filter().values_list("id", flat=True))
+        # The scheduler needs only opaque destination ids. Query the explicit
+        # through table so the Beat/cloud control path never needs SELECT on the
+        # credential-bearing core_storage row or any provider-specific child.
+        field = self._meta.get_field("storage_points")
+        through = field.remote_field.through
+        source_column = f"{field.m2m_field_name()}_id"
+        target_column = f"{field.m2m_reverse_field_name()}_id"
+        return list(
+            through.objects.filter(**{source_column: self.pk})
+            .order_by(target_column)
+            .values_list(target_column, flat=True)
+        )
 
     def crontab_display(self):
         return f"{self.minute} {self.hour} {self.day_of_month} {self.month_of_year} {self.day_of_week}"
@@ -12705,6 +12734,10 @@ class CoreNode(TimeStampedModel):
             return self.connection.auth_website.use_public_key or self.connection.auth_website.use_private_key
 
     def backup_ready_to_initiate(self, celery_task_id=None):
+        if not source_backup_creation_available(
+            self.connection.integration.code
+        ):
+            return False
         if self.get_backup_from_celery_task_id(celery_task_id):
             return True
         elif self.status == self.Status.ACTIVE:
@@ -12861,6 +12894,189 @@ class CoreNode(TimeStampedModel):
         if status is not None:
             backup.status = status
 
+    def _local_backup_model_key(self):
+        """Return the reviewed local-backup key without touching source secrets."""
+
+        if self.type == self.Type.DATABASE:
+            return "database"
+        if self.type == self.Type.WEBSITE:
+            return "website"
+        if self.type == self.Type.SAAS:
+            integration_code = self.connection.integration.code
+            if integration_code in {"wordpress", "basecamp"}:
+                return integration_code
+        return None
+
+    @staticmethod
+    def _local_destination_point_model(backup):
+        """Resolve the explicit through model without joining ``core_storage``."""
+
+        field = backup._meta.get_field("storage_points")
+        return field.remote_field.through
+
+    def _destination_request_digest(self, backup):
+        """Bind storage authorization to this concrete immutable request shape."""
+
+        metadata = dict(backup.metadata or {})
+        requested_ids, malformed_count = self._canonical_backup_storage_ids(
+            metadata.get("_backup_storage_ids")
+        )
+        try:
+            persisted_invalid_count = max(
+                0, int(metadata.get("_backup_storage_invalid_id_count") or 0)
+            )
+        except (TypeError, ValueError):
+            persisted_invalid_count = 0
+        document = {
+            "version": 1,
+            "backup_model": backup._meta.label_lower,
+            "backup_id": int(backup.pk),
+            "node_id": int(self.pk),
+            "source_task_id": str(backup.celery_task_id or ""),
+            "schedule_id": int(backup.schedule_id) if backup.schedule_id else None,
+            "storage_ids": requested_ids,
+            "invalid_storage_id_count": max(
+                persisted_invalid_count, malformed_count
+            ),
+        }
+        encoded = json.dumps(
+            document, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def authorized_local_destination_point_ids(self, backup):
+        """Return only destinations authorized by the storage database lane.
+
+        Database/files workers have SELECT-only access to these through rows.  The
+        authorization is therefore a database-enforced capability boundary, rather
+        than a flag in the source-writable backup metadata.
+        """
+
+        if self._local_backup_model_key() is None:
+            return []
+        setup = (backup.metadata or {}).get("_backup_destination_setup")
+        setup = dict(setup) if isinstance(setup, dict) else {}
+        if setup.get("state") != "complete":
+            return []
+        expected_digest = self._destination_request_digest(backup)
+        point_model = self._local_destination_point_model(backup)
+        authorized = []
+        expected_count = None
+        for point in point_model.objects.filter(backup_id=backup.pk).only(
+            "pk", "storage_id", "metadata"
+        ):
+            metadata = dict(point.metadata or {})
+            witness = metadata.get("_backup_destination_authorization")
+            witness = witness if isinstance(witness, dict) else {}
+            try:
+                witness_backup_id = int(witness.get("backup_id"))
+                witness_storage_id = int(witness.get("storage_id"))
+                witness_count = int(witness.get("accepted_count"))
+            except (TypeError, ValueError):
+                continue
+            if (
+                witness.get("version") != 1
+                or witness.get("state") != "complete"
+                or witness.get("requirements_satisfied") is not True
+                or witness.get("backup_model") != backup._meta.label_lower
+                or witness_backup_id != int(backup.pk)
+                or witness_storage_id != int(point.storage_id)
+                or witness.get("source_task_id")
+                != str(backup.celery_task_id or "")
+                or witness.get("request_digest") != expected_digest
+                or witness_count < 1
+            ):
+                continue
+            if expected_count is None:
+                expected_count = witness_count
+            elif expected_count != witness_count:
+                return []
+            authorized.append(point.pk)
+        if expected_count is None or len(authorized) != expected_count:
+            return []
+        return sorted(authorized)
+
+    def _authorize_local_backup_destinations(self, backup, accepted_ids):
+        """Commit non-secret storage-lane witnesses on every accepted point."""
+
+        point_model = self._local_destination_point_model(backup)
+        accepted_ids = sorted({int(value) for value in accepted_ids})
+        request_digest = self._destination_request_digest(backup)
+        with transaction.atomic():
+            points = list(
+                point_model.objects.select_for_update()
+                .filter(backup_id=backup.pk, storage_id__in=accepted_ids)
+                .order_by("pk")
+            )
+            if len(points) != len(accepted_ids):
+                raise RuntimeError(
+                    "accepted backup destinations are not durably attached"
+                )
+            for point in points:
+                metadata = dict(point.metadata or {})
+                metadata["_backup_destination_authorization"] = {
+                    "version": 1,
+                    "state": "complete",
+                    "requirements_satisfied": True,
+                    "backup_model": backup._meta.label_lower,
+                    "backup_id": int(backup.pk),
+                    "storage_id": int(point.storage_id),
+                    "source_task_id": str(backup.celery_task_id or ""),
+                    "request_digest": request_digest,
+                    "accepted_count": len(points),
+                    "authorized_at": timezone.now().isoformat(),
+                }
+                point.metadata = metadata
+                point.save(update_fields=["metadata", "modified"])
+        return [point.pk for point in points]
+
+    def _clear_local_backup_destination_authorizations(self, backup):
+        """Fail closed if a previously partial setup ends in rejection."""
+
+        point_model = self._local_destination_point_model(backup)
+        with transaction.atomic():
+            for point in point_model.objects.select_for_update().filter(
+                backup_id=backup.pk
+            ):
+                metadata = dict(point.metadata or {})
+                if metadata.pop("_backup_destination_authorization", None) is None:
+                    continue
+                point.metadata = metadata
+                point.save(update_fields=["metadata", "modified"])
+
+    def _publish_local_destination_preparation(self, backup):
+        """Queue credential-bearing validation only to the storage lane."""
+
+        from apps._tasks.integration.storage.tasks import (
+            prepare_local_backup_destinations,
+        )
+
+        model_key = self._local_backup_model_key()
+        if model_key is None:
+            raise RuntimeError("local destination preparation has no model key")
+        try:
+            prepare_local_backup_destinations.apply_async(
+                args=[model_key, backup.pk],
+                task_id=self.local_destination_preparation_task_id(backup),
+            )
+        except Exception as error:
+            # The concrete backup row is already committed. The storage recovery
+            # sweep republishes this exact deterministic phase after broker loss.
+            capture_exception(error)
+            return False
+        return True
+
+    @staticmethod
+    def local_destination_preparation_task_id(backup):
+        """Derive a stable id distinct from the source task/replay identity."""
+
+        identity = (
+            "backupsheep:local-destination:"
+            f"{backup._meta.label_lower}:{backup.pk}:"
+            f"{backup.celery_task_id or ''}"
+        )
+        return uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+
     def _reconcile_local_backup_destinations(self, backup, schedule_id):
         """Crash-safely reconcile every requested local-backup destination.
 
@@ -12995,8 +13211,10 @@ class CoreNode(TimeStampedModel):
                 error_code = "AIR_GAPPED_DESTINATION_REQUIRED"
             else:
                 checkpoint(state="complete")
+                self._authorize_local_backup_destinations(backup, accepted_ids)
                 return True
 
+            self._clear_local_backup_destination_authorizations(backup)
             checkpoint(
                 state="failed",
                 error_code=error_code,
@@ -13036,7 +13254,15 @@ class CoreNode(TimeStampedModel):
     #     return validate_ok
 
     def backup_initiate(
-            self, celery_task_id, backup_type, attempt_no, schedule_id, storage_ids, notes
+        self,
+        celery_task_id,
+        backup_type,
+        attempt_no,
+        schedule_id,
+        storage_ids,
+        notes,
+        *,
+        prepare_destinations=False,
     ):
         """
         Duplicate-backup guard: lock this node's row so concurrent backup tasks for
@@ -13048,6 +13274,7 @@ class CoreNode(TimeStampedModel):
         (the celery task) returns immediately. A retry of the SAME task reuses its
         own backup (same celery_task_id) and is never blocked by it.
         """
+        require_source_backup_creation(self.connection.integration.code)
         with transaction.atomic():
             # Keep the durable delivery ledger in sync with the concrete backup
             # while the node lock is held.  This import stays local to avoid
@@ -13133,8 +13360,13 @@ class CoreNode(TimeStampedModel):
                     selection = storage_ids
                     if selection is None and not created:
                         # Backward-compatible recovery for a pre-ledger backup.
+                        # Query the explicit through rows so a source worker never
+                        # needs SELECT on the credential-bearing core_storage table.
+                        point_model = self._local_destination_point_model(backup)
                         selection = list(
-                            backup.storage_points.values_list("id", flat=True)
+                            point_model.objects.filter(backup_id=backup.pk)
+                            .order_by("storage_id")
+                            .values_list("storage_id", flat=True)
                         )
                     normalized_ids, invalid_count = (
                         self._canonical_backup_storage_ids(selection)
@@ -13215,21 +13447,26 @@ class CoreNode(TimeStampedModel):
                 task_name=self.backup_task_name(),
             )
 
-        # Cloud servers and volumes don't have storage points for now. Local source
-        # generation may start only after the complete immutable destination request
-        # has been reconciled under a renewable lease.
-        if is_local_backup and not self._reconcile_local_backup_destinations(
-            backup,
-            schedule_id,
-        ):
-            return None
+        # Cloud servers and volumes don't have storage points for now. A local source
+        # worker must never read destination credentials: it only verifies the
+        # storage-owned through-row witnesses. The storage lane performs validation
+        # and republishes this same stable source task after committing them.
+        if is_local_backup:
+            if prepare_destinations:
+                if not self._reconcile_local_backup_destinations(
+                    backup,
+                    schedule_id,
+                ):
+                    return None
+            elif not self.authorized_local_destination_point_ids(backup):
+                self._publish_local_destination_preparation(backup)
+                return None
 
-        self.save()
         return backup
 
     def backup_complete_reset(self, celery_task_id=None):
         self.status = CoreNode.Status.ACTIVE
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
         if celery_task_id:
             backup = self.get_backup_from_celery_task_id(celery_task_id)
@@ -13239,7 +13476,7 @@ class CoreNode(TimeStampedModel):
 
     def backup_timeout_reset(self, celery_task_id=None):
         self.status = CoreNode.Status.ACTIVE
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
         if celery_task_id:
             backup = self.get_backup_from_celery_task_id(celery_task_id)
@@ -13297,11 +13534,11 @@ class CoreNode(TimeStampedModel):
         # node_type_object = getattr(self, self.connection.integration.code)
         # node_type_object.backups.filter()
         self.status = self.Status.ACTIVE
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
     def delete_requested(self):
         self.status = self.Status.DELETE_REQUESTED
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
     def notify_storage_validation_fail(self, storage, backup):
         """Email 'fail' recipients when a storage point fails validation at backup start.
@@ -13311,8 +13548,6 @@ class CoreNode(TimeStampedModel):
         built inside the storage_validation_failed template from the injected
         site_app_url + node_id passed here.
         """
-        from apps._tasks.helper.tasks import send_postmark_email
-
         try:
             if self.notify_on_fail and self.connection.account.notify_on_fail:
                 account = self.connection.account
@@ -13329,12 +13564,11 @@ class CoreNode(TimeStampedModel):
                     "help_url": "https://support.backupsheep.com",
                     "sender_name": "BackupSheep - Notification Bot",
                 }
-                for _member, to_email in account.get_notification_recipients("fail"):
-                    send_postmark_email.delay(
-                        to_email,
-                        "storage_validation_failed",
-                        data,
-                    )
+                account.create_log(
+                    data=data,
+                    email_event="fail",
+                    email_template="storage_validation_failed",
+                )
         except Exception as e:
             capture_exception(e)
 
@@ -13568,7 +13802,6 @@ class CoreNode(TimeStampedModel):
         return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
     def _notify_backup_fail_safe(self, error, backup_type):
-        from apps._tasks.helper.tasks import send_postmark_email
         from datetime import datetime
 
         class_name = error.__class__.__name__
@@ -13607,16 +13840,7 @@ class CoreNode(TimeStampedModel):
             if not self.notify_on_fail or not account.notify_on_fail:
                 return
 
-            recipients = account.get_notification_recipients("fail")
-            member = recipients[0][0] if recipients else None
-            try:
-                notification_timezone = pytz.timezone(
-                    (getattr(member, "timezone", None) or "UTC")
-                )
-            except Exception:
-                notification_timezone = pytz.UTC
-
-            date_time = datetime.now(tz=notification_timezone).strftime(
+            date_time = datetime.now(tz=pytz.UTC).strftime(
                 "%b %d %Y - %I:%M%p %Z"
             )
             is_validation = contract["template"] == "unable_to_start_backup"
@@ -13643,13 +13867,11 @@ class CoreNode(TimeStampedModel):
                 "sender_name": "BackupSheep - Notification Bot",
             }
 
-            account.create_log(data=data)
-            for _member, to_email in recipients:
-                send_postmark_email.delay(
-                    to_email,
-                    contract["template"],
-                    data,
-                )
+            account.create_log(
+                data=data,
+                email_event="fail",
+                email_template=contract["template"],
+            )
         except Exception as notification_error:
             capture_exception(notification_error)
 
@@ -13658,7 +13880,6 @@ class CoreNode(TimeStampedModel):
         return self._notify_backup_fail_safe(error, backup_type)
 
     def notify_upload_fail(self, error, backup, storage, *, error_code=None):
-        from apps._tasks.helper.tasks import send_postmark_email
         from datetime import datetime
 
         # Keep full diagnostics in Sentry only. The account log and email are
@@ -13684,16 +13905,9 @@ class CoreNode(TimeStampedModel):
         try:
             if self.notify_on_fail and self.connection.account.notify_on_fail:
                 account = self.connection.account
-                # Email every eligible member (notify_on_fail honored; the primary
-                # membership is always included) instead of only the primary member.
-                recipients = account.get_notification_recipients("fail")
-
-                member = recipients[0][0] if recipients else None
-
-                timezone = pytz.timezone((member.timezone if member else None) or "UTC")
-                now = datetime.now()
-
-                date_time = now.astimezone(timezone).strftime("%b %d %Y - %I:%M%p %Z")
+                date_time = datetime.now(tz=pytz.UTC).strftime(
+                    "%b %d %Y - %I:%M%p %Z"
+                )
 
                 action_url = f"https://backupsheep.com/console/nodes/{self.id}/"
 
@@ -13721,31 +13935,19 @@ class CoreNode(TimeStampedModel):
                     "sender_name": "BackupSheep - Notification Bot",
                 }
 
-                self.connection.account.create_log(data=data)
-
-                for _member, to_email in recipients:
-                    send_postmark_email.delay(
-                        to_email,
-                        "unable_to_upload_backup",
-                        data,
-                    )
+                account.create_log(
+                    data=data,
+                    email_event="fail",
+                    email_template="unable_to_upload_backup",
+                )
         except Exception as e:
             capture_exception(e)
 
     def notify_backup_success(self, backup):
-        from apps._tasks.helper.tasks import send_postmark_email
-
         try:
             if self.notify_on_success and self.connection.account.notify_on_success:
                 account = self.connection.account
-                # Email every eligible member (notify_on_success honored; the primary
-                # membership is always included) instead of only the primary member.
-                recipients = account.get_notification_recipients("success")
-
-                member = recipients[0][0] if recipients else None
-
-                timezone = pytz.timezone((member.timezone if member else None) or "UTC")
-                date_time = backup.modified.astimezone(timezone).strftime(
+                date_time = backup.modified.astimezone(pytz.UTC).strftime(
                     "%b %d %Y - %I:%M%p %Z"
                 )
 
@@ -13795,14 +13997,11 @@ class CoreNode(TimeStampedModel):
                     "sender_name": "BackupSheep - Notification Bot",
                 }
 
-                self.connection.account.create_log(data=data)
-
-                for _member, to_email in recipients:
-                    send_postmark_email.delay(
-                        to_email,
-                        "backup_is_complete",
-                        data,
-                    )
+                account.create_log(
+                    data=data,
+                    email_event="success",
+                    email_template="backup_is_complete",
+                )
         except Exception as e:
             capture_exception(e)
 

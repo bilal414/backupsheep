@@ -65,7 +65,7 @@ class CoreStorageBackBlazeB2View(ReadWriteSerializerMixin, viewsets.ModelViewSet
     def totals(self, request):
         return Response("")
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             storage = self.get_object()

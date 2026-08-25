@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shlex
 import stat
 import subprocess
@@ -77,6 +78,31 @@ MAX_ITEMS = 10_000
 REQUEST_TIMEOUT = (10.0, 60.0)
 SOURCE_BLOCK_DEVICE = "/dev/oracleoci/oraclevdb"
 RESTORE_BLOCK_DEVICE = "/dev/oracleoci/oraclevdc"
+
+
+def _ssh_public_key_fingerprint(key):
+    """Return the OpenSSH SHA-256 fingerprint for one public host key."""
+    try:
+        raw = key.asbytes()
+    except Exception as error:
+        raise HarnessError("Pinned SSH host key is unreadable.") from error
+    if not isinstance(raw, bytes) or not raw:
+        raise HarnessError("Pinned SSH host key is malformed.")
+    return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode(
+        "ascii"
+    ).rstrip("=")
+
+
+class _ExactHostKeyPolicy:
+    """Accept a missing Paramiko host only when an independent pin matches."""
+
+    def __init__(self, expected_fingerprint):
+        self.expected_fingerprint = expected_fingerprint
+
+    def missing_host_key(self, _client, _hostname, key):
+        actual = _ssh_public_key_fingerprint(key)
+        if not secrets.compare_digest(actual, self.expected_fingerprint):
+            raise HarnessError("The Oracle SSH host key did not match the exact pin.")
 
 E2E_RUN_TAG = "BACKUPSHEEP_E2E_RUN"
 E2E_OWNED_TAG = "BACKUPSHEEP_E2E_OWNED"
@@ -2128,7 +2154,6 @@ class OracleLiveUIHarness:
         except Exception as error:
             raise HarnessError("Paramiko is required for Oracle data verification.") from error
         private_path, _public = self._ensure_ssh_key()
-        _private, _public_path, known_hosts = self._key_paths()
         addresses = {
             str(_value(vnic, "public_ip") or "").strip(),
             str(_value(vnic, "private_ip") or "").strip(),
@@ -2143,19 +2168,22 @@ class OracleLiveUIHarness:
             host = str(_value(vnic, "private_ip") or "").strip()
         if not host or host not in addresses:
             raise HarnessError("SSH host must be an exact provider-reported VNIC address.")
+        pin_variable = f"{host_variable}_KEY_SHA256"
+        expected_fingerprint = _required(self.environment, pin_variable)
+        if not SSH_FINGERPRINT_RE.fullmatch(expected_fingerprint):
+            raise HarnessError(
+                f"{pin_variable} must be an exact OpenSSH SHA-256 host-key fingerprint."
+            )
         user = _required(self.environment, "ORACLE_E2E_SSH_USER")
         if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
             raise HarnessError("ORACLE_E2E_SSH_USER is malformed.")
         client = paramiko.SSHClient()
-        if known_hosts.exists():
-            client.load_host_keys(str(known_hosts))
-        first_connection = host not in client.get_host_keys()
-        if first_connection:
-            # This is trust-on-first-use for a fresh, exact-OCID test instance.
-            # Only deterministic non-secret test bytes traverse this connection.
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        else:
-            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        # Never trust a key learned from this connection. The pin must be
+        # collected through the provider console/serial channel (or another
+        # independently authenticated path) and supplied before SSH begins.
+        client.set_missing_host_key_policy(
+            _ExactHostKeyPolicy(expected_fingerprint)
+        )
         try:
             key = paramiko.RSAKey.from_private_key_file(str(private_path))
             client.connect(
@@ -2168,11 +2196,17 @@ class OracleLiveUIHarness:
                 banner_timeout=REQUEST_TIMEOUT[1],
                 auth_timeout=REQUEST_TIMEOUT[1],
             )
-            if first_connection:
-                known_hosts.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                client.save_host_keys(str(known_hosts))
-                known_hosts.chmod(0o600)
+            remote_key = client.get_transport().get_remote_server_key()
+            if not secrets.compare_digest(
+                _ssh_public_key_fingerprint(remote_key), expected_fingerprint
+            ):
+                raise HarnessError(
+                    "The connected Oracle SSH host key did not match the exact pin."
+                )
             return client
+        except HarnessError:
+            client.close()
+            raise
         except Exception as error:
             client.close()
             raise HarnessError("SSH connection to the exact test VNIC failed.") from error
@@ -5069,15 +5103,7 @@ class OracleLiveUIHarness:
 
     @staticmethod
     def _ssh_key_fingerprint(key):
-        try:
-            raw = key.asbytes()
-        except Exception as error:
-            raise HarnessError("Pinned workload SSH host key is unreadable.") from error
-        if not isinstance(raw, bytes) or not raw:
-            raise HarnessError("Pinned workload SSH host key is malformed.")
-        return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode(
-            "ascii"
-        ).rstrip("=")
+        return _ssh_public_key_fingerprint(key)
 
     def _readonly_workload_ssh_client(self, scope):
         """Connect only through preexisting key material and a pinned host key."""

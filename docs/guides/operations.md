@@ -12,7 +12,7 @@ Check the console for:
 - reconciliation entries that require manual review;
 - storage validation failures and incomplete destination copies;
 - upcoming schedules and schedules that have stopped producing successful runs;
-- capacity trends for Local Storage and the host work filesystem;
+- capacity trends for Local Storage, three private work volumes and ciphertext transfers;
 - recent authentication, connection, schedule, storage and restore activity.
 
 The public `execution_status` API shape exposes durable status, phase, retry time,
@@ -22,30 +22,60 @@ job truth.
 
 ## Start, stop and inspect
 
-Build the exact checked-out source once before starting it manually. The stock application
-services set `pull_policy: never`, so Compose will not silently substitute a registry image
-when the reviewed local image is missing:
+Use the exact-ref installer for first creation or after a whole-stack `down`. For an
+existing installation whose database, broker and one-shot gates are already healthy,
+build the exact checked-out source and force-recreate the web/guard pair. The application,
+database and egress-guard service families set `pull_policy: never`, so Compose will not
+silently substitute a registry image when a reviewed local image is missing:
 
 ```bash
 cd /opt/backupsheep
-./backupsheep-compose build db app
-./backupsheep-compose up --detach
+./backupsheep-compose build db app app-egress-guard
+./backupsheep-compose up --detach --no-build --no-deps --force-recreate \
+  app-egress-guard app
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=100 app migrate preflight
+./backupsheep-compose logs --tail=100 \
+  rabbitmq-volume-init rabbitmq-provision staging-provision \
+  db-provision migrate db-seal preflight app-egress-guard app
 ```
 
-That profile-less start is intentionally core-only: PostgreSQL, RabbitMQ, migrations,
-security preflight and the web UI. After reviewing credentials and durable queue/recovery
-state, explicitly start the provider-mutating workers and singleton scheduler:
+That paired recovery changes only the existing web namespace. It is not a substitute for
+first-boot provisioning, migrations or recovery after `down`; rerun the verified
+installer for those paths. After reviewing
+credentials and durable queue/recovery state, explicitly start the provider-mutating
+workers and singleton scheduler:
 
 ```bash
-./backupsheep-compose --profile operations up --detach
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+./backupsheep-compose --profile operations up --detach --no-build --no-deps beat
 ./backupsheep-compose --profile operations ps --all
 ```
 
 Do not enable the profile merely to make every container green. It can resume queued or
 recoverable provider work. Installer-managed installations should normally use the same
 exact-commit `install.sh --ref ... --enable-operations` command used at installation.
+
+Operations workers and Beat use `restart: unless-stopped`; namespace guards use
+`restart: "no"`. The wrapper refuses independent guard lifecycle commands and recreates a
+workload/guard pair together. To pause provider execution while leaving the core
+available, stop the exact set explicitly:
+
+```bash
+./backupsheep-compose --profile operations stop \
+  worker-cloud worker-database worker-files worker-storage worker-logs beat
+```
+
+An explicit Docker stop suppresses application-service automatic restart until the
+reviewed operations opt-in. No-secret guards remain in place during a provider pause.
+Before every build or migration, the installer instead removes the complete topology with
+ordinary `down` while preserving named volumes. If Docker later restarts an enabled
+application service, its entrypoint reruns deployment preflight, but it cannot restart or
+attest the `restart: "no"` guard. After a Docker daemon restart or guard loss, use the
+exact paired recovery command before returning that worker to service.
 
 Follow all service logs:
 
@@ -62,22 +92,55 @@ Follow only an execution lane:
 Stop the stack without deleting volumes:
 
 ```bash
-./backupsheep-compose --profile operations stop
+./backupsheep-compose --profile operations down --timeout 300
 ```
 
-Including the profile ensures workers and Beat stop too; profile-less `stop` is only a
-core stop and may leave intentionally enabled operations services running. `./backupsheep-compose
---profile operations down` removes containers and networks but normally retains named
-volumes. Never add `--volumes` during routine operation; it removes PostgreSQL, broker,
-work, SSH trust and Local Storage data plus the installation-identity sentinel.
+Including the profile removes the complete container/network topology together so no
+guard is stopped independently of its namespace-sharing workload. Ordinary `down`
+retains named volumes. Never add `--volumes` during routine operation; it removes PostgreSQL, broker,
+private/legacy work, ciphertext-transfer, layout-witness and Local Storage data plus the
+installation-identity sentinel.
+
+### Control-plane mutation lock
+
+`install.sh` and `backupsheep-compose` share one atomic, owner-only sidecar directory:
+`${INSTALL_DIR}.backupsheep-mutation-lock`. Every real wrapper mutation holds it from the
+last pre-mutation validation until the Docker command returns; the installer holds it for
+its complete validation/build/start transaction. This prevents two operator terminals
+from both passing the one-off/guard inventory before either changes the topology. Read-only
+commands such as `config`, `ps`, `logs` and `top`, plus structural `--dry-run`, remain
+concurrent.
+
+`SIGKILL`, power loss or a filesystem failure can leave the directory behind. That is a
+fail-closed condition: neither tool trusts the recorded PID enough to reap it automatically.
+First use trusted host process and change-window evidence to prove that no `install.sh` or
+`backupsheep-compose` mutation is still active. Inspect the exact owner witness, then remove
+only that file and its now-empty directory:
+
+```bash
+INSTALL_DIR=/opt/backupsheep
+LOCK="${INSTALL_DIR}.backupsheep-mutation-lock"
+test -f "${LOCK}/owner" && cat "${LOCK}/owner"
+# Only after independent proof that the recorded operation is no longer active:
+rm -- "${LOCK}/owner"
+rmdir -- "${LOCK}"
+```
+
+Never recursively remove a broader parent path, and never clear the lock merely because
+its recorded PID is absent or appears reused.
 
 ## Dependency checks
 
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz/
-./backupsheep-compose exec -T db pg_isready -U backupsheep -d backupsheep
+DB_CONTAINER="$(./backupsheep-compose ps -q db)"
+test -n "${DB_CONTAINER}"
+test "$(docker inspect --format '{{.State.Health.Status}}' "${DB_CONTAINER}")" = healthy
 ./backupsheep-compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 ```
+
+The stock database healthcheck authenticates over TCP with its file-backed bootstrap
+credential and executes `SELECT 1`; do not substitute unauthenticated `pg_isready`.
 
 The health URL returns static `ok` and is liveness only. PostgreSQL, RabbitMQ and worker
 checks are separate. When operations are intentionally enabled, add:
@@ -121,8 +184,9 @@ backup row is complete or lost.
 7. Start the complete stack and verify migrations, dependencies and workers.
 8. Re-enable schedules/Beat and watch the first recovery sweep and scheduled run.
 
-For the stock stack, "complete" means `./backupsheep-compose --profile operations up --detach`;
-a profile-less `up` deliberately leaves all workers and Beat disabled.
+For an existing stock stack, "complete" means force-recreating all five exact
+guard/worker pairs and then starting Beat with the commands above. Broad or workload-only
+`up` is refused after any pair exists.
 
 If an urgent reboot interrupts work, do not manually trigger the same backup immediately.
 RabbitMQ redelivery and the periodic database recovery tasks will resume durable requests,
@@ -171,14 +235,16 @@ guard.
 | --- | --- | --- |
 | Provider snapshots wait | `worker-cloud`, `cloud`/`default` queues, provider API | Restore worker/broker connectivity; let durable polling resume |
 | Database dumps wait | `worker-database`, disk, source network/client version | Free capacity or correct source connectivity; preserve the row for retry |
-| Website/WordPress/Basecamp waits | `worker-files`, work volume, source network/SSH trust | Fix source/trust/capacity, then observe retry |
+| Website/WordPress/Basecamp waits | `worker-files`, work volume, source network/account-scoped SSH approval | Fix source/approval/capacity, then observe retry |
 | Completed dump is not offsite | `worker-storage`, `storage` queue, destination validation | Restore upload capacity/credentials; do not delete the work artifact |
 | Logs/notifications lag | `worker-logs`, `logs` queue, email/channel provider | Scale or repair that lane; backup execution can continue independently |
 
 Scale storage workers when uploads are the measured bottleneck:
 
 ```bash
-./backupsheep-compose --profile operations up --detach --scale worker-storage=4
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate --scale worker-storage=4 \
+  storage-egress-guard worker-storage
 ```
 
 Keep CPU/disk-bound database and file concurrency conservative.
@@ -187,8 +253,9 @@ Keep CPU/disk-bound database and file concurrency conservative.
 
 Beat dispatches:
 
-- local run-log pruning at 03:00 UTC;
-- database activity-log pruning at 03:30 UTC;
+- files run-log pruning at 03:00 UTC, database run-log pruning at 03:05 UTC and
+  destination-upload run-log pruning at 03:10 UTC, each in its private worker lane;
+- database `CoreLog` activity-row pruning at 03:30 UTC;
 - retry of S3 Object Lock-protected deletes every six hours;
 - durable request/backup/restore/replication recovery every minute.
 
@@ -205,13 +272,13 @@ activity entries.
 - Reset a console password from the host when email is unavailable:
 
   ```bash
-  ./backupsheep-compose run --rm app python manage.py changepassword user@example.com
+  ./backupsheep-compose run --rm --no-deps app python manage.py changepassword user@example.com
   ```
 
 - Create a separate Django superuser only for `/django-admin/`:
 
   ```bash
-  ./backupsheep-compose run --rm app python manage.py createsuperuser
+  ./backupsheep-compose run --rm --no-deps app python manage.py createsuperuser
   ```
 
 ## Routine evidence to retain

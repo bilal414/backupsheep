@@ -1,0 +1,19 @@
+**
+!Dockerfile.egress
+!deploy/
+!deploy/egress/
+!deploy/egress/entrypoint.sh
+!deploy/egress/healthcheck.sh
+
+# Credentials and runtime state remain forbidden even if the allowlist expands.
+.env
+.env.*
+.secrets/
+**/.env
+**/.env.*
+**/*.env
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/.ssh/

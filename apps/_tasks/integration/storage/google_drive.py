@@ -869,12 +869,14 @@ def _verify_and_commit(
         etag=state.get("etag") or "",
         version_id=state.get("version_id") or "",
         multipart_upload_id=(session or {}).get("fingerprint") or "",
+        verified_at=timezone.now(),
         metadata={
             "provider": "google_drive",
             "provider_id": str(item["id"]),
             "provider_path": provider_path,
             "revision": state.get("revision") or "",
             "md5_checksum": item.get("md5Checksum"),
+            "storage_metadata_key": STATE_KEY,
         },
     )
     _save_state(stored_backup, state, status=stored_backup.Status.UPLOAD_COMPLETE, storage_file_id=item["id"])

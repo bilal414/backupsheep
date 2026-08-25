@@ -38,6 +38,11 @@ from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
 from apps.tests.test_restore import RestoreBackendBase
+from backupsheep.celery_task_intent import (
+    TaskIntentError,
+    notification_fanout_task_id,
+    resolve_task_intent,
+)
 
 User = get_user_model()
 
@@ -116,7 +121,7 @@ class NotificationRecipientTests(BaseTestCase):
 
 
 class NotifyBackupSuccessTests(BaseTestCase):
-    """notify_backup_success emails every eligible member, not just the primary."""
+    """Source workers persist opaque fanout work; logs resolves recipients."""
 
     def test_emails_every_eligible_member(self):
         node = factories.make_website_node(self.account, self.member)
@@ -128,39 +133,65 @@ class NotifyBackupSuccessTests(BaseTestCase):
             attempt_no=1, type=UtilBackup.Type.ON_DEMAND,
         )
 
-        with mock.patch("apps._tasks.helper.tasks.send_postmark_email.delay") as delay:
+        with mock.patch.object(
+            helper_tasks.send_log_to_db, "apply_async"
+        ) as publish, mock.patch(
+            "apps.console.account.models.transaction.on_commit",
+            side_effect=lambda callback: callback(),
+        ):
             node.notify_backup_success(backup)
 
-        emailed = {call.args[0] for call in delay.call_args_list}
-        self.assertEqual(emailed, {self.user.email, member_ok.user.email})
-        for call in delay.call_args_list:
-            self.assertEqual(call.args[1], "backup_is_complete")
+        log = CoreLog.objects.get(account=self.account)
+        publish.assert_called_once_with(
+            args=[log.pk], task_id=notification_fanout_task_id(log.pk, log.data)
+        )
+        self.assertNotIn(self.user.email, repr(publish.call_args))
+        self.assertEqual(
+            log.data["notification_request"],
+            {"version": 1, "event": "success", "template": "backup_is_complete"},
+        )
 
-        # the DB activity log entry is still written exactly once
-        self.assertTrue(CoreLog.objects.filter(account=self.account).exists())
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ):
+            helper_tasks.send_log_to_db.run(log.pk)
+        member_ids = set(
+            CoreNotificationDelivery.objects.filter(
+                log=log, channel_type="email"
+            ).values_list("channel_id", flat=True)
+        )
+        self.assertEqual(member_ids, {self.member.pk, member_ok.pk})
+        self.assertNotIn(member_opted_out.pk, member_ids)
 
 
-class GenericEmailTaskTests(BaseTestCase):
-    """The rewritten send_postmark_email task sends ANY template."""
-
-    def test_sends_non_password_template(self):
-        with mock.patch.object(CoreNotificationLogEmail, "send") as send_mock:
-            helper_tasks.send_postmark_email(
-                self.user.email, "backup_is_complete", {"message": "hi"}
+class LogsOwnedEmailDeliveryTests(BaseTestCase):
+    def test_email_delivery_resolves_identity_only_inside_logs_worker(self):
+        with self.captureOnCommitCallbacks(execute=True), mock.patch.object(
+            helper_tasks.send_log_to_db, "apply_async"
+        ):
+            log = self.account.create_log(
+                {
+                    "sender_name": "BackupSheep - Notification Bot",
+                    "message": "Backup complete.",
+                },
+                email_event="success",
+                email_template="backup_is_complete",
             )
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ):
+            helper_tasks.send_log_to_db.run(log.pk)
+        delivery = CoreNotificationDelivery.objects.get(
+            log=log, channel_type="email", channel_id=self.member.pk
+        )
+
+        with mock.patch.object(CoreNotificationLogEmail, "send") as send_mock:
+            helper_tasks.deliver_log_notification.run(delivery.pk)
         send_mock.assert_called_once()
-        log = CoreNotificationLogEmail.objects.get()
-        self.assertEqual(log.member, self.member)
-        self.assertEqual(log.email, self.user.email)
-        self.assertEqual(log.template, "backup_is_complete")
-
-    def test_unknown_email_is_skipped(self):
-        with mock.patch.object(CoreNotificationLogEmail, "send") as send_mock:
-            helper_tasks.send_postmark_email(
-                "nobody@example.com", "backup_is_complete", {}
-            )
-        send_mock.assert_not_called()
-        self.assertFalse(CoreNotificationLogEmail.objects.exists())
+        email_log = CoreNotificationLogEmail.objects.get()
+        self.assertEqual(email_log.member, self.member)
+        self.assertEqual(email_log.email, self.user.email)
+        self.assertEqual(email_log.template, "backup_is_complete")
 
 
 class SendLogToDbNotificationTests(BaseTestCase):
@@ -185,8 +216,18 @@ class SendLogToDbNotificationTests(BaseTestCase):
                 }
             )
 
-        apply_async.assert_called_once_with(args=[log.pk])
+        apply_async.assert_called_once_with(
+            args=[log.pk], task_id=notification_fanout_task_id(log.pk, log.data)
+        )
         notify.assert_not_called()
+        self.assertFalse(CoreNotificationDelivery.objects.filter(log=log).exists())
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ) as publish, mock.patch(
+            "apps._tasks.helper.tasks.transaction.on_commit",
+            side_effect=lambda callback: callback(),
+        ):
+            helper_tasks.send_log_to_db.run(log.pk)
         delivery = CoreNotificationDelivery.objects.get(log=log)
         self.assertEqual(
             (delivery.channel_type, delivery.channel_id),
@@ -195,6 +236,46 @@ class SendLogToDbNotificationTests(BaseTestCase):
         self.assertNotIn(
             "sensitive provider detail", repr(apply_async.call_args)
         )
+        publish.assert_called_once_with(args=[delivery.pk])
+
+    def test_consumer_rejects_log_payload_changed_after_publication(self):
+        with mock.patch.object(
+            helper_tasks.send_log_to_db, "apply_async"
+        ) as publish, mock.patch(
+            "apps.console.account.models.transaction.on_commit",
+            side_effect=lambda callback: callback(),
+        ):
+            log = self.account.create_log(
+                {
+                    "sender_name": "BackupSheep - Notification Bot",
+                    "message": "reviewed value",
+                }
+            )
+        task_id = publish.call_args.kwargs["task_id"]
+        intent = resolve_task_intent(
+            task_name="send_log_to_db",
+            task_id=task_id,
+            args=[log.pk],
+            kwargs={},
+            publisher="files",
+            intent="log_record",
+            phase="consume",
+        )
+        self.assertEqual(intent["id"], log.pk)
+
+        changed = dict(log.data)
+        changed["message"] = "modified after signature"
+        CoreLog.objects.filter(pk=log.pk).update(data=changed)
+        with self.assertRaisesRegex(TaskIntentError, "not reserved"):
+            resolve_task_intent(
+                task_name="send_log_to_db",
+                task_id=task_id,
+                args=[log.pk],
+                kwargs={},
+                publisher="files",
+                intent="log_record",
+                phase="consume",
+            )
 
     @mock.patch(
         "apps._tasks.helper.tasks.send_log_to_db.apply_async",
@@ -215,20 +296,16 @@ class SendLogToDbNotificationTests(BaseTestCase):
                 }
             )
 
-        # The on-commit wake-up failed after the database commit. The durable row
-        # remains due and the periodic recovery task publishes only its integer ID.
-        delivery = CoreNotificationDelivery.objects.get(
-            log=log,
-            channel_type=CoreNotificationDelivery.ChannelType.TELEGRAM,
-            channel_id=channel.pk,
-        )
+        self.assertFalse(CoreNotificationDelivery.objects.filter(log=log).exists())
         with mock.patch.object(
-            helper_tasks.deliver_log_notification, "apply_async"
+            helper_tasks.send_log_to_db, "apply_async"
         ) as recovered_publish:
-            helper_tasks.recover_notification_deliveries.run()
-        recovered_publish.assert_called_once_with(args=[delivery.pk])
+            helper_tasks.recover_notification_fanouts.run()
+        recovered_publish.assert_called_once_with(
+            args=[log.pk], task_id=notification_fanout_task_id(log.pk, log.data)
+        )
 
-    def test_legacy_dict_is_persisted_then_fans_out_as_delivery_ids(self):
+    def test_fanout_creates_all_channel_rows_and_publishes_only_ids(self):
         CoreNotificationSlack.objects.create(
             account=self.account,
             app_id="A1",
@@ -249,20 +326,24 @@ class SendLogToDbNotificationTests(BaseTestCase):
             channel_name="ops",
             added_by=self.member,
         )
+        with self.captureOnCommitCallbacks(execute=True), mock.patch.object(
+            helper_tasks.send_log_to_db, "apply_async"
+        ):
+            log = self.account.create_log(
+                {
+                    "sender_name": "BackupSheep - Notification Bot",
+                    "message": "sensitive backup detail",
+                    "error_details": "",
+                }
+            )
         with mock.patch.object(
             helper_tasks.deliver_log_notification, "apply_async"
         ) as publish, mock.patch(
             "apps._tasks.helper.tasks.transaction.on_commit",
             side_effect=lambda callback: callback(),
         ):
-            helper_tasks.send_log_to_db({
-                "account_id": self.account.id,
-                "sender_name": "BackupSheep - Notification Bot",
-                "message": "sensitive backup detail",
-                "error_details": "",
-            })
+            helper_tasks.send_log_to_db.run(log.pk)
 
-        self.assertTrue(CoreLog.objects.filter(account=self.account).exists())
         deliveries = list(CoreNotificationDelivery.objects.order_by("pk"))
         self.assertEqual(len(deliveries), 2)
         self.assertEqual(
@@ -323,13 +404,13 @@ class AccountSendNotificationTests(BaseTestCase):
         with mock.patch(
             "apps.console.notification.models.requests.post",
             return_value=response,
-        ) as post, mock.patch(
-            "apps._tasks.helper.tasks.send_log_to_telegram.delay"
-        ) as legacy_delay:
+        ) as post:
             result = telegram.send("sensitive provider detail")
 
         self.assertTrue(result)
-        legacy_delay.assert_not_called()
+        from apps._tasks.helper.tasks import send_log_to_telegram
+
+        self.assertFalse(hasattr(send_log_to_telegram, "delay"))
         post.assert_called_once_with(
             "https://api.telegram.org/bottest-bot-token/sendMessage",
             json={"chat_id": "42", "text": "sensitive provider detail"},
@@ -549,30 +630,27 @@ class RestoreNotificationTests(RestoreBackendBase):
     def test_completed_restore_emails_and_logs(self):
         node, backup, restore = self._restore()
         with mock.patch("apps._tasks.integration.restore_website.restore_website"), \
-             mock.patch("apps._tasks.helper.tasks.send_postmark_email.delay") as delay, \
-             mock.patch("apps.console.log.models.CoreLog") as core_log:
+             mock.patch.object(CoreAccount, "create_log") as create_log:
             restore_tasks.restore_website_backup.apply(args=[node.id, backup.id, restore.id])
 
         restore.refresh_from_db()
         self.assertEqual(restore.status, CoreWebsiteRestore.Status.COMPLETE)
 
-        templates = [call.args[1] for call in delay.call_args_list]
+        templates = [
+            call.kwargs["email_template"] for call in create_log.call_args_list
+        ]
         self.assertEqual(templates, ["restore_started", "restore_completed"])
-        for call in delay.call_args_list:
-            self.assertEqual(call.args[0], self.user.email)
-        completed_ctx = delay.call_args_list[1].args[2]
+        completed_ctx = create_log.call_args_list[1].kwargs["data"]
         self.assertEqual(completed_ctx["node_id"], node.id)
         self.assertEqual(completed_ctx["node_name"], node.name)
         self.assertEqual(completed_ctx["restore_name"], "r")
         self.assertEqual(completed_ctx["backup_name"], backup.uuid_str)
 
-        # one RESTORE activity-log entry per event (started + completed)
-        self.assertEqual(core_log.record.call_count, 2)
-        record_account = core_log.record.call_args_list[1].args[0]
-        record_data = core_log.record.call_args_list[1].args[2]
-        self.assertEqual(record_account, self.account)
-        self.assertEqual(record_data["node_id"], node.id)
-        self.assertIn("completed", record_data["message"])
+        self.assertEqual(create_log.call_count, 2)
+        self.assertEqual(
+            create_log.call_args_list[1].kwargs["log_type"], CoreLog.Type.RESTORE
+        )
+        self.assertIn("completed", completed_ctx["message"])
 
     def test_failed_restore_emails_and_logs(self):
         node, backup, restore = self._restore()
@@ -580,22 +658,23 @@ class RestoreNotificationTests(RestoreBackendBase):
             "apps._tasks.integration.restore_website.restore_website",
             side_effect=RestoreError("boom"),
         ), \
-             mock.patch("apps._tasks.helper.tasks.send_postmark_email.delay") as delay, \
-             mock.patch("apps.console.log.models.CoreLog") as core_log:
+             mock.patch.object(CoreAccount, "create_log") as create_log:
             restore_tasks.restore_website_backup.apply(args=[node.id, backup.id, restore.id])
 
         restore.refresh_from_db()
         self.assertEqual(restore.status, CoreWebsiteRestore.Status.FAILED)
 
-        templates = [call.args[1] for call in delay.call_args_list]
+        templates = [
+            call.kwargs["email_template"] for call in create_log.call_args_list
+        ]
         self.assertEqual(templates, ["restore_started", "restore_failed"])
-        failed_ctx = delay.call_args_list[1].args[2]
+        failed_ctx = create_log.call_args_list[1].kwargs["data"]
         self.assertEqual(
             failed_ctx["error_details"],
             "The restore failed safely. Review its status and correlation ID in BackupSheep.",
         )
         self.assertNotIn("boom", failed_ctx["error_details"])
-        self.assertEqual(core_log.record.call_count, 2)
+        self.assertEqual(create_log.call_count, 2)
 
 
 class NotificationEmailApiTests(BaseTestCase):

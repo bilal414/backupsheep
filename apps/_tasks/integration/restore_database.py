@@ -1352,9 +1352,12 @@ def _sftp_write(ssh, remote_name, content, *, restore=None, backup=None):
         _sftp_channel(sftp, COMMAND_TIMEOUT)
         if restore is not None:
             _ensure_restore_fence(restore)
-        with sftp.open(remote_name, "w") as output:
+        with sftp.open(remote_name, "x") as output:
+            # Refuse a pre-positioned file or symlink, then restrict the empty
+            # inode before any credential bytes become observable. SFTP has no
+            # portable atomic create-with-mode operation.
+            sftp.chmod(remote_name, 0o600)
             output.write(content)
-        sftp.chmod(remote_name, 0o600)
         if restore is not None:
             _ensure_restore_fence(restore)
     finally:
@@ -3936,7 +3939,7 @@ def restore_database(backup, restore):
         # size, compression-ratio, and disk checks) happen before any DB client
         # is opened or any target is created.
         _ensure_restore_fence(restore)
-        fetch_backup_zip(stored_backup, local_zip)
+        fetch_backup_zip(stored_backup, local_zip, restore=restore)
         _ensure_restore_fence(restore)
         extract_backup_zip(local_zip, local_dir)
         _ensure_restore_fence(restore)

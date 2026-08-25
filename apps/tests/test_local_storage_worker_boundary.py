@@ -20,7 +20,10 @@ from apps._tasks.integration.storage.tasks import (
     resume_requested_storage_deletions,
     _validate_local_storage_id,
 )
-from apps._tasks.helper.tasks import resume_requested_node_deletions
+from apps._tasks.helper.tasks import (
+    _delete_requested_node,
+    resume_requested_local_node_deletions,
+)
 from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.node.views import CoreNodeView
 from apps.api.v1.storage.local.views import CoreStorageLocalView
@@ -123,12 +126,13 @@ class LocalStorageWorkerBoundaryTests(BaseTestCase):
     def test_node_delete_recovery_republishes_database_ids_only(self):
         node = factories.make_website_node(self.account, self.member)
         node.status = node.Status.DELETE_REQUESTED
-        node.save(update_fields=["status", "modified"])
+        node.flag_delete_node = True
+        node.save(update_fields=["status", "flag_delete_node", "modified"])
 
         with mock.patch(
-            "apps._tasks.helper.tasks.node_delete_requested.apply_async"
+            "apps._tasks.helper.tasks.delete_local_node_requested.apply_async"
         ) as publish:
-            self.assertEqual(resume_requested_node_deletions(), [node.pk])
+            self.assertEqual(resume_requested_local_node_deletions(), [node.pk])
 
         publish.assert_called_once_with(args=[node.pk])
 
@@ -188,12 +192,11 @@ class LocalStorageWorkerBoundaryTests(BaseTestCase):
         )
         node = backup.website.node
         node.status = node.Status.DELETE_REQUESTED
-        node.save(update_fields=["status", "modified"])
-
-        from apps._tasks.helper.tasks import node_delete_requested
+        node.flag_delete_node = True
+        node.save(update_fields=["status", "flag_delete_node", "modified"])
 
         self.assertEqual(
-            node_delete_requested(node_id=node.pk),
+            _delete_requested_node(node.pk, "local"),
             {"result": "protected", "node_id": node.pk},
         )
         node.refresh_from_db()
@@ -204,6 +207,42 @@ class LocalStorageWorkerBoundaryTests(BaseTestCase):
             backup.metadata["_deletion_request"]["state"],
             "deferred_protected",
         )
+        self.assertFalse(node.flag_delete_node)
+
+    def test_local_and_cloud_node_delete_lanes_cannot_adopt_each_other(self):
+        node = factories.make_website_node(self.account, self.member)
+        node.status = node.Status.DELETE_REQUESTED
+        node.flag_delete_node = True
+        node.save(update_fields=["status", "flag_delete_node", "modified"])
+
+        with self.assertRaisesRegex(RuntimeError, "local deletion lane"):
+            _delete_requested_node(node.pk, "cloud")
+
+    def test_api_prepares_schedule_cleanup_before_publishing_local_delete(self):
+        from django_celery_beat.models import PeriodicTask
+
+        node = factories.make_website_node(self.account, self.member)
+        schedule = factories.make_schedule(node, self.member)
+        schedule.schedule_create()
+        periodic_task_id = schedule.celery_periodic_task_id
+        view = CoreNodeView()
+        view.get_object = lambda: node
+        request = SimpleNamespace(user=self.user)
+
+        with mock.patch(
+            "apps.api.v1.node.views.delete_local_node_requested.apply_async"
+        ) as publish, mock.patch(
+            "apps.api.v1.node.views._log_activity"
+        ), self.captureOnCommitCallbacks(execute=True):
+            response = view.delete(request, pk=node.pk)
+
+        self.assertEqual(response.status_code, 202)
+        node.refresh_from_db()
+        self.assertEqual(node.status, node.Status.DELETE_REQUESTED)
+        self.assertTrue(node.flag_delete_node)
+        self.assertFalse(node.schedules.exists())
+        self.assertFalse(PeriodicTask.objects.filter(pk=periodic_task_id).exists())
+        publish.assert_called_once_with(args=[node.pk])
 
     def test_api_delete_is_durable_async_and_broker_payload_is_id_only(self):
         storage = _local_storage(self.account, self.member)

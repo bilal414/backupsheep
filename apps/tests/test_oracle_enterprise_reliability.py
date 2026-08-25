@@ -873,7 +873,15 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
         ) as soft_delete, mock.patch.object(
             helper_tasks.reconcile_oracle_backup_deletion, "apply_async"
         ) as schedule:
-            helper_tasks.clean_delete_failed_backups.apply()
+            helper_tasks.clean_delete_failed_backups(
+                SimpleNamespace(
+                    retry=mock.Mock(
+                        side_effect=AssertionError(
+                            "retired cleanup helper unexpectedly requested a retry"
+                        )
+                    )
+                )
+            )
 
         soft_delete.assert_not_called()
         schedule.assert_not_called()
@@ -883,7 +891,10 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
     def test_node_delete_routes_oracle_delete_in_progress_to_reconciler(self):
         backup = self._delete_pending_backup()
         self.node.status = CoreNode.Status.DELETE_REQUESTED
-        self.node.save(update_fields=["status", "modified"])
+        self.node.flag_delete_node = True
+        self.node.save(
+            update_fields=["status", "flag_delete_node", "modified"]
+        )
 
         class RetrySignal(Exception):
             pass
@@ -895,11 +906,11 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
         ) as schedule:
             with self.assertRaises(RetrySignal):
                 with mock.patch.object(
-                    helper_tasks.node_delete_requested,
+                    helper_tasks.delete_cloud_node_requested,
                     "retry",
                     side_effect=RetrySignal,
                 ):
-                    helper_tasks.node_delete_requested.run(self.node.id)
+                    helper_tasks.delete_cloud_node_requested.run(self.node.id)
 
         soft_delete.assert_not_called()
         schedule.assert_called_once_with(args=[backup.id], countdown=0)
@@ -1778,7 +1789,18 @@ class OracleDeleteCleanupRoutingConcurrencyTests(TransactionTestCase):
     def _run_task(task):
         close_old_connections()
         try:
-            task.apply()
+            if hasattr(task, "apply"):
+                task.apply()
+            else:
+                task(
+                    SimpleNamespace(
+                        retry=mock.Mock(
+                            side_effect=AssertionError(
+                                "retired cleanup helper unexpectedly requested a retry"
+                            )
+                        )
+                    )
+                )
         finally:
             close_old_connections()
 

@@ -18,12 +18,10 @@ from django.utils import timezone
 from sentry_sdk import capture_exception, capture_message
 
 from apps.console.account.models import CoreAccount
-from backupsheep.celery import app
-
 from apps.console.connection.models import CoreAuthBasecamp
-from apps.console.member.models import CoreMember
 from apps.console.notification.models import (
     CoreNotificationDelivery,
+    CoreNotificationLogEmail,
     CoreNotificationSlack,
     CoreNotificationTelegram,
 )
@@ -31,6 +29,44 @@ from apps.console.storage.models import CoreStorageType, CoreStorage, CoreStorag
     CoreStorageGoogleDrive
 from apps.console.utils.models import UtilBackup
 from slack_sdk import WebhookClient
+from backupsheep.celery_task_intent import notification_fanout_task_id
+from backupsheep.source_recovery_policy import (
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
+
+
+EMAIL_NOTIFICATION_CHANNEL = "email"
+REVIEWED_NOTIFICATION_EMAILS = {
+    "storage_validation_failed": "fail",
+    "unable_to_start_backup": "fail",
+    "error_during_backup": "fail",
+    "unable_to_upload_backup": "fail",
+    "backup_is_complete": "success",
+    "restore_started": "fail",
+    "restore_completed": "success",
+    "restore_failed": "fail",
+}
+
+
+def _reviewed_notification_request(data):
+    if (
+        not isinstance(data, dict)
+        or data.get("sender_name") != "BackupSheep - Notification Bot"
+    ):
+        raise ValueError("notification request has an invalid sender")
+    request = data.get("notification_request")
+    if request is None:
+        return None, None
+    if (
+        not isinstance(request, dict)
+        or set(request) != {"version", "event", "template"}
+        or request.get("version") != 1
+        or REVIEWED_NOTIFICATION_EMAILS.get(request.get("template"))
+        != request.get("event")
+    ):
+        raise ValueError("notification email request is not reviewed")
+    return request["event"], request["template"]
 
 
 @current_app.task(name="run_scheduled_backup", bind=True, ignore_result=True)
@@ -51,6 +87,7 @@ def run_scheduled_backup(self, schedule_id=None, occurrence_id=None):
     except CoreSchedule.DoesNotExist:
         return
 
+    require_source_backup_creation(schedule.node.connection.integration.code)
     request_id = str(
         occurrence_id
         or getattr(self.request, "id", "")
@@ -125,12 +162,13 @@ def resume_pending_backup_requests(self):
 
 
 _CLOUD_BACKUP_MODELS = None
-_LOCAL_BACKUP_MODELS = None
+_DATABASE_BACKUP_MODELS = None
+_FILES_BACKUP_MODELS = None
 
 
 def _recovery_backup_models():
     """Load every backup model lazily to avoid the node/model import cycle."""
-    global _CLOUD_BACKUP_MODELS, _LOCAL_BACKUP_MODELS
+    global _CLOUD_BACKUP_MODELS, _DATABASE_BACKUP_MODELS, _FILES_BACKUP_MODELS
     if _CLOUD_BACKUP_MODELS is None:
         from apps.console.backup.models import (
             CoreAWSBackup,
@@ -162,20 +200,24 @@ def _recovery_backup_models():
             CoreAWSRDSBackup,
             CoreVultrDatabaseBackup,
         )
-    if _LOCAL_BACKUP_MODELS is None:
+    if _DATABASE_BACKUP_MODELS is None or _FILES_BACKUP_MODELS is None:
         from apps.console.backup.models import (
             CoreBasecampBackup,
             CoreDatabaseBackup,
             CoreWebsiteBackup,
             CoreWordPressBackup,
         )
-        _LOCAL_BACKUP_MODELS = (
+        _DATABASE_BACKUP_MODELS = (CoreDatabaseBackup,)
+        _FILES_BACKUP_MODELS = (
             CoreWebsiteBackup,
-            CoreDatabaseBackup,
             CoreWordPressBackup,
             CoreBasecampBackup,
         )
-    return _CLOUD_BACKUP_MODELS, _LOCAL_BACKUP_MODELS
+    return (
+        _CLOUD_BACKUP_MODELS,
+        _DATABASE_BACKUP_MODELS,
+        _FILES_BACKUP_MODELS,
+    )
 
 
 def _backup_control(backup):
@@ -1040,9 +1082,8 @@ def _recoverable_oracle_delete_queryset(*, cutoff, now, batch_size):
     )
 
 
-@current_app.task(name="resume_in_progress_backups", bind=True, ignore_result=True)
-def resume_in_progress_backups(self):
-    """Requeue work left behind by a worker or server restart.
+def _resume_in_progress_backup_models(models, *, cloud):
+    """Requeue only the models owned by one database/worker lane.
 
     RabbitMQ late acknowledgements handle ordinary worker loss. This sweep is the
     durable fallback for messages lost during broker migration, old ETA pollers, and
@@ -1056,9 +1097,7 @@ def resume_in_progress_backups(self):
     batch_size = int(getattr(settings, "BACKUP_RECOVERY_BATCH_SIZE", 100))
     cutoff = timezone.now() - datetime.timedelta(seconds=stale_seconds)
     recovery_now = timezone.now()
-    cloud_models, local_models = _recovery_backup_models()
-
-    for model in cloud_models + local_models:
+    for model in models:
         backups = _recoverable_backup_queryset(
             model,
             cutoff=cutoff,
@@ -1072,6 +1111,13 @@ def resume_in_progress_backups(self):
                     CoreNode.Status.DELETE_REQUESTED,
                     CoreNode.Status.PAUSED,
                 ):
+                    continue
+                if not source_backup_creation_available(
+                    node.connection.integration.code
+                ):
+                    # Preserve the active historical row for operator inspection;
+                    # do not lease or republish it under an incomplete recovery
+                    # policy.
                     continue
 
                 # Managed database backups use a provider-owned metadata record
@@ -1097,7 +1143,7 @@ def resume_in_progress_backups(self):
                         )
                     continue
 
-                if model in cloud_models and _backup_has_provider_reference(backup):
+                if cloud and _backup_has_provider_reference(backup):
                     recovery_id = f"recover-poll-{model.__name__}-{backup.pk}"
                     claimed = _claim_cloud_poll(
                         backup,
@@ -1128,7 +1174,7 @@ def resume_in_progress_backups(self):
                 # the original create lease is still active; if the worker died,
                 # the lease expiry is the safe hand-off point.
                 if (
-                    model in cloud_models
+                    cloud
                     and not _backup_has_provider_reference(backup)
                     and _backup_lease_active(backup, "create")
                 ):
@@ -1139,7 +1185,7 @@ def resume_in_progress_backups(self):
                 # is healthy would create a second chord whose callback could run
                 # before the first upload finishes.
                 if (
-                    model in local_models
+                    not cloud
                     and backup.status == UtilBackup.Status.UPLOAD_IN_PROGRESS
                     and _local_upload_is_active(backup)
                 ):
@@ -1170,6 +1216,34 @@ def resume_in_progress_backups(self):
                 # One malformed/removed row must not prevent recovery of the rest of
                 # the provider catalog. The next sweep can retry this row.
                 capture_exception(error)
+
+
+@current_app.task(name="resume_in_progress_backups", bind=True, ignore_result=True)
+def resume_in_progress_backups(self):
+    """Recover only cloud-provider backups in the cloud lane."""
+
+    cloud_models, _database_models, _files_models = _recovery_backup_models()
+    return _resume_in_progress_backup_models(cloud_models, cloud=True)
+
+
+@current_app.task(
+    name="resume_in_progress_database_backups", bind=True, ignore_result=True
+)
+def resume_in_progress_database_backups(self):
+    """Recover database dumps without granting their rows to cloud/files."""
+
+    _cloud_models, database_models, _files_models = _recovery_backup_models()
+    return _resume_in_progress_backup_models(database_models, cloud=False)
+
+
+@current_app.task(
+    name="resume_in_progress_files_backups", bind=True, ignore_result=True
+)
+def resume_in_progress_files_backups(self):
+    """Recover website/WordPress/Basecamp dumps only in the files lane."""
+
+    _cloud_models, _database_models, files_models = _recovery_backup_models()
+    return _resume_in_progress_backup_models(files_models, cloud=False)
 
 
 @current_app.task(
@@ -1261,13 +1335,6 @@ def reconcile_oracle_backup_deletions(self):
             capture_exception(error)
 
 
-@current_app.task(
-    name="digitalocean_refresh_tokens",
-    track_started=True,
-    default_retry_delay=15 * 60,
-    max_retries=16,
-    bind=True,
-)
 def digitalocean_refresh_tokens(self):
     try:
         from datetime import datetime
@@ -1304,8 +1371,8 @@ def delete_from_disk(self, backup_uuid, path_type):
         "restore" -> "both" plus the exact restore generation's local credential
                      files (my_<uuid>.cnf and ssh_<uuid>)
 
-    The run log (<uuid>.log) is intentionally kept on disk and pruned later by
-    delete_old_logs; it is never removed here.
+    The storage-lane run log (<uuid>.log) is intentionally kept on disk and pruned
+    later by delete_old_storage_logs; it is never removed here.
 
     Uses plain Python file operations -- no shell, no sudo, no hardcoded host paths --
     and is idempotent: a missing file is success, not an error. Only unexpected failures
@@ -1377,11 +1444,11 @@ def delete_from_disk(self, backup_uuid, path_type):
     ignore_result=True,
 )
 def reset_incremental_cache(self, node_id):
-    """Delete one node's local mirror cache from the storage worker boundary.
+    """Delete one node's local mirror cache from the files worker boundary.
 
-    The web container mounts the shared backup work volume read-only. Moving this
-    mutation to the storage queue prevents a compromised HTTP process from altering
-    staged archives, manifests, SSH trust material, or another worker's lock files.
+    The web container has no work-volume mount. The files lane is the only role that
+    owns the website mirror and its lock, so deletion cannot race through a second
+    container or require a shared plaintext staging volume.
     """
 
     try:
@@ -1393,7 +1460,14 @@ def reset_incremental_cache(self, node_id):
 
     from apps.console.node.models import CoreNode
 
-    node = CoreNode.objects.filter(pk=canonical_id).only("id").first()
+    node = (
+        CoreNode.objects.filter(
+            pk=canonical_id,
+            type=CoreNode.Type.WEBSITE,
+        )
+        .only("id")
+        .first()
+    )
     if node is None:
         return
     cache_key = node.uuid_str
@@ -1450,15 +1524,9 @@ def reset_incremental_cache(self, node_id):
             os.close(cache_root_fd)
 
 
-@current_app.task(name="delete_old_logs", bind=True, ignore_result=True)
-def delete_old_logs(self, max_age_days=None):
-    """Prune backup run logs from local _storage once they pass the retention window.
+def _prune_old_run_logs(max_age_days=None):
+    """Prune run-log artefacts from the caller's private source-lane workdir."""
 
-    Self-hosted builds keep run logs (and the .files/.md5 artefacts) on the container
-    instead of uploading them anywhere, so this task is what bounds their disk usage.
-    It is scheduled daily by Celery beat (see CELERY_BEAT_SCHEDULE). max_age_days
-    defaults to settings.LOG_RETENTION_DAYS (30).
-    """
     if max_age_days is None:
         max_age_days = getattr(settings, "LOG_RETENTION_DAYS", 30)
     storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
@@ -1480,13 +1548,34 @@ def delete_old_logs(self, max_age_days=None):
         capture_exception(e)
 
 
+@current_app.task(name="delete_old_logs", bind=True, ignore_result=True)
+def delete_old_logs(self, max_age_days=None):
+    """Prune website/WordPress/Basecamp run logs in the files private workdir."""
+
+    return _prune_old_run_logs(max_age_days)
+
+
+@current_app.task(name="delete_old_database_logs", bind=True, ignore_result=True)
+def delete_old_database_logs(self, max_age_days=None):
+    """Prune database run logs in the database private workdir."""
+
+    return _prune_old_run_logs(max_age_days)
+
+
+@current_app.task(name="delete_old_storage_logs", bind=True, ignore_result=True)
+def delete_old_storage_logs(self, max_age_days=None):
+    """Prune destination-upload run logs in the storage private workdir."""
+
+    return _prune_old_run_logs(max_age_days)
+
+
 @current_app.task(name="delete_old_db_logs", bind=True, ignore_result=True)
 def delete_old_db_logs(self):
     """Prune old CoreLog rows from the database.
 
-    DB counterpart of delete_old_logs (which prunes on-disk run logs): delegates
-    to CoreLog.prune(), which deletes rows older than settings.LOG_RETENTION_DAYS.
-    Scheduled daily by Celery beat (see CELERY_BEAT_SCHEDULE).
+    The three source/storage maintenance tasks prune their private on-disk run logs;
+    this logs-lane task separately delegates to CoreLog.prune(), which deletes rows
+    older than settings.LOG_RETENTION_DAYS. Scheduled daily by Celery beat.
     """
     from apps.console.log.models import CoreLog
 
@@ -1656,20 +1745,6 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
 
 
 @current_app.task(
-    name="terminate_backup",
-    track_started=True,
-    default_retry_delay=15 * 60,
-    max_retries=16,
-    bind=True,
-)
-def terminate_backup(self, data):
-    try:
-        app.control.revoke(data["celery_task_id"], terminate=True)
-    except Exception as e:
-        raise self.retry()
-
-
-@current_app.task(
     name="send_log_to_db",
     bind=True,
     ignore_result=True,
@@ -1677,52 +1752,23 @@ def terminate_backup(self, data):
     send_events=False,
 )
 def send_log_to_db(self, log_reference):
-    """Create durable per-channel deliveries for a persisted log row.
-
-    New callers send only an integer row id after commit. The dict branch is a
-    compatibility path for messages queued by older releases during an upgrade;
-    it persists that historical payload once. Every message published from this
-    point onward contains only an opaque delivery-row id.
-    """
+    """Expand one durable log request inside the identity-bearing logs lane."""
     from apps.console.log.models import CoreLog
 
     try:
-        if isinstance(log_reference, dict):
-            data = dict(log_reference)
-            if not data.get("account_id"):
-                return
-            log = CoreLog.objects.create(
-                account_id=data.get("account_id"), data=data
-            )
-        else:
-            try:
-                log_id = int(log_reference)
-            except (TypeError, ValueError):
-                return
-            if log_id <= 0 or str(log_id) != str(log_reference):
-                return
-            log = CoreLog.objects.select_related("account").filter(pk=log_id).first()
-            if log is None:
-                return
-            data = log.data if isinstance(log.data, dict) else {}
+        try:
+            log_id = int(log_reference)
+        except (TypeError, ValueError):
+            return
+        if log_id <= 0 or str(log_id) != str(log_reference):
+            return
+        log = CoreLog.objects.select_related("account").filter(pk=log_id).first()
+        if log is None:
+            return
+        data = log.data if isinstance(log.data, dict) else {}
 
         if data.get("sender_name") != "BackupSheep - Notification Bot":
             return
-
-        channel_references = [
-            *(
-                (CoreNotificationDelivery.ChannelType.SLACK, channel_id)
-                for channel_id in log.account.notification_slack.values_list(
-                    "id", flat=True
-                )
-            ),
-            *(
-                (CoreNotificationDelivery.ChannelType.TELEGRAM, channel_id)
-                for channel_id in log.account.notification_telegram.values_list(
-                    "id", flat=True
-                )
-            ),
-        ]
         delivery_ids = []
         now = timezone.now()
         with transaction.atomic():
@@ -1735,6 +1781,44 @@ def send_log_to_db(self, log_reference):
             )
             if current_log is None:
                 return
+            current_data = (
+                dict(current_log.data)
+                if isinstance(current_log.data, dict)
+                else {}
+            )
+            if current_data.get("notification_fanout_status") == "complete":
+                return
+            email_recipients = []
+            try:
+                event, _template = _reviewed_notification_request(current_data)
+            except ValueError:
+                return
+            if event is not None:
+                email_recipients = current_log.account.get_notification_recipients(
+                    event
+                )
+
+            # Credential and member tables are intentionally queried only here,
+            # by the logs lane. The source publisher never sees channel secrets or
+            # recipient identities and RabbitMQ receives only integer row ids.
+            channel_references = [
+                *(
+                    (CoreNotificationDelivery.ChannelType.SLACK, channel_id)
+                    for channel_id in current_log.account.notification_slack.values_list(
+                        "id", flat=True
+                    )
+                ),
+                *(
+                    (CoreNotificationDelivery.ChannelType.TELEGRAM, channel_id)
+                    for channel_id in current_log.account.notification_telegram.values_list(
+                        "id", flat=True
+                    )
+                ),
+                *(
+                    (EMAIL_NOTIFICATION_CHANNEL, member.pk)
+                    for member, _email in email_recipients
+                ),
+            ]
             for channel_type, channel_id in channel_references:
                 delivery, _created = CoreNotificationDelivery.objects.get_or_create(
                     log_id=current_log.pk,
@@ -1757,6 +1841,10 @@ def send_log_to_db(self, log_reference):
                     continue
                 delivery_ids.append(delivery.pk)
 
+            current_data["notification_fanout_status"] = "complete"
+            current_log.data = current_data
+            current_log.save(update_fields=["data", "modified"])
+
             if delivery_ids:
                 transaction.on_commit(
                     lambda ids=tuple(delivery_ids): _publish_notification_deliveries(
@@ -1764,11 +1852,63 @@ def send_log_to_db(self, log_reference):
                     )
                 )
     except Exception:
-        # The legacy input can contain notification plaintext, and model/query
-        # frames can contain encrypted provider credentials. Do not hand this
+        # Model/query frames can contain encrypted provider credentials. Do not hand this
         # exception to an observability SDK or retry the original payload. A
-        # successfully-created delivery is independently recovered by Beat.
+        # pending log or successfully-created delivery is independently recovered.
         return
+
+
+@current_app.task(
+    name="recover_notification_fanouts",
+    bind=True,
+    ignore_result=True,
+    acks_late=False,
+    send_events=False,
+)
+def recover_notification_fanouts(self):
+    """Republish pending log fanouts after a source-to-broker publication gap."""
+
+    from apps.console.log.models import CoreLog
+
+    try:
+        batch_size = max(
+            1,
+            min(
+                1000,
+                int(
+                    getattr(
+                        settings,
+                        "NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE",
+                        100,
+                    )
+                ),
+            ),
+        )
+    except (TypeError, ValueError):
+        batch_size = 100
+    candidates = list(
+        CoreLog.objects.filter(data__notification_fanout_status="pending")
+        .order_by("created", "pk")
+        .only("pk", "data")[:batch_size]
+    )
+    for log in candidates:
+        try:
+            _reviewed_notification_request(log.data)
+        except ValueError:
+            data = dict(log.data or {}) if isinstance(log.data, dict) else {}
+            data["notification_fanout_status"] = "rejected"
+            CoreLog.objects.filter(
+                pk=log.pk,
+                data__notification_fanout_status="pending",
+            ).update(data=data)
+            continue
+        try:
+            send_log_to_db.apply_async(
+                args=[log.pk],
+                task_id=notification_fanout_task_id(log.pk, log.data),
+            )
+        except Exception:
+            continue
 
 
 def _publish_notification_deliveries(delivery_ids):
@@ -1962,6 +2102,66 @@ def deliver_log_notification(self, delivery_reference):
     if delivery is None:
         return
 
+    if delivery.channel_type == EMAIL_NOTIFICATION_CHANNEL:
+        try:
+            event, template = _reviewed_notification_request(delivery.log.data)
+        except ValueError:
+            _finish_notification_delivery(
+                delivery_id,
+                lease_token,
+                skipped=True,
+                outcome_code="email_request_invalid",
+            )
+            return
+        if event is None or template is None:
+            _finish_notification_delivery(
+                delivery_id,
+                lease_token,
+                skipped=True,
+                outcome_code="email_request_missing",
+            )
+            return
+        eligible = {
+            member.pk: (member, email)
+            for member, email in delivery.log.account.get_notification_recipients(
+                event
+            )
+        }
+        recipient = eligible.get(delivery.channel_id)
+        if recipient is None:
+            _finish_notification_delivery(
+                delivery_id,
+                lease_token,
+                skipped=True,
+                outcome_code="email_recipient_ineligible",
+            )
+            return
+        member, email = recipient
+        context = dict(delivery.log.data)
+        context.pop("notification_request", None)
+        context.pop("notification_fanout_status", None)
+        try:
+            email_notification = CoreNotificationLogEmail.objects.create(
+                member=member,
+                email=email,
+                template=template,
+                context=context,
+            )
+            email_notification.send()
+        except Exception:
+            sent = False
+            outcome_code = "provider_exception"
+        else:
+            sent = True
+            outcome_code = "sent"
+        _finish_notification_delivery(
+            delivery_id,
+            lease_token,
+            sent=sent,
+            outcome_code=outcome_code,
+        )
+        return
+
     channel_model = {
         CoreNotificationDelivery.ChannelType.SLACK: CoreNotificationSlack,
         CoreNotificationDelivery.ChannelType.TELEGRAM: CoreNotificationTelegram,
@@ -2070,11 +2270,6 @@ def recover_notification_deliveries(self):
     _publish_notification_deliveries(delivery_ids)
 
 
-@current_app.task(
-    name="send_log_to_slack",
-    bind=True,
-    ignore_result=True,
-)
 def send_log_to_slack(self, url, message):
     """Drain a pre-outbox plaintext task once, without republishing it."""
 
@@ -2090,11 +2285,6 @@ def send_log_to_slack(self, url, message):
         return False
 
 
-@current_app.task(
-    name="send_log_to_telegram",
-    bind=True,
-    ignore_result=True,
-)
 def send_log_to_telegram(self, chat_id, message):
     """Drain only messages queued by older releases.
 
@@ -2119,13 +2309,6 @@ def send_log_to_telegram(self, chat_id, message):
         return False
 
 
-@current_app.task(
-    name="account_delete",
-    track_started=True,
-    default_retry_delay=15 * 60,
-    max_retries=16,
-    bind=True,
-)
 def account_delete(self):
     try:
         from apps.console.node.models import CoreSchedule, CoreNode
@@ -2142,7 +2325,7 @@ def account_delete(self):
             """
             for node in CoreNode.objects.filter(connection__account=account).order_by("-created"):
                 node.status = CoreNode.Status.DELETE_REQUESTED
-                node.save()
+                node.save(update_fields=["status", "modified"])
                 node_delete_requested(node_id=node.id)
 
             """
@@ -2156,53 +2339,9 @@ def account_delete(self):
         raise self.retry()
 
 
-@current_app.task(
-    name="send_postmark_email",
-    bind=True,
-    ignore_result=True,
-)
-def send_postmark_email(self, to_email, template, context):
-    """Generic notification email task: log + render + send ANY email template.
-
-    Replaces the stale Postmark-only version, which filtered on a non-existent
-    CoreNotificationEmail.account FK and only ever sent password_reset emails.
-    Despite the historical task name (kept for backwards compatibility with
-    existing callers/queues), delivery goes through
-    CoreNotificationLogEmail.send(), which honors the configured email provider
-    (postmark / mailgun / ses). The log row needs the member FK, so emails to
-    an address with no matching member are skipped with a print-log.
-    """
-    try:
-        from apps.console.notification.models import CoreNotificationLogEmail
-
-        member = CoreMember.objects.filter(user__email=to_email).first()
-        if member is None:
-            print(f"no member found for email, skipping {template} email: {to_email}")
-            return
-
-        email_notification = CoreNotificationLogEmail()
-        email_notification.member = member
-        email_notification.email = to_email
-        email_notification.template = template
-        email_notification.context = context
-        email_notification.save()
-
-        # Now Send email (works for any template, not just password_reset)
-        email_notification.send()
-    except Exception as e:
-        capture_exception(e)
-
-
 """
 NO NEED TO RUN IT ON REGULAR BASIS ANYMORE. 
 """
-@current_app.task(
-    name="digitalocean_clean_volume_snapshots",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def digitalocean_clean_volume_snapshots(self):
     from apps.console.node.models import CoreNode
     from apps.console.backup.models import CoreDigitalOceanBackup
@@ -2228,108 +2367,245 @@ def digitalocean_clean_volume_snapshots(self):
 """
 RUNS ON ENDPOINT NODE
 """
+LOCAL_NODE_INTEGRATIONS = frozenset(
+    {"basecamp", "database", "website", "wordpress"}
+)
+
+
+def _node_deletion_lane(node):
+    code = str(node.connection.integration.code or "").lower()
+    return "local" if code in LOCAL_NODE_INTEGRATIONS else "cloud"
+
+
+def _requested_node_for_lane(node_id, expected_lane):
+    """Return one durably prepared node without crossing its worker boundary."""
+
+    from apps.console.node.models import CoreNode
+
+    node = (
+        CoreNode.objects.select_related("connection__integration")
+        .filter(
+            id=node_id,
+            status=CoreNode.Status.DELETE_REQUESTED,
+            flag_delete_node=True,
+        )
+        .first()
+    )
+    if node is None:
+        return None
+    actual_lane = _node_deletion_lane(node)
+    if actual_lane != expected_lane:
+        raise RuntimeError(
+            f"Node {node_id} belongs to the {actual_lane} deletion lane, not "
+            f"{expected_lane}."
+        )
+    # Only the web control plane may mutate django-celery-beat.  A worker must
+    # never erase a node while a schedule or PeriodicTask relationship remains.
+    if node.schedules.exists():
+        raise RuntimeError(
+            f"Node {node_id} deletion was not prepared by the control plane."
+        )
+    return node
+
+
+def _delete_requested_node(node_id, expected_lane):
+    """Execute provider/local cleanup under one explicit database + filesystem lane."""
+
+    from apps.console.node.models import CoreNode
+
+    node = _requested_node_for_lane(node_id, expected_lane)
+    if node is None:
+        return {"result": "not_requested", "node_id": node_id}
+
+    node_type_object = node._integration_object()
+    query = ~Q(status=UtilBackup.Status.DELETE_COMPLETED)
+    if node_type_object:
+        pending_backups = node_type_object.backups.filter(query).order_by("created")
+        for backup in pending_backups:
+            if (
+                backup.status == UtilBackup.Status.DELETE_IN_PROGRESS
+                and node.connection.integration.code == "oracle"
+            ):
+                # Oracle deletion is owned by the durable reconciler lease.
+                backup._enqueue_delete_reconciliation()
+                continue
+            deleted = backup.soft_delete()
+            if deleted is False:
+                backup.refresh_from_db()
+                deletion_request = dict(
+                    (backup.metadata or {}).get("_deletion_request") or {}
+                )
+                if deletion_request.get("state") == "deferred_protected":
+                    # Protection cancels the deletion phase visibly and prevents
+                    # a replayed child from adopting the old intent.
+                    node.status = CoreNode.Status.PAUSED
+                    node.flag_delete_node = False
+                    node.save(
+                        update_fields=["status", "flag_delete_node", "modified"]
+                    )
+                    return {"result": "protected", "node_id": node.pk}
+
+        if node_type_object.backups.filter(query).exists():
+            raise RuntimeError(
+                f"Node {node_id} still has backups whose remote deletion has "
+                "not been confirmed."
+            )
+
+    if expected_lane == "local" and getattr(node, "website", None) is not None:
+        # Only storage owns the shared local-artifact volume. Cloud deletion never
+        # resolves or mutates a host path.
+        storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+        cache_base = os.path.realpath(
+            os.path.join(storage_dir, "website_cache", node.uuid_str)
+        )
+        if (
+            cache_base != storage_dir
+            and os.path.commonpath([storage_dir, cache_base]) == storage_dir
+        ):
+            shutil.rmtree(cache_base, ignore_errors=True)
+            for suffix in (".meta.json", ".lock"):
+                try:
+                    os.remove(cache_base + suffix)
+                except FileNotFoundError:
+                    pass
+
+    # Recheck the durable phase under a row lock immediately before the cascade.
+    # A schedule created by a racing request or an unconfirmed backup blocks delete.
+    with transaction.atomic():
+        locked = (
+            CoreNode.objects.select_for_update()
+            .select_related("connection__integration")
+            .filter(
+                id=node_id,
+                status=CoreNode.Status.DELETE_REQUESTED,
+                flag_delete_node=True,
+            )
+            .first()
+        )
+        if locked is None:
+            return {"result": "phase_changed", "node_id": node_id}
+        if _node_deletion_lane(locked) != expected_lane or locked.schedules.exists():
+            raise RuntimeError(f"Node {node_id} deletion phase changed.")
+        locked_type_object = locked._integration_object()
+        if locked_type_object and locked_type_object.backups.filter(query).exists():
+            raise RuntimeError(
+                f"Node {node_id} acquired an unfinished backup during deletion."
+            )
+        locked.delete()
+    return {"result": "deleted", "node_id": node_id}
+
+
 @current_app.task(
-    name="node_delete_requested",
+    name="delete_local_node_requested",
     track_started=True,
     default_retry_delay=1 * 60,
     max_retries=16,
     bind=True,
 )
+def delete_local_node_requested(self, node_id):
+    try:
+        return _delete_requested_node(node_id, "local")
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry()
+
+
+@current_app.task(
+    name="delete_cloud_node_requested",
+    track_started=True,
+    default_retry_delay=1 * 60,
+    max_retries=16,
+    bind=True,
+)
+def delete_cloud_node_requested(self, node_id):
+    try:
+        return _delete_requested_node(node_id, "cloud")
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry()
+
+
+@current_app.task(
+    name="node_delete_requested",
+    default_retry_delay=1 * 60,
+    max_retries=16,
+    bind=True,
+    ignore_result=True,
+)
 def node_delete_requested(self, node_id):
-    from apps.console.node.models import CoreNode, CoreSchedule
+    """Compatibility dispatcher for durable requests from older releases."""
+
+    from apps.console.node.models import CoreNode
 
     try:
-        if node_id:
-            for node in CoreNode.objects.filter(status=CoreNode.Status.DELETE_REQUESTED, id=node_id).order_by(
-                "-created"
-            ):
-                node_type_object = node._integration_object()
-                if node_type_object:
-
-                    query = ~Q(status=UtilBackup.Status.DELETE_COMPLETED)
-                    pending_backups = node_type_object.backups.filter(query).order_by("created")
-                    for backup in pending_backups:
-                        if (
-                            backup.status == UtilBackup.Status.DELETE_IN_PROGRESS
-                            and node.connection.integration.code == "oracle"
-                        ):
-                            # Oracle deletion is owned by the durable reconciler
-                            # lease. Node/connection cleanup must not perform an
-                            # unfenced provider read or terminal status write.
-                            backup._enqueue_delete_reconciliation()
-                            continue
-                        deleted = backup.soft_delete()
-                        if deleted is False:
-                            backup.refresh_from_db()
-                            deletion_request = dict(
-                                (backup.metadata or {}).get("_deletion_request") or {}
-                            )
-                            if deletion_request.get("state") == "deferred_protected":
-                                # The backup parent is visible again and must remain
-                                # restorable. Stop the node sweep too: PAUSED is a
-                                # visible, fail-closed outcome that avoids creating
-                                # new backups until the operator resolves protection.
-                                node.status = CoreNode.Status.PAUSED
-                                node.save(update_fields=["status", "modified"])
-                                return {"result": "protected", "node_id": node.pk}
-
-                    # A node row owns the backup catalog.  Never cascade-delete it
-                    # while a provider still has an unconfirmed backup: doing so
-                    # destroys the only local pointer available for a later retry.
-                    if node_type_object.backups.filter(query).exists():
-                        raise RuntimeError(
-                            f"Node {node_id} still has backups whose remote deletion "
-                            "has not been confirmed."
-                        )
-
-                    for schedule in CoreSchedule.objects.filter(node=node):
-                        schedule.schedule_delete()
-
-                    for schedule in node.schedules.all():
-                        schedule.delete()
-
-                # Remove the per-node website mirror cache used by incremental
-                # backups, confined to _storage like delete_from_disk.
-                if getattr(node, "website", None) is not None:
-                    storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
-                    cache_base = os.path.realpath(os.path.join(storage_dir, "website_cache", node.uuid_str))
-                    if cache_base != storage_dir and os.path.commonpath([storage_dir, cache_base]) == storage_dir:
-                        shutil.rmtree(cache_base, ignore_errors=True)
-                        for suffix in (".meta.json", ".lock"):
-                            try:
-                                os.remove(cache_base + suffix)
-                            except FileNotFoundError:
-                                pass
-
-                node.delete()
-    except Exception as e:
-        capture_exception(e)
+        node = (
+            CoreNode.objects.select_related("connection__integration")
+            .filter(
+                id=node_id,
+                status=CoreNode.Status.DELETE_REQUESTED,
+                flag_delete_node=True,
+            )
+            .first()
+        )
+        if node is None:
+            return {"result": "not_requested", "node_id": node_id}
+        if node.schedules.exists():
+            raise RuntimeError(
+                f"Node {node_id} deletion was not prepared by the control plane."
+            )
+        lane = _node_deletion_lane(node)
+        task = (
+            delete_local_node_requested
+            if lane == "local"
+            else delete_cloud_node_requested
+        )
+        task.apply_async(args=[node.pk])
+        return {"result": "dispatched", "lane": lane, "node_id": node.pk}
+    except Exception as error:
+        capture_exception(error)
         raise self.retry()
 
 
 @current_app.task(name="resume_requested_node_deletions", ignore_result=True)
 def resume_requested_node_deletions():
-    """Republish durable node deletion intents using database ids only."""
+    """Republish cloud deletion intents visible to the cloud database lane."""
 
     from apps.console.node.models import CoreNode
 
     node_ids = list(
-        CoreNode.objects.filter(status=CoreNode.Status.DELETE_REQUESTED)
+        CoreNode.objects.filter(
+            status=CoreNode.Status.DELETE_REQUESTED,
+            flag_delete_node=True,
+        )
+        .exclude(connection__integration__code__in=LOCAL_NODE_INTEGRATIONS)
         .order_by("pk")
         .values_list("pk", flat=True)[:100]
     )
     for node_id in node_ids:
-        node_delete_requested.apply_async(args=[node_id])
+        delete_cloud_node_requested.apply_async(args=[node_id])
     return node_ids
 
 
-@current_app.task(
-    name="clean_delete_failed_backups",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
+@current_app.task(name="resume_requested_local_node_deletions", ignore_result=True)
+def resume_requested_local_node_deletions():
+    """Republish local deletion intents visible only to the storage DB lane."""
+
+    from apps.console.node.models import CoreNode
+
+    node_ids = list(
+        CoreNode.objects.filter(
+            status=CoreNode.Status.DELETE_REQUESTED,
+            flag_delete_node=True,
+            connection__integration__code__in=LOCAL_NODE_INTEGRATIONS,
+        )
+        .order_by("pk")
+        .values_list("pk", flat=True)[:100]
+    )
+    for node_id in node_ids:
+        delete_local_node_requested.apply_async(args=[node_id])
+    return node_ids
+
+
 def clean_delete_failed_backups(self):
     from apps.console.node.models import CoreNode, CoreSchedule
 
@@ -2366,15 +2642,9 @@ def clean_delete_failed_backups(self):
         raise self.retry()
 
 
-@current_app.task(
-    name="delete_requested_integrations",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def delete_requested_integrations(self):
     from apps.console.node.models import CoreConnection
+    from apps.console.connection.managed_ssh import acquire_managed_ssh_mutation_lock
 
     try:
         for connection in CoreConnection.objects.filter(status=CoreConnection.Status.DELETE_REQUESTED).order_by(
@@ -2382,20 +2652,36 @@ def delete_requested_integrations(self):
         ):
             for node in connection.nodes.filter():
                 node_delete_requested(node_id=node.id)
-            connection.delete()
+            with transaction.atomic():
+                # This legacy helper is not scheduled by the stock deployment,
+                # but any future caller must still obey the managed-SSH delete
+                # order instead of cascading from a row-first transaction.
+                acquire_managed_ssh_mutation_lock()
+                identity = (
+                    CoreConnection.objects.filter(
+                        pk=connection.pk,
+                        status=CoreConnection.Status.DELETE_REQUESTED,
+                    )
+                    .values("account_id")
+                    .first()
+                )
+                if identity is None:
+                    continue
+                account = CoreAccount.objects.select_for_update().only("pk").get(
+                    pk=identity["account_id"]
+                )
+                locked_connection = CoreConnection.objects.select_for_update().get(
+                    pk=connection.pk,
+                    account=account,
+                    status=CoreConnection.Status.DELETE_REQUESTED,
+                )
+                locked_connection.delete()
     except Exception as e:
         capture_exception(e)
         raise self.retry()
 
 
 # Todo: Add some checks here
-@current_app.task(
-    name="delete_requested_storages",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def delete_requested_storages(self):
     from apps._tasks.integration.storage.tasks import (
         _delete_storage_requested_id,
@@ -2411,13 +2697,6 @@ def delete_requested_storages(self):
         raise self.retry()
 
 
-@current_app.task(
-    name="calc_stats_storage_insight",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def calc_stats_storage_insight(self):
     try:
         for account in CoreAccount.objects.filter().order_by("-created"):
@@ -2456,13 +2735,6 @@ def calc_stats_storage_insight(self):
         raise self.retry()
 
 
-@current_app.task(
-    name="token_refresh_all",
-    track_started=True,
-    default_retry_delay=15 * 60,
-    max_retries=16,
-    bind=True,
-)
 def token_refresh_all(self):
     from datetime import datetime
 

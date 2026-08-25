@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import hmac
+import importlib
 import os
 import resource
 import stat
@@ -18,13 +20,42 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from kombu import Connection
 
+from backupsheep.artifact_crypto import AWSKMSConfig, AWSKMSKeyProvider
+
+from backupsheep.celery_security import (
+    CONSUMER_QUEUES,
+    LANES,
+    _load_private_key,
+    _load_public_keys,
+    _security_configuration,
+)
+from backupsheep.celery_task_manifest import (
+    TaskManifestError,
+    validate_configured_routes,
+    validate_registered_tasks,
+)
+from backupsheep.database_identity import (
+    ProvisioningError,
+    assert_database_lane_contract,
+)
+from backupsheep.database_lane_policy import LANES as DATABASE_LANES
+
 
 EXPECTED_UID = 10001
+EXPECTED_UID_BY_ROLE = {
+    "web": 10001,
+    "database": 10002,
+    "files": 10003,
+    "storage": 10004,
+    "logs": 10005,
+    "beat": 10006,
+    "migration": 10007,
+    "cloud": 10008,
+}
 REQUIRED_SECRET_FILE_ENV = {
     "DJANGO_SECRET_KEY": "/run/secrets/django_secret_key",
-    "DB_PASSWORD": "/run/secrets/db_password",
-    "RABBITMQ_PASSWORD": "/run/secrets/rabbitmq_password",
 }
+CELERY_PUBLIC_KEYS_FILE = "/run/secrets/celery_trusted_public_keys"
 FORBIDDEN_CREDENTIAL_URL_ENV = ("DATABASE_URL", "CELERY_BROKER_URL")
 
 
@@ -34,6 +65,8 @@ def _assert_stock_configuration_sources(*, environment, runtime_settings, secret
         errors.append("DJANGO_SETTINGS_MODULE does not select backupsheep.settings")
     if environment.get("BACKUPSHEEP_SECRETS"):
         errors.append("BACKUPSHEEP_SECRETS replaces the reviewed stock configuration")
+    if environment.get("BACKUPSHEEP_EGRESS_POLICY_GENERATION") != "2":
+        errors.append("fail-closed egress policy generation 2 is not active")
 
     expected_django = secret_values.get("DJANGO_SECRET_KEY", "")
     expected_database = secret_values.get("DB_PASSWORD", "")
@@ -57,9 +90,33 @@ def _assert_stock_configuration_sources(*, environment, runtime_settings, secret
         raise CommandError("Docker security preflight failed: " + "; ".join(errors))
 
 
-def _read_stock_secret_values():
+def _rabbitmq_secret_path(environment):
+    lane = str(environment.get("BACKUPSHEEP_CELERY_LANE") or "")
+    if lane not in (*LANES, "preflight"):
+        raise CommandError("Docker security preflight failed: Celery lane is invalid")
+    return f"/run/secrets/rabbitmq_{lane}_password"
+
+
+def _required_secret_file_env(environment):
+    return {
+        **REQUIRED_SECRET_FILE_ENV,
+        "DB_PASSWORD": _database_secret_path(environment),
+        "RABBITMQ_PASSWORD": _rabbitmq_secret_path(environment),
+    }
+
+
+def _database_secret_path(environment):
+    lane = str(environment.get("BACKUPSHEEP_DATABASE_LANE") or "")
+    if lane not in DATABASE_LANES:
+        raise CommandError(
+            "Docker security preflight failed: database lane is invalid"
+        )
+    return f"/run/secrets/db_{lane}_password"
+
+
+def _read_stock_secret_values(required_secret_files):
     values = {}
-    for setting_name, expected_path in REQUIRED_SECRET_FILE_ENV.items():
+    for setting_name, expected_path in required_secret_files.items():
         try:
             values[setting_name] = Path(expected_path).read_text(encoding="utf-8").rstrip("\n")
         except OSError as error:
@@ -67,6 +124,64 @@ def _read_stock_secret_values():
                 "Docker security preflight failed: could not read a required stock secret file"
             ) from error
     return values
+
+
+def _assert_celery_identity(environment):
+    lane = str(environment.get("BACKUPSHEEP_CELERY_LANE") or "")
+    if str(environment.get("BACKUPSHEEP_CELERY_SECURITY_REQUIRED") or "").lower() != "true":
+        raise CommandError(
+            "Docker security preflight failed: authenticated Celery is not required"
+        )
+    expected_user = f"backupsheep_{lane}"
+    if environment.get("RABBITMQ_USER") != expected_user:
+        raise CommandError(
+            "Docker security preflight failed: RabbitMQ identity does not match its Celery lane"
+        )
+    if environment.get("CELERY_TRUSTED_PUBLIC_KEYS_FILE") != CELERY_PUBLIC_KEYS_FILE:
+        raise CommandError(
+            "Docker security preflight failed: Celery public-key registry path drifted"
+        )
+    publishing = lane in LANES
+    expected_private = (
+        f"/run/secrets/celery_signing_{lane}_private_key" if publishing else ""
+    )
+    if str(environment.get("CELERY_SIGNING_PRIVATE_KEY_FILE") or "") != expected_private:
+        raise CommandError(
+            "Docker security preflight failed: Celery signing-key path drifted"
+        )
+    try:
+        config = _security_configuration(publishing=publishing)
+        public_keys = _load_public_keys(
+            config.public_keys_file, config.installation_id
+        )
+        if publishing:
+            probe = b"backupsheep-celery-identity-v2"
+            public_keys[lane].verify(
+                _load_private_key(config.private_key_file).sign(probe), probe
+            )
+        elif lane not in CONSUMER_QUEUES and lane != "preflight":
+            raise ValueError("invalid non-publishing lane")
+    except Exception as error:
+        raise CommandError(
+            "Docker security preflight failed: Celery signing material is invalid"
+        ) from error
+
+
+def _assert_celery_task_manifest(runtime_settings):
+    """Import every reviewed task and reject registry/route drift before service start."""
+
+    from backupsheep.celery import app
+
+    try:
+        validate_configured_routes(runtime_settings.CELERY_TASK_ROUTES)
+        for module_name in runtime_settings.CELERY_IMPORTS:
+            importlib.import_module(module_name)
+        app.finalize()
+        validate_registered_tasks(app.tasks)
+    except (ImportError, TaskManifestError) as error:
+        raise CommandError(
+            "Docker security preflight failed: Celery task manifest drifted"
+        ) from error
 
 
 def _proc_status_values(text: str) -> dict[str, str]:
@@ -78,11 +193,13 @@ def _proc_status_values(text: str) -> dict[str, str]:
     return values
 
 
-def _assert_process_boundary(*, uid: int, proc_status: str, root_flags: int, core_limit):
+def _assert_process_boundary(
+    *, uid: int, proc_status: str, root_flags: int, core_limit, expected_uid=EXPECTED_UID
+):
     errors = []
     status_values = _proc_status_values(proc_status)
-    if uid != EXPECTED_UID:
-        errors.append(f"runtime UID must be {EXPECTED_UID}, observed {uid}")
+    if uid != expected_uid:
+        errors.append(f"runtime UID must be {expected_uid}, observed {uid}")
     for capability_set in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
         try:
             capabilities = int(status_values.get(capability_set, "invalid"), 16)
@@ -166,16 +283,18 @@ def _assert_secure_tmpfs(path: Path, mountinfo: str):
     raise CommandError(f"Required runtime path {path} is not a distinct mount")
 
 
-def _assert_private_writable_tmpfs(path: Path, mountinfo: str):
+def _assert_private_writable_tmpfs(
+    path: Path, mountinfo: str, *, expected_uid=EXPECTED_UID
+):
     try:
         metadata = path.stat()
     except OSError as error:
         raise CommandError(f"Required tmpfs path {path} is unavailable: {error}") from error
     if not stat.S_ISDIR(metadata.st_mode):
         raise CommandError(f"Required tmpfs path {path} is not a directory")
-    if path == Path("/run/backupsheep") and metadata.st_uid != EXPECTED_UID:
+    if path == Path("/run/backupsheep") and metadata.st_uid != expected_uid:
         raise CommandError(
-            f"Required tmpfs path {path} must be owned by UID {EXPECTED_UID}"
+            f"Required tmpfs path {path} must be owned by UID {expected_uid}"
         )
     if path == Path("/run/backupsheep") and stat.S_IMODE(metadata.st_mode) != 0o700:
         raise CommandError("/run/backupsheep must have mode 0700")
@@ -206,10 +325,167 @@ def _assert_no_pending_migrations(executor: MigrationExecutor):
     )
 
 
+def _assert_runtime_database_identity(*, cursor, environment, runtime_settings):
+    """Prove the active login and the complete generation-3 ACL/RLS boundary."""
+
+    configured_user = str(
+        runtime_settings.DATABASES.get("default", {}).get("USER", "") or ""
+    )
+    try:
+        assert_database_lane_contract(
+            cursor,
+            environment=environment,
+            configured_user=configured_user,
+        )
+    except ProvisioningError as error:
+        raise CommandError(f"Docker security preflight failed: {error}") from error
+
+
+def _assert_managed_ssh_identity(*, environment, runtime_settings):
+    """Prove split public identity and least-privilege private-key custody."""
+
+    from apps.console.connection.managed_ssh import (
+        ManagedSSHOperationError,
+        managed_public_key_fingerprint,
+        managed_public_key_for_lane,
+    )
+    from apps.console.connection.ssh import _load_private_key
+
+    role = str(environment.get("BACKUPSHEEP_RUNTIME_ROLE") or "")
+    errors = []
+    if runtime_settings.SSH_MANAGED_LANE_ISOLATION_REQUIRED is not True:
+        errors.append("managed SSH lane isolation is not required")
+    if str(runtime_settings.SSH_MANAGED_PUBLIC_KEY or ""):
+        errors.append("the legacy shared managed SSH public key is configured")
+
+    public_keys = {}
+    try:
+        for lane in ("database", "files"):
+            value = managed_public_key_for_lane(lane)
+            public_keys[lane] = value
+            if value:
+                managed_public_key_fingerprint(value)
+    except ManagedSSHOperationError:
+        errors.append("managed SSH lane public keys are invalid")
+    enabled = bool(public_keys.get("database") and public_keys.get("files"))
+
+    runtime_path = str(runtime_settings.SSH_MANAGED_PRIVATE_KEY_PATH or "")
+    lane_sources = {
+        "database": Path("/run/secrets/ssh_managed_database_private_key"),
+        "files": Path("/run/secrets/ssh_managed_files_private_key"),
+    }
+    if role in lane_sources:
+        own_source = lane_sources[role]
+        other_source = lane_sources["files" if role == "database" else "database"]
+        if own_source.is_symlink() or not own_source.is_file():
+            errors.append("the lane managed SSH private-key secret is unavailable")
+        if other_source.exists() or other_source.is_symlink():
+            errors.append("the opposite managed SSH private-key secret is mounted")
+        if enabled:
+            expected_path = "/run/backupsheep/ssh/managed_private_key"
+            if runtime_path != expected_path:
+                errors.append("the managed SSH private key is not staged in private tmpfs")
+            else:
+                key_path = Path(runtime_path)
+                try:
+                    metadata = key_path.lstat()
+                    if key_path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+                        raise ValueError("not a regular file")
+                    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+                        raise ValueError("unsafe ownership or mode")
+                    if metadata.st_size < 1 or metadata.st_size > 64 * 1024:
+                        raise ValueError("unsafe size")
+                    private_key = _load_private_key(runtime_path, managed=True)
+                    private_fingerprint = hashlib.sha256(
+                        private_key.asbytes()
+                    ).hexdigest()
+                    public_fingerprint = managed_public_key_fingerprint(
+                        public_keys[role]
+                    )
+                    if not hmac.compare_digest(
+                        private_fingerprint, public_fingerprint
+                    ):
+                        raise ValueError("public/private mismatch")
+                except Exception:
+                    errors.append(
+                        "the staged managed SSH private key is invalid or mismatched"
+                    )
+        elif runtime_path or Path(
+            "/run/backupsheep/ssh/managed_private_key"
+        ).exists():
+            errors.append("a managed SSH private key exists while the feature is disabled")
+    else:
+        if runtime_path:
+            errors.append("this runtime role can access a managed SSH private-key path")
+        if any(path.exists() or path.is_symlink() for path in lane_sources.values()):
+            errors.append("this runtime role mounts a managed SSH private-key secret")
+
+    if errors:
+        raise CommandError("Docker security preflight failed: " + "; ".join(errors))
+
+
+def _assert_artifact_encryption_boundary(*, environment, runtime_settings):
+    """Prove the hardened stack cannot transfer or restore plaintext artifacts."""
+
+    errors = []
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE != "bse1":
+        errors.append("artifact encryption mode is not BSE1")
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE is not True:
+        errors.append("enterprise artifact policy is not active")
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "aws-kms":
+        errors.append("artifact key custody is not AWS KMS")
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE is not False:
+        errors.append("legacy plaintext restore is enabled")
+    if environment.get("BACKUPSHEEP_PLAINTEXT_ROOT", "/code/_storage") != "/code/_storage":
+        errors.append("the private artifact root is not the stock container path")
+    if (
+        environment.get(
+            "BACKUPSHEEP_CIPHERTEXT_TRANSFER_ROOT",
+            "/var/lib/backupsheep/transfer",
+        )
+        != "/var/lib/backupsheep/transfer"
+    ):
+        errors.append("the ciphertext transfer root is not the stock container path")
+    try:
+        provider = AWSKMSKeyProvider(
+            AWSKMSConfig(
+                key_id=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_KEY_ID,
+                region_name=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_REGION,
+                allowed_key_ids=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS,
+                endpoint_url=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL,
+                connect_timeout_seconds=(
+                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS
+                ),
+                read_timeout_seconds=(
+                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS
+                ),
+                max_attempts=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS,
+                allow_insecure_endpoint=(
+                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT
+                ),
+            )
+        )
+        if provider.enterprise_eligible is not True:
+            errors.append("AWS KMS artifact configuration is not enterprise eligible")
+    except Exception:
+        errors.append("AWS KMS artifact configuration is invalid")
+    if errors:
+        raise CommandError(
+            "Docker security preflight failed: " + "; ".join(errors)
+        )
+
+
 class Command(BaseCommand):
     help = "Validate the stock Docker runtime boundary, database, and broker without consuming work."
 
     def handle(self, *args, **options):
+        runtime_role = str(os.environ.get("BACKUPSHEEP_RUNTIME_ROLE") or "")
+        try:
+            expected_uid = EXPECTED_UID_BY_ROLE[runtime_role]
+        except KeyError as error:
+            raise CommandError(
+                "Docker security preflight failed: runtime role is invalid"
+            ) from error
         try:
             proc_status = Path("/proc/self/status").read_text(encoding="utf-8")
             mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
@@ -222,13 +498,19 @@ class Command(BaseCommand):
             proc_status=proc_status,
             root_flags=root_flags,
             core_limit=resource.getrlimit(resource.RLIMIT_CORE),
+            expected_uid=expected_uid,
         )
         _assert_read_only_path(Path("/code"))
         _assert_read_only_path(Path("/etc"))
-        _assert_private_writable_tmpfs(Path("/tmp"), mountinfo)
-        _assert_private_writable_tmpfs(Path("/run/backupsheep"), mountinfo)
+        _assert_private_writable_tmpfs(
+            Path("/tmp"), mountinfo, expected_uid=expected_uid
+        )
+        _assert_private_writable_tmpfs(
+            Path("/run/backupsheep"), mountinfo, expected_uid=expected_uid
+        )
 
-        for setting_name, expected_path in REQUIRED_SECRET_FILE_ENV.items():
+        required_secret_files = _required_secret_file_env(os.environ)
+        for setting_name, expected_path in required_secret_files.items():
             if os.environ.get(setting_name):
                 raise CommandError(
                     f"Docker security preflight failed: {setting_name} is exposed "
@@ -248,7 +530,17 @@ class Command(BaseCommand):
         _assert_stock_configuration_sources(
             environment=os.environ,
             runtime_settings=settings,
-            secret_values=_read_stock_secret_values(),
+            secret_values=_read_stock_secret_values(required_secret_files),
+        )
+        _assert_celery_identity(os.environ)
+        _assert_celery_task_manifest(settings)
+        _assert_managed_ssh_identity(
+            environment=os.environ,
+            runtime_settings=settings,
+        )
+        _assert_artifact_encryption_boundary(
+            environment=os.environ,
+            runtime_settings=settings,
         )
 
         static_root = Path(settings.STATIC_ROOT)
@@ -264,6 +556,11 @@ class Command(BaseCommand):
                 cursor.execute("SELECT 1")
                 if cursor.fetchone() != (1,):
                     raise CommandError("Database authentication probe returned bad data")
+                _assert_runtime_database_identity(
+                    cursor=cursor,
+                    environment=os.environ,
+                    runtime_settings=settings,
+                )
             _assert_no_pending_migrations(MigrationExecutor(connection))
         except CommandError:
             raise
@@ -280,6 +577,8 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 "Docker security preflight passed: immutable non-root runtime, "
-                "file-backed secrets, applied migrations, database, and broker verified."
+                "file-backed secrets, external-KMS BSE1 artifact custody, "
+                "least-privilege database identity, applied migrations, database, "
+                "and broker verified."
             )
         )

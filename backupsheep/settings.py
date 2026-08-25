@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 import io
+import base64
 import ipaddress
 import json
 import os
@@ -23,11 +24,13 @@ from django.core.exceptions import ImproperlyConfigured
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 import google.auth
+from kombu import Exchange, Queue
 from dotenv import load_dotenv
 from dotenv import dotenv_values
 
 from backupsheep.sentry_security import scrub_sentry_event
 from backupsheep.runtime_secrets import resolve_file_backed_secrets
+from backupsheep.celery_task_manifest import celery_routes
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +69,21 @@ def _as_bool(value, default=False):
     if value is None:
         return default
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _strict_bool(name, value, *, default=False):
+    """Parse a security policy boolean without treating typos as disabled."""
+
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ImproperlyConfigured(f"{name} must be an explicit boolean value.")
 
 
 SECRET_KEY = config["DJANGO_SECRET_KEY"]
@@ -530,6 +548,130 @@ APP_DOMAIN = config["APP_DOMAIN"]
 APP_PROTOCOL = config["APP_PROTOCOL"]
 APP_URL = f"{APP_PROTOCOL}{APP_DOMAIN}"
 
+# Backup artifacts have one explicit wire-policy.  The stock hardened Docker
+# deployment sets enterprise mode and therefore cannot start or dispatch work in
+# legacy-only mode.  The compatibility mode remains available to non-enterprise
+# upgrades solely so operators can restore historical plaintext ZIP objects.
+BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE = str(
+    config.get("BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE", "legacy-only")
+).strip().lower()
+if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE not in {"bse1", "legacy-only"}:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE must be bse1 or legacy-only."
+    )
+
+BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE = _strict_bool(
+    "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE",
+    config.get("BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE"),
+    default=False,
+)
+BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE = _strict_bool(
+    "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE",
+    config.get("BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE"),
+    default=BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "legacy-only",
+)
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER = str(
+    config.get(
+        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER",
+        "aws-kms" if DJANGO_SERVER == "prod" else "local-development",
+    )
+).strip().lower()
+if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER not in {"aws-kms", "local-development"}:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER must be aws-kms or local-development."
+    )
+
+BACKUPSHEEP_INSTALLATION_ID = str(config.get("BACKUPSHEEP_INSTALLATION_ID", ""))
+BACKUPSHEEP_ARTIFACT_CHUNK_SIZE = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE", 4 * 1024 * 1024, 64 * 1024 * 1024
+)
+if BACKUPSHEEP_ARTIFACT_CHUNK_SIZE < 64 * 1024:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE must be at least 65536 bytes."
+    )
+
+BACKUPSHEEP_ARTIFACT_KMS_KEY_ID = str(
+    config.get("BACKUPSHEEP_ARTIFACT_KMS_KEY_ID", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_KMS_REGION = str(
+    config.get("BACKUPSHEEP_ARTIFACT_KMS_REGION", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS = tuple(
+    value.strip()
+    for value in str(
+        config.get("BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS", "")
+    ).split(",")
+    if value.strip()
+)
+BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL = (
+    str(config.get("BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL", "")).strip() or None
+)
+BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT = _strict_bool(
+    "BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT",
+    config.get("BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT"),
+    default=False,
+)
+BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS", 5, 60
+)
+BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS", 30, 120
+)
+BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS", 3, 5
+)
+BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY = str(
+    config.get("BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID = str(
+    config.get("BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID", "local-v1")
+).strip()
+
+if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1":
+    if not re.fullmatch(r"[0-9a-f]{64}", BACKUPSHEEP_INSTALLATION_ID):
+        raise ImproperlyConfigured(
+            "BSE1 encryption requires a stable 64-character BACKUPSHEEP_INSTALLATION_ID."
+        )
+    if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "aws-kms":
+        if not (
+            BACKUPSHEEP_ARTIFACT_KMS_KEY_ID
+            and BACKUPSHEEP_ARTIFACT_KMS_REGION
+            and BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS
+        ):
+            raise ImproperlyConfigured(
+                "BSE1 AWS KMS encryption requires a key, region, and resolved key-ARN allowlist."
+            )
+    else:
+        if DJANGO_SERVER == "prod" or BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE:
+            raise ImproperlyConfigured(
+                "The local artifact key provider is restricted to explicit non-production use."
+            )
+        try:
+            local_wrapping_key = base64.b64decode(
+                BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY,
+                validate=True,
+            )
+        except (ValueError, TypeError) as error:
+            raise ImproperlyConfigured(
+                "BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY must be canonical base64."
+            ) from error
+        if len(local_wrapping_key) != 32 or not BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID:
+            raise ImproperlyConfigured(
+                "The local development artifact provider requires a 32-byte key and key ID."
+            )
+        del local_wrapping_key
+
+if BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE and (
+    BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE != "bse1"
+    or BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "aws-kms"
+    or BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE
+    or BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL is not None
+    or BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT
+):
+    raise ImproperlyConfigured(
+        "Enterprise artifact policy requires BSE1, standard-endpoint AWS KMS, and no legacy restore."
+    )
+
 
 def _sentry_sample_rate(name):
     """Return an explicit, bounded Sentry sampling rate.
@@ -860,6 +1002,9 @@ CELERY_BROKER_USE_SSL = _broker_ssl_options(CELERY_BROKER_URL, config)
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE
+# No production caller consumes Celery result rows, and chords have been removed.
+# Keeping results would give every worker a shared cross-lane data/tamper surface.
+CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_TRACK_STARTED = True
 # Backup tasks perform remote side effects. A worker must acknowledge them only after
 # the task has committed its provider id/status, otherwise a worker crash can lose the
@@ -891,13 +1036,43 @@ CELERY_TASK_PUBLISH_RETRY_POLICY = {
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+CELERY_TASK_PROTOCOL = 2
+# Stock RabbitMQ declares this fixed topology from a root-owned definitions file.
+# Producers and consumers set ``no_declare`` so their AMQP users need no configure
+# permission and cannot create, delete, or rebind another lane's queue.
+_BACKUPSHEEP_CELERY_QUEUES = ("default", "cloud", "database", "files", "storage", "logs")
+CELERY_TASK_QUEUES = tuple(
+    Queue(
+        queue_name,
+        exchange=Exchange(
+            f"backupsheep.{queue_name}",
+            type="direct",
+            durable=True,
+            auto_delete=False,
+            no_declare=True,
+        ),
+        routing_key=queue_name,
+        durable=True,
+        auto_delete=False,
+        no_declare=True,
+    )
+    for queue_name in _BACKUPSHEEP_CELERY_QUEUES
+)
+CELERY_TASK_CREATE_MISSING_QUEUES = False
+CELERY_TASK_DEFAULT_EXCHANGE = "backupsheep.default"
+CELERY_TASK_DEFAULT_EXCHANGE_TYPE = "direct"
+CELERY_TASK_DEFAULT_ROUTING_KEY = "default"
+# Remote-control pidbox, gossip, and mingle create shared broker resources that defeat
+# queue configure isolation. Compose also passes the explicit CLI disable switches.
+CELERY_WORKER_ENABLE_REMOTE_CONTROL = False
 # Task modules the worker must import at boot so every task is registered. These
 # do not live in the conventional "<app>/tasks.py" location, so Celery's app
-# autodiscovery does not find them; backups are dispatched by name via
-# send_task()/chord(), which fails on an unregistered task unless listed here.
+# autodiscovery does not find them; some tasks are dispatched by registered name,
+# which fails on an unregistered task unless listed here.
 CELERY_IMPORTS = (
     "apps._tasks.helper.tasks",
     "apps._tasks.helper.maintenance",
+    "apps._tasks.managed_ssh",
     "apps._tasks.integration.aws",
     "apps._tasks.integration.aws_rds",
     "apps._tasks.integration.basecamp",
@@ -924,8 +1099,9 @@ CELERY_IMPORTS = (
 # commits each occurrence and its outbox before broker publication.
 CELERY_BEAT_SCHEDULER = "backupsheep.scheduler:BackupDatabaseScheduler"
 
-# Backup run logs are kept on the container's local _storage volume (never uploaded to
-# any external bucket) and pruned by the delete_old_logs task after this many days.
+# Backup run logs are kept in each source lane's private _storage volume (never
+# uploaded to any external bucket) and pruned by the matching lane-owned task after
+# this many days.
 LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
 
 # Notification providers are contacted only after a short database lease has
@@ -972,7 +1148,7 @@ BACKUP_REQUEST_RECOVERY_BATCH_SIZE = int(
     config.get("BACKUP_REQUEST_RECOVERY_BATCH_SIZE", 100)
 )
 BACKUP_POLL_INTERVAL = int(config.get("BACKUP_POLL_INTERVAL", 120))
-# Short, renewable leases protect long-running local dumps and chord publication.
+# Short, renewable leases protect long-running local dumps and upload publication.
 # A worker heartbeat extends the lease; after a hard crash, recovery can safely take
 # over within minutes rather than waiting for the command's multi-hour timeout.
 BACKUP_WORKER_LEASE_SECONDS = int(
@@ -1133,8 +1309,8 @@ BACKUP_CREATE_LEASE_SECONDS = int(
     config.get("BACKUP_CREATE_LEASE_SECONDS", 60 * 60)
 )
 # A storage upload can legitimately run much longer than the general recovery
-# interval. Keep a separate claimant lease so a duplicate chord does not take over
-# a healthy long-running upload and invoke the finalizer too early.
+# interval. Keep a separate claimant lease so a duplicate delivery does not take
+# over a healthy long-running upload and invoke the finalizer too early.
 BACKUP_STORAGE_STALE_SECONDS = int(
     config.get("BACKUP_STORAGE_STALE_SECONDS", 6 * 60 * 60)
 )
@@ -1145,6 +1321,22 @@ S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
     "S3_DOWNLOAD_URL_EXPIRES",
     5 * 60,
     60 * 60,
+)
+
+# WordPress and Basecamp have no enterprise BSE1 plaintext-export/restore path.
+# Their feature switches are compatibility opt-ins only; the shared recovery
+# capability gate additionally requires non-enterprise legacy-only artifacts with
+# legacy download enabled. Security-policy booleans are strict so a typo cannot
+# accidentally enable an incomplete source family.
+WORDPRESS_INTEGRATION_ENABLED = _strict_bool(
+    "WORDPRESS_INTEGRATION_ENABLED",
+    config.get("WORDPRESS_INTEGRATION_ENABLED"),
+    default=False,
+)
+BASECAMP_INTEGRATION_ENABLED = _strict_bool(
+    "BASECAMP_INTEGRATION_ENABLED",
+    config.get("BASECAMP_INTEGRATION_ENABLED"),
+    default=False,
 )
 
 # WordPress targets are public HTTPS origins by default. Self-hosters that must
@@ -1162,9 +1354,9 @@ ALLOW_INSECURE_FTP = _as_bool(
     default=False,
 )
 
-# Paramiko and the system SSH client both require a verified host key for SSH/SFTP
-# backup sources.  Keep the file under the persistent _storage volume by default so
-# operators can mount a reviewed known_hosts file into the worker containers.
+# Compatibility path for non-Compose development callers. Stock Compose uses the
+# account-scoped approval ledger and transient per-operation known_hosts files; it
+# must not mount a shared writable trust store.
 SSH_KNOWN_HOSTS_PATH = os.path.expanduser(
     str(config.get("SSH_KNOWN_HOSTS_PATH", os.path.join(BASE_DIR, "_storage", "ssh_known_hosts")))
 )
@@ -1184,6 +1376,57 @@ DATABASE_COMMAND_TIMEOUT = int(config.get("DATABASE_COMMAND_TIMEOUT", 23 * 3600)
 DATABASE_VALIDATION_COMMAND_TIMEOUT = int(
     config.get("DATABASE_VALIDATION_COMMAND_TIMEOUT", 30)
 )
+SSH_IO_TIMEOUT = _bounded_positive_int("SSH_IO_TIMEOUT", 30, 120)
+SSH_DISCOVERY_TIMEOUT_SECONDS = _bounded_positive_int(
+    "SSH_DISCOVERY_TIMEOUT_SECONDS", 60, 180
+)
+SSH_DISCOVERY_MAX_ENTRIES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_ENTRIES", 10_000, 100_000
+)
+SSH_DISCOVERY_MAX_NAME_BYTES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_NAME_BYTES", 4_096, 16_384
+)
+SSH_DISCOVERY_MAX_RESULT_BYTES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_RESULT_BYTES", 2 * 1024 * 1024, 4 * 1024 * 1024
+)
+SSH_REMOTE_COMMAND_MAX_BYTES = _bounded_positive_int(
+    "SSH_REMOTE_COMMAND_MAX_BYTES", 2 * 1024 * 1024, 4 * 1024 * 1024
+)
+SSH_REMOTE_CREDENTIAL_STALE_SECONDS = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_STALE_SECONDS", 900, 86_400
+)
+SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES", 10_000, 100_000
+)
+SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS", 10, 60
+)
+MANAGED_SSH_OPERATION_TTL_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_OPERATION_TTL_SECONDS", 600, 1_800
+)
+MANAGED_SSH_OPERATION_LEASE_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_OPERATION_LEASE_SECONDS", 300, 900
+)
+MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS", 240, 840
+)
+MANAGED_SSH_TASK_TIME_LIMIT_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_TASK_TIME_LIMIT_SECONDS", 270, 870
+)
+if not (
+    MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS
+    < MANAGED_SSH_TASK_TIME_LIMIT_SECONDS
+    < MANAGED_SSH_OPERATION_LEASE_SECONDS
+    < MANAGED_SSH_OPERATION_TTL_SECONDS
+):
+    raise ImproperlyConfigured(
+        "Managed SSH limits must satisfy soft time limit < hard time limit < "
+        "lease < operation TTL."
+    )
+if SSH_DISCOVERY_TIMEOUT_SECONDS >= MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS:
+    raise ImproperlyConfigured(
+        "SSH_DISCOVERY_TIMEOUT_SECONDS must be below the managed SSH soft time limit."
+    )
 SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS = int(
     config.get("SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS", 12 * 3600)
 )
@@ -1251,10 +1494,9 @@ WEBSITE_RESTORE_INLINE_FILE_LIMIT = config.get(
     "WEBSITE_RESTORE_INLINE_FILE_LIMIT", 1_000
 )
 
-# Managed-key authentication is optional and must be configured as an explicit key
-# pair by a self-hosted operator. Never advertise a built-in key whose private half
-# is missing from workers. Relative paths are resolved beneath BASE_DIR so the
-# persistent _storage volume can be shared by web and backup workers.
+# Managed-key authentication is optional. Stock Compose exposes two distinct public
+# identities and stages exactly one private half into each source worker's tmpfs.
+# The generic private path is runtime-only and must never point into a shared volume.
 SSH_MANAGED_PRIVATE_KEY_PATH = os.path.expanduser(
     str(config.get("SSH_MANAGED_PRIVATE_KEY_PATH", ""))
 )
@@ -1263,6 +1505,17 @@ if SSH_MANAGED_PRIVATE_KEY_PATH and not os.path.isabs(SSH_MANAGED_PRIVATE_KEY_PA
         BASE_DIR, SSH_MANAGED_PRIVATE_KEY_PATH
     )
 SSH_MANAGED_PUBLIC_KEY = str(config.get("SSH_MANAGED_PUBLIC_KEY", "")).strip()
+SSH_MANAGED_DATABASE_PUBLIC_KEY = str(
+    config.get("SSH_MANAGED_DATABASE_PUBLIC_KEY", "")
+).strip()
+SSH_MANAGED_FILES_PUBLIC_KEY = str(
+    config.get("SSH_MANAGED_FILES_PUBLIC_KEY", "")
+).strip()
+SSH_MANAGED_LANE_ISOLATION_REQUIRED = _strict_bool(
+    "SSH_MANAGED_LANE_ISOLATION_REQUIRED",
+    config.get("SSH_MANAGED_LANE_ISOLATION_REQUIRED"),
+    default=False,
+)
 # Compatibility for older deployments and code paths.
 SSH_KEY_PATH = SSH_MANAGED_PRIVATE_KEY_PATH
 
@@ -1273,7 +1526,15 @@ from celery.schedules import crontab
 CELERY_BEAT_SCHEDULE = {
     "delete-old-logs": {
         "task": "delete_old_logs",
-        "schedule": crontab(minute=0, hour=3),  # daily at 03:00 (worker timezone)
+        "schedule": crontab(minute=0, hour=3),  # files lane, daily at 03:00
+    },
+    "delete-old-database-run-logs": {
+        "task": "delete_old_database_logs",
+        "schedule": crontab(minute=5, hour=3),  # database lane, daily at 03:05
+    },
+    "delete-old-storage-run-logs": {
+        "task": "delete_old_storage_logs",
+        "schedule": crontab(minute=10, hour=3),  # storage lane, daily at 03:10
     },
     # Prune old CoreLog rows from the database (see delete_old_db_logs task).
     "delete-old-db-logs": {
@@ -1300,6 +1561,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_in_progress_backups",
         "schedule": 60.0,
     },
+    "resume-in-progress-database-backups": {
+        "task": "resume_in_progress_database_backups",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-files-backups": {
+        "task": "resume_in_progress_files_backups",
+        "schedule": 60.0,
+    },
     # API-triggered Oracle snapshot deletes enqueue immediately. This independent
     # sweep re-publishes DELETE_IN_PROGRESS rows after broker loss, worker crash,
     # or a server reboot; the provider adapter keeps the exact delete checkpoint.
@@ -1311,8 +1580,33 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_in_progress_restores",
         "schedule": 60.0,
     },
+    "resume-in-progress-database-restores": {
+        "task": "resume_in_progress_database_restores",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-files-restores": {
+        "task": "resume_in_progress_files_restores",
+        "schedule": 60.0,
+    },
     "resume-pending-backup-requests": {
         "task": "resume_pending_backup_requests",
+        "schedule": 60.0,
+    },
+    # Destination credentials belong only to the storage lane. This sweep repairs
+    # both source-to-storage and storage-to-source publication gaps from the durable
+    # per-backup destination authorization witnesses.
+    "resume-pending-backup-destination-validations": {
+        "task": "resume_pending_backup_destination_validations",
+        "schedule": 60.0,
+    },
+    # Managed SSH API rows expire after five minutes. Each owning source lane
+    # repairs a lost publication and expires/retains only its own durable rows.
+    "maintain-managed-ssh-database-operations": {
+        "task": "maintain_managed_ssh_database_operations",
+        "schedule": 60.0,
+    },
+    "maintain-managed-ssh-files-operations": {
+        "task": "maintain_managed_ssh_files_operations",
         "schedule": 60.0,
     },
     # Bucket replication uses durable run/object leases and can resume after a
@@ -1344,12 +1638,29 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_requested_node_deletions",
         "schedule": 60.0,
     },
+    "resume-requested-local-node-deletions": {
+        "task": "resume_requested_local_node_deletions",
+        "schedule": 60.0,
+    },
     # Recover outbox publications lost after commit and processing leases left by
     # a crashed logs worker. Provider delivery is at-least-once across the narrow
     # crash-after-send/before-SENT window.
     "recover-notification-deliveries": {
         "task": "recover_notification_deliveries",
         "schedule": 60.0,
+    },
+    # A source worker commits the log request before broker publication. The logs
+    # lane expands pending requests into per-channel rows without exposing member
+    # identities or provider credentials to source lanes or RabbitMQ.
+    "recover-notification-fanouts": {
+        "task": "recover_notification_fanouts",
+        "schedule": 60.0,
+    },
+    # Retain terminal replay identities beyond every accepted signed message.
+    # Active/redeliverable rows are never selected by the cleanup task.
+    "cleanup-celery-task-replays": {
+        "task": "cleanup_celery_task_replays",
+        "schedule": crontab(minute=15, hour=4),
     },
 }
 
@@ -1362,83 +1673,27 @@ CELERY_BEAT_SCHEDULE = {
 #               mutation/cleanup; scalable pool sharing _storage with dump workers
 #   logs ...... DB log entries and Slack/Telegram notifications; no artifact volume
 #
-# storage_upload/finalize_backup/delete_from_disk go to "storage" so they always run on a
-# worker that can see the files the dump produced. Anything not listed here falls to the
-# default queue, drained by the cloud worker.
+# There is deliberately no catch-all route. The independent manifest defines every
+# production task's queue, publisher lanes, consumer lane, durable-intent resolver,
+# and signed lifetime. Worker and Beat startup compare the imported task registry and
+# this exact route map to the manifest and fail closed on any drift.
 CELERY_TASK_DEFAULT_QUEUE = "default"
-CELERY_TASK_ROUTES = {
-    # Local-disk dumps — isolated per type.
-    "backup_database": {"queue": "database"},
-    "backup_website": {"queue": "files"},
-    "backup_wordpress": {"queue": "files"},
-    "backup_basecamp": {"queue": "files"},
-    # Restores push data back to the source server — same per-type isolation.
-    "restore_website_backup": {"queue": "files"},
-    "restore_database_backup": {"queue": "database"},
-    # Local-disk upload + cleanup — handled by the scalable worker-storage pool.
-    "storage_upload": {"queue": "storage"},
-    "finalize_backup": {"queue": "storage"},
-    "delete_from_disk": {"queue": "storage"},
-    "reset_incremental_cache": {"queue": "storage"},
-    "delete_old_logs": {"queue": "storage"},
-    "validate_local_storage": {"queue": "storage"},
-    "validate_pending_local_storages": {"queue": "storage"},
-    "delete_backup_requested": {"queue": "storage"},
-    "delete_storage_requested": {"queue": "storage"},
-    "resume_requested_storage_deletions": {"queue": "storage"},
-    # These legacy maintenance paths can invoke storage-point deletion. Keep
-    # them on the same RW boundary even when an older django-celery-beat row
-    # publishes the task by its historical name.
-    "node_delete_requested": {"queue": "storage"},
-    "resume_requested_node_deletions": {"queue": "storage"},
-    "clean_delete_failed_backups": {"queue": "storage"},
-    "delete_requested_integrations": {"queue": "storage"},
-    "delete_requested_storages": {"queue": "storage"},
-    "account_delete": {"queue": "storage"},
-    # S3 lifecycle rule application + deferred Object Lock delete retries.
-    "storage_aws_s3_sync_lifecycle": {"queue": "storage"},
-    "retry_protected_storage_deletes": {"queue": "storage"},
-    "storage_cleanup_owned_multipart": {"queue": "storage"},
-    "storage_sweep_owned_multipart_cleanup": {"queue": "storage"},
-    "sync_lightsail_bucket_replications": {"queue": "storage"},
-    "resume_lightsail_bucket_replications": {"queue": "storage"},
-    "resume_lightsail_bucket_restores": {"queue": "storage"},
-    "start_lightsail_bucket_replication": {"queue": "storage"},
-    "replicate_lightsail_bucket": {"queue": "storage"},
-    "finalize_lightsail_bucket_replication": {"queue": "storage"},
-    "restore_lightsail_bucket_replication": {"queue": "storage"},
-    # Cloud/volume provider snapshots — API-only, no local disk.
-    "backup_digitalocean": {"queue": "cloud"},
-    "backup_hetzner": {"queue": "cloud"},
-    "backup_vultr": {"queue": "cloud"},
-    "backup_vultr_database": {"queue": "cloud"},
-    "poll_vultr_database_backup": {"queue": "cloud"},
-    "restore_vultr_database": {"queue": "cloud"},
-    "poll_vultr_database_restore": {"queue": "cloud"},
-    "restore_cloud_backup": {"queue": "cloud"},
-    "poll_cloud_restore": {"queue": "cloud"},
-    "backup_aws": {"queue": "cloud"},
-    "backup_aws_rds": {"queue": "cloud"},
-    "backup_lightsail": {"queue": "cloud"},
-    "backup_google_cloud": {"queue": "cloud"},
-    "backup_oracle": {"queue": "cloud"},
-    "backup_upcloud": {"queue": "cloud"},
-    "backup_ovh_ca": {"queue": "cloud"},
-    "backup_ovh_eu": {"queue": "cloud"},
-    "backup_ovh_us": {"queue": "cloud"},
-    # Async snapshot status polling (re-queues itself); API-only, no local disk.
-    "poll_cloud_backup": {"queue": "cloud"},
-    "reconcile_oracle_backup_deletion": {"queue": "cloud"},
-    "reconcile_oracle_backup_deletions": {"queue": "cloud"},
-    "resume_in_progress_backups": {"queue": "default"},
-    "resume_in_progress_restores": {"queue": "default"},
-    "resume_pending_backup_requests": {"queue": "default"},
-    # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram
-    # fan-out, and on-disk run-log retention.
-    "send_log_to_db": {"queue": "logs"},
-    "deliver_log_notification": {"queue": "logs"},
-    "recover_notification_deliveries": {"queue": "logs"},
-    "send_log_to_slack": {"queue": "logs"},
-    "send_log_to_telegram": {"queue": "logs"},
-    "delete_old_db_logs": {"queue": "logs"},
-}
+CELERY_TASK_ROUTES = celery_routes()
+
+CELERY_TASK_REPLAY_RETENTION_SECONDS = _bounded_positive_int(
+    "CELERY_TASK_REPLAY_RETENTION_SECONDS",
+    14 * 24 * 60 * 60,
+    365 * 24 * 60 * 60,
+)
+try:
+    CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE = int(
+        config.get("CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE", 1000)
+    )
+except (TypeError, ValueError) as error:
+    raise ImproperlyConfigured(
+        "CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE must be an integer."
+    ) from error
+if not 1 <= CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE <= 10000:
+    raise ImproperlyConfigured(
+        "CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE must be between 1 and 10000."
+    )

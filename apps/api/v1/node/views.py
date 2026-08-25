@@ -44,7 +44,13 @@ from apps._tasks.exceptions import (
 from apps._tasks.integration.basecamp import backup_basecamp
 from apps._tasks.integration.website import backup_website
 from ..utils.api_filters import DateRangeFilter
-from apps._tasks.helper.tasks import node_delete_requested, reset_incremental_cache
+from apps._tasks.helper.tasks import (
+    LOCAL_NODE_INTEGRATIONS,
+    delete_cloud_node_requested,
+    delete_local_node_requested,
+    reset_incremental_cache,
+)
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 def _log_activity(request, log_type, data):
@@ -429,6 +435,7 @@ class CoreNodeView(viewsets.ModelViewSet):
         "resume": "node_changes",
         "delete": "node_changes",
         "reset_incremental": "node_changes",
+        "validate": "backup_create",
         "take_snapshot": "backup_create",
         "restore_backup": "backup_create",
         "resume_restore": "backup_create",
@@ -492,6 +499,7 @@ class CoreNodeView(viewsets.ModelViewSet):
         )
 
         node = self.get_object()
+        require_source_backup_creation(node.connection.integration.code)
         notes = self.request.data.get("notes")
         storage_point_ids = self.request.data.get("storage_point_ids")
 
@@ -1358,6 +1366,7 @@ class CoreNodeView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         node = self.get_object()
+        require_source_backup_creation(node.connection.integration.code)
         node.status = CoreNode.Status.ACTIVE
         node.save()
         _log_activity(
@@ -1380,18 +1389,38 @@ class CoreNodeView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def delete(self, request, pk=None):
         node = self.get_object()
-        node.status = CoreNode.Status.DELETE_REQUESTED
-        node.save()
+        with transaction.atomic():
+            # Serialize schedule removal and the durable deletion phase. Only the
+            # web control plane has Beat DML; no compromised worker can erase or
+            # rewrite a universal scheduler row while deleting a node.
+            node = (
+                CoreNode.objects.select_for_update()
+                .select_related("connection__integration")
+                .get(pk=node.pk)
+            )
+            for schedule in node.schedules.select_related(
+                "celery_periodic_task"
+            ).order_by("pk"):
+                schedule.schedule_delete()
+                schedule.delete()
+            node.status = CoreNode.Status.DELETE_REQUESTED
+            node.flag_delete_node = True
+            node.save(
+                update_fields=["status", "flag_delete_node", "modified"]
+            )
+            deletion_task = (
+                delete_local_node_requested
+                if node.connection.integration.code in LOCAL_NODE_INTEGRATIONS
+                else delete_cloud_node_requested
+            )
+            node_id = node.pk
 
-        """
-        Delete Node
-        """
         def publish_delete():
             try:
                 # Only the already-authorized row id crosses the broker boundary.
-                # A periodic storage-worker sweep recovers a failed publication
-                # from the durable DELETE_REQUESTED state.
-                node_delete_requested.apply_async(args=[node.id])
+                # Lane-specific sweeps recover a failed publication from the
+                # durable status + flag_delete_node phase.
+                deletion_task.apply_async(args=[node_id])
             except Exception:
                 pass
 
@@ -1411,16 +1440,20 @@ class CoreNodeView(viewsets.ModelViewSet):
             },
         )
         return Response(
-            {"detail": "Node deletion was scheduled on the storage worker."},
+            {"detail": "Node deletion was scheduled on its isolated worker."},
             status=status.HTTP_202_ACCEPTED,
         )
 
     @action(detail=True, methods=["post"])
     def reset_incremental(self, request, pk=None):
         node = self.get_object()
-        # The HTTP role has read-only access to staged backup data. Dispatch the
-        # exact cache mutation to the storage worker, whose queue is the authorized
-        # local-artifact boundary.
+        if node.type != CoreNode.Type.WEBSITE:
+            return Response(
+                {"detail": "Incremental cache reset is available only for website nodes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # The HTTP role has no source workdir. Dispatch the exact cache mutation to
+        # the files worker, which exclusively owns the website mirror and its lock.
         reset_incremental_cache.apply_async(args=[node.pk])
         _log_activity(
             request,
@@ -1439,13 +1472,13 @@ class CoreNodeView(viewsets.ModelViewSet):
             {
                 "detail": (
                     "Incremental cache reset scheduled. Your next backup will be "
-                    "a full backup after the storage worker applies it."
+                    "a full backup after the files worker applies it."
                 )
             },
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             validation = self.get_object().validate()

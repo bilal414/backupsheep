@@ -1,4 +1,5 @@
 <div x-data="setupSelectConnection()">
+    {% if source_protection_available %}
     <button @click="openConnectionModal(null, null, null,'{{ integration.code }}')" type="button"
             class="group relative block w-full rounded-xl border-2 border-dashed border-slate-300 bg-white px-6 py-10 text-center transition hover:border-indigo-400 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
 
@@ -17,6 +18,12 @@
         {% endif %}
 
     </button>
+    {% else %}
+        <section class="rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900" role="status">
+            <h2 class="font-semibold">New protection is unavailable</h2>
+            <p class="mt-1 leading-6">{{ source_recovery_unavailable_message }}</p>
+        </section>
+    {% endif %}
 
     {% if connections_count > 0 %}
         <div class="mt-12 flex flex-wrap items-center justify-between gap-3">
@@ -71,6 +78,9 @@
                             <td class="whitespace-nowrap px-4 py-3 text-slate-700">{{ connection.total_nodes }}</td>
                             <td class="whitespace-nowrap px-4 py-3">
                                 <div class="flex flex-wrap items-center gap-1.5">
+                                    {% if not source_protection_available %}
+                                        <span class="text-xs text-slate-500">Unavailable</span>
+                                    {% else %}
                                     {% if integration.code == "website" %}
                                         <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
                                            class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
@@ -104,10 +114,22 @@
                                             </a>
                                         {% endif %}
                                     {% endif %}
+                                    {% endif %}
                                 </div>
                             </td>
                             <td class="whitespace-nowrap px-4 py-3">
-                                {% if connection.status == 5 %}
+                                {% if not source_protection_available %}
+                                    <div class="flex flex-wrap items-center gap-1.5">
+                                        <a target="_blank" href="{% url 'console:log:index' %}?integration={{ connection.id }}"
+                                           class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Logs</a>
+                                        {% if connection.status == 1 %}
+                                            <button @click="pauseConnection('{{ connection.id }}')" type="button"
+                                                    class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Pause</button>
+                                        {% endif %}
+                                        <button @click="deleteConnection('{{ connection.id }}')" type="button"
+                                                class="inline-flex items-center rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Delete</button>
+                                    </div>
+                                {% elif connection.status == 5 %}
                                     <button @click="resumeConnection('{{ connection.id }}')" type="button"
                                             class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                         Undo
@@ -200,7 +222,7 @@
             </div>
         </nav>
 
-    {% else %}
+    {% elif source_protection_available %}
         <section class="mt-10 rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="first-integration-heading">
             <div class="px-5 py-8 sm:px-8">
                 <div class="max-w-2xl">
@@ -1222,12 +1244,12 @@
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12v-.008z"/>
                                 </svg>
                                 <p class="min-w-0 flex-1 leading-6">
-                                    Use the following Linux bash command to add the public key to your SSH
-                                    user. Please make sure you log in as a user before running this command.
+                                    Add this restricted public key to a dedicated, least-privilege SSH user.
+                                    The restriction disables forwarding, PTY allocation, and user startup hooks.
                                 </p>
                             </div>
                             <code class="mt-3 block overflow-x-auto whitespace-normal break-words rounded-lg bg-slate-900 p-3 font-mono text-xs leading-6 text-slate-100"
-                                  x-show="(selectedAuth.use_public_key===true)">printf '%s\n' '{{ ssh_managed_public_key }}' >> ~/.ssh/authorized_keys</code>
+                                  x-show="(selectedAuth.use_public_key===true)">printf '%s\n' 'restrict {{ ssh_managed_public_key }}' >> ~/.ssh/authorized_keys</code>
                             <code class="mt-3 block overflow-x-auto whitespace-normal break-words rounded-lg bg-slate-900 p-3 font-mono text-xs leading-6 text-slate-100"
                                   x-show="(selectedAuth.use_public_key===true)">chmod 0600 ~/.ssh/authorized_keys</code>
                         </div>
@@ -1258,6 +1280,19 @@
                             <p x-show="connectionErrors.auth?.private_key && selectedAuth.use_private_key===true"
                                class="mt-1.5 text-xs font-medium text-red-600" id="notes-error"
                                x-text="connectionErrors.auth?.private_key"></p>
+                        </div>
+                        <div class="sm:col-span-6" x-cloak
+                             x-show="connection.id && sshHostKeyTarget()">
+                            <div class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+                                <p class="font-semibold">Revoke SSH server trust</p>
+                                <p class="mt-1 leading-6">Use this immediately if the server identity may be compromised or retired. Matching connections will be suspended until a new key is reviewed.</p>
+                                <button type="button"
+                                        class="mt-3 inline-flex items-center justify-center rounded-lg border border-red-300 bg-white px-3.5 py-2 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                        :disabled="hostKeyRevocationLoading"
+                                        @click="revokeSSHHostKey()"
+                                        x-text="hostKeyRevocationLoading ? 'Revoking…' : 'Revoke approved host key'">
+                                </button>
+                            </div>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
@@ -1534,7 +1569,9 @@
             connectionFailure: null,
             hostKeyReview: null,
             hostKeyApprovalLoading: false,
+            hostKeyRevocationLoading: false,
             requestTimeoutMs: 60000,
+            managedOperationTimeoutMs: 300000,
             selectedAuth: {},
             notes: null,
             connectionErrors: {
@@ -1690,11 +1727,6 @@
                 }
             ],
             integrationCode: "{{integration.code}}",
-            init() {
-                if (this.integrationCode === "ovh_ca" || this.integrationCode === "ovh_eu" || this.integrationCode === "ovh_us") {
-                    this.getOauthUrl();
-                }
-            },
             openUrl(url) {
                 window.location.href = url;
             },
@@ -1830,6 +1862,47 @@
                     window.clearTimeout(timeout);
                 }
             },
+            async waitForManagedOperation(connectionId, accepted) {
+                if (!accepted?.operation_id) return accepted;
+                const operationUrl = "/api/v1/connections/" + this.integrationCode
+                    + "/" + encodeURIComponent(connectionId)
+                    + "/managed-ssh-operations/"
+                    + encodeURIComponent(accepted.operation_id) + "/";
+                const deadline = Date.now() + this.managedOperationTimeoutMs;
+                let state = accepted;
+                while (Date.now() < deadline) {
+                    const operationStatus = String(
+                        state.operation_status || "pending"
+                    ).toLowerCase();
+                    if (operationStatus === "complete") {
+                        return {
+                            ...accepted,
+                            ...state,
+                            operation_result: state.result || {},
+                        };
+                    }
+                    if (operationStatus === "failed" || operationStatus === "expired") {
+                        const failure = this.extractConnectionFailure({
+                            connection_error: state.error || {},
+                        });
+                        const error = new Error(failure.detail);
+                        error.connectionFailure = failure;
+                        error.payload = state;
+                        throw error;
+                    }
+                    await new Promise((resolve) => window.setTimeout(resolve, 750));
+                    state = await this.requestJSON(operationUrl, {
+                        headers: {'Accept': 'application/json'},
+                        method: 'GET',
+                        cache: 'no-store',
+                    }, 20000);
+                }
+                const failure = this.defaultConnectionFailure('REQUEST_TIMEOUT');
+                const error = new Error(failure.detail);
+                error.connectionFailure = failure;
+                error.payload = state;
+                throw error;
+            },
             sshHostKeyTarget() {
                 if (this.integrationCode === 'website') {
                     return {
@@ -1894,26 +1967,59 @@
                     this.hostKeyApprovalLoading = false;
                 }
             },
+            async revokeSSHHostKey() {
+                const target = this.sshHostKeyTarget();
+                if (!target?.host || !target?.port || this.hostKeyRevocationLoading) return;
+                if (!window.confirm('Revoke this SSH host key and suspend matching connections?')) return;
+                this.hostKeyRevocationLoading = true;
+                try {
+                    const revoked = await this.requestJSON('/api/v1/utils/ssh-host-keys/revoke/', {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        method: 'POST',
+                        body: JSON.stringify(target),
+                    }, 20000);
+                    this.hostKeyReview = null;
+                    this.connectionFailure = null;
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'SSH host key revoked',
+                        details: revoked.detail,
+                    });
+                    location.reload();
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Unable to revoke the SSH host key');
+                } finally {
+                    this.hostKeyRevocationLoading = false;
+                }
+            },
             async getOauthUrl() {
                 this.loading = true;
                 const url = "/api/v1/connections/" + this.integrationCode + "/oauth_url/";
                 try {
-                    const json = await this.requestJSON(url, {
+                    let json = await this.requestJSON(url, {
                         headers: {
                             'Accept': 'application/json',
                             'Content-Type': 'application/json'
                         },
-                        method: 'GET',
+                        method: 'POST',
+                        body: JSON.stringify({restart: true}),
                     });
                     this.oauth_url = json.oauth_url;
+                    return this.oauth_url;
                 } catch (error) {
                     this.notifyConnectionFailure(error, 'Unable to prepare provider authorization');
+                    return null;
                 } finally {
                     this.loading = false;
                 }
             },
 
             async openConnectionModal(connection_id, location_id, action_type, integration_code) {
+                if (this.loading) return;
                 this.connectionFailure = null;
                 this.hostKeyReview = null;
                 this.connectionErrors = {
@@ -2002,7 +2108,8 @@
                          * Add New Connection
                          */
                         if (this.integrationCode === "ovh_ca" || this.integrationCode === "ovh_eu" || this.integrationCode === "ovh_us") {
-                            window.location.href = this.oauth_url;
+                            const oauthUrl = await this.getOauthUrl();
+                            if (oauthUrl) window.location.href = oauthUrl;
                         } else {
                             this.connection = {};
                             this.notes = null;
@@ -2098,7 +2205,7 @@
                 }
 
                 try {
-                    const json = await this.requestJSON(url, {
+                    let json = await this.requestJSON(url, {
                         headers: {
                             'Accept': 'application/json',
                             'Content-Type': 'application/json'
@@ -2106,6 +2213,31 @@
                         method: method,
                         body: JSON.stringify(data)
                     });
+                    if (json["id"]) {
+                        // A direct validation failure is reported as a successful,
+                        // explicit PENDING save. Retain the identifier so retrying
+                        // updates that row instead of creating a duplicate.
+                        this.connection.id = json["id"];
+                        this.connection.location = json["location"] || this.connection.location;
+                    }
+                    if (json.validation_status === 'failed') {
+                        const failure = this.extractConnectionFailure({
+                            connection_error: json.validation_error || {},
+                        });
+                        const error = new Error(failure.detail);
+                        error.connectionFailure = failure;
+                        error.payload = json;
+                        error.saved = true;
+                        throw error;
+                    }
+                    if (json.operation_id) {
+                        try {
+                            json = await this.waitForManagedOperation(json["id"], json);
+                        } catch (error) {
+                            error.saved = true;
+                            throw error;
+                        }
+                    }
                     if (this.integrationCode === "database") {
                         if (json["id"]) {
                             await this.updateDBTypeAndVersion(json["id"], json["location"]);
@@ -2121,7 +2253,10 @@
                     location.reload();
                 } catch (error) {
                     this.applyConnectionErrors(error?.payload || {});
-                    this.notifyConnectionFailure(error);
+                    this.notifyConnectionFailure(
+                        error,
+                        error?.saved ? 'Integration saved as pending; validation failed' : null,
+                    );
                     if (error?.connectionFailure?.code === 'HOST_KEY_UNKNOWN'
                         || error?.connectionFailure?.code === 'HOST_KEY_CHANGED') {
                         await this.previewSSHHostKey();
@@ -2167,13 +2302,15 @@
                     location: location_id,
                 });
                 try {
-                    const json = await this.requestJSON(url, {
+                    let json = await this.requestJSON(url, {
                         headers: {
                             'Accept': 'application/json',
                             'Content-Type': 'application/json'
                         },
-                        method: 'GET',
+                        method: 'POST',
+                        body: '{}',
                     });
+                    json = await this.waitForManagedOperation(connection_id, json);
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
@@ -2191,18 +2328,20 @@
                     location: location_id,
                 });
                 try {
-                    const json = await this.requestJSON(url, {
+                    let json = await this.requestJSON(url, {
                         headers: {
                             'Accept': 'application/json',
                             'Content-Type': 'application/json'
                         },
-                        method: 'GET',
+                        method: 'POST',
+                        body: '{}',
                     });
+                    json = await this.waitForManagedOperation(connection_id, json);
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
                         heading: 'Success!',
-                        details: json.detail
+                        details: json.detail || 'Database metadata updated.'
                     });
                     return true;
                 } catch (error) {

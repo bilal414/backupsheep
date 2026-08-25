@@ -1,0 +1,88 @@
+{
+  "schema_version": 2,
+  "source_repository": "bilal414/backupsheep",
+  "release_workflow": ".github/workflows/release-images.yml",
+  "registry": "ghcr.io",
+  "images": {
+    "app": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep",
+      "dockerfile": "Dockerfile"
+    },
+    "postgres": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-postgres-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-postgres",
+      "dockerfile": "Dockerfile.postgres"
+    },
+    "egress": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-egress-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-egress",
+      "dockerfile": "Dockerfile.egress"
+    }
+  },
+  "platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "release_tag_regex": "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$",
+  "identity": {
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "certificate_identity_regex": "^https://github\\.com/bilal414/backupsheep/\\.github/workflows/release-images\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$",
+    "workflow_trigger": "push"
+  },
+  "attestations": {
+    "provenance_predicate_type": "https://slsa.dev/provenance/v1",
+    "provenance_mode": "max",
+    "buildkit_build_type": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+    "sbom_predicate_types": {
+      "cyclonedx-json": "https://cyclonedx.org/bom",
+      "spdx-json": "https://spdx.dev/Document"
+    }
+  },
+  "tools": {
+    "actionlint": {
+      "version": "1.7.12",
+      "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+      "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+      "archive_member": "actionlint"
+    },
+    "cosign": {
+      "version": "3.1.3",
+      "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64",
+      "sha256": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
+      "archive_member": null
+    },
+    "oras": {
+      "version": "1.3.3",
+      "url": "https://github.com/oras-project/oras/releases/download/v1.3.3/oras_1.3.3_linux_amd64.tar.gz",
+      "sha256": "9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59",
+      "archive_member": "oras"
+    },
+    "syft": {
+      "version": "1.51.0",
+      "url": "https://github.com/anchore/syft/releases/download/v1.51.0/syft_1.51.0_linux_amd64.tar.gz",
+      "sha256": "2a2e837a2c8d59ec9af5472ee22d3b04ee463c4e44476ecf993fd1e5ab6ebc7f",
+      "archive_member": "syft"
+    },
+    "trivy": {
+      "version": "0.74.0",
+      "url": "https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz",
+      "sha256": "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
+      "archive_member": "trivy"
+    }
+  },
+  "vulnerability_policy": {
+    "scanner": "trivy",
+    "scanner_version": "0.74.0",
+    "fail_severities": [
+      "HIGH",
+      "CRITICAL"
+    ],
+    "ignore_unfixed": false,
+    "allowlist": null
+  },
+  "evidence": {
+    "workflow_artifact_retention_days": 90,
+    "durable_github_release_assets": true
+  }
+}

@@ -1,4 +1,5 @@
-from cryptography.fernet import Fernet
+import secrets
+
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets
@@ -23,6 +24,10 @@ from apps.console.node.models import CoreDatabase, CoreNode, CoreWordPress
 from rest_framework import status
 
 from apps.console.utils.models import UtilBackup
+from backupsheep.source_recovery_policy import (
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
 
 
 class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -58,6 +63,8 @@ class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def connections(self, request):
+        if not source_backup_creation_available("wordpress"):
+            return Response([])
         member = self.request.user.member
         query = Q(account=member.get_current_account(), integration__code="wordpress")
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
@@ -93,5 +100,6 @@ class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False)
     def generate_key(self, request):
-        key = Fernet.generate_key()[0:24]
+        require_source_backup_creation("wordpress")
+        key = secrets.token_urlsafe(32)
         return Response({"key": key})

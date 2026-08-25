@@ -27,6 +27,7 @@ from django.db import transaction
 from django.utils import timezone
 from django_celery_beat.models import PeriodicTask
 from django_celery_beat.schedulers import DatabaseScheduler, ModelEntry
+from backupsheep.source_recovery_policy import source_backup_creation_available
 
 
 logger = logging.getLogger(__name__)
@@ -310,6 +311,16 @@ class BackupDatabaseScheduler(DatabaseScheduler):
                 if fresh_entry is not None:
                     fresh_entry.model.enabled = False
                 return {"kind": "inactive", "entry": fresh_entry}
+            if not source_backup_creation_available(
+                schedule.node.connection.integration.code
+            ):
+                # Preserve the schedule row for inspection, but keep this Beat
+                # process quiet and create no run/outbox record. API and worker
+                # boundaries enforce the same capability if a stale message exists.
+                fresh_entry = self._fresh_entry(periodic_task)
+                if fresh_entry is not None:
+                    fresh_entry.model.enabled = False
+                return {"kind": "inactive", "entry": fresh_entry}
 
             request_key = _opaque_request_key(
                 schedule.node_id, SCHEDULE_TRIGGER, occurrence_id
@@ -335,7 +346,10 @@ class BackupDatabaseScheduler(DatabaseScheduler):
                     "task_name": schedule.node.backup_task_name(),
                     "node": schedule.node,
                     "schedule": schedule,
-                    "requested_by": schedule.added_by,
+                    # Preserve the FK snapshot without loading CoreMember into the
+                    # Beat process. Its database principal intentionally cannot
+                    # enumerate identities.
+                    "requested_by_id": schedule.added_by_id,
                     "trigger": SCHEDULE_TRIGGER,
                     "payload": payload,
                     "next_dispatch_at": timezone.now(),

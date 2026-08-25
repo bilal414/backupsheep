@@ -85,6 +85,7 @@
                     <p class="mt-0.5 text-xs text-slate-500">Run on-demand operations for this node.</p>
                 </div>
                 <div class="flex flex-wrap items-center gap-2 p-5">
+                    {% if source_backup_creation_available %}
                     <button @click="openBackupModal()" type="button"
                             class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                         Create {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backup{% else %}Snapshot{% endif %}
@@ -93,6 +94,9 @@
                             class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                         Add Schedule
                     </button>
+                    {% else %}
+                        <p class="w-full rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900" role="status">{{ source_recovery_unavailable_message }}</p>
+                    {% endif %}
                     {% if object.type == 1 or object.type == 2 %}
                         <button @click="openModifyModal()" type="button"
                                 class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
@@ -103,7 +107,7 @@
                            class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                             Modify
                         </a>
-                    {% elif object.type == 5 %}
+                    {% elif object.type == 5 and source_backup_creation_available %}
                         <a href="{% url 'console:setup:integration_modify_node' integration_code=object.get_integration_alt_code|lower connection_id=object.connection.id object_code='objects' node_id=object.id %}"
                            class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                             Modify
@@ -114,7 +118,7 @@
                                 class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                             Pause
                         </button>
-                    {% elif object.status == 6 or object.status == 8 %}
+                    {% elif source_backup_creation_available and object.status == 6 or source_backup_creation_available and object.status == 8 %}
                         <button @click="openResumeBackupsModal()" type="button"
                                 class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                             Resume
@@ -175,7 +179,7 @@
                 <dl class="grid grid-cols-1 gap-x-4 gap-y-5 p-5 sm:grid-cols-2">
                     <div>
                         <dt class="text-sm font-medium text-slate-500">
-                            Status (<button type="button" @click="openResumeBackupsModal()" class="font-medium text-indigo-600 transition hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">reset</button>)
+                            Status{% if source_backup_creation_available %} (<button type="button" @click="openResumeBackupsModal()" class="font-medium text-indigo-600 transition hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">reset</button>){% endif %}
                         </dt>
                         <dd class="mt-1 text-sm text-slate-900">
                             {% if object.status == 1 or object.status == 2 %}
@@ -323,7 +327,7 @@
                     <h2 id="schedules-heading" class="text-sm font-semibold text-slate-900">Schedules ({{ object.schedules.count|default:0 }})</h2>
                     <p class="mt-0.5 text-xs text-slate-500">Automatic backup schedules for this node.</p>
                 </div>
-                {% if object.schedules.count > 0 %}
+                {% if object.schedules.count > 0 and source_backup_creation_available %}
                     <button type="button" @click="openScheduleModal()"
                             class="inline-flex flex-none items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -386,10 +390,10 @@
                                     <td class="whitespace-nowrap px-4 py-3 text-right">
                                         <div class="inline-flex items-center gap-2">
                                             {% if schedule.status == 3 %}
-                                                <button @click="resumeSchedule('{{ schedule.id }}')" type="button"
+                                                {% if source_backup_creation_available %}<button @click="resumeSchedule('{{ schedule.id }}')" type="button"
                                                         class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                                     Undo
-                                                </button>
+                                                </button>{% endif %}
                                             {% else %}
                                                 <button @click="openScheduleModal('{{ schedule.id }}')" type="button"
                                                         class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
@@ -400,7 +404,7 @@
                                                             class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                                         Pause
                                                     </button>
-                                                {% elif schedule.status == 2 %}
+                                                {% elif schedule.status == 2 and source_backup_creation_available %}
                                                     <button @click="resumeSchedule('{{ schedule.id }}')" type="button"
                                                             class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                                         Resume
@@ -418,7 +422,7 @@
                         </tbody>
                     </table>
                 </div>
-            {% else %}
+            {% elif source_backup_creation_available %}
                 <div class="p-5">
                     <button @click="openScheduleModal()" type="button"
                             class="flex w-full flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 px-6 py-12 text-center transition hover:border-indigo-300 hover:bg-indigo-50/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
@@ -5156,50 +5160,79 @@
                 },
                 async validateConnection() {
                     Alpine.store('showLoading').toggle("Checking {{ object.connection.integration.name|lower }} status with {{ object.connection.integration.name }}.", "Integration Validation");
-
-                    let url = null;
-                    let method = null;
-
-                    url = "/api/v1/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/validate?" + new URLSearchParams({
+                    const url = "/api/v1/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/validate?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
-                    method = "GET";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                    }).then(async (response) => {
-
-                        Alpine.store('showLoading').toggle();
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                    const requestJSON = async (target, options, timeoutMs = 20000) => {
+                        const controller = new AbortController();
+                        const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+                        try {
+                            const response = await fetch(target, {...options, signal: controller.signal});
+                            let payload = {};
+                            try { payload = await response.json(); } catch (ignored) {}
+                            if (!response.ok) {
+                                throw new Error(payload.detail || 'Integration validation failed.');
                             }
-                            throw new Error(json.detail);
+                            return payload;
+                        } catch (error) {
+                            if (error.name === 'AbortError') {
+                                throw new Error('The validation request timed out. Retry the operation.');
+                            }
+                            throw error;
+                        } finally {
+                            window.clearTimeout(timeout);
                         }
-                    }).then((json) => {
+                    };
+                    try {
+                        let json = await requestJSON(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'POST',
+                            body: '{}',
+                        });
+                        if (json.operation_id) {
+                            const statusUrl = "/api/v1/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/managed-ssh-operations/"
+                                + encodeURIComponent(json.operation_id) + "/";
+                            const deadline = Date.now() + 300000;
+                            while (Date.now() < deadline) {
+                                const operationStatus = String(json.operation_status || 'pending').toLowerCase();
+                                if (operationStatus === 'complete') break;
+                                if (operationStatus === 'failed' || operationStatus === 'expired') {
+                                    const failure = json.error || {};
+                                    throw new Error(
+                                        [failure.detail, failure.remediation].filter(Boolean).join(' ')
+                                        || 'Integration validation failed.'
+                                    );
+                                }
+                                await new Promise((resolve) => window.setTimeout(resolve, 750));
+                                json = await requestJSON(statusUrl, {
+                                    headers: {'Accept': 'application/json'},
+                                    method: 'GET',
+                                    cache: 'no-store',
+                                });
+                            }
+                            if (String(json.operation_status || '').toLowerCase() !== 'complete') {
+                                throw new Error('Integration validation timed out. Retry the operation.');
+                            }
+                        }
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
                             heading: 'Success!',
-                            details: json.detail
+                            details: json.detail || 'Validation passed. Integration is good for backups.'
                         });
-                    }).catch((error) => {
+                    } catch (error) {
                         Alpine.store('notifications').items.push({
                             show: true,
                             error: true,
                             heading: 'Error!',
                             details: error.message
                         });
-                    });
+                    } finally {
+                        Alpine.store('showLoading').toggle();
+                    }
                 },
                 async validateNode() {
                     Alpine.store('showLoading').toggle("Checking {{ object.get_type_display|lower }} status with {{ object.connection.integration.name }}.", "Node Validation");
@@ -5213,7 +5246,8 @@
                             'Accept': 'application/json',
                             'Content-Type': 'application/json'
                         },
-                        method: 'GET',
+                        method: 'POST',
+                        body: '{}',
                     }).then(async (response) => {
                         Alpine.store('showLoading').toggle();
 
@@ -5249,7 +5283,7 @@
                 async validateStorage(storage_id, storage_code) {
                     Alpine.store('showLoading').toggle();
 
-                    let method = "GET";
+                    let method = "POST";
                     let url = "/api/v1/storage/" + storage_code + "/" + storage_id + "/validate" + "/?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
@@ -5260,6 +5294,7 @@
                             'Content-Type': 'application/json'
                         },
                         method: method,
+                        body: '{}',
                     }).then(async (response) => {
                         Alpine.store('showLoading').toggle();
                         if (response.ok) {

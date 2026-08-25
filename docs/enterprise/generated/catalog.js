@@ -3,23 +3,23 @@ window.BACKUPSHEEP_DOC_CATALOG = {
   "metadata": {
     "schemaVersion": 1,
     "api": {
-      "api_operations": 916,
+      "api_operations": 920,
       "health_operations": 1,
-      "total_operations": 917,
-      "unique_paths": 524
+      "total_operations": 921,
+      "unique_paths": 528
     },
     "generatedFrom": "Django root URL resolver on the checked-out branch",
-    "configurationVariables": 171,
+    "configurationVariables": 289,
     "provenance": {
-      "sourceRevision": "d03d92963d6d",
+      "sourceRevision": "0e7614222b5f",
       "catalogSource": "git-ref",
-      "workingTreeApiChanges": true,
+      "workingTreeApiChanges": false,
       "includesWorkingTreeApiChanges": false,
       "committedApi": {
-        "api_operations": 916,
+        "api_operations": 920,
         "health_operations": 1,
-        "total_operations": 917,
-        "unique_paths": 524
+        "total_operations": 921,
+        "unique_paths": 528
       }
     }
   },
@@ -169,20 +169,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/01 Authentication/001-post-post.bru"
     },
     {
-      "operation_id": "get-api-v1-auth-logout",
-      "method": "GET",
+      "operation_id": "post-api-v1-auth-logout",
+      "method": "POST",
       "path": "/api/v1/auth/logout/",
       "regex_route": "api/v1/auth/logout/?$",
       "view": "apps.api.v1.auth.views.APIAuthLogout",
-      "action": "get",
+      "action": "post",
       "source": "apps/api/v1/auth/views.py",
       "auth": "none",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/01 Authentication/002-get-get.bru",
+      "file": "requests/01 Authentication/002-post-post.bru",
       "family": "auth",
       "source_href": "../../apps/api/v1/auth/views.py",
-      "bruno_href": "../../bruno/requests/01 Authentication/002-get-get.bru"
+      "bruno_href": "../../bruno/requests/01 Authentication/002-post-post.bru"
     },
     {
       "operation_id": "patch-api-v1-auth-reset",
@@ -5113,20 +5113,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Aws/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-aws-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-aws-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/aws/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^aws/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.aws.views.CoreAWSView",
       "action": "validate",
       "source": "apps/api/v1/connection/aws/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Aws/010-get-validate.bru",
+      "file": "requests/20 Connections/Aws/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/aws/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Aws/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Aws/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-aws-rds",
@@ -5273,20 +5273,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Aws Rds/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-aws-rds-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-aws-rds-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/aws_rds/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^aws_rds/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.aws_rds.views.CoreAWSRDSView",
       "action": "validate",
       "source": "apps/api/v1/connection/aws_rds/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Aws Rds/010-get-validate.bru",
+      "file": "requests/20 Connections/Aws Rds/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/aws_rds/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Aws Rds/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Aws Rds/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-basecamp",
@@ -5417,20 +5417,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Basecamp/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-basecamp-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-basecamp-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/basecamp/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^basecamp/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.basecamp.views.CoreBasecampView",
       "action": "validate",
       "source": "apps/api/v1/connection/basecamp/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Basecamp/009-get-validate.bru",
+      "file": "requests/20 Connections/Basecamp/009-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/basecamp/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Basecamp/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Basecamp/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-database",
@@ -5545,52 +5545,68 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Database/007-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-database-resourceid-objects",
+      "operation_id": "get-api-v1-connections-database-resourceid-managed-ssh-operations-operationuuid",
       "method": "GET",
+      "path": "/api/v1/connections/database/{{resourceId}}/managed-ssh-operations/{{operationUuid}}/",
+      "regex_route": "api/v1/connections/^database/(?P<pk>[^/.]+)/managed-ssh-operations/(?P<operation_uuid>[^/.]+)/$",
+      "view": "apps.api.v1.connection.database.views.CoreDatabaseView",
+      "action": "managed_ssh_operation",
+      "source": "apps/api/v1/connection/database/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/20 Connections/Database/008-get-managed-ssh-operation.bru",
+      "family": "connections",
+      "source_href": "../../apps/api/v1/connection/database/views.py",
+      "bruno_href": "../../bruno/requests/20 Connections/Database/008-get-managed-ssh-operation.bru"
+    },
+    {
+      "operation_id": "post-api-v1-connections-database-resourceid-objects",
+      "method": "POST",
       "path": "/api/v1/connections/database/{{resourceId}}/objects/",
       "regex_route": "api/v1/connections/^database/(?P<pk>[^/.]+)/objects/$",
       "view": "apps.api.v1.connection.database.views.CoreDatabaseView",
       "action": "objects",
       "source": "apps/api/v1/connection/database/views.py",
       "auth": "token",
-      "safety": "safe-read",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Database/008-get-objects.bru",
+      "file": "requests/20 Connections/Database/009-post-objects.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/database/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Database/008-get-objects.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Database/009-post-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-database-resourceid-update-db-type-and-version",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-database-resourceid-update-db-type-and-version",
+      "method": "POST",
       "path": "/api/v1/connections/database/{{resourceId}}/update_db_type_and_version/",
       "regex_route": "api/v1/connections/^database/(?P<pk>[^/.]+)/update_db_type_and_version/$",
       "view": "apps.api.v1.connection.database.views.CoreDatabaseView",
       "action": "update_db_type_and_version",
       "source": "apps/api/v1/connection/database/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Database/009-get-update-db-type-and-version.bru",
+      "file": "requests/20 Connections/Database/010-post-update-db-type-and-version.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/database/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Database/009-get-update-db-type-and-version.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Database/010-post-update-db-type-and-version.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-database-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-database-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/database/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^database/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.database.views.CoreDatabaseView",
       "action": "validate",
       "source": "apps/api/v1/connection/database/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Database/010-get-validate.bru",
+      "file": "requests/20 Connections/Database/011-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/database/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Database/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Database/011-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-digitalocean",
@@ -5641,20 +5657,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Digitalocean/003-get-endpoints.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-digitalocean-oauth-url",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-digitalocean-oauth-url",
+      "method": "POST",
       "path": "/api/v1/connections/digitalocean/oauth_url/",
       "regex_route": "api/v1/connections/^digitalocean/oauth_url/$",
       "view": "apps.api.v1.connection.digitalocean.views.CoreDigitalOceanView",
       "action": "oauth_url",
       "source": "apps/api/v1/connection/digitalocean/views.py",
-      "auth": "token",
-      "safety": "safe-read",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Digitalocean/004-get-oauth-url.bru",
+      "file": "requests/20 Connections/Digitalocean/004-post-oauth-url.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/digitalocean/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Digitalocean/004-get-oauth-url.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Digitalocean/004-post-oauth-url.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-digitalocean-resourceid",
@@ -5737,20 +5753,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Digitalocean/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-digitalocean-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-digitalocean-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/digitalocean/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^digitalocean/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.digitalocean.views.CoreDigitalOceanView",
       "action": "validate",
       "source": "apps/api/v1/connection/digitalocean/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Digitalocean/010-get-validate.bru",
+      "file": "requests/20 Connections/Digitalocean/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/digitalocean/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Digitalocean/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Digitalocean/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-google-cloud",
@@ -5881,20 +5897,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Google Cloud/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-google-cloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-google-cloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/google_cloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^google_cloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.google_cloud.views.CoreGoogleCloudView",
       "action": "validate",
       "source": "apps/api/v1/connection/google_cloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Google Cloud/009-get-validate.bru",
+      "file": "requests/20 Connections/Google Cloud/009-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/google_cloud/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Google Cloud/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Google Cloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-hetzner",
@@ -6025,20 +6041,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Hetzner/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-hetzner-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-hetzner-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/hetzner/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^hetzner/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.hetzner.views.CoreHetznerView",
       "action": "validate",
       "source": "apps/api/v1/connection/hetzner/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Hetzner/009-get-validate.bru",
+      "file": "requests/20 Connections/Hetzner/009-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/hetzner/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Hetzner/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Hetzner/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-lightsail",
@@ -6185,20 +6201,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Lightsail/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-lightsail-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-lightsail-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/lightsail/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^lightsail/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.lightsail.views.CoreLightsailView",
       "action": "validate",
       "source": "apps/api/v1/connection/lightsail/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Lightsail/010-get-validate.bru",
+      "file": "requests/20 Connections/Lightsail/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/lightsail/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Lightsail/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Lightsail/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-oracle",
@@ -6329,20 +6345,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Oracle/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-oracle-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-oracle-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/oracle/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^oracle/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.oracle.views.CoreOracleView",
       "action": "validate",
       "source": "apps/api/v1/connection/oracle/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Oracle/009-get-validate.bru",
+      "file": "requests/20 Connections/Oracle/009-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/oracle/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Oracle/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Oracle/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-ovh-ca",
@@ -6393,20 +6409,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Ovh Ca/003-get-endpoints.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-ca-oauth-url",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-ca-oauth-url",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_ca/oauth_url/",
       "regex_route": "api/v1/connections/^ovh_ca/oauth_url/$",
       "view": "apps.api.v1.connection.ovh_ca.views.CoreOVHCAView",
       "action": "oauth_url",
       "source": "apps/api/v1/connection/ovh_ca/views.py",
-      "auth": "token",
-      "safety": "safe-read",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Ca/004-get-oauth-url.bru",
+      "file": "requests/20 Connections/Ovh Ca/004-post-oauth-url.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/ovh_ca/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Ovh Ca/004-get-oauth-url.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Ovh Ca/004-post-oauth-url.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-ovh-ca-resourceid",
@@ -6489,20 +6505,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Ovh Ca/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-ca-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-ca-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_ca/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^ovh_ca/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.ovh_ca.views.CoreOVHCAView",
       "action": "validate",
       "source": "apps/api/v1/connection/ovh_ca/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Ca/010-get-validate.bru",
+      "file": "requests/20 Connections/Ovh Ca/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/ovh_ca/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Ovh Ca/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Ovh Ca/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-ovh-eu",
@@ -6553,20 +6569,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Ovh Eu/003-get-endpoints.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-eu-oauth-url",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-eu-oauth-url",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_eu/oauth_url/",
       "regex_route": "api/v1/connections/^ovh_eu/oauth_url/$",
       "view": "apps.api.v1.connection.ovh_eu.views.CoreOVHEUView",
       "action": "oauth_url",
       "source": "apps/api/v1/connection/ovh_eu/views.py",
-      "auth": "token",
-      "safety": "safe-read",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Eu/004-get-oauth-url.bru",
+      "file": "requests/20 Connections/Ovh Eu/004-post-oauth-url.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/ovh_eu/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Ovh Eu/004-get-oauth-url.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Ovh Eu/004-post-oauth-url.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-ovh-eu-resourceid",
@@ -6649,20 +6665,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Ovh Eu/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-eu-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-eu-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_eu/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^ovh_eu/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.ovh_eu.views.CoreOVHEUView",
       "action": "validate",
       "source": "apps/api/v1/connection/ovh_eu/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Eu/010-get-validate.bru",
+      "file": "requests/20 Connections/Ovh Eu/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/ovh_eu/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Ovh Eu/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Ovh Eu/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-ovh-us",
@@ -6713,20 +6729,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Ovh Us/003-get-endpoints.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-us-oauth-url",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-us-oauth-url",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_us/oauth_url/",
       "regex_route": "api/v1/connections/^ovh_us/oauth_url/$",
       "view": "apps.api.v1.connection.ovh_us.views.CoreOVHUSView",
       "action": "oauth_url",
       "source": "apps/api/v1/connection/ovh_us/views.py",
-      "auth": "token",
-      "safety": "safe-read",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Us/004-get-oauth-url.bru",
+      "file": "requests/20 Connections/Ovh Us/004-post-oauth-url.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/ovh_us/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Ovh Us/004-get-oauth-url.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Ovh Us/004-post-oauth-url.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-ovh-us-resourceid",
@@ -6809,20 +6825,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Ovh Us/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-us-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-us-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_us/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^ovh_us/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.ovh_us.views.CoreOVHUSView",
       "action": "validate",
       "source": "apps/api/v1/connection/ovh_us/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Us/010-get-validate.bru",
+      "file": "requests/20 Connections/Ovh Us/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/ovh_us/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Ovh Us/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Ovh Us/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-totals",
@@ -6969,20 +6985,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Upcloud/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-upcloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-upcloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/upcloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^upcloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.upcloud.views.CoreUpCloudView",
       "action": "validate",
       "source": "apps/api/v1/connection/upcloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Upcloud/009-get-validate.bru",
+      "file": "requests/20 Connections/Upcloud/009-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/upcloud/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Upcloud/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Upcloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-vultr",
@@ -7113,20 +7129,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Vultr/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-vultr-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-vultr-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/vultr/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^vultr/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.vultr.views.CoreVultrView",
       "action": "validate",
       "source": "apps/api/v1/connection/vultr/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Vultr/009-get-validate.bru",
+      "file": "requests/20 Connections/Vultr/009-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/vultr/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Vultr/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Vultr/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-website",
@@ -7241,36 +7257,52 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Website/007-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-website-resourceid-objects",
+      "operation_id": "get-api-v1-connections-website-resourceid-managed-ssh-operations-operationuuid",
       "method": "GET",
+      "path": "/api/v1/connections/website/{{resourceId}}/managed-ssh-operations/{{operationUuid}}/",
+      "regex_route": "api/v1/connections/^website/(?P<pk>[^/.]+)/managed-ssh-operations/(?P<operation_uuid>[^/.]+)/$",
+      "view": "apps.api.v1.connection.website.views.CoreWebsiteView",
+      "action": "managed_ssh_operation",
+      "source": "apps/api/v1/connection/website/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/20 Connections/Website/008-get-managed-ssh-operation.bru",
+      "family": "connections",
+      "source_href": "../../apps/api/v1/connection/website/views.py",
+      "bruno_href": "../../bruno/requests/20 Connections/Website/008-get-managed-ssh-operation.bru"
+    },
+    {
+      "operation_id": "post-api-v1-connections-website-resourceid-objects",
+      "method": "POST",
       "path": "/api/v1/connections/website/{{resourceId}}/objects/",
       "regex_route": "api/v1/connections/^website/(?P<pk>[^/.]+)/objects/$",
       "view": "apps.api.v1.connection.website.views.CoreWebsiteView",
       "action": "objects",
       "source": "apps/api/v1/connection/website/views.py",
       "auth": "token",
-      "safety": "safe-read",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Website/008-get-objects.bru",
+      "file": "requests/20 Connections/Website/009-post-objects.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/website/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Website/008-get-objects.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Website/009-post-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-website-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-website-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/website/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^website/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.website.views.CoreWebsiteView",
       "action": "validate",
       "source": "apps/api/v1/connection/website/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Website/009-get-validate.bru",
+      "file": "requests/20 Connections/Website/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/website/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Website/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Website/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-wordpress",
@@ -7401,20 +7433,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Wordpress/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-wordpress-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-wordpress-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/wordpress/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^wordpress/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.wordpress.views.CoreWordPressView",
       "action": "validate",
       "source": "apps/api/v1/connection/wordpress/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Wordpress/009-get-validate.bru",
+      "file": "requests/20 Connections/Wordpress/009-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/wordpress/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Wordpress/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Wordpress/009-post-validate.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-resourceid",
@@ -7513,20 +7545,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/20 Connections/Aggregate/009-post-resume.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/{{resourceId}}/validate/",
       "regex_route": "api/v1/^connections/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.views.CoreConnectionView",
       "action": "validate",
       "source": "apps/api/v1/connection/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Aggregate/010-get-validate.bru",
+      "file": "requests/20 Connections/Aggregate/010-post-validate.bru",
       "family": "connections",
       "source_href": "../../apps/api/v1/connection/views.py",
-      "bruno_href": "../../bruno/requests/20 Connections/Aggregate/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/20 Connections/Aggregate/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-databases",
@@ -7849,20 +7881,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/10 Account and Team/Invites/006-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-invites-resourceid-accept",
-      "method": "GET",
+      "operation_id": "post-api-v1-invites-resourceid-accept",
+      "method": "POST",
       "path": "/api/v1/invites/{{resourceId}}/accept/",
       "regex_route": "api/v1/^invites/(?P<pk>[^/.]+)/accept/$",
       "view": "apps.api.v1.invite.views.CoreInviteView",
       "action": "accept",
       "source": "apps/api/v1/invite/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/10 Account and Team/Invites/007-get-accept.bru",
+      "file": "requests/10 Account and Team/Invites/007-post-accept.bru",
       "family": "invites",
       "source_href": "../../apps/api/v1/invite/views.py",
-      "bruno_href": "../../bruno/requests/10 Account and Team/Invites/007-get-accept.bru"
+      "bruno_href": "../../bruno/requests/10 Account and Team/Invites/007-post-accept.bru"
     },
     {
       "operation_id": "post-api-v1-invites-resourceid-cancel",
@@ -8087,6 +8119,22 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "family": "members",
       "source_href": "../../apps/api/v1/member/views.py",
       "bruno_href": "../../bruno/requests/10 Account and Team/Members/011-post-update-membership.bru"
+    },
+    {
+      "operation_id": "get-api-v1-mobile-bootstrap",
+      "method": "GET",
+      "path": "/api/v1/mobile/bootstrap/",
+      "regex_route": "api/v1/mobile/bootstrap/",
+      "view": "apps.api.v1.mobile.views.MobileBootstrapView",
+      "action": "get",
+      "source": "apps/api/v1/mobile/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/02 Session/002-get-get.bru",
+      "family": "mobile",
+      "source_href": "../../apps/api/v1/mobile/views.py",
+      "bruno_href": "../../bruno/requests/02 Session/002-get-get.bru"
     },
     {
       "operation_id": "get-api-v1-nodes",
@@ -8345,20 +8393,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/30 Nodes/016-post-take-snapshot.bru"
     },
     {
-      "operation_id": "get-api-v1-nodes-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-nodes-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/nodes/{{resourceId}}/validate/",
       "regex_route": "api/v1/^nodes/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.node.views.CoreNodeView",
       "action": "validate",
       "source": "apps/api/v1/node/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/30 Nodes/017-get-validate.bru",
+      "file": "requests/30 Nodes/017-post-validate.bru",
       "family": "nodes",
       "source_href": "../../apps/api/v1/node/views.py",
-      "bruno_href": "../../bruno/requests/30 Nodes/017-get-validate.bru"
+      "bruno_href": "../../bruno/requests/30 Nodes/017-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-notifications-email",
@@ -8569,20 +8617,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/93 Notifications/Slack/006-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-notifications-slack-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-notifications-slack-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/notifications-slack/{{resourceId}}/validate/",
       "regex_route": "api/v1/^notifications-slack/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.notification.views.CoreNotificationSlackView",
       "action": "validate",
       "source": "apps/api/v1/notification/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/93 Notifications/Slack/007-get-validate.bru",
+      "file": "requests/93 Notifications/Slack/007-post-validate.bru",
       "family": "notifications-slack",
       "source_href": "../../apps/api/v1/notification/views.py",
-      "bruno_href": "../../bruno/requests/93 Notifications/Slack/007-get-validate.bru"
+      "bruno_href": "../../bruno/requests/93 Notifications/Slack/007-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-notifications-telegram",
@@ -8681,20 +8729,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/93 Notifications/Telegram/006-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-notifications-telegram-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-notifications-telegram-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/notifications-telegram/{{resourceId}}/validate/",
       "regex_route": "api/v1/^notifications-telegram/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.notification.views.CoreNotificationTelegramView",
       "action": "validate",
       "source": "apps/api/v1/notification/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/93 Notifications/Telegram/007-get-validate.bru",
+      "file": "requests/93 Notifications/Telegram/007-post-validate.bru",
       "family": "notifications-telegram",
       "source_href": "../../apps/api/v1/notification/views.py",
-      "bruno_href": "../../bruno/requests/93 Notifications/Telegram/007-get-validate.bru"
+      "bruno_href": "../../bruno/requests/93 Notifications/Telegram/007-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-saas-basecamp",
@@ -9305,20 +9353,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Alibaba/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-alibaba-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-alibaba-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/alibaba/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^alibaba/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.alibaba.views.CoreStorageAliBabaView",
       "action": "validate",
       "source": "apps/api/v1/storage/alibaba/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Alibaba/010-get-validate.bru",
+      "file": "requests/80 Storage/Alibaba/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/alibaba/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Alibaba/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Alibaba/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-all",
@@ -9529,20 +9577,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Aws S3/010-post-sync-lifecycle.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-aws-s3-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-aws-s3-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/aws_s3/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^aws_s3/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.aws_s3.views.CoreStorageAWSS3View",
       "action": "validate",
       "source": "apps/api/v1/storage/aws_s3/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Aws S3/011-get-validate.bru",
+      "file": "requests/80 Storage/Aws S3/011-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/aws_s3/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Aws S3/011-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Aws S3/011-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-azure",
@@ -9673,20 +9721,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Azure/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-azure-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-azure-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/azure/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^azure/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.azure.views.CoreStorageAzureView",
       "action": "validate",
       "source": "apps/api/v1/storage/azure/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Azure/009-get-validate.bru",
+      "file": "requests/80 Storage/Azure/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/azure/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Azure/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Azure/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-backblaze-b2",
@@ -9817,20 +9865,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Backblaze B2/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-backblaze-b2-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-backblaze-b2-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/backblaze_b2/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^backblaze_b2/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.backblaze_b2.views.CoreStorageBackBlazeB2View",
       "action": "validate",
       "source": "apps/api/v1/storage/backblaze_b2/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Backblaze B2/009-get-validate.bru",
+      "file": "requests/80 Storage/Backblaze B2/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/backblaze_b2/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Backblaze B2/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Backblaze B2/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-cloudflare",
@@ -9961,20 +10009,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Cloudflare/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-cloudflare-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-cloudflare-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/cloudflare/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^cloudflare/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.cloudflare.views.CoreStorageCloudflareView",
       "action": "validate",
       "source": "apps/api/v1/storage/cloudflare/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Cloudflare/009-get-validate.bru",
+      "file": "requests/80 Storage/Cloudflare/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/cloudflare/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Cloudflare/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Cloudflare/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-costs",
@@ -10137,20 +10185,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Do Spaces/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-do-spaces-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-do-spaces-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/do_spaces/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^do_spaces/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.do_spaces.views.CoreStorageDoSpacesView",
       "action": "validate",
       "source": "apps/api/v1/storage/do_spaces/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Do Spaces/010-get-validate.bru",
+      "file": "requests/80 Storage/Do Spaces/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/do_spaces/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Do Spaces/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Do Spaces/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-dropbox",
@@ -10281,20 +10329,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Dropbox/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-dropbox-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-dropbox-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/dropbox/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^dropbox/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.dropbox.views.CoreStorageDropboxView",
       "action": "validate",
       "source": "apps/api/v1/storage/dropbox/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Dropbox/009-get-validate.bru",
+      "file": "requests/80 Storage/Dropbox/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/dropbox/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Dropbox/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Dropbox/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-exoscale",
@@ -10441,20 +10489,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Exoscale/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-exoscale-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-exoscale-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/exoscale/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^exoscale/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.exoscale.views.CoreStorageExoscaleView",
       "action": "validate",
       "source": "apps/api/v1/storage/exoscale/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Exoscale/010-get-validate.bru",
+      "file": "requests/80 Storage/Exoscale/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/exoscale/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Exoscale/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Exoscale/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-filebase",
@@ -10601,20 +10649,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Filebase/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-filebase-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-filebase-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/filebase/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^filebase/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.filebase.views.CoreStorageFilebaseView",
       "action": "validate",
       "source": "apps/api/v1/storage/filebase/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Filebase/010-get-validate.bru",
+      "file": "requests/80 Storage/Filebase/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/filebase/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Filebase/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Filebase/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-google-cloud",
@@ -10745,20 +10793,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Google Cloud/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-google-cloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-google-cloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/google_cloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^google_cloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.google_cloud.views.CoreStorageGoogleCloudView",
       "action": "validate",
       "source": "apps/api/v1/storage/google_cloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Google Cloud/009-get-validate.bru",
+      "file": "requests/80 Storage/Google Cloud/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/google_cloud/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Google Cloud/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Google Cloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-google-drive",
@@ -10889,20 +10937,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Google Drive/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-google-drive-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-google-drive-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/google_drive/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^google_drive/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.google_drive.views.CoreStorageGoogleDriveView",
       "action": "validate",
       "source": "apps/api/v1/storage/google_drive/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Google Drive/009-get-validate.bru",
+      "file": "requests/80 Storage/Google Drive/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/google_drive/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Google Drive/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Google Drive/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-ibm",
@@ -11049,20 +11097,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Ibm/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-ibm-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-ibm-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/ibm/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^ibm/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.ibm.views.CoreStorageIBMView",
       "action": "validate",
       "source": "apps/api/v1/storage/ibm/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Ibm/010-get-validate.bru",
+      "file": "requests/80 Storage/Ibm/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/ibm/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Ibm/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Ibm/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-idrive",
@@ -11193,20 +11241,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Idrive/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-idrive-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-idrive-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/idrive/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^idrive/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.idrive.views.CoreStorageIDriveView",
       "action": "validate",
       "source": "apps/api/v1/storage/idrive/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Idrive/009-get-validate.bru",
+      "file": "requests/80 Storage/Idrive/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/idrive/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Idrive/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Idrive/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-ionos",
@@ -11353,20 +11401,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Ionos/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-ionos-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-ionos-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/ionos/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^ionos/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.ionos.views.CoreStorageIonosView",
       "action": "validate",
       "source": "apps/api/v1/storage/ionos/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Ionos/010-get-validate.bru",
+      "file": "requests/80 Storage/Ionos/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/ionos/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Ionos/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Ionos/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-leviia",
@@ -11497,20 +11545,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Leviia/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-leviia-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-leviia-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/leviia/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^leviia/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.leviia.views.CoreStorageLeviiaView",
       "action": "validate",
       "source": "apps/api/v1/storage/leviia/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Leviia/009-get-validate.bru",
+      "file": "requests/80 Storage/Leviia/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/leviia/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Leviia/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Leviia/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-linode",
@@ -11641,20 +11689,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Linode/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-linode-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-linode-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/linode/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^linode/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.linode.views.CoreStorageLinodeView",
       "action": "validate",
       "source": "apps/api/v1/storage/linode/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Linode/009-get-validate.bru",
+      "file": "requests/80 Storage/Linode/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/linode/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Linode/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Linode/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-local",
@@ -11769,20 +11817,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Local/007-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-local-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-local-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/local/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^local/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.local.views.CoreStorageLocalView",
       "action": "validate",
       "source": "apps/api/v1/storage/local/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/008-get-validate.bru",
+      "file": "requests/80 Storage/Local/008-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/local/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Local/008-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Local/008-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-onedrive",
@@ -11913,20 +11961,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Onedrive/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-onedrive-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-onedrive-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/onedrive/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^onedrive/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.onedrive.views.CoreStorageOneDriveView",
       "action": "validate",
       "source": "apps/api/v1/storage/onedrive/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Onedrive/009-get-validate.bru",
+      "file": "requests/80 Storage/Onedrive/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/onedrive/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Onedrive/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Onedrive/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-oracle",
@@ -12073,20 +12121,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Oracle/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-oracle-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-oracle-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/oracle/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^oracle/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.oracle.views.CoreStorageOracleView",
       "action": "validate",
       "source": "apps/api/v1/storage/oracle/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Oracle/010-get-validate.bru",
+      "file": "requests/80 Storage/Oracle/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/oracle/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Oracle/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Oracle/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-pcloud",
@@ -12217,20 +12265,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Pcloud/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-pcloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-pcloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/pcloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^pcloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.pcloud.views.CoreStoragePCloudView",
       "action": "validate",
       "source": "apps/api/v1/storage/pcloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Pcloud/009-get-validate.bru",
+      "file": "requests/80 Storage/Pcloud/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/pcloud/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Pcloud/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Pcloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-rackcorp",
@@ -12377,20 +12425,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Rackcorp/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-rackcorp-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-rackcorp-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/rackcorp/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^rackcorp/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.rackcorp.views.CoreStorageRackCorpView",
       "action": "validate",
       "source": "apps/api/v1/storage/rackcorp/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Rackcorp/010-get-validate.bru",
+      "file": "requests/80 Storage/Rackcorp/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/rackcorp/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Rackcorp/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Rackcorp/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-scaleway",
@@ -12537,20 +12585,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Scaleway/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-scaleway-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-scaleway-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/scaleway/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^scaleway/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.scaleway.views.CoreStorageScalewayView",
       "action": "validate",
       "source": "apps/api/v1/storage/scaleway/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Scaleway/010-get-validate.bru",
+      "file": "requests/80 Storage/Scaleway/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/scaleway/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Scaleway/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Scaleway/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-tencent",
@@ -12697,20 +12745,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Tencent/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-tencent-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-tencent-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/tencent/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^tencent/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.tencent.views.CoreStorageTencentView",
       "action": "validate",
       "source": "apps/api/v1/storage/tencent/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Tencent/010-get-validate.bru",
+      "file": "requests/80 Storage/Tencent/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/tencent/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Tencent/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Tencent/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-upcloud",
@@ -12841,20 +12889,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Upcloud/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-upcloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-upcloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/upcloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^upcloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.upcloud.views.CoreStorageUpCloudView",
       "action": "validate",
       "source": "apps/api/v1/storage/upcloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Upcloud/009-get-validate.bru",
+      "file": "requests/80 Storage/Upcloud/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/upcloud/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Upcloud/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Upcloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-vultr",
@@ -12985,20 +13033,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Vultr/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-vultr-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-vultr-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/vultr/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^vultr/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.vultr.views.CoreStorageVultrView",
       "action": "validate",
       "source": "apps/api/v1/storage/vultr/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Vultr/009-get-validate.bru",
+      "file": "requests/80 Storage/Vultr/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/vultr/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Vultr/009-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Vultr/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-wasabi",
@@ -13145,20 +13193,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Wasabi/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-wasabi-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-wasabi-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/wasabi/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^wasabi/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.wasabi.views.CoreStorageWasabiView",
       "action": "validate",
       "source": "apps/api/v1/storage/wasabi/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Wasabi/010-get-validate.bru",
+      "file": "requests/80 Storage/Wasabi/010-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/wasabi/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Wasabi/010-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Wasabi/010-post-validate.bru"
     },
     {
       "operation_id": "post-api-v1-storage-resourceid-delete",
@@ -13209,20 +13257,20 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Aggregate/005-post-resume.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/{{resourceId}}/validate/",
       "regex_route": "api/v1/^storage/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.views.CoreStorageView",
       "action": "validate",
       "source": "apps/api/v1/storage/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Aggregate/006-get-validate.bru",
+      "file": "requests/80 Storage/Aggregate/006-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Aggregate/006-get-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Aggregate/006-post-validate.bru"
     },
     {
       "operation_id": "post-api-v1-utils-ssh-host-keys-approve",
@@ -13257,6 +13305,22 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/94 Utilities/002-post-post.bru"
     },
     {
+      "operation_id": "post-api-v1-utils-ssh-host-keys-revoke",
+      "method": "POST",
+      "path": "/api/v1/utils/ssh-host-keys/revoke/",
+      "regex_route": "api/v1/utils/ssh-host-keys/revoke/",
+      "view": "apps.api.v1.utils.views.SSHHostKeyRevokeView",
+      "action": "post",
+      "source": "apps/api/v1/utils/views.py",
+      "auth": "token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/94 Utilities/003-post-post.bru",
+      "family": "utils",
+      "source_href": "../../apps/api/v1/utils/views.py",
+      "bruno_href": "../../bruno/requests/94 Utilities/003-post-post.bru"
+    },
+    {
       "operation_id": "get-api-v1-utils-test",
       "method": "GET",
       "path": "/api/v1/utils/test/",
@@ -13267,10 +13331,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "auth": "none",
       "safety": "safe-read",
       "kind": "machine-api",
-      "file": "requests/94 Utilities/003-get-get.bru",
+      "file": "requests/94 Utilities/004-get-get.bru",
       "family": "utils",
       "source_href": "../../apps/api/v1/utils/views.py",
-      "bruno_href": "../../bruno/requests/94 Utilities/003-get-get.bru"
+      "bruno_href": "../../bruno/requests/94 Utilities/004-get-get.bru"
     },
     {
       "operation_id": "get-api-v1-volumes-aws",
@@ -14699,6 +14763,546 @@ window.BACKUPSHEEP_DOC_CATALOG = {
   ],
   "configuration": [
     {
+      "name": "ALLOW_INSECURE_FTP",
+      "category": "Advanced and integration settings",
+      "default": "false",
+      "sensitive": false,
+      "required": false,
+      "description": "Plain FTP exposes credentials and backup data on the network. Use SFTP or FTPS. Set true only for a reviewed legacy endpoint after explicitly accepting that risk.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "API_TOKEN_TTL_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "Secret value — replace sample",
+      "sensitive": true,
+      "required": false,
+      "description": "Personal API tokens expire after this many seconds. The maximum accepted lifetime is 90 days; 2592000 keeps the secure default to 30 days.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "AUTH_THROTTLE_TRUSTED_PROXY_ENABLED",
+      "category": "Advanced and integration settings",
+      "default": "false",
+      "sensitive": false,
+      "required": false,
+      "description": "Authentication rate limits use the direct REMOTE_ADDR by default. Enable this only when every application request crosses a reviewed reverse proxy which OVERWRITES X-BackupSheep-Client-IP with the actual client address. List the exact immediate proxy IP(s) or CIDR(s) as the application sees them; never list client/public address ranges.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_APP_EGRESS_ALLOW_DNS_NAMES",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_APP_EGRESS_ALLOW_DNS_NAMES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_APP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_APP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_APP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_APP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_APP_EGRESS_MODE",
+      "category": "Advanced and integration settings",
+      "default": "deny",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_APP_EGRESS_MODE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE",
+      "category": "Advanced and integration settings",
+      "default": "false",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE",
+      "category": "Advanced and integration settings",
+      "default": "bse1",
+      "sensitive": false,
+      "required": false,
+      "description": "Enterprise artifact custody. The key must be a resolved symmetric AWS KMS key ARN; every key still needed for restore/rotation must remain in the comma-separated ARN allowlist. AWS credentials are never stored here: install.sh requires separate reviewed `[default]` credentials for database and files, writes distinct secrets, and Compose mounts each secret only into its matching lane. IAM/key policy must condition KMS use on the exact `bse:lane` encryption-context value.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE",
+      "category": "Advanced and integration settings",
+      "default": "true",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER",
+      "category": "Advanced and integration settings",
+      "default": "aws-kms",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KEY_PROVIDER.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT",
+      "category": "Advanced and integration settings",
+      "default": "false",
+      "sensitive": false,
+      "required": false,
+      "description": "Service endpoint override for Backupsheep; keep the documented HTTPS provider host unless a regional endpoint is required.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "5",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KMS_KEY_ID",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_KEY_ID.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS",
+      "category": "Advanced and integration settings",
+      "default": "3",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "20",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_KMS_REGION",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_REGION.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID",
+      "category": "Advanced and integration settings",
+      "default": "local-v1",
+      "sensitive": false,
+      "required": false,
+      "description": "Test/support setting read by the application but not included in the normal operator sample. Do not enable it in production without reviewing the implementation.",
+      "source": "backupsheep/settings.py"
+    },
+    {
+      "name": "BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Test/support setting read by the application but not included in the normal operator sample. Do not enable it in production without reviewing the implementation.",
+      "source": "backupsheep/settings.py"
+    },
+    {
+      "name": "BACKUPSHEEP_BIND_ADDRESS",
+      "category": "Advanced and integration settings",
+      "default": "127.0.0.1",
+      "sensitive": false,
+      "required": false,
+      "description": "Compose publishes the web container on loopback by default. Keep this value for a TLS reverse proxy on the same host. Setting 0.0.0.0 is an explicit opt-in to direct network exposure and should not be used for production onboarding.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_BIND_PORT",
+      "category": "Advanced and integration settings",
+      "default": "8000",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_BIND_PORT.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_CELERY_SECURITY_GENERATION",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_CELERY_SECURITY_GENERATION.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_CLOUD_EGRESS_ALLOW_DNS_NAMES",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_CLOUD_EGRESS_ALLOW_DNS_NAMES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_CLOUD_EGRESS_MODE",
+      "category": "Advanced and integration settings",
+      "default": "deny",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_CLOUD_EGRESS_MODE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_COMPOSE_PROJECT_NAME",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "install.sh persists the exact Compose project name and refuses drift on rerun, preventing a typo from creating a second stack with empty data volumes.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_DATABASE_EGRESS_ALLOW_DNS_NAMES",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_DATABASE_EGRESS_ALLOW_DNS_NAMES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_DATABASE_EGRESS_MODE",
+      "category": "Advanced and integration settings",
+      "default": "deny",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_DATABASE_EGRESS_MODE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "PostgreSQL. Stock Docker initializes with a database-only bootstrap superuser, runs migrations as the schema owner, then seals exact grants for app, preflight, Beat and every worker lane. Each lane receives only its own file-backed password. DB_USER is a compatibility alias for DB_APP_USER outside Compose; never point it at a privileged or worker role. PostgreSQL 18 is recommended (14+ supported by Django 6).",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_EGRESS_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "backupsheep-egress:local",
+      "sensitive": false,
+      "required": false,
+      "description": "Locally built no-secret namespace policy image. The verified installer binds it to the same immutable source commit as the application/PostgreSQL images.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_EGRESS_POLICY_GENERATION",
+      "category": "Advanced and integration settings",
+      "default": "2",
+      "sensitive": false,
+      "required": false,
+      "description": "Stock `deny` mode permits only the exact internal PostgreSQL/RabbitMQ peers and blocks all outward traffic. Before enabling a role that needs an external source, provider, storage or KMS endpoint, select `allowlist` and supply the smallest exact CIDR:TCP-port tuples plus every provider/KMS DNS name and CNAME target. This network control is defense in depth, not a resource-aware exfiltration boundary: enterprise operations require dedicated/private endpoints or a controlled resource-aware proxy. `public` is an explicit compatibility risk opt-in; it is never the stock default.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_FILES_EGRESS_ALLOW_DNS_NAMES",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_FILES_EGRESS_ALLOW_DNS_NAMES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_FILES_EGRESS_MODE",
+      "category": "Advanced and integration settings",
+      "default": "deny",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_FILES_EGRESS_MODE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "backupsheep:local",
+      "sensitive": false,
+      "required": false,
+      "description": "Build or deploy every application role from the same reviewed tag. Production operators should set this to an exact release/revision tag, never `latest`.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_INSTALLATION_ID",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Unique 64-character hexadecimal identity for this Compose installation. install.sh generates it. For a reviewed manual install, generate it once with `python -c \"import secrets; print(secrets.token_hex(32))\"` and keep it stable so project-name collisions fail closed rather than reusing another install's volumes.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_LOGS_EGRESS_ALLOW_DNS_NAMES",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_LOGS_EGRESS_ALLOW_DNS_NAMES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_LOGS_EGRESS_MODE",
+      "category": "Advanced and integration settings",
+      "default": "deny",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_LOGS_EGRESS_MODE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_PIDS_LIMIT",
+      "category": "Advanced and integration settings",
+      "default": "512",
+      "sensitive": false,
+      "required": false,
+      "description": "Maximum processes per application container. This bounds accidental fork/process exhaustion without limiting the bytes or CPU needed by a legitimate large backup.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_POSTGRES_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "backupsheep-postgres:local",
+      "sensitive": false,
+      "required": false,
+      "description": "Locally built, digest-rooted PostgreSQL image. The verified installer pins both local image tags to the same full source commit and never pulls either tag.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Populated only while/after the one-time Debian migration so the detached legacy volume remains bound to its exact retained rollback image.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_POSTGRES_STORAGE_GENERATION",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "PostgreSQL 18 Alpine/ICU storage generation. install.sh derives the witness from the installation identity, project, fixed runtime generation, active logical volume, and ICU locale. Never copy or invent these values to adopt an old volume.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_POSTGRES_STORAGE_INTENT",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_POSTGRES_STORAGE_INTENT.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_POSTGRES_STORAGE_WITNESS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_PRIVATE_MIN_FREE_BYTES",
+      "category": "Advanced and integration settings",
+      "default": "536870912",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_PRIVATE_MIN_FREE_BYTES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_PRIVATE_MIN_FREE_INODES",
+      "category": "Advanced and integration settings",
+      "default": "1024",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_PRIVATE_MIN_FREE_INODES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RABBITMQ_DATA_GENERATION",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Installer-owned data-format witness. Leave blank in the sample; install.sh sets 4.3 only for a new volume or after proving a live broker is already on RabbitMQ 4.3.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Installer-owned identity/task-auth witnesses. Existing stock installs must use the explicit broker migration flag; never set these by hand to bypass provisioning.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES",
+      "category": "Advanced and integration settings",
+      "default": "536870912",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES",
+      "category": "Advanced and integration settings",
+      "default": "1024",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES.",
+      "source": ".env_sample"
+    },
+    {
       "name": "BACKUPSHEEP_SECRETS",
       "category": "Advanced and integration settings",
       "default": "Application default",
@@ -14708,12 +15312,201 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": "backupsheep/settings.py"
     },
     {
+      "name": "BACKUPSHEEP_SECRETS_DIR",
+      "category": "Advanced and integration settings",
+      "default": ".secrets",
+      "sensitive": false,
+      "required": false,
+      "description": "Private host directory populated with the installation's file-backed secrets.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_STAGING_LAYOUT_INTENT",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Generation-3 ownership witness for private source/storage volumes and separate database/files ciphertext handoffs. install.sh derives both values; do not invent them to bypass migration.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_STAGING_LAYOUT_WITNESS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_STAGING_LAYOUT_WITNESS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_STAGING_MIN_FREE_BYTES",
+      "category": "Advanced and integration settings",
+      "default": "536870912",
+      "sensitive": false,
+      "required": false,
+      "description": "Fail before creating another private or shared artifact when the relevant volume cannot retain this reserve. Docker volume quotas/encryption remain host responsibilities.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_STAGING_MIN_FREE_INODES",
+      "category": "Advanced and integration settings",
+      "default": "1024",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_STAGING_MIN_FREE_INODES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_STORAGE_EGRESS_ALLOW_DNS_NAMES",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_STORAGE_EGRESS_ALLOW_DNS_NAMES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_STORAGE_EGRESS_MODE",
+      "category": "Advanced and integration settings",
+      "default": "deny",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_STORAGE_EGRESS_MODE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES",
+      "category": "Advanced and integration settings",
+      "default": "536870912",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_TRANSFER_MIN_FREE_INODES",
+      "category": "Advanced and integration settings",
+      "default": "1024",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_TRANSFER_MIN_FREE_INODES.",
+      "source": ".env_sample"
+    },
+    {
       "name": "BS_LOCAL_STORAGE_PATH",
       "category": "Advanced and integration settings",
       "default": "/backups",
       "sensitive": false,
       "required": false,
-      "description": "Root filesystem path for the Local Storage destination. It must be durable and visible at the same path to every role that uses it.",
+      "description": "Durable root for the Local Storage destination. Stock Compose mounts it read/write only in worker-storage; every other runtime role must have no Local Storage mount.",
+      "source": "backupsheep/settings.py"
+    },
+    {
+      "name": "DOCKER_LOG_MAX_FILE",
+      "category": "Advanced and integration settings",
+      "default": "5",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing DOCKER_LOG_MAX_FILE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DOCKER_LOG_MAX_SIZE",
+      "category": "Advanced and integration settings",
+      "default": "10m",
+      "sensitive": false,
+      "required": false,
+      "description": "Bound Docker json-file logs so a noisy worker cannot fill the host filesystem.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "MANAGED_SSH_OPERATION_LEASE_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "300",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing MANAGED_SSH_OPERATION_LEASE_SECONDS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "MANAGED_SSH_OPERATION_TTL_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "600",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing MANAGED_SSH_OPERATION_TTL_SECONDS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "240",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "MANAGED_SSH_TASK_TIME_LIMIT_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "270",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing MANAGED_SSH_TASK_TIME_LIMIT_SECONDS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "30",
+      "sensitive": false,
+      "required": false,
+      "description": "Test/support setting read by the application but not included in the normal operator sample. Do not enable it in production without reviewing the implementation.",
+      "source": "backupsheep/settings.py"
+    },
+    {
+      "name": "NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "Computed by application",
+      "sensitive": false,
+      "required": false,
+      "description": "Test/support setting read by the application but not included in the normal operator sample. Do not enable it in production without reviewing the implementation.",
+      "source": "backupsheep/settings.py"
+    },
+    {
+      "name": "NOTIFICATION_DELIVERY_LEASE_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "120",
+      "sensitive": false,
+      "required": false,
+      "description": "Test/support setting read by the application but not included in the normal operator sample. Do not enable it in production without reviewing the implementation.",
+      "source": "backupsheep/settings.py"
+    },
+    {
+      "name": "NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE",
+      "category": "Advanced and integration settings",
+      "default": "100",
+      "sensitive": false,
+      "required": false,
+      "description": "Test/support setting read by the application but not included in the normal operator sample. Do not enable it in production without reviewing the implementation.",
       "source": "backupsheep/settings.py"
     },
     {
@@ -14735,12 +15528,75 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": "backupsheep/settings.py"
     },
     {
+      "name": "SENTRY_PROFILES_SAMPLE_RATE",
+      "category": "Advanced and integration settings",
+      "default": "0",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing SENTRY_PROFILES_SAMPLE_RATE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SENTRY_TRACES_SAMPLE_RATE",
+      "category": "Advanced and integration settings",
+      "default": "0",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing SENTRY_TRACES_SAMPLE_RATE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SESSION_COOKIE_AGE",
+      "category": "Advanced and integration settings",
+      "default": "43200",
+      "sensitive": false,
+      "required": false,
+      "description": "Browser sessions last at most 12 hours and, by default, lose their client cookie when the browser closes. Values above 43200 are rejected at boot. Session cookies are always HttpOnly and SameSite=Lax; DJANGO_HTTPS additionally marks them Secure.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SESSION_EXPIRE_AT_BROWSER_CLOSE",
+      "category": "Advanced and integration settings",
+      "default": "true",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing SESSION_EXPIRE_AT_BROWSER_CLOSE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "STORAGE_POINT_DELETE_LEASE_SECONDS",
+      "category": "Advanced and integration settings",
+      "default": "3600",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing STORAGE_POINT_DELETE_LEASE_SECONDS.",
+      "source": ".env_sample"
+    },
+    {
       "name": "WEBSITE_RESTORE_INLINE_FILE_LIMIT",
       "category": "Advanced and integration settings",
       "default": "1000",
       "sensitive": false,
       "required": false,
       "description": "Maximum website-archive member count handled by the inline preflight path before the restore uses the scalable inventory path. Zero disables inline enumeration.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "WORDPRESS_INTEGRATION_ENABLED",
+      "category": "Advanced and integration settings",
+      "default": "false",
+      "sensitive": false,
+      "required": false,
+      "description": "WordPress and Basecamp are unavailable in enterprise/BSE1 mode until each has a complete authenticated export or automatic restore workflow. These switches are explicit non-enterprise compatibility opt-ins only and take effect only with BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=legacy-only, BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true, and enterprise mode disabled. WordPress additionally requires the reviewed secure connector v2 described in docs/guides/wordpress-secure-connector.md; the legacy plugin protocol is unsupported.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "WORDPRESS_PRIVATE_TARGET_CIDRS",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Empty is the enterprise-safe default: WordPress credentials may reach public HTTPS origins only. Self-hosters can opt in exact private networks (for example, 10.20.30.0/24); DNS remains pinned and metadata/link-local targets stay forbidden.",
       "source": ".env_sample"
     },
     {
@@ -14768,6 +15624,15 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "sensitive": false,
       "required": false,
       "description": "Canonical public URL scheme, including ://. Keep it aligned with TLS termination, secure cookies, CSRF origins, links, and OAuth callbacks.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DJANGO_ADMIN_ENABLED",
+      "category": "Application and security",
+      "default": "false",
+      "sensitive": false,
+      "required": false,
+      "description": "Disabled by default because Django admin uses a separate password-only login that does not inherit BackupSheep console MFA. If an operator enables it, restrict the route at the reverse proxy or VPN and use a dedicated superuser.",
       "source": ".env_sample"
     },
     {
@@ -14803,7 +15668,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "Secret value — replace sample",
       "sensitive": true,
       "required": true,
-      "description": "CHANGE THIS to a long random string and keep it STABLE. It signs sessions/tokens and derives the key that encrypts stored email credentials — rotating it logs everyone out and makes saved email creds undecryptable. Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\"",
+      "description": "The stock Compose stack blanks this value and reads `.secrets/django_secret_key`. External/PaaS deployments may instead supply a long, stable secret directly.",
       "source": ".env_sample"
     },
     {
@@ -14830,7 +15695,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "Not set",
       "sensitive": true,
       "required": false,
-      "description": "First-run onboarding gate. The first account created through /onboarding becomes the instance admin; the install token proves the person running the wizard has access to this server. Leave blank to use the auto-generated token written to _storage/install_token on first load (read: docker compose exec app cat /code/_storage/install_token), or set a fixed value here for automated installs.",
+      "description": "First-run onboarding gate. The first account created through /onboarding becomes the instance admin; the install token proves the person running the wizard has access to this server. The stock installer supplies `.secrets/onboarding_token`; external/PaaS deployments may set a fixed value here for automated installs.",
       "source": ".env_sample"
     },
     {
@@ -15329,6 +16194,15 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": ".env_sample"
     },
     {
+      "name": "BASECAMP_INTEGRATION_ENABLED",
+      "category": "OAuth applications",
+      "default": "false",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced oauth applications control read at process start. Review its implementation references, unit, and restart scope before changing BASECAMP_INTEGRATION_ENABLED.",
+      "source": ".env_sample"
+    },
+    {
       "name": "BASECAMP_OAUTH_ENDPOINT",
       "category": "OAuth applications",
       "default": "https://launchpad.37signals.com/authorization/new",
@@ -15601,10 +16475,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
     {
       "name": "S3_DOWNLOAD_URL_EXPIRES",
       "category": "Observability and retention",
-      "default": "86400",
+      "default": "300",
       "sensitive": false,
       "required": false,
-      "description": "Seconds before a generated backup download URL expires (default 86400 = 24 hours).",
+      "description": "Seconds before a generated provider-signed backup download URL expires. Five minutes is the default and values above the one-hour hard ceiling are rejected at boot.",
       "source": ".env_sample"
     },
     {
@@ -15613,7 +16487,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "Not set",
       "sensitive": true,
       "required": false,
-      "description": "Optional",
+      "description": "Optional. Error delivery is enabled only when a DSN is set. Tracing and profiling remain off unless deliberately enabled with a bounded 0..1 rate. Sentry request bodies, local variables, default PII, and secret-shaped fields are suppressed regardless of these sampling values.",
       "source": ".env_sample"
     },
     {
@@ -15626,6 +16500,60 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": ".env_sample"
     },
     {
+      "name": "DB_APP_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_app",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_APP_USER.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DB_BEAT_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_beat",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_BEAT_USER.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DB_BOOTSTRAP_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_bootstrap",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_BOOTSTRAP_USER.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DB_CLOUD_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_cloud",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_CLOUD_USER.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DB_DATABASE_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_database",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_DATABASE_USER.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DB_FILES_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_files",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_FILES_USER.",
+      "source": ".env_sample"
+    },
+    {
       "name": "DB_HOST",
       "category": "PostgreSQL",
       "default": "db",
@@ -15635,12 +16563,30 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": ".env_sample"
     },
     {
+      "name": "DB_LOGS_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_logs",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_LOGS_USER.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DB_MIGRATOR_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_migrator",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_MIGRATOR_USER.",
+      "source": ".env_sample"
+    },
+    {
       "name": "DB_NAME",
       "category": "PostgreSQL",
       "default": "backupsheep",
       "sensitive": false,
       "required": false,
-      "description": "PostgreSQL. The docker `db` service reads DB_NAME/DB_USER/DB_PASSWORD as its POSTGRES_DB/USER/PASSWORD, so set a real password here. PostgreSQL 18 recommended (14+ supported by Django 6). For the docker stack keep DB_HOST=db and DB_PORT=5432.",
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_NAME.",
       "source": ".env_sample"
     },
     {
@@ -15662,18 +16608,45 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": ".env_sample"
     },
     {
+      "name": "DB_PREFLIGHT_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_preflight",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_PREFLIGHT_USER.",
+      "source": ".env_sample"
+    },
+    {
       "name": "DB_SSLMODE",
       "category": "PostgreSQL",
       "default": "Not set",
       "sensitive": false,
       "required": false,
-      "description": "Optional PostgreSQL TLS mode. Managed database providers often require `require`.",
+      "description": "External PostgreSQL is accepted in production only with full hostname verification and an explicit CA bundle. The stock `db` Compose service is the narrow plaintext exception.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DB_SSLROOTCERT",
+      "category": "PostgreSQL",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_SSLROOTCERT.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "DB_STORAGE_USER",
+      "category": "PostgreSQL",
+      "default": "backupsheep_storage",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced postgresql control read at process start. Review its implementation references, unit, and restart scope before changing DB_STORAGE_USER.",
       "source": ".env_sample"
     },
     {
       "name": "DB_USER",
       "category": "PostgreSQL",
-      "default": "backupsheep",
+      "default": "backupsheep_app",
       "sensitive": false,
       "required": false,
       "description": "PostgreSQL role used by the app, workers, scheduler, and migrations when DATABASE_URL is unset.",
@@ -15694,17 +16667,17 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "Not set",
       "sensitive": false,
       "required": false,
-      "description": "DigitalOcean OAuth application client identifier for self-hosted OAuth connections.",
-      "source": "backupsheep/settings.py"
+      "description": "DigitalOcean OAuth application (PAT-based connections do not need these).",
+      "source": ".env_sample"
     },
     {
       "name": "DIGITALOCEAN_APP_CLIENT_SECRET",
       "category": "Provider endpoints and credentials",
-      "default": "Secret value — replace sample",
+      "default": "Not set",
       "sensitive": true,
       "required": false,
-      "description": "DigitalOcean OAuth application secret for self-hosted OAuth connections.",
-      "source": "backupsheep/settings.py"
+      "description": "Deployment OAuth/API credential for Digitalocean App; protect it as a secret and rotate it through the provider application workflow.",
+      "source": ".env_sample"
     },
     {
       "name": "DIGITALOCEAN_TOKEN_URL",
@@ -15817,10 +16790,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
     {
       "name": "CELERY_BROKER_URL",
       "category": "Queues and worker capacity",
-      "default": "amqp://guest:guest@rabbitmq:5672//",
+      "default": "Not set",
       "sensitive": false,
       "required": false,
-      "description": "Celery broker for background + scheduled (cron/rate/one-time) backups. BackupSheep uses RabbitMQ only. The docker stack points at the bundled `rabbitmq` service; change it for an external RabbitMQ broker.",
+      "description": "Celery broker for background + scheduled backups. Stock Compose uses independent file-backed credentials for app, Beat, preflight and every worker lane; this value names the application identity only and the direct password remains blank. Managed platforms may instead provide CELERY_BROKER_URL and leave RABBITMQ_HOST blank.",
       "source": ".env_sample"
     },
     {
@@ -15914,12 +16887,48 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": ".env_sample"
     },
     {
-      "name": "RABBITMQ_HOST",
+      "name": "CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE",
+      "category": "Queues and worker capacity",
+      "default": "1000",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced queues and worker capacity control read at process start. Review its implementation references, unit, and restart scope before changing CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "CELERY_TASK_REPLAY_RETENTION_SECONDS",
+      "category": "Queues and worker capacity",
+      "default": "1209600",
+      "sensitive": false,
+      "required": false,
+      "description": "Terminal replay identities outlive the seven-day signed message lifetime. Active deliveries are never pruned; keep at least 605100 seconds (7 days + clock skew).",
+      "source": ".env_sample"
+    },
+    {
+      "name": "RABBITMQ_CA_CERT",
       "category": "Queues and worker capacity",
       "default": "Not set",
       "sensitive": false,
       "required": false,
-      "description": "Alternatively, managed platforms can provide RabbitMQ as connection fragments. When RABBITMQ_HOST is set, these take precedence over CELERY_BROKER_URL and are URL-encoded.",
+      "description": "Optional private CA bundle for amqps. System trust roots are used when this is blank.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "RABBITMQ_HOST",
+      "category": "Queues and worker capacity",
+      "default": "rabbitmq",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced queues and worker capacity control read at process start. Review its implementation references, unit, and restart scope before changing RABBITMQ_HOST.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "RABBITMQ_LEGACY_USER",
+      "category": "Queues and worker capacity",
+      "default": "backupsheep",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced queues and worker capacity control read at process start. Review its implementation references, unit, and restart scope before changing RABBITMQ_LEGACY_USER.",
       "source": ".env_sample"
     },
     {
@@ -15941,9 +16950,18 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": ".env_sample"
     },
     {
+      "name": "RABBITMQ_SCHEME",
+      "category": "Queues and worker capacity",
+      "default": "amqp",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced queues and worker capacity control read at process start. Review its implementation references, unit, and restart scope before changing RABBITMQ_SCHEME.",
+      "source": ".env_sample"
+    },
+    {
       "name": "RABBITMQ_USER",
       "category": "Queues and worker capacity",
-      "default": "Not set",
+      "default": "backupsheep_app",
       "sensitive": false,
       "required": false,
       "description": "RabbitMQ username used when constructing the broker URL from fragments.",
@@ -15952,7 +16970,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
     {
       "name": "RABBITMQ_VHOST",
       "category": "Queues and worker capacity",
-      "default": "/",
+      "default": "backupsheep",
       "sensitive": false,
       "required": false,
       "description": "RabbitMQ virtual host used when constructing the broker URL from fragments.",
@@ -16031,6 +17049,51 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": ".env_sample"
     },
     {
+      "name": "SSH_DISCOVERY_MAX_ENTRIES",
+      "category": "Source connectivity and trust",
+      "default": "10000",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced source connectivity and trust control read at process start. Review its implementation references, unit, and restart scope before changing SSH_DISCOVERY_MAX_ENTRIES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_DISCOVERY_MAX_NAME_BYTES",
+      "category": "Source connectivity and trust",
+      "default": "4096",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced source connectivity and trust control read at process start. Review its implementation references, unit, and restart scope before changing SSH_DISCOVERY_MAX_NAME_BYTES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_DISCOVERY_MAX_RESULT_BYTES",
+      "category": "Source connectivity and trust",
+      "default": "2097152",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced source connectivity and trust control read at process start. Review its implementation references, unit, and restart scope before changing SSH_DISCOVERY_MAX_RESULT_BYTES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_DISCOVERY_TIMEOUT_SECONDS",
+      "category": "Source connectivity and trust",
+      "default": "60",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced source connectivity and trust control read at process start. Review its implementation references, unit, and restart scope before changing SSH_DISCOVERY_TIMEOUT_SECONDS.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_IO_TIMEOUT",
+      "category": "Source connectivity and trust",
+      "default": "30",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced source connectivity and trust control read at process start. Review its implementation references, unit, and restart scope before changing SSH_IO_TIMEOUT.",
+      "source": ".env_sample"
+    },
+    {
       "name": "SSH_KEEPALIVE_SECONDS",
       "category": "Source connectivity and trust",
       "default": "30",
@@ -16045,7 +17108,34 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "_storage/ssh_known_hosts",
       "sensitive": false,
       "required": false,
-      "description": "Verified SSH host keys for SFTP/SSH backup sources. Populate this file with keys reviewed out-of-band; unknown SSH hosts are rejected.",
+      "description": "Compatibility-only path for separately reviewed non-stock deployments. Stock Compose does not mount this shared file: it stores account-scoped approvals in PostgreSQL and materializes only the exact approved keys for each operation.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_MANAGED_DATABASE_PUBLIC_KEY",
+      "category": "Source connectivity and trust",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Public half of the optional database-worker Ed25519 identity; must match its lane secret and differ from the files identity.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_MANAGED_FILES_PUBLIC_KEY",
+      "category": "Source connectivity and trust",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Public half of the optional files-worker Ed25519 identity; must match its lane secret and differ from the database identity.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_MANAGED_LANE_ISOLATION_REQUIRED",
+      "category": "Source connectivity and trust",
+      "default": "true",
+      "sensitive": false,
+      "required": false,
+      "description": "Fail-closed stock guard requiring distinct database/files identities and lane-only private-key custody.",
       "source": ".env_sample"
     },
     {
@@ -16054,7 +17144,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "Not set",
       "sensitive": true,
       "required": false,
-      "description": "Optional managed SSH key authentication. Configure both values on every web/files/ database worker before the UI will advertise this mode. The private key file should live on the shared _storage volume with mode 0600.",
+      "description": "Optional managed SSH authentication uses distinct Ed25519 identities per source lane. Put the private halves in `.secrets/ssh_managed_database_private_key` and `.secrets/ssh_managed_files_private_key`; the installer derives and canonicalizes both public values. Enable both or neither. Runtime paths and the legacy shared public setting stay blank in stock Compose.",
       "source": ".env_sample"
     },
     {
@@ -16063,7 +17153,43 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "Not set",
       "sensitive": false,
       "required": false,
-      "description": "Public half of the deployment-managed SSH key shown for installation on source hosts; must match the configured private key.",
+      "description": "Legacy shared public-key setting that must remain blank in stock Compose.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_REMOTE_COMMAND_MAX_BYTES",
+      "category": "Source connectivity and trust",
+      "default": "2097152",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced source connectivity and trust control read at process start. Review its implementation references, unit, and restart scope before changing SSH_REMOTE_COMMAND_MAX_BYTES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_REMOTE_CREDENTIAL_STALE_SECONDS",
+      "category": "Source connectivity and trust",
+      "default": "900",
+      "sensitive": false,
+      "required": false,
+      "description": "Remote DB validation credentials are exclusive 0600 files and are normally deleted immediately. A later validation removes exact BackupSheep artifacts older than this bound if a worker was hard-killed before cleanup.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES",
+      "category": "Source connectivity and trust",
+      "default": "10000",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced source connectivity and trust control read at process start. Review its implementation references, unit, and restart scope before changing SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS",
+      "category": "Source connectivity and trust",
+      "default": "10",
+      "sensitive": false,
+      "required": false,
+      "description": "Advanced source connectivity and trust control read at process start. Review its implementation references, unit, and restart scope before changing SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS.",
       "source": ".env_sample"
     },
     {

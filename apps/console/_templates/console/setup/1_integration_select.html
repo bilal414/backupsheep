@@ -279,8 +279,13 @@
             <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
                 <h3 id="cms-saas-heading" class="text-base font-semibold text-slate-900">CMS &amp; SaaS Applications</h3>
             </div>
-            <p class="mt-1 text-sm text-slate-500">Connect WordPress website by installing BackupSheep plugin. You can store backups included Free Storage in your plan or on your storage accounts.</p>
+            {% if wordpress_source_protection_available or basecamp_source_protection_available %}
+                <p class="mt-1 text-sm text-slate-500">Connect an explicitly enabled application source and store its backups on your configured storage accounts.</p>
+            {% else %}
+                <p class="mt-1 text-sm text-slate-500">Only application sources with a complete recovery workflow are shown in this installation.</p>
+            {% endif %}
             <div class="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {% if wordpress_source_protection_available %}
                 <a id="wordpress" href="{% url 'console:setup:integration_open' 'wordpress' %}"
                    data-category="cms" data-search="wordpress plugin cms website backup"
                    x-show="cardVisible($el)"
@@ -293,6 +298,8 @@
                     </div>
                     <p class="mt-3 text-sm leading-6 text-slate-500">Backup your WordPress websites using BackupSheep plugin.</p>
                 </a>
+                {% endif %}
+                {% if basecamp_source_protection_available %}
                 <a id="basecamp" href="{% url 'console:setup:integration_open' 'basecamp' %}"
                    data-category="cms" data-search="basecamp saas project backup"
                    x-show="cardVisible($el)"
@@ -305,6 +312,7 @@
                     </div>
                     <p class="mt-3 text-sm leading-6 text-slate-500">Backup your data using BackupSheep.</p>
                 </a>
+                {% endif %}
                 <div id="zendesk"
                      data-category="cms" data-search="zendesk saas support coming soon"
                      x-show="cardVisible($el)"

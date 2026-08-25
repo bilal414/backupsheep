@@ -15,10 +15,10 @@
     ]
   },
   "counts": {
-    "api_operations": 917,
+    "api_operations": 920,
     "health_operations": 1,
-    "total_operations": 918,
-    "unique_paths": 525
+    "total_operations": 921,
+    "unique_paths": 528
   },
   "operations": [
     {
@@ -139,17 +139,17 @@
       "file": "requests/01 Authentication/001-post-post.bru"
     },
     {
-      "operation_id": "get-api-v1-auth-logout",
-      "method": "GET",
+      "operation_id": "post-api-v1-auth-logout",
+      "method": "POST",
       "path": "/api/v1/auth/logout/",
       "regex_route": "api/v1/auth/logout/?$",
       "view": "apps.api.v1.auth.views.APIAuthLogout",
-      "action": "get",
+      "action": "post",
       "source": "apps/api/v1/auth/views.py",
       "auth": "none",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/01 Authentication/002-get-get.bru"
+      "file": "requests/01 Authentication/002-post-post.bru"
     },
     {
       "operation_id": "patch-api-v1-auth-reset",
@@ -4156,17 +4156,17 @@
       "file": "requests/20 Connections/Aws/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-aws-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-aws-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/aws/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^aws/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.aws.views.CoreAWSView",
       "action": "validate",
       "source": "apps/api/v1/connection/aws/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Aws/010-get-validate.bru"
+      "file": "requests/20 Connections/Aws/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-aws-rds",
@@ -4286,17 +4286,17 @@
       "file": "requests/20 Connections/Aws Rds/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-aws-rds-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-aws-rds-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/aws_rds/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^aws_rds/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.aws_rds.views.CoreAWSRDSView",
       "action": "validate",
       "source": "apps/api/v1/connection/aws_rds/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Aws Rds/010-get-validate.bru"
+      "file": "requests/20 Connections/Aws Rds/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-basecamp",
@@ -4403,17 +4403,17 @@
       "file": "requests/20 Connections/Basecamp/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-basecamp-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-basecamp-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/basecamp/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^basecamp/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.basecamp.views.CoreBasecampView",
       "action": "validate",
       "source": "apps/api/v1/connection/basecamp/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Basecamp/009-get-validate.bru"
+      "file": "requests/20 Connections/Basecamp/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-database",
@@ -4507,43 +4507,56 @@
       "file": "requests/20 Connections/Database/007-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-database-resourceid-objects",
+      "operation_id": "get-api-v1-connections-database-resourceid-managed-ssh-operations-operationuuid",
       "method": "GET",
+      "path": "/api/v1/connections/database/{{resourceId}}/managed-ssh-operations/{{operationUuid}}/",
+      "regex_route": "api/v1/connections/^database/(?P<pk>[^/.]+)/managed-ssh-operations/(?P<operation_uuid>[^/.]+)/$",
+      "view": "apps.api.v1.connection.database.views.CoreDatabaseView",
+      "action": "managed_ssh_operation",
+      "source": "apps/api/v1/connection/database/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/20 Connections/Database/008-get-managed-ssh-operation.bru"
+    },
+    {
+      "operation_id": "post-api-v1-connections-database-resourceid-objects",
+      "method": "POST",
       "path": "/api/v1/connections/database/{{resourceId}}/objects/",
       "regex_route": "api/v1/connections/^database/(?P<pk>[^/.]+)/objects/$",
       "view": "apps.api.v1.connection.database.views.CoreDatabaseView",
       "action": "objects",
       "source": "apps/api/v1/connection/database/views.py",
       "auth": "token",
-      "safety": "safe-read",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Database/008-get-objects.bru"
+      "file": "requests/20 Connections/Database/009-post-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-database-resourceid-update-db-type-and-version",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-database-resourceid-update-db-type-and-version",
+      "method": "POST",
       "path": "/api/v1/connections/database/{{resourceId}}/update_db_type_and_version/",
       "regex_route": "api/v1/connections/^database/(?P<pk>[^/.]+)/update_db_type_and_version/$",
       "view": "apps.api.v1.connection.database.views.CoreDatabaseView",
       "action": "update_db_type_and_version",
       "source": "apps/api/v1/connection/database/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Database/009-get-update-db-type-and-version.bru"
+      "file": "requests/20 Connections/Database/010-post-update-db-type-and-version.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-database-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-database-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/database/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^database/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.database.views.CoreDatabaseView",
       "action": "validate",
       "source": "apps/api/v1/connection/database/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Database/010-get-validate.bru"
+      "file": "requests/20 Connections/Database/011-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-digitalocean",
@@ -4585,17 +4598,17 @@
       "file": "requests/20 Connections/Digitalocean/003-get-endpoints.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-digitalocean-oauth-url",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-digitalocean-oauth-url",
+      "method": "POST",
       "path": "/api/v1/connections/digitalocean/oauth_url/",
       "regex_route": "api/v1/connections/^digitalocean/oauth_url/$",
       "view": "apps.api.v1.connection.digitalocean.views.CoreDigitalOceanView",
       "action": "oauth_url",
       "source": "apps/api/v1/connection/digitalocean/views.py",
-      "auth": "token",
-      "safety": "safe-read",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Digitalocean/004-get-oauth-url.bru"
+      "file": "requests/20 Connections/Digitalocean/004-post-oauth-url.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-digitalocean-resourceid",
@@ -4663,17 +4676,17 @@
       "file": "requests/20 Connections/Digitalocean/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-digitalocean-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-digitalocean-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/digitalocean/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^digitalocean/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.digitalocean.views.CoreDigitalOceanView",
       "action": "validate",
       "source": "apps/api/v1/connection/digitalocean/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Digitalocean/010-get-validate.bru"
+      "file": "requests/20 Connections/Digitalocean/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-google-cloud",
@@ -4780,17 +4793,17 @@
       "file": "requests/20 Connections/Google Cloud/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-google-cloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-google-cloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/google_cloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^google_cloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.google_cloud.views.CoreGoogleCloudView",
       "action": "validate",
       "source": "apps/api/v1/connection/google_cloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Google Cloud/009-get-validate.bru"
+      "file": "requests/20 Connections/Google Cloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-hetzner",
@@ -4897,17 +4910,17 @@
       "file": "requests/20 Connections/Hetzner/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-hetzner-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-hetzner-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/hetzner/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^hetzner/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.hetzner.views.CoreHetznerView",
       "action": "validate",
       "source": "apps/api/v1/connection/hetzner/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Hetzner/009-get-validate.bru"
+      "file": "requests/20 Connections/Hetzner/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-lightsail",
@@ -5027,17 +5040,17 @@
       "file": "requests/20 Connections/Lightsail/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-lightsail-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-lightsail-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/lightsail/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^lightsail/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.lightsail.views.CoreLightsailView",
       "action": "validate",
       "source": "apps/api/v1/connection/lightsail/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Lightsail/010-get-validate.bru"
+      "file": "requests/20 Connections/Lightsail/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-oracle",
@@ -5144,17 +5157,17 @@
       "file": "requests/20 Connections/Oracle/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-oracle-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-oracle-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/oracle/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^oracle/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.oracle.views.CoreOracleView",
       "action": "validate",
       "source": "apps/api/v1/connection/oracle/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Oracle/009-get-validate.bru"
+      "file": "requests/20 Connections/Oracle/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-ovh-ca",
@@ -5196,17 +5209,17 @@
       "file": "requests/20 Connections/Ovh Ca/003-get-endpoints.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-ca-oauth-url",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-ca-oauth-url",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_ca/oauth_url/",
       "regex_route": "api/v1/connections/^ovh_ca/oauth_url/$",
       "view": "apps.api.v1.connection.ovh_ca.views.CoreOVHCAView",
       "action": "oauth_url",
       "source": "apps/api/v1/connection/ovh_ca/views.py",
-      "auth": "token",
-      "safety": "safe-read",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Ca/004-get-oauth-url.bru"
+      "file": "requests/20 Connections/Ovh Ca/004-post-oauth-url.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-ovh-ca-resourceid",
@@ -5274,17 +5287,17 @@
       "file": "requests/20 Connections/Ovh Ca/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-ca-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-ca-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_ca/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^ovh_ca/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.ovh_ca.views.CoreOVHCAView",
       "action": "validate",
       "source": "apps/api/v1/connection/ovh_ca/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Ca/010-get-validate.bru"
+      "file": "requests/20 Connections/Ovh Ca/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-ovh-eu",
@@ -5326,17 +5339,17 @@
       "file": "requests/20 Connections/Ovh Eu/003-get-endpoints.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-eu-oauth-url",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-eu-oauth-url",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_eu/oauth_url/",
       "regex_route": "api/v1/connections/^ovh_eu/oauth_url/$",
       "view": "apps.api.v1.connection.ovh_eu.views.CoreOVHEUView",
       "action": "oauth_url",
       "source": "apps/api/v1/connection/ovh_eu/views.py",
-      "auth": "token",
-      "safety": "safe-read",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Eu/004-get-oauth-url.bru"
+      "file": "requests/20 Connections/Ovh Eu/004-post-oauth-url.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-ovh-eu-resourceid",
@@ -5404,17 +5417,17 @@
       "file": "requests/20 Connections/Ovh Eu/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-eu-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-eu-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_eu/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^ovh_eu/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.ovh_eu.views.CoreOVHEUView",
       "action": "validate",
       "source": "apps/api/v1/connection/ovh_eu/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Eu/010-get-validate.bru"
+      "file": "requests/20 Connections/Ovh Eu/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-ovh-us",
@@ -5456,17 +5469,17 @@
       "file": "requests/20 Connections/Ovh Us/003-get-endpoints.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-us-oauth-url",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-us-oauth-url",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_us/oauth_url/",
       "regex_route": "api/v1/connections/^ovh_us/oauth_url/$",
       "view": "apps.api.v1.connection.ovh_us.views.CoreOVHUSView",
       "action": "oauth_url",
       "source": "apps/api/v1/connection/ovh_us/views.py",
-      "auth": "token",
-      "safety": "safe-read",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Us/004-get-oauth-url.bru"
+      "file": "requests/20 Connections/Ovh Us/004-post-oauth-url.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-ovh-us-resourceid",
@@ -5534,17 +5547,17 @@
       "file": "requests/20 Connections/Ovh Us/009-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-ovh-us-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-ovh-us-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/ovh_us/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^ovh_us/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.ovh_us.views.CoreOVHUSView",
       "action": "validate",
       "source": "apps/api/v1/connection/ovh_us/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Ovh Us/010-get-validate.bru"
+      "file": "requests/20 Connections/Ovh Us/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-totals",
@@ -5664,17 +5677,17 @@
       "file": "requests/20 Connections/Upcloud/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-upcloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-upcloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/upcloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^upcloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.upcloud.views.CoreUpCloudView",
       "action": "validate",
       "source": "apps/api/v1/connection/upcloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Upcloud/009-get-validate.bru"
+      "file": "requests/20 Connections/Upcloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-vultr",
@@ -5781,17 +5794,17 @@
       "file": "requests/20 Connections/Vultr/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-vultr-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-vultr-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/vultr/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^vultr/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.vultr.views.CoreVultrView",
       "action": "validate",
       "source": "apps/api/v1/connection/vultr/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Vultr/009-get-validate.bru"
+      "file": "requests/20 Connections/Vultr/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-website",
@@ -5885,30 +5898,43 @@
       "file": "requests/20 Connections/Website/007-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-website-resourceid-objects",
+      "operation_id": "get-api-v1-connections-website-resourceid-managed-ssh-operations-operationuuid",
       "method": "GET",
+      "path": "/api/v1/connections/website/{{resourceId}}/managed-ssh-operations/{{operationUuid}}/",
+      "regex_route": "api/v1/connections/^website/(?P<pk>[^/.]+)/managed-ssh-operations/(?P<operation_uuid>[^/.]+)/$",
+      "view": "apps.api.v1.connection.website.views.CoreWebsiteView",
+      "action": "managed_ssh_operation",
+      "source": "apps/api/v1/connection/website/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/20 Connections/Website/008-get-managed-ssh-operation.bru"
+    },
+    {
+      "operation_id": "post-api-v1-connections-website-resourceid-objects",
+      "method": "POST",
       "path": "/api/v1/connections/website/{{resourceId}}/objects/",
       "regex_route": "api/v1/connections/^website/(?P<pk>[^/.]+)/objects/$",
       "view": "apps.api.v1.connection.website.views.CoreWebsiteView",
       "action": "objects",
       "source": "apps/api/v1/connection/website/views.py",
       "auth": "token",
-      "safety": "safe-read",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Website/008-get-objects.bru"
+      "file": "requests/20 Connections/Website/009-post-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-website-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-website-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/website/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^website/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.website.views.CoreWebsiteView",
       "action": "validate",
       "source": "apps/api/v1/connection/website/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Website/009-get-validate.bru"
+      "file": "requests/20 Connections/Website/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-connections-wordpress",
@@ -6015,17 +6041,17 @@
       "file": "requests/20 Connections/Wordpress/008-get-objects.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-wordpress-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-wordpress-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/wordpress/{{resourceId}}/validate/",
       "regex_route": "api/v1/connections/^wordpress/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.wordpress.views.CoreWordPressView",
       "action": "validate",
       "source": "apps/api/v1/connection/wordpress/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Wordpress/009-get-validate.bru"
+      "file": "requests/20 Connections/Wordpress/009-post-validate.bru"
     },
     {
       "operation_id": "delete-api-v1-connections-resourceid",
@@ -6106,17 +6132,17 @@
       "file": "requests/20 Connections/Aggregate/009-post-resume.bru"
     },
     {
-      "operation_id": "get-api-v1-connections-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-connections-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/connections/{{resourceId}}/validate/",
       "regex_route": "api/v1/^connections/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.connection.views.CoreConnectionView",
       "action": "validate",
       "source": "apps/api/v1/connection/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/20 Connections/Aggregate/010-get-validate.bru"
+      "file": "requests/20 Connections/Aggregate/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-databases",
@@ -6379,17 +6405,17 @@
       "file": "requests/10 Account and Team/Invites/006-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-invites-resourceid-accept",
-      "method": "GET",
+      "operation_id": "post-api-v1-invites-resourceid-accept",
+      "method": "POST",
       "path": "/api/v1/invites/{{resourceId}}/accept/",
       "regex_route": "api/v1/^invites/(?P<pk>[^/.]+)/accept/$",
       "view": "apps.api.v1.invite.views.CoreInviteView",
       "action": "accept",
       "source": "apps/api/v1/invite/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/10 Account and Team/Invites/007-get-accept.bru"
+      "file": "requests/10 Account and Team/Invites/007-post-accept.bru"
     },
     {
       "operation_id": "post-api-v1-invites-resourceid-cancel",
@@ -6795,17 +6821,17 @@
       "file": "requests/30 Nodes/016-post-take-snapshot.bru"
     },
     {
-      "operation_id": "get-api-v1-nodes-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-nodes-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/nodes/{{resourceId}}/validate/",
       "regex_route": "api/v1/^nodes/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.node.views.CoreNodeView",
       "action": "validate",
       "source": "apps/api/v1/node/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/30 Nodes/017-get-validate.bru"
+      "file": "requests/30 Nodes/017-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-notifications-email",
@@ -6977,17 +7003,17 @@
       "file": "requests/93 Notifications/Slack/006-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-notifications-slack-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-notifications-slack-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/notifications-slack/{{resourceId}}/validate/",
       "regex_route": "api/v1/^notifications-slack/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.notification.views.CoreNotificationSlackView",
       "action": "validate",
       "source": "apps/api/v1/notification/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/93 Notifications/Slack/007-get-validate.bru"
+      "file": "requests/93 Notifications/Slack/007-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-notifications-telegram",
@@ -7068,17 +7094,17 @@
       "file": "requests/93 Notifications/Telegram/006-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-notifications-telegram-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-notifications-telegram-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/notifications-telegram/{{resourceId}}/validate/",
       "regex_route": "api/v1/^notifications-telegram/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.notification.views.CoreNotificationTelegramView",
       "action": "validate",
       "source": "apps/api/v1/notification/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/93 Notifications/Telegram/007-get-validate.bru"
+      "file": "requests/93 Notifications/Telegram/007-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-saas-basecamp",
@@ -7575,17 +7601,17 @@
       "file": "requests/80 Storage/Alibaba/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-alibaba-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-alibaba-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/alibaba/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^alibaba/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.alibaba.views.CoreStorageAliBabaView",
       "action": "validate",
       "source": "apps/api/v1/storage/alibaba/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Alibaba/010-get-validate.bru"
+      "file": "requests/80 Storage/Alibaba/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-all",
@@ -7757,17 +7783,17 @@
       "file": "requests/80 Storage/Aws S3/010-post-sync-lifecycle.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-aws-s3-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-aws-s3-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/aws_s3/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^aws_s3/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.aws_s3.views.CoreStorageAWSS3View",
       "action": "validate",
       "source": "apps/api/v1/storage/aws_s3/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Aws S3/011-get-validate.bru"
+      "file": "requests/80 Storage/Aws S3/011-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-azure",
@@ -7874,17 +7900,17 @@
       "file": "requests/80 Storage/Azure/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-azure-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-azure-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/azure/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^azure/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.azure.views.CoreStorageAzureView",
       "action": "validate",
       "source": "apps/api/v1/storage/azure/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Azure/009-get-validate.bru"
+      "file": "requests/80 Storage/Azure/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-backblaze-b2",
@@ -7991,17 +8017,17 @@
       "file": "requests/80 Storage/Backblaze B2/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-backblaze-b2-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-backblaze-b2-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/backblaze_b2/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^backblaze_b2/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.backblaze_b2.views.CoreStorageBackBlazeB2View",
       "action": "validate",
       "source": "apps/api/v1/storage/backblaze_b2/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Backblaze B2/009-get-validate.bru"
+      "file": "requests/80 Storage/Backblaze B2/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-cloudflare",
@@ -8108,17 +8134,17 @@
       "file": "requests/80 Storage/Cloudflare/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-cloudflare-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-cloudflare-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/cloudflare/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^cloudflare/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.cloudflare.views.CoreStorageCloudflareView",
       "action": "validate",
       "source": "apps/api/v1/storage/cloudflare/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Cloudflare/009-get-validate.bru"
+      "file": "requests/80 Storage/Cloudflare/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-costs",
@@ -8251,17 +8277,17 @@
       "file": "requests/80 Storage/Do Spaces/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-do-spaces-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-do-spaces-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/do_spaces/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^do_spaces/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.do_spaces.views.CoreStorageDoSpacesView",
       "action": "validate",
       "source": "apps/api/v1/storage/do_spaces/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Do Spaces/010-get-validate.bru"
+      "file": "requests/80 Storage/Do Spaces/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-dropbox",
@@ -8368,17 +8394,17 @@
       "file": "requests/80 Storage/Dropbox/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-dropbox-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-dropbox-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/dropbox/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^dropbox/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.dropbox.views.CoreStorageDropboxView",
       "action": "validate",
       "source": "apps/api/v1/storage/dropbox/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Dropbox/009-get-validate.bru"
+      "file": "requests/80 Storage/Dropbox/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-exoscale",
@@ -8498,17 +8524,17 @@
       "file": "requests/80 Storage/Exoscale/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-exoscale-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-exoscale-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/exoscale/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^exoscale/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.exoscale.views.CoreStorageExoscaleView",
       "action": "validate",
       "source": "apps/api/v1/storage/exoscale/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Exoscale/010-get-validate.bru"
+      "file": "requests/80 Storage/Exoscale/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-filebase",
@@ -8628,17 +8654,17 @@
       "file": "requests/80 Storage/Filebase/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-filebase-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-filebase-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/filebase/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^filebase/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.filebase.views.CoreStorageFilebaseView",
       "action": "validate",
       "source": "apps/api/v1/storage/filebase/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Filebase/010-get-validate.bru"
+      "file": "requests/80 Storage/Filebase/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-google-cloud",
@@ -8745,17 +8771,17 @@
       "file": "requests/80 Storage/Google Cloud/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-google-cloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-google-cloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/google_cloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^google_cloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.google_cloud.views.CoreStorageGoogleCloudView",
       "action": "validate",
       "source": "apps/api/v1/storage/google_cloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Google Cloud/009-get-validate.bru"
+      "file": "requests/80 Storage/Google Cloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-google-drive",
@@ -8862,17 +8888,17 @@
       "file": "requests/80 Storage/Google Drive/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-google-drive-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-google-drive-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/google_drive/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^google_drive/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.google_drive.views.CoreStorageGoogleDriveView",
       "action": "validate",
       "source": "apps/api/v1/storage/google_drive/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Google Drive/009-get-validate.bru"
+      "file": "requests/80 Storage/Google Drive/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-ibm",
@@ -8992,17 +9018,17 @@
       "file": "requests/80 Storage/Ibm/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-ibm-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-ibm-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/ibm/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^ibm/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.ibm.views.CoreStorageIBMView",
       "action": "validate",
       "source": "apps/api/v1/storage/ibm/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Ibm/010-get-validate.bru"
+      "file": "requests/80 Storage/Ibm/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-idrive",
@@ -9109,17 +9135,17 @@
       "file": "requests/80 Storage/Idrive/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-idrive-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-idrive-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/idrive/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^idrive/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.idrive.views.CoreStorageIDriveView",
       "action": "validate",
       "source": "apps/api/v1/storage/idrive/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Idrive/009-get-validate.bru"
+      "file": "requests/80 Storage/Idrive/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-ionos",
@@ -9239,17 +9265,17 @@
       "file": "requests/80 Storage/Ionos/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-ionos-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-ionos-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/ionos/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^ionos/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.ionos.views.CoreStorageIonosView",
       "action": "validate",
       "source": "apps/api/v1/storage/ionos/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Ionos/010-get-validate.bru"
+      "file": "requests/80 Storage/Ionos/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-leviia",
@@ -9356,17 +9382,17 @@
       "file": "requests/80 Storage/Leviia/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-leviia-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-leviia-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/leviia/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^leviia/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.leviia.views.CoreStorageLeviiaView",
       "action": "validate",
       "source": "apps/api/v1/storage/leviia/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Leviia/009-get-validate.bru"
+      "file": "requests/80 Storage/Leviia/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-linode",
@@ -9473,17 +9499,17 @@
       "file": "requests/80 Storage/Linode/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-linode-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-linode-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/linode/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^linode/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.linode.views.CoreStorageLinodeView",
       "action": "validate",
       "source": "apps/api/v1/storage/linode/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Linode/009-get-validate.bru"
+      "file": "requests/80 Storage/Linode/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-local",
@@ -9577,17 +9603,17 @@
       "file": "requests/80 Storage/Local/007-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-local-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-local-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/local/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^local/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.local.views.CoreStorageLocalView",
       "action": "validate",
       "source": "apps/api/v1/storage/local/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/008-get-validate.bru"
+      "file": "requests/80 Storage/Local/008-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-onedrive",
@@ -9694,17 +9720,17 @@
       "file": "requests/80 Storage/Onedrive/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-onedrive-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-onedrive-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/onedrive/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^onedrive/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.onedrive.views.CoreStorageOneDriveView",
       "action": "validate",
       "source": "apps/api/v1/storage/onedrive/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Onedrive/009-get-validate.bru"
+      "file": "requests/80 Storage/Onedrive/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-oracle",
@@ -9824,17 +9850,17 @@
       "file": "requests/80 Storage/Oracle/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-oracle-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-oracle-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/oracle/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^oracle/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.oracle.views.CoreStorageOracleView",
       "action": "validate",
       "source": "apps/api/v1/storage/oracle/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Oracle/010-get-validate.bru"
+      "file": "requests/80 Storage/Oracle/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-pcloud",
@@ -9941,17 +9967,17 @@
       "file": "requests/80 Storage/Pcloud/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-pcloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-pcloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/pcloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^pcloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.pcloud.views.CoreStoragePCloudView",
       "action": "validate",
       "source": "apps/api/v1/storage/pcloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Pcloud/009-get-validate.bru"
+      "file": "requests/80 Storage/Pcloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-rackcorp",
@@ -10071,17 +10097,17 @@
       "file": "requests/80 Storage/Rackcorp/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-rackcorp-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-rackcorp-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/rackcorp/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^rackcorp/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.rackcorp.views.CoreStorageRackCorpView",
       "action": "validate",
       "source": "apps/api/v1/storage/rackcorp/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Rackcorp/010-get-validate.bru"
+      "file": "requests/80 Storage/Rackcorp/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-scaleway",
@@ -10201,17 +10227,17 @@
       "file": "requests/80 Storage/Scaleway/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-scaleway-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-scaleway-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/scaleway/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^scaleway/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.scaleway.views.CoreStorageScalewayView",
       "action": "validate",
       "source": "apps/api/v1/storage/scaleway/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Scaleway/010-get-validate.bru"
+      "file": "requests/80 Storage/Scaleway/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-tencent",
@@ -10331,17 +10357,17 @@
       "file": "requests/80 Storage/Tencent/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-tencent-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-tencent-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/tencent/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^tencent/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.tencent.views.CoreStorageTencentView",
       "action": "validate",
       "source": "apps/api/v1/storage/tencent/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Tencent/010-get-validate.bru"
+      "file": "requests/80 Storage/Tencent/010-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-upcloud",
@@ -10448,17 +10474,17 @@
       "file": "requests/80 Storage/Upcloud/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-upcloud-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-upcloud-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/upcloud/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^upcloud/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.upcloud.views.CoreStorageUpCloudView",
       "action": "validate",
       "source": "apps/api/v1/storage/upcloud/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Upcloud/009-get-validate.bru"
+      "file": "requests/80 Storage/Upcloud/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-vultr",
@@ -10565,17 +10591,17 @@
       "file": "requests/80 Storage/Vultr/008-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-vultr-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-vultr-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/vultr/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^vultr/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.vultr.views.CoreStorageVultrView",
       "action": "validate",
       "source": "apps/api/v1/storage/vultr/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Vultr/009-get-validate.bru"
+      "file": "requests/80 Storage/Vultr/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-wasabi",
@@ -10695,17 +10721,17 @@
       "file": "requests/80 Storage/Wasabi/009-put-update.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-wasabi-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-wasabi-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/wasabi/{{resourceId}}/validate/",
       "regex_route": "api/v1/storage/^wasabi/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.wasabi.views.CoreStorageWasabiView",
       "action": "validate",
       "source": "apps/api/v1/storage/wasabi/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Wasabi/010-get-validate.bru"
+      "file": "requests/80 Storage/Wasabi/010-post-validate.bru"
     },
     {
       "operation_id": "post-api-v1-storage-resourceid-delete",
@@ -10747,17 +10773,17 @@
       "file": "requests/80 Storage/Aggregate/005-post-resume.bru"
     },
     {
-      "operation_id": "get-api-v1-storage-resourceid-validate",
-      "method": "GET",
+      "operation_id": "post-api-v1-storage-resourceid-validate",
+      "method": "POST",
       "path": "/api/v1/storage/{{resourceId}}/validate/",
       "regex_route": "api/v1/^storage/(?P<pk>[^/.]+)/validate/$",
       "view": "apps.api.v1.storage.views.CoreStorageView",
       "action": "validate",
       "source": "apps/api/v1/storage/views.py",
       "auth": "token",
-      "safety": "stateful-get",
+      "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Aggregate/006-get-validate.bru"
+      "file": "requests/80 Storage/Aggregate/006-post-validate.bru"
     },
     {
       "operation_id": "post-api-v1-utils-ssh-host-keys-approve",
@@ -10786,6 +10812,19 @@
       "file": "requests/94 Utilities/002-post-post.bru"
     },
     {
+      "operation_id": "post-api-v1-utils-ssh-host-keys-revoke",
+      "method": "POST",
+      "path": "/api/v1/utils/ssh-host-keys/revoke/",
+      "regex_route": "api/v1/utils/ssh-host-keys/revoke/",
+      "view": "apps.api.v1.utils.views.SSHHostKeyRevokeView",
+      "action": "post",
+      "source": "apps/api/v1/utils/views.py",
+      "auth": "token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/94 Utilities/003-post-post.bru"
+    },
+    {
       "operation_id": "get-api-v1-utils-test",
       "method": "GET",
       "path": "/api/v1/utils/test/",
@@ -10796,7 +10835,7 @@
       "auth": "none",
       "safety": "safe-read",
       "kind": "machine-api",
-      "file": "requests/94 Utilities/003-get-get.bru"
+      "file": "requests/94 Utilities/004-get-get.bru"
     },
     {
       "operation_id": "get-api-v1-volumes-aws",

@@ -419,6 +419,526 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         self.assertIn('"network_calls": false', stdout.getvalue())
         self.assertNotIn("TOKEN-CANARY", stdout.getvalue() + stderr.getvalue())
 
+    def test_main_refuses_secret_bearing_results_before_writing_output(self):
+        cases = {
+            "sensitive_key": {
+                "status": "ready",
+                "secret_key": "SECRET-CANARY",
+            },
+            "registered_secret_value": {
+                "status": "ready",
+                "diagnostic": "SECRET-CANARY",
+            },
+            "api_token_value": {
+                "status": "ready",
+                "diagnostic": "TOKEN-CANARY",
+            },
+            "generic_token_key": {
+                "status": "ready",
+                "token": "UNREGISTERED-CANARY",
+            },
+            "camel_case_api_key": {
+                "status": "ready",
+                "apiKey": "CAMEL-CANARY",
+            },
+            "compact_access_key": {
+                "status": "ready",
+                "accesskey": "COMPACT-CANARY",
+            },
+            "generic_key": {
+                "status": "ready",
+                "key": "UNREGISTERED-GENERIC-CANARY",
+            },
+            "generic_auth": {
+                "status": "ready",
+                "auth": "UNREGISTERED-GENERIC-CANARY",
+            },
+            "generic_session": {
+                "status": "ready",
+                "session": "UNREGISTERED-GENERIC-CANARY",
+            },
+            "generic_jwt": {
+                "status": "ready",
+                "jwt": "UNREGISTERED-GENERIC-CANARY",
+            },
+            "generic_ticket": {
+                "status": "ready",
+                "ticket": "UNREGISTERED-GENERIC-CANARY",
+            },
+            **{
+                f"composite_{index}": {
+                    "status": "ready",
+                    key: "UNREGISTERED-COMPOSITE-CANARY",
+                }
+                for index, key in enumerate(
+                    (
+                        "auth_key",
+                        "authkey",
+                        "session_key",
+                        "sessionKey",
+                        "jwt_key",
+                        "ticket_key",
+                        "oauth_code",
+                        "signing_key",
+                        "encryption_key",
+                        "key_material",
+                        "key_value",
+                    )
+                )
+            },
+            **{
+                f"credential_family_{index}": {
+                    "status": "ready",
+                    key: "UNREGISTERED-FAMILY-CANARY",
+                }
+                for index, key in enumerate(
+                    (
+                        "session_cookie",
+                        "sessioncookie",
+                        "auth_cookie",
+                        "client_key",
+                        "consumer_key",
+                        "master_key",
+                        "ssh_key",
+                        "otp",
+                        "one_time_code",
+                        "verification_code",
+                        "refresh_code",
+                        "signed_cookie",
+                        "oauth_verifier",
+                        "oauth_state",
+                    )
+                )
+            },
+            "nested_credential_family": {
+                "status": "ready",
+                "result": {
+                    "details": {
+                        "session_cookie": "NESTED-FAMILY-CANARY",
+                    }
+                },
+            },
+            "list_credential_family": {
+                "status": "ready",
+                "items": [
+                    {
+                        "details": {
+                            "client_key": "LIST-FAMILY-CANARY",
+                        }
+                    }
+                ],
+            },
+            "private_key": {
+                "status": "ready",
+                "private_key": "UNREGISTERED-PRIVATE-CANARY",
+            },
+            "private_key_material_in_path_field": {
+                "status": "ready",
+                "ssh_private_key_file": "UNREGISTERED-PRIVATE-CANARY",
+            },
+            "secret_in_url_query": {
+                "status": "ready",
+                "next_url": "https://provider.invalid/callback?token=QUERY-CANARY",
+            },
+            "secret_in_percent_encoded_url_query": {
+                "status": "ready",
+                "next_url": (
+                    "https://provider.invalid/callback?secret%255Fkey=ENCODED-CANARY"
+                ),
+            },
+            "secret_in_url_fragment": {
+                "status": "ready",
+                "next_url": "https://provider.invalid/callback#accessKey=FRAGMENT-CANARY",
+            },
+            "signature_in_url_query": {
+                "status": "ready",
+                "next_url": "https://provider.invalid/callback?sig=SIGNATURE-CANARY",
+            },
+            "standalone_bearer_value": {
+                "status": "ready",
+                "diagnostic": "Bearer STANDALONE-BEARER-CANARY",
+            },
+            "url_userinfo": {
+                "status": "ready",
+                "next_url": "https://USERINFO-CANARY@provider.invalid/callback",
+            },
+            "secret_query_in_allowed_path_field": {
+                "status": "ready",
+                "ssh_private_key_file": (
+                    "/protected/runtime.json?token=PATH-QUERY-CANARY"
+                ),
+            },
+            "noncanonical_allowed_path_field": {
+                "status": "ready",
+                "credentials_file": "/protected/../runtime.json",
+            },
+            "double_anchor_allowed_path_field": {
+                "status": "ready",
+                "credentials_file": "//protected/runtime.json",
+            },
+            "registered_secret_as_key": {
+                "status": "ready",
+                "OPAQUE-CANARY": "value",
+            },
+        }
+        for label, payload in cases.items():
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            harness = mock.Mock()
+            harness._output_secret_values = {"SECRET-CANARY", "OPAQUE-CANARY"}
+            # Keep the command envelope valid so each case must reach the
+            # recursive key/text/registered-value boundary. A sparse or extra-key
+            # result would be rejected by the envelope before proving the
+            # credential detector that this regression test targets.
+            harness.setup_object_storage.return_value = {
+                "status": "ready_for_ui_storage_configuration",
+                "service_uuid": "11111111-1111-4111-8111-111111111111",
+                "bucket_name": "public-bucket",
+                "endpoint": payload,
+                "prefix": "backupsheep-e2e/run/",
+                "credentials_file": "/protected/runtime.json",
+                "versioning": "not_enabled_until_arm_object_storage",
+                "ui_no_delete": False,
+            }
+            with self.subTest(case=label), mock.patch.object(
+                live_harness.HarnessConfig,
+                "from_environment",
+                return_value=self.config(apply=True),
+            ), mock.patch.object(
+                live_harness, "UpCloudLiveHarness", return_value=harness
+            ), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = live_harness.main(
+                    ["setup-object-storage"],
+                    environment={"UPCLOUD_API_TOKEN": "TOKEN-CANARY"},
+                )
+
+            output = stdout.getvalue() + stderr.getvalue()
+            self.assertEqual(result, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("refused a diagnostic or result", stderr.getvalue())
+            self.assertNotIn("TOKEN-CANARY", output)
+            self.assertNotIn("SECRET-CANARY", output)
+            self.assertNotIn("UNREGISTERED-CANARY", output)
+            self.assertNotIn("UNREGISTERED-PRIVATE-CANARY", output)
+            self.assertNotIn("OPAQUE-CANARY", output)
+            self.assertNotIn("CAMEL-CANARY", output)
+            self.assertNotIn("COMPACT-CANARY", output)
+            self.assertNotIn("UNREGISTERED-GENERIC-CANARY", output)
+            self.assertNotIn("UNREGISTERED-COMPOSITE-CANARY", output)
+            self.assertNotIn("UNREGISTERED-FAMILY-CANARY", output)
+            self.assertNotIn("NESTED-FAMILY-CANARY", output)
+            self.assertNotIn("LIST-FAMILY-CANARY", output)
+            self.assertNotIn("QUERY-CANARY", output)
+            self.assertNotIn("ENCODED-CANARY", output)
+            self.assertNotIn("FRAGMENT-CANARY", output)
+            self.assertNotIn("SIGNATURE-CANARY", output)
+            self.assertNotIn("STANDALONE-BEARER-CANARY", output)
+            self.assertNotIn("USERINFO-CANARY", output)
+            self.assertNotIn("PATH-QUERY-CANARY", output)
+
+    def test_main_never_renders_provider_diagnostics(self):
+        cases = {
+            "safe": (
+                live_harness.HarnessError("The exact service ownership changed."),
+                "refused a diagnostic or result",
+            ),
+            "api_token": (
+                live_harness.HarnessError("Provider rejected TOKEN-CANARY."),
+                "refused a diagnostic or result",
+            ),
+            "credential_assignment": (
+                live_harness.HarnessError("password=SECRET-CANARY"),
+                "refused a diagnostic or result",
+            ),
+            "secret_crossing_diagnostic_bound": (
+                live_harness.HarnessError("x" * 496 + "TOKEN-CANARY"),
+                "refused a diagnostic or result",
+            ),
+            "authorization_bearer": (
+                live_harness.HarnessError(
+                    "Authorization Bearer UNREGISTERED-BEARER-CANARY"
+                ),
+                "refused a diagnostic or result",
+            ),
+            "authorization_basic": (
+                live_harness.HarnessError(
+                    "Authorization: Basic UNREGISTERED-BASIC-CANARY"
+                ),
+                "refused a diagnostic or result",
+            ),
+            "standalone_bearer": (
+                live_harness.HarnessError(
+                    "Bearer STANDALONE-BEARER-CANARY"
+                ),
+                "refused a diagnostic or result",
+            ),
+            "percent_encoded_query_secret": (
+                live_harness.HarnessError(
+                    "https://provider.invalid/error?secret%255Fkey=ENCODED-CANARY"
+                ),
+                "refused a diagnostic or result",
+            ),
+            "url_userinfo": (
+                live_harness.HarnessError(
+                    "https://USERINFO-CANARY@provider.invalid/error"
+                ),
+                "refused a diagnostic or result",
+            ),
+            "safe_url_diagnostic": (
+                live_harness.HarnessError(
+                    "https://provider.invalid/status?request_id=abc#summary"
+                ),
+                "refused a diagnostic or result",
+            ),
+        }
+        for label, (error, expected) in cases.items():
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            harness = mock.Mock()
+            harness._output_secret_values = {"SECRET-CANARY"}
+            harness.setup_object_storage.side_effect = error
+            with self.subTest(case=label), mock.patch.object(
+                live_harness.HarnessConfig,
+                "from_environment",
+                return_value=self.config(apply=True),
+            ), mock.patch.object(
+                live_harness, "UpCloudLiveHarness", return_value=harness
+            ), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = live_harness.main(
+                    ["setup-object-storage"],
+                    environment={"UPCLOUD_API_TOKEN": "TOKEN-CANARY"},
+                )
+
+            output = stdout.getvalue() + stderr.getvalue()
+            self.assertEqual(result, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(
+                stderr.getvalue(),
+                "ERROR: The UpCloud harness refused a diagnostic or result "
+                "containing credentials.\n",
+            )
+            self.assertIn(expected, stderr.getvalue())
+            self.assertNotIn("The exact service ownership changed.", output)
+            self.assertNotIn("provider.invalid/status", output)
+            self.assertNotIn("TOKEN-CANARY", output)
+            self.assertNotIn("SECRET-CANARY", output)
+            self.assertNotIn("UNREGISTERED-", output)
+            self.assertNotIn("STANDALONE-BEARER-CANARY", output)
+            self.assertNotIn("ENCODED-CANARY", output)
+            self.assertNotIn("USERINFO-CANARY", output)
+
+    def test_main_prints_safe_result_with_protected_file_diagnostic(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        harness = mock.Mock()
+        harness._output_secret_values = {"SECRET-CANARY"}
+        harness.setup_object_storage.return_value = {
+            "status": "ready_for_ui_storage_configuration",
+            "service_uuid": "11111111-1111-4111-8111-111111111111",
+            "bucket_name": "public-bucket",
+            "endpoint": "https://public.example.invalid",
+            "prefix": "backupsheep-e2e/run/",
+            "credentials_file": "/protected/runtime.json",
+            "versioning": "not_enabled_until_arm_object_storage",
+            "ui_no_delete": False,
+        }
+        with mock.patch.object(
+            live_harness.HarnessConfig,
+            "from_environment",
+            return_value=self.config(apply=True),
+        ), mock.patch.object(
+            live_harness, "UpCloudLiveHarness", return_value=harness
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            result = live_harness.main(
+                ["setup-object-storage"],
+                environment={"UPCLOUD_API_TOKEN": "TOKEN-CANARY"},
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {
+                "status": "ready_for_ui_storage_configuration",
+                "service_uuid": "11111111-1111-4111-8111-111111111111",
+                "bucket_name": "public-bucket",
+                "endpoint": "https://public.example.invalid",
+                "prefix": "backupsheep-e2e/run/",
+                "credentials_file": "/protected/runtime.json",
+                "versioning": "not_enabled_until_arm_object_storage",
+                "ui_no_delete": False,
+            },
+        )
+
+    def test_main_refuses_unknown_or_incomplete_public_output_envelope(self):
+        valid = {
+            "status": "ready_for_ui_storage_configuration",
+            "service_uuid": "11111111-1111-4111-8111-111111111111",
+            "bucket_name": "public-bucket",
+            "endpoint": "https://public.example.invalid",
+            "prefix": "backupsheep-e2e/run/",
+            "credentials_file": "/protected/runtime.json",
+            "versioning": "not_enabled_until_arm_object_storage",
+            "ui_no_delete": False,
+        }
+        cases = {
+            "unknown_neutral_field": {**valid, "diagnostic": "safe"},
+            "missing_field": {
+                key: value
+                for key, value in valid.items()
+                if key != "service_uuid"
+            },
+        }
+        for label, payload in cases.items():
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            harness = mock.Mock()
+            harness._output_secret_values = set()
+            harness.setup_object_storage.return_value = payload
+            with self.subTest(case=label), mock.patch.object(
+                live_harness.HarnessConfig,
+                "from_environment",
+                return_value=self.config(apply=True),
+            ), mock.patch.object(
+                live_harness, "UpCloudLiveHarness", return_value=harness
+            ), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = live_harness.main(
+                    ["setup-object-storage"],
+                    environment={"UPCLOUD_API_TOKEN": "TOKEN-CANARY"},
+                )
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(
+                stderr.getvalue(),
+                "ERROR: The UpCloud harness refused a diagnostic or result "
+                "containing credentials.\n",
+            )
+
+    def test_public_output_filter_couples_cleanup_shape_to_status(self):
+        full_result = {
+            "status": "completed",
+            "service_uuid": "11111111-1111-4111-8111-111111111111",
+            "data_cleanup": "completed",
+            "credential_service_scaffolding": (
+                live_harness.USER_RETAINED_BY_INSTRUCTION
+            ),
+            "retained_by_instruction": {},
+        }
+        valid = (
+            {"status": "nothing_to_cleanup"},
+            full_result,
+        )
+        for payload in valid:
+            stdout = io.StringIO()
+            with self.subTest(valid=payload["status"]), redirect_stdout(stdout):
+                live_harness._emit_public_json(
+                    payload, command="cleanup-object-storage"
+                )
+            self.assertEqual(json.loads(stdout.getvalue()), payload)
+
+        invalid = (
+            {"status": "completed"},
+            {**full_result, "status": "nothing_to_cleanup"},
+        )
+        for payload in invalid:
+            stdout = io.StringIO()
+            with self.subTest(invalid=payload["status"]), self.assertRaisesRegex(
+                live_harness.HarnessError,
+                "refused a diagnostic or result",
+            ), redirect_stdout(stdout):
+                live_harness._emit_public_json(
+                    payload, command="cleanup-object-storage"
+                )
+            self.assertEqual(stdout.getvalue(), "")
+
+    def test_output_filter_rejects_every_credential_family_recursively(self):
+        names = (
+            "key",
+            "auth",
+            "session",
+            "sessionid",
+            "jwt",
+            "ticket",
+            "auth_key",
+            "authkey",
+            "session_key",
+            "sessionKey",
+            "jwt_key",
+            "ticket_key",
+            "oauth_code",
+            "signing_key",
+            "encryption_key",
+            "key_material",
+            "key_value",
+            "session_cookie",
+            "sessioncookie",
+            "auth_cookie",
+            "client_key",
+            "consumer_key",
+            "master_key",
+            "ssh_key",
+            "otp",
+            "one_time_code",
+            "verification_code",
+            "refresh_code",
+            "signed_cookie",
+            "oauth_verifier",
+            "oauth_state",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                self.assertTrue(live_harness._output_name_is_sensitive(name))
+        self.assertTrue(
+            live_harness._contains_sensitive_output_key(
+                {"result": {"details": {"session_cookie": "CANARY"}}}
+            )
+        )
+        self.assertTrue(
+            live_harness._contains_sensitive_output_key(
+                {"items": [{"details": {"client_key": "CANARY"}}]}
+            )
+        )
+
+    def test_public_output_filter_accepts_reviewed_key_metadata(self):
+        payload = {
+            "status": "verified",
+            "objects": [
+                {
+                    "object_key": "backupsheep-e2e/run/backup.zip",
+                    "key_fingerprints": ["a" * 64, "b" * 64],
+                    "public_key_sha256": "c" * 64,
+                }
+            ],
+        }
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            live_harness._emit_public_json(
+                payload, command="verify-object-storage"
+            )
+        self.assertEqual(json.loads(stdout.getvalue()), payload)
+
+    def test_main_rejects_malformed_public_key_metadata_exceptions(self):
+        cases = {
+            "object_key": {"object_key": "/unsafe/absolute.zip"},
+            "key_fingerprints": {"key_fingerprints": ["NOT-A-FINGERPRINT"]},
+            "public_key_sha256": {"public_key_sha256": "NOT-A-DIGEST"},
+        }
+        for label, payload in cases.items():
+            stdout = io.StringIO()
+            with self.subTest(case=label), self.assertRaisesRegex(
+                live_harness.HarnessError,
+                "refused a diagnostic or result",
+            ), redirect_stdout(stdout):
+                live_harness._emit_public_json(
+                    {
+                        "status": "verified",
+                        "objects": [payload],
+                    },
+                    command="verify-object-storage",
+                )
+            self.assertEqual(stdout.getvalue(), "")
+
     def test_setup_and_cleanup_require_independent_explicit_gates(self):
         control = mock.Mock()
         with self.assertRaises(live_harness.HarnessError):
@@ -1220,6 +1740,8 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             ):
             result = harness.reconcile_object_storage_evidence()
         self.assertEqual(result["configuration_provenance"], "observed_existing")
+        self.assertEqual(result["bucket_name"], harness.names["bucket"])
+        self.assertEqual(result["prefix"], harness.names["prefix"])
         config = harness._one_active("mos_bucket_configuration")
         self.assertEqual(config["ownership"]["request_fingerprint"], "")
         self.assertEqual(config["ownership"]["versioning"], "Enabled")

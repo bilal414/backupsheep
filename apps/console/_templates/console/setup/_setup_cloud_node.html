@@ -52,7 +52,7 @@
                         </ul>
                     </div>
                 </div>
-                <button @click="openUrl(oauth_url)" type="button"
+                <button @click="restartOauth()" x-bind:disabled="oauthRestartLoading" type="button"
                         class="flex w-full flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white px-6 py-10 text-center transition hover:border-slate-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                     <img class="h-10 max-h-10" src="{{ STATIC_URL }}{{ integration.image }}" alt="{{ integration.name }} Backups">
                     <span class="mt-3 block text-sm font-semibold text-slate-900">Reconnect {{ integration.name }} ({{ connection.name }}) Connection</span>
@@ -143,16 +143,25 @@
             connection_id: "{{connection.id}}",
             location_id: "{{connection.location.id}}",
             object_type: "{{object_code}}",
+            oauthRestartLoading: false,
 
             init() {
                 this.getObjects();
-                if (this.integration_code === "ovh_ca" || this.integration_code === "ovh_eu" || this.integration_code === "ovh_us") {
-                    this.getOauthUrl();
-                }
             },
 
             openUrl(url) {
                 window.location.href = url;
+            },
+
+            async restartOauth() {
+                if (this.oauthRestartLoading) return;
+                this.oauthRestartLoading = true;
+                try {
+                    const oauthUrl = await this.getOauthUrl();
+                    if (oauthUrl) this.openUrl(oauthUrl);
+                } finally {
+                    this.oauthRestartLoading = false;
+                }
             },
 
             async getObjects() {
@@ -281,7 +290,8 @@
                         'Accept': 'application/json',
                         'Content-Type': 'application/json'
                     },
-                    method: 'GET',
+                    method: 'POST',
+                    body: JSON.stringify({restart: true}),
                 }).then(async (response) => {
                     if (response.ok) {
                         return response.json();
@@ -300,9 +310,12 @@
                 }).then((json) => {
                     {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
                     this.oauth_url = json.oauth_url;
+                    return this.oauth_url;
                 }).catch((error) => {
                     Alpine.store('notifications').items.push({show: true, error: true, heading: 'Error! Unable to get OAuth url.', details: error.message});
+                    return null;
                 });
+                return response;
             },
         }));
     });

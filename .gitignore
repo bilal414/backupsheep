@@ -5,6 +5,7 @@
 *.pyc
 /.env
 /.secrets/
+/_storage/
 /docker-compose.override.yml
 /node_modules
 /scripts/.upcloud-runtime/

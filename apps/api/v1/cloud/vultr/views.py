@@ -19,7 +19,11 @@ from apps.console.node.models import CoreDatabase, CoreNode, CoreVultr
 from rest_framework import status
 
 from apps.console.utils.models import UtilBackup
-from apps.console.vultr_monitoring import VultrMonitoringError, list_instance_backups
+from apps.console.vultr_monitoring import (
+    VultrMonitoringError,
+    list_instance_backups,
+    vultr_monitoring_public_message,
+)
 
 
 class CoreCloudVultrView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -103,7 +107,12 @@ class CoreCloudVultrView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 instance_id=instance.unique_id,
             )
         except VultrMonitoringError as error:
-            payload = {"detail": str(error), "classification": error.classification}
+            payload = {
+                "detail": vultr_monitoring_public_message(
+                    error.classification, error.status_code
+                ),
+                "classification": error.classification,
+            }
             if error.status_code == 429:
                 response_status = status.HTTP_429_TOO_MANY_REQUESTS
             elif error.classification in {"transient_timeout", "transient_unavailable", "provider_unavailable"}:

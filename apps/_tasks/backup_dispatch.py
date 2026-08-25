@@ -17,6 +17,12 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from sentry_sdk import capture_exception
+from backupsheep.source_recovery_policy import (
+    RECOVERY_INCOMPLETE_SOURCE_FAMILIES,
+    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
 
 
 _SAFE_BROKER_ERROR = (
@@ -56,7 +62,7 @@ def _backup_request_ineligible_q():
     from apps.console.connection.models import CoreConnection
     from apps.console.node.models import CoreNode
 
-    return (
+    ineligible = (
         Q(
             node__status__in=(
                 CoreNode.Status.PAUSED,
@@ -78,6 +84,16 @@ def _backup_request_ineligible_q():
             )
         )
     )
+    unavailable_families = [
+        code
+        for code in RECOVERY_INCOMPLETE_SOURCE_FAMILIES
+        if not source_backup_creation_available(code)
+    ]
+    if unavailable_families:
+        ineligible |= Q(
+            node__connection__integration__code__in=unavailable_families
+        )
+    return ineligible
 
 
 def _backup_request_ineligible_reason(node):
@@ -104,6 +120,8 @@ def _backup_request_ineligible_reason(node):
         CoreAccount.Status.DELETE_REQUESTED,
     }:
         return "account_ineligible"
+    if not source_backup_creation_available(connection.integration.code):
+        return "source_recovery_unavailable"
     return None
 
 
@@ -226,6 +244,7 @@ def create_backup_request(
     """
     from apps.console.backup.models import CoreBackupRequest
 
+    require_source_backup_creation(node.connection.integration.code)
     idempotency_key = str(idempotency_key or uuid.uuid4())
     request_key = _opaque_request_key(node.pk, trigger, idempotency_key)
     task_id = uuid.uuid5(uuid.NAMESPACE_URL, request_key).hex
@@ -321,7 +340,10 @@ def publish_backup_request(request_id, *, force=False):
     with transaction.atomic():
         request = (
             CoreBackupRequest.objects.select_for_update()
-            .select_related("node__connection__account")
+            .select_related(
+                "node__connection__account",
+                "node__connection__integration",
+            )
             .get(pk=request_id)
         )
         if request.status not in {
@@ -335,7 +357,8 @@ def publish_backup_request(request_id, *, force=False):
             and request.dispatch_lease_expires_at > now
         ):
             return False
-        if _backup_request_ineligible_reason(request.node):
+        ineligible_reason = _backup_request_ineligible_reason(request.node)
+        if ineligible_reason:
             # Keep a previously confirmed ``published_at`` as evidence of the
             # broker hand-off, but make the row terminal and remove it from all
             # future recovery sweeps. The queued task, if any, will hit the same
@@ -345,8 +368,16 @@ def publish_backup_request(request_id, *, force=False):
             request.dispatch_lease_token = None
             request.dispatch_lease_expires_at = None
             request.next_dispatch_at = None
-            request.last_error_code = "REQUEST_INELIGIBLE"
-            request.last_error_message = _SAFE_INELIGIBLE_REQUEST
+            request.last_error_code = (
+                "SOURCE_RECOVERY_UNAVAILABLE"
+                if ineligible_reason == "source_recovery_unavailable"
+                else "REQUEST_INELIGIBLE"
+            )
+            request.last_error_message = (
+                SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+                if request.last_error_code == "SOURCE_RECOVERY_UNAVAILABLE"
+                else _SAFE_INELIGIBLE_REQUEST
+            )
             request.modified = now
             request.save(
                 update_fields=[

@@ -404,6 +404,11 @@ class GoogleDriveHardeningTests(_AdapterFixtureMixin, SimpleTestCase):
         self.assertEqual(point.status, point.Status.UPLOAD_COMPLETE)
         self.assertEqual(len(point.backup.artifact_calls), 2)
         self.assertEqual(point.backup.artifact_calls[-1]["checksum_value"], self.checksum)
+        self.assertIsNotNone(point.backup.artifact_calls[-1]["verified_at"])
+        self.assertEqual(
+            point.backup.artifact_calls[-1]["metadata"]["storage_metadata_key"],
+            google_drive.STATE_KEY,
+        )
         self.assertNotIn(client.session_url, json.dumps(point.metadata))
         artifact_index = next(i for i, event in enumerate(point.backup.events) if event[0] == "artifact")
         complete_index = max(i for i, event in enumerate(point.backup.events) if event == ("save", point.Status.UPLOAD_COMPLETE))
@@ -501,6 +506,11 @@ class OneDriveHardeningTests(_AdapterFixtureMixin, SimpleTestCase):
         self.assertEqual(point.status, point.Status.UPLOAD_COMPLETE)
         self.assertEqual(point.storage_file_id, f"backupsheep/test-node/{self.identifier}.zip")
         self.assertEqual(point.backup.artifact_calls[-1]["etag"], "etag-1")
+        self.assertIsNotNone(point.backup.artifact_calls[-1]["verified_at"])
+        self.assertEqual(
+            point.backup.artifact_calls[-1]["metadata"]["storage_metadata_key"],
+            onedrive.STATE_KEY,
+        )
         self.assertNotIn(graph.session_url, json.dumps(point.metadata))
         artifact_index = next(i for i, event in enumerate(point.backup.events) if event[0] == "artifact")
         complete_index = max(i for i, event in enumerate(point.backup.events) if event == ("save", point.Status.UPLOAD_COMPLETE))

@@ -18,6 +18,9 @@ from django.utils import timezone
 
 from apps._tasks.helper import tasks as helper_tasks
 from apps._tasks.integration.digitalocean import backup_digitalocean
+from apps._tasks.integration.storage.tasks import (
+    _prepare_local_backup_destinations_id,
+)
 from apps._tasks.integration.website import backup_website
 from apps.console.backup.models import (
     CoreDigitalOceanBackup,
@@ -143,6 +146,16 @@ class BackupInitiateGuardTests(BaseTestCase):
             storage=storage,
             status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_IN_PROGRESS,
         )
+        node._write_destination_setup_state(
+            first,
+            state="complete",
+            requested_count=1,
+            accepted_count=1,
+            validation_failed_ids=set(),
+            unavailable_count=0,
+        )
+        node._authorize_local_backup_destinations(first, {storage.id})
+        first.refresh_from_db()
         resumed = self._initiate(node, "task-1", storage_ids=[])
         self.assertEqual(resumed.id, first.id)
         self.assertEqual(resumed.status, UtilBackup.Status.UPLOAD_IN_PROGRESS)
@@ -162,7 +175,15 @@ class BackupInitiateGuardTests(BaseTestCase):
         with mock.patch.object(
             CoreNode, "_reconcile_local_backup_destinations", return_value=True
         ):
-            backup = self._initiate(node, "website-selection-task", storage_ids=[])
+            backup = node.backup_initiate(
+                "website-selection-task",
+                UtilBackup.Type.ON_DEMAND,
+                1,
+                None,
+                [],
+                None,
+                prepare_destinations=True,
+            )
 
         self.assertFalse(backup.all_paths)
         self.assertEqual(backup.paths, original_paths)
@@ -178,8 +199,14 @@ class BackupInitiateGuardTests(BaseTestCase):
         with mock.patch.object(
             CoreNode, "_reconcile_local_backup_destinations", return_value=True
         ):
-            resumed = self._initiate(
-                node, "website-selection-task", storage_ids=[]
+            resumed = node.backup_initiate(
+                "website-selection-task",
+                UtilBackup.Type.ON_DEMAND,
+                1,
+                None,
+                [],
+                None,
+                prepare_destinations=True,
             )
 
         self.assertEqual(resumed.pk, backup.pk)
@@ -204,6 +231,7 @@ class DestinationSetupRecoveryTests(BaseTestCase):
             None,
             storage_ids,
             None,
+            prepare_destinations=True,
         )
 
     def test_crash_after_first_destination_resumes_remaining_selection(self):
@@ -331,7 +359,10 @@ class DestinationSetupRecoveryTests(BaseTestCase):
             "storage_ids": [storage.id],
             "notes": None,
         }
-        with mock.patch.object(
+        with mock.patch(
+            "apps._tasks.integration.storage.tasks."
+            "prepare_local_backup_destinations.apply_async"
+        ), mock.patch.object(
             CoreStorage, "validate", return_value=False
         ), mock.patch.object(
             CoreNode, "notify_storage_validation_fail"
@@ -341,12 +372,14 @@ class DestinationSetupRecoveryTests(BaseTestCase):
             CoreWebsite, "create_snapshot"
         ) as snapshot:
             backup_website.apply(kwargs=kwargs, task_id="no-destination-task")
+            backup = CoreWebsiteBackup.objects.get(
+                celery_task_id="no-destination-task"
+            )
+            _prepare_local_backup_destinations_id("website", backup.pk)
 
         snapshot.assert_not_called()
         connection_validate.assert_not_called()
-        backup = CoreWebsiteBackup.objects.get(
-            celery_task_id="no-destination-task"
-        )
+        backup.refresh_from_db()
         self.assertEqual(
             backup.status,
             UtilBackup.Status.STORAGE_VALIDATION_FAILED,
@@ -559,7 +592,7 @@ class RecoverySweepTests(BaseTestCase):
         )
 
         with mock.patch.object(helper_tasks.current_app, "send_task") as send_task:
-            helper_tasks.resume_in_progress_backups.apply()
+            helper_tasks.resume_in_progress_files_backups.apply()
 
         send_task.assert_called_once()
         self.assertEqual(
@@ -581,10 +614,23 @@ class WebsiteTaskDuplicateTests(BaseTestCase):
             "storage_ids": [storage.id],
             "notes": None,
         }
-        with mock.patch.object(CoreStorage, "validate", return_value=True), \
-                mock.patch.object(CoreConnection, "validate", return_value=True), \
-                mock.patch.object(CoreWebsite, "create_snapshot") as snapshot:
+        with mock.patch(
+                "apps._tasks.integration.storage.tasks."
+                "prepare_local_backup_destinations.apply_async"
+             ), mock.patch.object(
+                CoreStorage, "validate", return_value=True
+             ), mock.patch(
+                "apps._tasks.integration.storage.tasks.current_app.send_task"
+             ), mock.patch.object(
+                CoreConnection, "validate", return_value=True
+             ), mock.patch.object(CoreWebsite, "create_snapshot") as snapshot:
             backup_website.apply(kwargs=kwargs, task_id="w-task-1")
+            snapshot.assert_not_called()
+            backup = CoreWebsiteBackup.objects.get(celery_task_id="w-task-1")
+            _prepare_local_backup_destinations_id("website", backup.pk)
+            backup_website.apply(
+                kwargs={**kwargs, "resume": True}, task_id="w-task-1"
+            )
             snapshot.assert_called_once()
             snapshot.reset_mock()
             # First backup is still in flight -> second task must do nothing.

@@ -23,6 +23,10 @@ from apps.console.node.models import CoreDatabase, CoreNode, CoreBasecamp
 from rest_framework import status
 
 from apps.console.utils.models import UtilBackup
+from backupsheep.source_recovery_policy import (
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
 
 
 class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -58,6 +62,8 @@ class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def connections(self, request):
+        if not source_backup_creation_available("basecamp"):
+            return Response([])
         member = self.request.user.member
         query = Q(account=member.get_current_account(), integration__code="basecamp")
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
@@ -93,5 +99,6 @@ class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False)
     def generate_key(self, request):
+        require_source_backup_creation("basecamp")
         key = Fernet.generate_key()[0:24]
         return Response({"key": key})

@@ -1,6 +1,9 @@
 from datetime import timedelta
 from unittest import mock
 
+from django.conf import settings
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from django_celery_beat.models import PeriodicTask
 
@@ -44,6 +47,20 @@ class RunScheduledBackupTests(BaseTestCase):
         self.assertEqual(self.node.backup_task_name(), "backup_website")
         do_node = factories.make_cloud_node(self.account, self.member, code="digitalocean")
         self.assertEqual(do_node.backup_task_name(), "backup_digitalocean")
+
+    def test_schedule_storage_ids_use_only_the_non_secret_through_table(self):
+        storage = factories.make_storage(
+            self.account, self.member, bucket="scheduled-through-only"
+        )
+        schedule = factories.make_schedule(
+            self.node, self.member, storages=(storage,)
+        )
+        with CaptureQueriesContext(connection) as queries:
+            storage_ids = schedule.storage_ids
+        self.assertEqual(storage_ids, [storage.pk])
+        sql = "\n".join(query["sql"] for query in queries.captured_queries)
+        self.assertIn('"core_schedule_storage_points"', sql)
+        self.assertNotIn('FROM "core_storage"', sql)
 
 
 class CrashSafeBeatSchedulingTests(BaseTestCase):
@@ -294,6 +311,54 @@ class CrashSafeBeatSchedulingTests(BaseTestCase):
         self.assertEqual(CoreBackupRequest.objects.filter(schedule=schedule).count(), 1)
 
 
+class PrivateWorkdirMaintenanceScheduleTests(BaseTestCase):
+    def test_static_schedule_upgrade_clears_a_stale_storage_queue_override(self):
+        current = settings.CELERY_BEAT_SCHEDULE["delete-old-logs"]
+        BackupModelEntry.from_entry(
+            "delete-old-logs",
+            app=celery_app,
+            task="delete_old_logs",
+            schedule=current["schedule"],
+            options={"queue": "storage"},
+        )
+        self.assertEqual(
+            PeriodicTask.objects.get(name="delete-old-logs").queue,
+            "storage",
+        )
+
+        upgraded = BackupModelEntry.from_entry(
+            "delete-old-logs",
+            app=celery_app,
+            **current,
+        )
+
+        upgraded.model.refresh_from_db()
+        self.assertIsNone(upgraded.model.queue)
+        self.assertEqual(upgraded.model.task, "delete_old_logs")
+
+    def test_database_run_log_schedule_is_materialized_without_queue_override(self):
+        entry = BackupModelEntry.from_entry(
+            "delete-old-database-run-logs",
+            app=celery_app,
+            **settings.CELERY_BEAT_SCHEDULE["delete-old-database-run-logs"],
+        )
+
+        entry.model.refresh_from_db()
+        self.assertIsNone(entry.model.queue)
+        self.assertEqual(entry.model.task, "delete_old_database_logs")
+
+    def test_storage_run_log_schedule_is_materialized_without_queue_override(self):
+        entry = BackupModelEntry.from_entry(
+            "delete-old-storage-run-logs",
+            app=celery_app,
+            **settings.CELERY_BEAT_SCHEDULE["delete-old-storage-run-logs"],
+        )
+
+        entry.model.refresh_from_db()
+        self.assertIsNone(entry.model.queue)
+        self.assertEqual(entry.model.task, "delete_old_storage_logs")
+
+
 class KeepLastRetentionTests(BaseTestCase):
     """keep_last is applied when a backup finalizes; exercise the real retention path in
     poll_cloud_backup (cloud snapshots) with the provider status check mocked."""
@@ -350,6 +415,7 @@ class AirGappedCopyPolicyTests(BaseTestCase):
                 schedule.id,
                 schedule.storage_ids,
                 None,
+                prepare_destinations=True,
             )
 
         self.assertIsNone(result)

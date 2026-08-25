@@ -74,7 +74,7 @@ class CoreStorageLocalView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         storage = self.get_object()
         # The API records intent only. The RW worker resolves the configured path
@@ -134,6 +134,22 @@ class LocalStorageFileDownloadView(APIView):
 
         if not stored_backup:
             raise Http404
+
+        if not stored_backup.direct_download_permitted():
+            # The web container must never regain a /backups mount merely to
+            # decrypt an object.  A future export workflow can authenticate BSE1
+            # in a private source lane and publish a short-lived result; until
+            # then, fail closed rather than serving ciphertext with a .zip name.
+            return Response(
+                {
+                    "detail": (
+                        "Direct ZIP download is disabled for encrypted backup "
+                        "artifacts. Use an authenticated restore or export workflow."
+                    ),
+                    "artifact_format": "bse1",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         local_root = os.path.realpath(settings.LOCAL_STORAGE_ROOT)
         target = os.path.realpath(stored_backup.storage_file_id)

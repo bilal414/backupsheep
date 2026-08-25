@@ -60,7 +60,7 @@ this runbook is the operator-controlled manual upgrade path. The `migrate` and s
 
    RUNNING_APPLICATION_SERVICES="$({
      bs_compose --profile operations ps --status running --services
-   } | grep -Ev '^(db|rabbitmq)$' || true)"
+   } | grep -Ev '^(db|rabbitmq|app-egress-guard|cloud-egress-guard|database-egress-guard|files-egress-guard|storage-egress-guard|logs-egress-guard)$' || true)"
    test -z "${RUNNING_APPLICATION_SERVICES}"
 
    BROKER_QUEUE_STATE="$({
@@ -81,7 +81,15 @@ this runbook is the operator-controlled manual upgrade path. The `migrate` and s
 
 6. Create and verify a PostgreSQL dump; copy `.env`, the complete `.secrets` directory and
    local Compose overrides to an encrypted recovery location. Back up Local Storage and
-   critical work-volume material.
+   critical work-volume material. Then remove the complete container/network topology so
+   no guard can be replaced beneath an old namespace; ordinary `down` preserves named
+   data and identity volumes:
+
+   ```bash
+   bs_compose --profile operations down --timeout 300
+   ```
+
+   Never add `--volumes`.
 7. Confirm free disk for both old/new image layers and migration work.
 
 If the release changes the pinned RabbitMQ generation, stop here and follow the dedicated
@@ -92,151 +100,88 @@ appear migrated.
 See [Disaster recovery](disaster-recovery.md#back-up-the-control-plane) for the backup
 commands.
 
-## One-time SSH trust and managed-key separation
+## One-time legacy SSH trust and shared-identity retirement
 
-Releases with the dedicated `ssh_trust` volume deliberately remove `backup_workdir` from
-the web app. Before replacing the legacy app container, explicitly migrate its old
-`/code/_storage/ssh_known_hosts` file and any managed private key stored under
-`_storage`. The installer will not infer or copy private-key material.
+This gate applies to releases that used a global `known_hosts` file, an `ssh_trust` volume,
+or one managed private key across the app/database/files roles. Those artifacts are legacy
+rollback evidence only. The current release deliberately does not import them into its
+account-scoped approval ledger and does not reuse the shared private identity.
 
-1. While the old app container still exists and is running, make a private staging
-   directory and resolve that exact container:
+The staging layout-v2 witness and dedicated `ssh_trust` volume existed only on the
+prerelease development line. Moving to layout v3 requires the explicit
+`migrate-empty-legacy-v3` intent; v2 is never treated as equivalent evidence. The
+installer accepts a develop-era trust volume only when its canonical project ownership,
+physical name and labels pass the complete resource validator. It leaves that volume
+detached for rollback evidence. The v3 provisioner has no trust mount or group, and the
+wrapper rejects every `--volume` override, so neither that volume nor an exported global
+trust file can be mounted or imported through the supported command path. Any ownership,
+name or label ambiguity stops the upgrade.
 
-   ```bash
-   umask 077
-   SSH_MIGRATION_DIR="$(mktemp -d "${PWD}/.backupsheep-ssh-migration.XXXXXX")"
-   LEGACY_APP="$(bs_compose ps -q app)"
-   test -n "${LEGACY_APP}"
-   test "$(docker inspect --format '{{.State.Running}}' "${LEGACY_APP}")" = true
-   ```
+1. Stop Beat, drain active SSH work, and stop every operations service. Create and verify
+   the normal encrypted control-plane rollback set. If policy requires retaining the old
+   global trust file or shared private key, copy it only into that encrypted, access-audited
+   rollback set without printing it. Do not copy either artifact into a current container,
+   database row, work volume, or current secret file. Leave any validated develop-era
+   `ssh_trust` volume detached until the approved rollback-retention period ends.
+2. Review the account count. Managed identities are supported only when the installation
+   contains exactly one account. For a multi-account installation, leave both managed-key
+   secret files empty and configure customer-supplied, account-scoped private keys instead.
+3. For an eligible single-account installation, create two new, distinct Ed25519 identities:
+   one for database SSH tunnels and one for files/SFTP. Store the private halves as
+   `.secrets/ssh_managed_database_private_key` and
+   `.secrets/ssh_managed_files_private_key`, each owner-owned, non-linked and mode `0444`
+   beneath the mode-`0700` secret directory. Never derive either new identity by copying or
+   converting the old shared key. The installer derives and canonicalizes the matching
+   `SSH_MANAGED_DATABASE_PUBLIC_KEY` and `SSH_MANAGED_FILES_PUBLIC_KEY` settings and refuses
+   non-Ed25519, mismatched or identical identities.
+4. Clear legacy `SSH_MANAGED_PRIVATE_KEY_PATH` and `SSH_MANAGED_PUBLIC_KEY` values. A
+   non-empty `.secrets/ssh_managed_private_key` is rejected because its account/lane scope
+   cannot be proven. After preserving approved rollback evidence, remove that legacy file;
+   the installer may retire only the exact empty, regular, single-link placeholder.
+5. Upgrade and start only the core. Existing SSH-managed connections are fenced pending.
+   For every SSH endpoint, use the signed-in preview, verify the displayed fingerprint over
+   an independent channel, and explicitly approve the exact account/host/port/key. A changed
+   key requires the explicit replacement flow. Stock Compose stores approvals and
+   append-only audit events in PostgreSQL; it has no trust volume or global `known_hosts`.
+6. Install only the database public key on database-tunnel sources and only the files public
+   key on SFTP/file sources. Verify that `worker-database` receives only its private source,
+   `worker-files` receives only its private source, the app receives neither, and each
+   operation creates then removes its exact mode-`0600` private-runtime trust file.
+7. Enable operations only after preflight, connection revalidation, and a disposable backup
+   and restore rehearsal pass. Retain or dispose of legacy rollback artifacts under the
+   organization's approved encrypted-media retention process.
 
-2. If the legacy known-hosts file exists, require a regular non-symlink file and copy it
-   without printing its contents:
+## One-time non-root volume migration to private staging layout v3
 
-   ```bash
-   if docker exec "${LEGACY_APP}" test -e /code/_storage/ssh_known_hosts; then
-     docker exec "${LEGACY_APP}" test -f /code/_storage/ssh_known_hosts
-     docker exec "${LEGACY_APP}" test ! -L /code/_storage/ssh_known_hosts
-     docker cp \
-       "${LEGACY_APP}:/code/_storage/ssh_known_hosts" \
-       "${SSH_MIGRATION_DIR}/known_hosts"
-     chmod 0444 "${SSH_MIGRATION_DIR}/known_hosts"
-   fi
-   ```
+Do not manually mount, classify, copy, relabel or recursively change ownership on the
+historical `backup_workdir`. It can contain mixed plaintext, credentials, partial artifacts
+and logs with no trustworthy lane marker. The v3 provisioner deliberately refuses to guess.
 
-3. Read the current `SSH_MANAGED_PRIVATE_KEY_PATH` locally without logging it. If it is
-   non-empty, resolve a relative value from `/code`, confirm the resulting absolute
-   container path is exactly the key intended for this installation, then copy it to the
-   private staging directory. Replace the placeholder below only after that review:
-
-   ```bash
-   LEGACY_KEY_CONTAINER_PATH='/code/_storage/replace-with-reviewed-key-path'
-   docker exec "${LEGACY_APP}" test -f "${LEGACY_KEY_CONTAINER_PATH}"
-   docker exec "${LEGACY_APP}" test ! -L "${LEGACY_KEY_CONTAINER_PATH}"
-   docker cp \
-     "${LEGACY_APP}:${LEGACY_KEY_CONTAINER_PATH}" \
-     "${SSH_MIGRATION_DIR}/managed_private_key"
-   chmod 0600 "${SSH_MIGRATION_DIR}/managed_private_key"
-   ```
-
-   Skip this step when the legacy setting is blank. Stop if the path is ambiguous or
-   points outside the expected BackupSheep data; do not guess based on a filename.
-
-4. After checking out/building the new release, install the optional source secret. A
-   pre-existing non-empty destination requires manual reconciliation; never overwrite a
-   different key. If there was no legacy key, create the required empty sentinel instead:
-
-   ```bash
-   if test -f "${SSH_MIGRATION_DIR}/managed_private_key"; then
-     if test -e .secrets/ssh_managed_private_key; then
-       test -f .secrets/ssh_managed_private_key
-       test ! -L .secrets/ssh_managed_private_key
-       test "$(stat -c %h .secrets/ssh_managed_private_key)" = 1
-     fi
-     test ! -s .secrets/ssh_managed_private_key
-     install -m 0444 \
-       "${SSH_MIGRATION_DIR}/managed_private_key" \
-       .secrets/.ssh_managed_private_key.new
-     mv .secrets/.ssh_managed_private_key.new .secrets/ssh_managed_private_key
-   elif test ! -e .secrets/ssh_managed_private_key; then
-     : > .secrets/ssh_managed_private_key
-     chmod 0444 .secrets/ssh_managed_private_key
-   fi
-   ```
-
-   Clear the legacy `SSH_MANAGED_PRIVATE_KEY_PATH` value in `.env`. Stock Compose owns
-   the runtime path: it mounts the mode-`0444` source only in app/database/files, and the
-   entrypoint copies a valid, unencrypted, non-empty key (maximum 64 KiB) into private
-   tmpfs as `/run/backupsheep/ssh/managed_private_key`, mode `0600`. Empty means disabled.
-   Never point SSH directly at `/run/secrets/ssh_managed_private_key`.
-
-5. After the new image and secret files exist but before enabling operations, populate
-   the new trust volume from the staged file. This reviewed one-off intentionally
-   overrides the entrypoint for data migration only; normal services must retain it:
-
-   ```bash
-   if test -f "${SSH_MIGRATION_DIR}/known_hosts"; then
-     bs_compose --allow-reviewed-runtime-overrides run --rm --no-deps \
-       --entrypoint /bin/sh \
-       --volume "${SSH_MIGRATION_DIR}/known_hosts:/migration/known_hosts:ro" \
-       app -ceu '
-         umask 077
-         test -f /migration/known_hosts
-         target=/var/lib/backupsheep/ssh-trust/known_hosts
-         temporary=/var/lib/backupsheep/ssh-trust/.known_hosts.new
-         test ! -e "${target}"
-         cp /migration/known_hosts "${temporary}"
-         chmod 0600 "${temporary}"
-         mv "${temporary}" "${target}"
-         test "$(stat -c %u:%g:%a "${target}")" = 10001:10001:600
-       '
-   fi
-   ```
-
-6. Start the core normally. A non-empty invalid, encrypted, non-regular, NUL-containing
-   or oversized key now fails closed in the entrypoint. Verify the trust file (when one
-   was migrated), runtime key ownership/mode and public-key derivation without printing
-   private material. Then retain the staging directory only in the encrypted rollback
-   set or remove it through the operator's approved secure-cleanup process.
-
-The resulting boundary is app read/write and database/files read-only for `ssh_trust`;
-only app/database/files receive and stage the optional key. No other role receives either
-the key or trust volume.
-
-## One-time non-root volume migration
-
-The application image runs as UID/GID `10001:10001`. Fresh stock named volumes inherit
-that ownership from the image. This procedure deliberately uses the **new** image and
-wrapper. First complete the exact checkout, protected `.env` tag update, model validation,
-and image build in [Upgrade to the exact reviewed commit](#upgrade-to-the-exact-reviewed-commit).
-Do not run the commands below from the old checkout. Before starting migrations or any new
-application role, stop every application writer, snapshot both application volumes, and
-change the existing volume ownership once:
+Before checking out the reviewed target, stop and drain every provider operation as described
+above and create the verified encrypted rollback set. The historical `backup_workdir` must be
+empty. If it is not empty, keep operations disabled and quarantine or reconcile the entire
+volume under an approved incident/data-handling process; do not move its entries into a new
+lane volume. When constructing `INSTALL_ARGS` in the next section, append the one-time
+authorization alongside the normal KMS and identity-migration arguments:
 
 ```bash
-bs_compose --profile operations stop app worker-cloud worker-database worker-files worker-storage worker-logs beat
-bs_compose --allow-reviewed-runtime-overrides --profile operations run --rm --no-deps \
-  --user 0:0 \
-  --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
-  --entrypoint sh worker-storage -ceu '
-    chown -R 10001:10001 /code/_storage /backups
-    find /code/_storage /backups -type d -exec chmod 0700 {} +
-    find /code/_storage /backups -type f -exec chmod 0600 {} +
-  '
-bs_compose --profile operations run --rm --no-deps worker-storage sh -ceu '
-  for directory in /code/_storage /backups; do
-    probe="$directory/.backupsheep-nonroot-probe"
-    : > "$probe"
-    test "$(stat -c %u:%g:%a "$probe")" = "10001:10001:600"
-    rm -f "$probe"
-  done
-'
+INSTALL_ARGS+=(--migrate-staging-layout)
+./install.sh "${INSTALL_ARGS[@]}"
 ```
 
-Run this only during the maintenance window and only against the two resolved BackupSheep
-volumes. For bind mounts, NFS, EFS or other shared filesystems, establish an equivalent
-UID/GID or ACL policy through that storage system instead; do not recursively `chown` an
-unverified shared path. Stop if ownership or volume identity is unclear.
+The installer records the installation-bound `migrate-empty-legacy-v3` intent. Its networkless
+root one-shot first proves that `database_workdir`, `files_workdir`, `storage_workdir`, the two
+source-specific forward-transfer volumes and `restore_ciphertext_transfer` are dedicated and
+empty. It accepts a populated `backup_storage` only when that tree contains private regular
+files/directories with unambiguous historical-or-storage ownership, then assigns it solely to
+UID/GID `10004:10004`. It assigns each new private/transfer root its exact lane ownership and
+mode and commits a root-only durable v3 witness. A witnessed rerun verifies the layout; it does
+not repair drift.
+
+The prerelease v2 witness is never accepted as v3 evidence. A canonical develop-era
+`ssh_trust` volume may be validated and retained only as detached rollback evidence; no current
+runtime mounts it or imports its global trust data. Any ambiguous resource name, label,
+ownership, non-empty new target, or unsafe Local Storage tree stops the upgrade.
 
 ## Upgrade to the exact reviewed commit
 
@@ -248,6 +193,12 @@ deployment `.env` *before* rendering or building the model:
 
 ```bash
 TARGET_COMMIT='<40-character-reviewed-release-commit>'
+CURRENT_DOMAIN='<existing-public-hostname>'
+ARTIFACT_KMS_KEY_ARN='<resolved-symmetric-kms-key-arn>'
+ARTIFACT_KMS_REGION='<aws-region>'
+ARTIFACT_KMS_ALLOWED_KEY_ARNS="${ARTIFACT_KMS_KEY_ARN}"
+DATABASE_KMS_CREDENTIALS_FILE='<canonical-private-database-lane-credentials-file>'
+FILES_KMS_CREDENTIALS_FILE='<different-canonical-private-files-lane-credentials-file>'
 git fetch --no-tags --depth=1 origin "${TARGET_COMMIT}"
 test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "${TARGET_COMMIT}"
 git checkout --detach "${TARGET_COMMIT}"
@@ -260,24 +211,65 @@ INSTALL_ARGS=(
   --ref "${TARGET_COMMIT}"
   --install-dir "$PWD"
   --project-name backupsheep
+  --domain "${CURRENT_DOMAIN}"
   --skip-start
+  --artifact-kms-key-id "${ARTIFACT_KMS_KEY_ARN}"
+  --artifact-kms-region "${ARTIFACT_KMS_REGION}"
+  --artifact-kms-allowed-key-arns "${ARTIFACT_KMS_ALLOWED_KEY_ARNS}"
+  --artifact-kms-database-aws-credentials-file "${DATABASE_KMS_CREDENTIALS_FILE}"
+  --artifact-kms-files-aws-credentials-file "${FILES_KMS_CREDENTIALS_FILE}"
 )
+# When and only when this installation predates PostgreSQL identity generation 3:
+# INSTALL_ARGS+=(--migrate-database-identities)
+# Existing pre-v3 staging layouts also require the one-time gate documented above:
+# INSTALL_ARGS+=(--migrate-staging-layout)
+# An installation without BACKUPSHEEP_EGRESS_POLICY_GENERATION=2 requires the
+# reviewed fail-closed reset documented below:
+# INSTALL_ARGS+=(--migrate-egress-policy)
+# An existing shared RabbitMQ login also requires the coordinated pending gate:
+# INSTALL_ARGS+=(--migrate-rabbitmq-identities)
 # If and only if the reviewed deployment override exists:
 # INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")
 ./install.sh "${INSTALL_ARGS[@]}"
 # If old `compose down` left only the exact four legacy volumes, rerun that one
 # bootstrap with: --adopt-legacy-project backupsheep
-# Continue only after the expected RabbitMQ refusal and a verified matching sentinel;
-# then follow docs/guides/rabbitmq-upgrade.md before any 4.3 start.
+# The expected 3.13 refusal is valid only after every earlier selected gate passes.
+# STOP this runbook there and complete docs/guides/rabbitmq-upgrade.md. Do not execute
+# the normal already-hardened image-switch block below during that coordinated transition.
+```
 
+That pre-hardening bootstrap must stage every applicable database generation-3,
+staging-v3, RabbitMQ identity-generation-2 and task-auth-generation-3 transition in the
+same pending state. The [RabbitMQ migration guide](rabbitmq-upgrade.md) owns the exact
+3.13 -> 4.2 -> 4.3 wrapper validation and final installer reconciliation; do not splice
+the normal upgrade commands below into it.
+
+The egress flag is a one-time, availability-impacting authorization. It accepts only an
+older stock policy in which all six roles are uniformly public with blank lists, blank
+with blank lists, or deny with blank lists. It resets every role to `deny`, clears all
+address-only and generation-2 lists, and writes `BACKUPSHEEP_EGRESS_POLICY_GENERATION=2`.
+Internet-dependent operations will remain blocked until reviewed exact IPv4
+`CIDR:port`/IPv6 `[CIDR]:port` tuples and exact DNS names are configured. A mixed or
+customized legacy policy is never translated: preserve the old `.env` in the encrypted
+recovery copy, review its dependencies, manually reset all roles and lists to the stock
+deny state, and then authorize the migration. Do not reuse the flag after generation 2;
+the installer rejects it.
+
+For an installation already at staging layout v3, PostgreSQL identity generation 3,
+RabbitMQ data generation 4.3, RabbitMQ identity generation 2 and task-auth generation 3,
+continue with the normal exact-release image switch:
+
+```bash
 TARGET_IMAGE="backupsheep:${TARGET_COMMIT}"
 TARGET_POSTGRES_IMAGE="backupsheep-postgres:${TARGET_COMMIT}"
+TARGET_EGRESS_IMAGE="backupsheep-egress:${TARGET_COMMIT}"
 ENV_TEMPORARY="$(mktemp "${PWD}/.env.backupsheep.XXXXXX")"
 chmod 0600 "${ENV_TEMPORARY}"
 awk \
   -v app_replacement="BACKUPSHEEP_IMAGE='${TARGET_IMAGE}'" \
-  -v postgres_replacement="BACKUPSHEEP_POSTGRES_IMAGE='${TARGET_POSTGRES_IMAGE}'" '
-  BEGIN { replaced = 0 }
+  -v postgres_replacement="BACKUPSHEEP_POSTGRES_IMAGE='${TARGET_POSTGRES_IMAGE}'" \
+  -v egress_replacement="BACKUPSHEEP_EGRESS_IMAGE='${TARGET_EGRESS_IMAGE}'" '
+  BEGIN { replaced = 0; postgres_replaced = 0; egress_replaced = 0 }
   /^[[:space:]]*BACKUPSHEEP_IMAGE=/ {
     if (!replaced) print app_replacement
     replaced = 1
@@ -288,10 +280,16 @@ awk \
     postgres_replaced = 1
     next
   }
+  /^[[:space:]]*BACKUPSHEEP_EGRESS_IMAGE=/ {
+    if (!egress_replaced) print egress_replacement
+    egress_replaced = 1
+    next
+  }
   { print }
   END {
     if (!replaced) print app_replacement
     if (!postgres_replaced) print postgres_replacement
+    if (!egress_replaced) print egress_replacement
   }
 ' .env > "${ENV_TEMPORARY}"
 mv -f -- "${ENV_TEMPORARY}" .env
@@ -302,6 +300,7 @@ bs_compose config --quiet
 RENDERED_IMAGES="$(bs_compose --profile operations config --images)"
 test -n "$({ printf '%s\n' "${RENDERED_IMAGES}" | grep -Fx "${TARGET_IMAGE}"; })"
 test -n "$({ printf '%s\n' "${RENDERED_IMAGES}" | grep -Fx "${TARGET_POSTGRES_IMAGE}"; })"
+test -n "$({ printf '%s\n' "${RENDERED_IMAGES}" | grep -Fx "${TARGET_EGRESS_IMAGE}"; })"
 test -z "$({
   printf '%s\n' "${RENDERED_IMAGES}" |
     awk -v expected="${TARGET_IMAGE}" '/^backupsheep:/ && $0 != expected { print }'
@@ -311,37 +310,46 @@ test -z "$({
     awk -v expected="${TARGET_POSTGRES_IMAGE}" \
       '/^backupsheep-postgres:/ && $0 != expected { print }'
 })"
-bs_compose build db app
+test -z "$({
+  printf '%s\n' "${RENDERED_IMAGES}" |
+    awk -v expected="${TARGET_EGRESS_IMAGE}" \
+      '/^backupsheep-egress:/ && $0 != expected { print }'
+})"
+bs_compose build db app app-egress-guard
 BUILT_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_IMAGE}")"
 BUILT_POSTGRES_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_POSTGRES_IMAGE}")"
+BUILT_EGRESS_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_EGRESS_IMAGE}")"
 test -n "${BUILT_IMAGE_ID}"
 test -n "${BUILT_POSTGRES_IMAGE_ID}"
+test -n "${BUILT_EGRESS_IMAGE_ID}"
 ```
-
-If this is the first upgrade from a root-running BackupSheep image, stop here and perform
-the [one-time non-root volume migration](#one-time-non-root-volume-migration) with this
-just-built exact image. Do not start `migrate`, `preflight`, `app`, a worker, or Beat until
-that ownership probe passes.
 
 The `migrate`, web, worker and Beat roles all resolve the same image reference. Their
 `pull_policy: never` setting requires this explicit local build and prevents a missing
-image from being silently replaced from a registry. The database has the same local-only
-contract. Do not use mutable tags or change either tag between migration and application
-startup. Record `BUILT_IMAGE_ID` and `BUILT_POSTGRES_IMAGE_ID` in the deployment receipt.
+image from being silently replaced from a registry. The database and egress guards have
+the same local-only contract. Do not use mutable tags or change any tag between migration
+and application startup. Record `BUILT_IMAGE_ID`, `BUILT_POSTGRES_IMAGE_ID` and
+`BUILT_EGRESS_IMAGE_ID` in the deployment receipt.
 
 Run migration and preflight explicitly, then start only the profile-less core:
 
 ```bash
 bs_compose run --rm migrate
 bs_compose run --rm preflight
-bs_compose up --detach app
+bs_compose up --detach --no-build --no-deps --force-recreate \
+  app-egress-guard app
 ```
 
 The profile-less rollout starts only the core. Once migration, preflight and durable
 recovery/queue state are verified, explicitly restore provider execution:
 
 ```bash
-bs_compose --profile operations up --detach
+bs_compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+bs_compose --profile operations up --detach --no-build --no-deps beat
 ```
 
 That command can resume queued or recoverable provider mutations immediately.
@@ -357,16 +365,20 @@ be fixed, not bypassed.
 
 ```bash
 bs_compose --profile operations ps --all
-bs_compose logs --tail=200 migrate preflight app
+bs_compose logs --tail=200 db-provision migrate preflight app
 bs_compose exec -T app python manage.py check
 curl -fsS http://127.0.0.1:8000/healthz/
-bs_compose exec -T db pg_isready -U backupsheep -d backupsheep
+DB_CONTAINER="$(bs_compose ps -q db)"
+test -n "${DB_CONTAINER}"
+test "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+  "${DB_CONTAINER}")" = healthy
 bs_compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 bs_compose --profile operations exec -T worker-cloud celery -A backupsheep inspect ping
 ```
 
-Verify that `migrate` and `preflight` exited `0` and every intentionally enabled worker
-answers. Then:
+The database assertion reuses the stock image's authenticated file-backed healthcheck;
+`pg_isready` alone only proves that a server is listening. Verify that `migrate` and
+`preflight` exited `0` and every intentionally enabled worker answers. Then:
 
 1. check login and the dashboard through the public HTTPS URL;
 2. inspect existing schedules, storage and source records;
@@ -380,8 +392,8 @@ answers. Then:
 ## Configuration changes between versions
 
 Compare the new `.env_sample` with the existing `.env` without printing secrets into logs.
-Add new non-secret/default keys deliberately and preserve existing values. Keep the four
-required stock installation values and the legacy managed-key path blank in `.env`, and
+Add new non-secret/default keys deliberately and preserve existing values. Keep all direct
+stock secret values and the two legacy shared managed-key settings blank in `.env`, and
 validate the corresponding `.secrets` files; never copy them back into environment
 variables for convenience. Because settings also read
 `.env_sample` as defaults, a missing optional key may still boot, but that does not mean
@@ -417,11 +429,14 @@ data migrations and application changes may not have a safe reverse path.
 
 ## PostgreSQL major-version changes
 
-The stock image currently uses PostgreSQL 18 and mounts `/var/lib/postgresql`, whose
-versioned layout differs from older images. A major PostgreSQL change requires a logical
-dump/restore or a supported `pg_upgrade` plan, not just changing the image tag against an
-old data directory. Rehearse it on a copy and preserve the old volume until the new
-database and restore tests pass.
+The stock image uses PostgreSQL 18.6 on Alpine 3.24, UID/GID `70:70`, ICU `und`, and the
+installation-witnessed `postgres_data_v1` volume. It never mounts the retired
+Debian/UID-999 `pgdata` volume. Follow the explicit
+[PostgreSQL Alpine/ICU migration gate](postgres-runtime-migration.md) for that one-time
+transition. Other major-version or non-stock database changes require a separately
+reviewed logical dump/restore or supported `pg_upgrade` plan; never change an image tag
+against an old data directory. Rehearse on a copy and preserve the old volume and exact
+image until database verification and a restore test pass.
 
 ## Upgrade completion record
 

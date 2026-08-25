@@ -602,8 +602,8 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         )
 
         with mock.patch.object(restore_tasks.current_app, "send_task") as send_task:
-            restore_tasks.resume_in_progress_restores.run()
-            restore_tasks.resume_in_progress_restores.run()
+            restore_tasks.resume_in_progress_files_restores.run()
+            restore_tasks.resume_in_progress_files_restores.run()
 
         send_task.assert_called_once_with(
             "restore_website_backup",
@@ -637,7 +637,7 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         )
 
         with mock.patch.object(restore_tasks.current_app, "send_task") as send_task:
-            restore_tasks.resume_in_progress_restores.run()
+            restore_tasks.resume_in_progress_files_restores.run()
 
         send_task.assert_not_called()
         restore.refresh_from_db()
@@ -665,7 +665,7 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         )
 
         with mock.patch.object(restore_tasks.current_app, "send_task") as send_task:
-            restore_tasks.resume_in_progress_restores.run()
+            restore_tasks.resume_in_progress_files_restores.run()
 
         send_task.assert_called_once_with(
             "restore_website_backup",
@@ -726,7 +726,7 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         )
 
         with mock.patch.object(restore_tasks.current_app, "send_task"):
-            restore_tasks.resume_in_progress_restores.run()
+            restore_tasks.resume_in_progress_files_restores.run()
 
         restore.refresh_from_db()
         reservation = restore.next_retry_at
@@ -768,7 +768,7 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         )
 
         with mock.patch.object(restore_tasks.current_app, "send_task"):
-            restore_tasks.resume_in_progress_restores.run()
+            restore_tasks.resume_in_progress_files_restores.run()
 
         restore.refresh_from_db()
         ordinary = DurableRestoreLease(
@@ -794,7 +794,7 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         )
 
         with mock.patch.object(restore_tasks.current_app, "send_task"):
-            restore_tasks.resume_in_progress_restores.run()
+            restore_tasks.resume_in_progress_files_restores.run()
 
         restore.refresh_from_db()
         recovery_task_id = (
@@ -836,6 +836,6 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         )
 
         with mock.patch.object(restore_tasks.current_app, "send_task") as send_task:
-            restore_tasks.resume_in_progress_restores.run()
+            restore_tasks.resume_in_progress_files_restores.run()
 
         send_task.assert_not_called()

@@ -83,7 +83,7 @@ class CoreAWSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         ).values()
         return Response(endpoints)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:

@@ -22,6 +22,7 @@ from rest_framework import status
 from django.utils.text import slugify
 from rest_framework.decorators import action
 from apps.api.v1.utils.api_exceptions import ExceptionDefault
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 def _log_activity(request, log_type, data):
@@ -146,6 +147,9 @@ class CoreScheduleView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def trigger(self, request, pk=None):
         schedule = self.get_object()
+        require_source_backup_creation(
+            schedule.node.connection.integration.code
+        )
         request.data["schedule"] = schedule.id
 
         serializer = CoreScheduleRunSerializer(data=request.data)
@@ -216,6 +220,9 @@ class CoreScheduleView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         schedule = self.get_object()
+        require_source_backup_creation(
+            schedule.node.connection.integration.code
+        )
         schedule.status = CoreSchedule.Status.ACTIVE
         schedule.save()
         schedule.schedule_update()

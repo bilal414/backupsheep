@@ -23,8 +23,8 @@ class PostgresImageHardeningContractTests(TestCase):
             )
         )
         self.assertIn(
-            "FROM postgres:18.6-trixie@sha256:"
-            "06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
+            "FROM postgres:18.6-alpine3.24@sha256:"
+            "d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
             self.dockerfile,
         )
         self.assertIn(
@@ -33,43 +33,34 @@ class PostgresImageHardeningContractTests(TestCase):
             "/usr/local/bin/docker-entrypoint.sh",
             self.dockerfile,
         )
-        self.assertIn("sha256sum --check --strict", self.dockerfile)
+        self.assertIn("sha256sum -c -", self.dockerfile)
         self.assertNotIn("ARG ", self.dockerfile)
 
-    def test_setpriv_replaces_exactly_the_reviewed_gosu_transition(self):
+    def test_su_exec_replaces_exactly_the_reviewed_gosu_transition(self):
         self.assertIn(
-            "exec setpriv --reuid=postgres --regid=postgres --init-groups -- "
-            '"$BASH_SOURCE" "$@"',
+            'exec su-exec postgres "$BASH_SOURCE" "$@"',
             self.dockerfile,
         )
+        self.assertIn("apk add --no-cache 'su-exec=0.3-r0'", self.dockerfile)
+        self.assertIn("grep -Fxq 'su-exec-0.3-r0'", self.dockerfile)
+        self.assertNotIn("apk upgrade", self.dockerfile)
         self.assertIn("rm -f -- /usr/local/bin/gosu", self.dockerfile)
         self.assertIn("! grep -Fq gosu /usr/local/bin/docker-entrypoint.sh", self.dockerfile)
         self.assertIn("! command -v gosu", self.dockerfile)
         self.assertIn("test ! -e /usr/local/bin/gosu", self.dockerfile)
-        self.assertTrue(self.dockerfile.rstrip().endswith("USER 999:999"))
+        self.assertIn("USER 70:70", self.dockerfile)
 
-    def test_complete_installed_util_linux_family_is_exactly_security_pinned(self):
-        self.assertIn('"util-linux=2.41.5-0+deb13u1"', self.dockerfile)
-        self.assertIn('"bsdutils=1:2.41.5-0+deb13u1"', self.dockerfile)
+    def test_runtime_embeds_the_generation_witness_gate(self):
         self.assertIn(
-            '"login=1:4.16.0-2+really2.41.5-0+deb13u1"',
+            'com.backupsheep.postgres.runtime-generation="18.6-alpine3.24-icu-v1"',
             self.dockerfile,
         )
-        for package in (
-            "libblkid1",
-            "liblastlog2-2",
-            "libmount1",
-            "libsmartcols1",
-            "libuuid1",
-            "mount",
-            "util-linux",
-        ):
-            with self.subTest(package=package):
-                self.assertRegex(
-                    self.dockerfile,
-                    rf"(?:\"{re.escape(package)}=2\.41\.5-0\+deb13u1\"|for package in .*\b{re.escape(package)}\b)",
-                )
-        self.assertIn("rm -rf /var/lib/apt/lists/*", self.dockerfile)
+        self.assertIn("deploy/postgres/entrypoint.sh", self.dockerfile)
+        self.assertIn("deploy/postgres/storage-witness.sh", self.dockerfile)
+        self.assertIn(
+            'ENTRYPOINT ["/usr/local/bin/backupsheep-postgres-entrypoint"]',
+            self.dockerfile,
+        )
 
     def test_compose_builds_the_commit_tagged_database_image_without_pull_fallback(self):
         database = re.search(
@@ -85,6 +76,7 @@ class PostgresImageHardeningContractTests(TestCase):
         )
         self.assertIn("pull_policy: never", block)
         self.assertIn("dockerfile: Dockerfile.postgres", block)
-        self.assertIn('user: "999:999"', block)
+        self.assertIn('user: "70:70"', block)
         self.assertNotIn("cap_add:", block)
-        self.assertIn("- pgdata:/var/lib/postgresql", block)
+        self.assertIn("- postgres_data_v1:/var/lib/postgresql", block)
+        self.assertNotIn("- pgdata:/var/lib/postgresql", block)

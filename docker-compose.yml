@@ -9,42 +9,42 @@
 #   worker-database . database dumps (pg_dump/mysqldump). Heavy CPU/disk.
 #   worker-files .... website/wordpress/basecamp dumps. Heavy CPU/disk.
 #   worker-storage .. uploads each finished dump to the storage backends + cleanup.
-#                     Scale this out for upload throughput:
-#                         ./backupsheep-compose --profile operations up -d --scale worker-storage=4
+#                     Recreate its exact namespace pair when changing scale:
+#                         ./backupsheep-compose --profile operations up --detach --no-deps --force-recreate --scale worker-storage=4 storage-egress-guard worker-storage
 #   worker-logs ..... DB log entries, Slack/Telegram/Firebase notifications, and pruning
-#                     old run logs from disk (delete_old_logs).
+#                     old run logs from each source lane's private workdir.
 #   beat ............ Celery beat scheduler. BackupSheep scheduled-backup entries use a
 #                     transactional occurrence claim, so duplicate Beat processes
 #                     converge safely; keep ordinary maintenance entries singleton.
 #
-# A profile-less `./backupsheep-compose up` is provider-operation-disabled/core-only: it
-# creates or restarts PostgreSQL, RabbitMQ and the web UI and can apply irreversible
-# database migrations. Use `./backupsheep-compose config --quiet` for non-mutating model
-# validation. Provider workers and Beat require the explicit `operations` profile after
-# credentials and recovery state have been reviewed:
-#     ./backupsheep-compose --profile operations up -d
+# A profile-less `./backupsheep-compose up` is accepted only for a fresh project before
+# any guarded workload exists. Normal installation and recovery must use install.sh,
+# which sequences migrations and recreates every guard/workload namespace pair.
+# Use `./backupsheep-compose config --quiet` for non-mutating model validation.
 #
-# All disk-touching workers (database, files, storage) share the backup_workdir volume,
-# so any of them can see any backup's in-progress files. On a SINGLE host you can scale
-# any of them with `--scale` (each replica handles distinct backups / upload tasks).
-# Keep Beat singleton for ordinary maintenance-task cadence; scheduled backup entries
-# themselves are protected by a transactional occurrence claim. Across MULTIPLE hosts,
-# backup_workdir must be a shared network filesystem (NFS/EFS) so replicas see each
-# other's files.
+# Database, files, and storage use distinct UID-owned private work volumes. Their only
+# shared paths carry authenticated BSE1 ciphertext through fenced, read-only handoffs.
+# The legacy backup_workdir is mounted only into the witnessed one-shot provisioner so
+# an upgrade cannot silently expose historical plaintext to another lane.
 #
-# Plus PostgreSQL and RabbitMQ (the Celery broker). Build both reviewed local images,
-# then start the core with the model-locking wrapper:
-#     ./backupsheep-compose build db app
-#     ./backupsheep-compose up -d
+# Plus PostgreSQL, RabbitMQ (the Celery broker), and a no-secret egress guard image.
+# Build all reviewed local images,
+# then use the installer for sequenced startup. For a fresh disposable project only,
+# the model-locking wrapper also accepts:
+#     ./backupsheep-compose build db app app-egress-guard
+#     ./backupsheep-compose up --detach
 #
 # Configure .env (see .env_sample). For this stack use the service names below:
 #     DB_HOST=db
 #     DB_PORT=5432
 #     RABBITMQ_HOST=rabbitmq
-#     RABBITMQ_USER=backupsheep
+#     RABBITMQ_USER=backupsheep_app
 #     RABBITMQ_VHOST=backupsheep
 # The installer stores the Django, database, broker, and onboarding secrets as private
 # file-backed Compose secrets under `.secrets`; their `.env` counterparts stay blank.
+# PostgreSQL has a database-only bootstrap superuser, a one-shot schema-owning
+# migrator, and an independently authenticated non-owner identity for every runtime
+# lane. A post-migration seal applies and witnesses the exact table/column/RLS policy.
 
 # Persist the installer-reviewed project identity in configuration as well as the
 # command line. This prevents a manual rerun from silently selecting a new project
@@ -62,6 +62,60 @@ x-default-logging: &default-logging
 # before mutation, without changing labels on existing data volumes during upgrades.
 x-installation-labels: &installation-labels
   com.backupsheep.installation-id: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+
+# Only the no-secret policy guard receives network administration. It has no env_file,
+# application secret, or data mount, becomes UID/GID 10020, drops every capability
+# except NET_ADMIN, and reconciles exact Docker-DNS peer sets in place. Allowlist mode
+# adds a loopback-only exact-name DNS proxy as separate zero-capability UID/GID 10021.
+x-egress-guard-runtime: &egress-guard-runtime
+  labels: *installation-labels
+  image: "${BACKUPSHEEP_EGRESS_IMAGE:-backupsheep-egress:local}"
+  pull_policy: never
+  user: "0:0"
+  privileged: false
+  read_only: true
+  cgroup: private
+  ipc: private
+  pids_limit: 32
+  mem_limit: 64m
+  cpus: "0.25"
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - NET_ADMIN
+    - SETUID
+    - SETGID
+    - SETPCAP
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /run/backupsheep-egress:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=0,gid=0
+  ulimits:
+    core:
+      soft: 0
+      hard: 0
+    nofile:
+      soft: 128
+      hard: 128
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/backupsheep-egress-healthcheck"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 10s
+  logging: *default-logging
+  # A restarted guard would enter a new network namespace while a running
+  # workload remained in the old one. Recovery must force-recreate the exact
+  # guard/workload pair through backupsheep-compose.
+  restart: "no"
+
+x-egress-workload-healthcheck: &egress-workload-healthcheck
+  test: ["CMD", "/usr/local/bin/backupsheep-egress-workload-healthcheck"]
+  interval: 10s
+  timeout: 5s
+  retries: 2
+  start_period: 60s
 
 # Least-privilege defaults for services built from the BackupSheep application image.
 # The explicit UID is defense in depth if an image's USER metadata regresses. The root
@@ -94,18 +148,154 @@ x-app-runtime: &app-runtime
       hard: 4096
   stop_grace_period: "${BACKUPSHEEP_STOP_GRACE_PERIOD:-5m}"
 
-# `env_file` remains the compatibility/configuration surface, but direct copies of the
-# four installation secrets are explicitly removed from every application container.
-# Settings resolves the first three from the read-only secret files instead. Only the
-# web service receives the onboarding token secret.
+# Compose reads the operator's `.env` only for interpolation. It never attaches that
+# file wholesale to a container: every accepted runtime variable is named here, so a
+# future/stale secret or proxy/loader hook fails closed until its consumer is reviewed.
+x-app-configuration-environment: &app-configuration-environment
+  BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+  BACKUPSHEEP_EGRESS_POLICY_GENERATION: "${BACKUPSHEEP_EGRESS_POLICY_GENERATION:?BACKUPSHEEP_EGRESS_POLICY_GENERATION is required}"
+  DJANGO_SERVER: "${DJANGO_SERVER:-prod}"
+  DJANGO_DEBUG: "${DJANGO_DEBUG:-false}"
+  DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}"
+  DJANGO_HTTPS: "${DJANGO_HTTPS:-false}"
+  DJANGO_ADMIN_ENABLED: "${DJANGO_ADMIN_ENABLED:-false}"
+  API_TOKEN_TTL_SECONDS: "${API_TOKEN_TTL_SECONDS:-2592000}"
+  SESSION_COOKIE_AGE: "${SESSION_COOKIE_AGE:-43200}"
+  SESSION_EXPIRE_AT_BROWSER_CLOSE: "${SESSION_EXPIRE_AT_BROWSER_CLOSE:-true}"
+  AUTH_THROTTLE_TRUSTED_PROXY_ENABLED: "${AUTH_THROTTLE_TRUSTED_PROXY_ENABLED:-false}"
+  AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS: "${AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS:-}"
+  APP_DOMAIN: "${APP_DOMAIN:-localhost:8000}"
+  APP_PROTOCOL: "${APP_PROTOCOL:-http://}"
+  APP_NAME: "${APP_NAME:-BackupSheep}"
+  BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "${BACKUPSHEEP_DATABASE_IDENTITY_GENERATION:?BACKUPSHEEP_DATABASE_IDENTITY_GENERATION is required}"
+  DB_NAME: "${DB_NAME:-backupsheep}"
+  DB_HOST: "${DB_HOST:-db}"
+  DB_PORT: "${DB_PORT:-5432}"
+  # Non-secret role names are part of the generation-3 catalog witness. Every
+  # runtime must be able to attest the complete sealed contract, while receiving
+  # only its own password file below.
+  DB_BOOTSTRAP_USER: "${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}"
+  DB_MIGRATOR_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
+  DB_APP_USER: "${DB_APP_USER:-backupsheep_app}"
+  DB_PREFLIGHT_USER: "${DB_PREFLIGHT_USER:-backupsheep_preflight}"
+  DB_BEAT_USER: "${DB_BEAT_USER:-backupsheep_beat}"
+  DB_CLOUD_USER: "${DB_CLOUD_USER:-backupsheep_cloud}"
+  DB_DATABASE_USER: "${DB_DATABASE_USER:-backupsheep_database}"
+  DB_FILES_USER: "${DB_FILES_USER:-backupsheep_files}"
+  DB_STORAGE_USER: "${DB_STORAGE_USER:-backupsheep_storage}"
+  DB_LOGS_USER: "${DB_LOGS_USER:-backupsheep_logs}"
+  DB_SSLMODE: "${DB_SSLMODE:-}"
+  DB_SSLROOTCERT: "${DB_SSLROOTCERT:-}"
+  RABBITMQ_HOST: "${RABBITMQ_HOST:-rabbitmq}"
+  RABBITMQ_PORT: "${RABBITMQ_PORT:-5672}"
+  RABBITMQ_SCHEME: "${RABBITMQ_SCHEME:-amqp}"
+  RABBITMQ_VHOST: "${RABBITMQ_VHOST:-backupsheep}"
+  RABBITMQ_CA_CERT: "${RABBITMQ_CA_CERT:-}"
+  BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION: "${BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION:?BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION is required}"
+  BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION: "${BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION:?BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION is required}"
+  CELERY_TASK_REPLAY_RETENTION_SECONDS: "${CELERY_TASK_REPLAY_RETENTION_SECONDS:-1209600}"
+  CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE: "${CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE:-1000}"
+  LOG_RETENTION_DAYS: "${LOG_RETENTION_DAYS:-30}"
+  BACKUP_RECOVERY_STALE_SECONDS: "${BACKUP_RECOVERY_STALE_SECONDS:-900}"
+  BACKUP_RECOVERY_BATCH_SIZE: "${BACKUP_RECOVERY_BATCH_SIZE:-100}"
+  BACKUP_REQUEST_RETRY_SECONDS: "${BACKUP_REQUEST_RETRY_SECONDS:-60}"
+  BACKUP_REQUEST_RETRY_MAX_SECONDS: "${BACKUP_REQUEST_RETRY_MAX_SECONDS:-900}"
+  BACKUP_REQUEST_CLAIM_TIMEOUT_SECONDS: "${BACKUP_REQUEST_CLAIM_TIMEOUT_SECONDS:-300}"
+  BACKUP_REQUEST_CLAIM_TIMEOUT_MAX_SECONDS: "${BACKUP_REQUEST_CLAIM_TIMEOUT_MAX_SECONDS:-3600}"
+  BACKUP_REQUEST_DISPATCH_LEASE_SECONDS: "${BACKUP_REQUEST_DISPATCH_LEASE_SECONDS:-60}"
+  BACKUP_REQUEST_RECOVERY_BATCH_SIZE: "${BACKUP_REQUEST_RECOVERY_BATCH_SIZE:-100}"
+  BACKUP_POLL_INTERVAL: "${BACKUP_POLL_INTERVAL:-120}"
+  BACKUP_WORKER_LEASE_SECONDS: "${BACKUP_WORKER_LEASE_SECONDS:-180}"
+  BACKUP_WORKER_HEARTBEAT_SECONDS: "${BACKUP_WORKER_HEARTBEAT_SECONDS:-30}"
+  BACKUP_DELETE_LEASE_SECONDS: "${BACKUP_DELETE_LEASE_SECONDS:-300}"
+  STORAGE_POINT_DELETE_LEASE_SECONDS: "${STORAGE_POINT_DELETE_LEASE_SECONDS:-3600}"
+  BACKUP_STORAGE_LEASE_SECONDS: "${BACKUP_STORAGE_LEASE_SECONDS:-180}"
+  BACKUP_STORAGE_HEARTBEAT_SECONDS: "${BACKUP_STORAGE_HEARTBEAT_SECONDS:-30}"
+  RESTORE_WORKER_LEASE_SECONDS: "${RESTORE_WORKER_LEASE_SECONDS:-180}"
+  RESTORE_WORKER_HEARTBEAT_SECONDS: "${RESTORE_WORKER_HEARTBEAT_SECONDS:-30}"
+  RESTORE_RECOVERY_STALE_SECONDS: "${RESTORE_RECOVERY_STALE_SECONDS:-300}"
+  RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS: "${RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS:-120}"
+  RESTORE_RECOVERY_BATCH_SIZE: "${RESTORE_RECOVERY_BATCH_SIZE:-100}"
+  BACKUP_CREATE_LEASE_SECONDS: "${BACKUP_CREATE_LEASE_SECONDS:-3600}"
+  BACKUP_STORAGE_STALE_SECONDS: "${BACKUP_STORAGE_STALE_SECONDS:-21600}"
+  S3_DOWNLOAD_URL_EXPIRES: "${S3_DOWNLOAD_URL_EXPIRES:-300}"
+  WORDPRESS_INTEGRATION_ENABLED: "${WORDPRESS_INTEGRATION_ENABLED:-false}"
+  BASECAMP_INTEGRATION_ENABLED: "${BASECAMP_INTEGRATION_ENABLED:-false}"
+  WORDPRESS_PRIVATE_TARGET_CIDRS: "${WORDPRESS_PRIVATE_TARGET_CIDRS:-}"
+  ALLOW_INSECURE_FTP: "${ALLOW_INSECURE_FTP:-false}"
+  SSH_CONNECT_TIMEOUT: "${SSH_CONNECT_TIMEOUT:-15}"
+  SSH_BANNER_TIMEOUT: "${SSH_BANNER_TIMEOUT:-15}"
+  SSH_AUTH_TIMEOUT: "${SSH_AUTH_TIMEOUT:-15}"
+  SSH_KEEPALIVE_SECONDS: "${SSH_KEEPALIVE_SECONDS:-30}"
+  DATABASE_CONNECT_TIMEOUT: "${DATABASE_CONNECT_TIMEOUT:-15}"
+  DATABASE_STATEMENT_TIMEOUT_MS: "${DATABASE_STATEMENT_TIMEOUT_MS:-15000}"
+  DATABASE_LOCK_TIMEOUT_MS: "${DATABASE_LOCK_TIMEOUT_MS:-5000}"
+  DATABASE_COMMAND_TIMEOUT: "${DATABASE_COMMAND_TIMEOUT:-82800}"
+  DATABASE_VALIDATION_COMMAND_TIMEOUT: "${DATABASE_VALIDATION_COMMAND_TIMEOUT:-30}"
+  SSH_IO_TIMEOUT: "${SSH_IO_TIMEOUT:-30}"
+  SSH_DISCOVERY_TIMEOUT_SECONDS: "${SSH_DISCOVERY_TIMEOUT_SECONDS:-60}"
+  SSH_DISCOVERY_MAX_ENTRIES: "${SSH_DISCOVERY_MAX_ENTRIES:-10000}"
+  SSH_DISCOVERY_MAX_NAME_BYTES: "${SSH_DISCOVERY_MAX_NAME_BYTES:-4096}"
+  SSH_DISCOVERY_MAX_RESULT_BYTES: "${SSH_DISCOVERY_MAX_RESULT_BYTES:-2097152}"
+  SSH_REMOTE_COMMAND_MAX_BYTES: "${SSH_REMOTE_COMMAND_MAX_BYTES:-2097152}"
+  SSH_REMOTE_CREDENTIAL_STALE_SECONDS: "${SSH_REMOTE_CREDENTIAL_STALE_SECONDS:-900}"
+  SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES: "${SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES:-10000}"
+  SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS: "${SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS:-10}"
+  MANAGED_SSH_OPERATION_TTL_SECONDS: "${MANAGED_SSH_OPERATION_TTL_SECONDS:-600}"
+  MANAGED_SSH_OPERATION_LEASE_SECONDS: "${MANAGED_SSH_OPERATION_LEASE_SECONDS:-300}"
+  MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS: "${MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS:-240}"
+  MANAGED_SSH_TASK_TIME_LIMIT_SECONDS: "${MANAGED_SSH_TASK_TIME_LIMIT_SECONDS:-270}"
+  SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS: "${SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS:-43200}"
+  PROVIDER_HTTP_CONNECT_TIMEOUT: "${PROVIDER_HTTP_CONNECT_TIMEOUT:-10}"
+  PROVIDER_HTTP_READ_TIMEOUT: "${PROVIDER_HTTP_READ_TIMEOUT:-60}"
+  PROVIDER_HTTP_MAX_TIMEOUT: "${PROVIDER_HTTP_MAX_TIMEOUT:-300}"
+  PROVIDER_HTTP_MAX_RETRIES: "${PROVIDER_HTTP_MAX_RETRIES:-4}"
+  PROVIDER_HTTP_MAX_POOL_CONNECTIONS: "${PROVIDER_HTTP_MAX_POOL_CONNECTIONS:-50}"
+  PROVIDER_HTTP_BACKOFF_FACTOR: "${PROVIDER_HTTP_BACKOFF_FACTOR:-0.5}"
+  S3_MULTIPART_THRESHOLD_BYTES: "${S3_MULTIPART_THRESHOLD_BYTES:-8388608}"
+  S3_MULTIPART_PART_SIZE_BYTES: "${S3_MULTIPART_PART_SIZE_BYTES:-8388608}"
+  S3_MULTIPART_TARGET_PARTS: "${S3_MULTIPART_TARGET_PARTS:-8000}"
+  S3_MULTIPART_CHECKPOINT_PARTS: "${S3_MULTIPART_CHECKPOINT_PARTS:-16}"
+  S3_MULTIPART_HASH_CHUNK_BYTES: "${S3_MULTIPART_HASH_CHUNK_BYTES:-1048576}"
+  S3_MULTIPART_NO_PROGRESS_SECONDS: "${S3_MULTIPART_NO_PROGRESS_SECONDS:-3600}"
+  S3_MULTIPART_NO_PROGRESS_RETRY_AFTER_SECONDS: "${S3_MULTIPART_NO_PROGRESS_RETRY_AFTER_SECONDS:-300}"
+  DROPBOX_UPLOAD_CHUNK_SIZE_BYTES: "${DROPBOX_UPLOAD_CHUNK_SIZE_BYTES:-8388608}"
+  RESTORE_MAX_ARCHIVE_MEMBERS: "${RESTORE_MAX_ARCHIVE_MEMBERS:-2100000}"
+  RESTORE_MAX_UNCOMPRESSED_BYTES: "${RESTORE_MAX_UNCOMPRESSED_BYTES:-2199023255552}"
+  RESTORE_MAX_COMPRESSION_RATIO: "${RESTORE_MAX_COMPRESSION_RATIO:-1000}"
+  RESTORE_DISK_RESERVE_BYTES: "${RESTORE_DISK_RESERVE_BYTES:-536870912}"
+  WEBSITE_RESTORE_INLINE_FILE_LIMIT: "${WEBSITE_RESTORE_INLINE_FILE_LIMIT:-1000}"
+  SENTRY_DSN: "${SENTRY_DSN:-}"
+  SENTRY_TRACES_SAMPLE_RATE: "${SENTRY_TRACES_SAMPLE_RATE:-0}"
+  SENTRY_PROFILES_SAMPLE_RATE: "${SENTRY_PROFILES_SAMPLE_RATE:-0}"
+  MS_OAUTH_ENDPOINT: "${MS_OAUTH_ENDPOINT:-https://login.microsoftonline.com/common/oauth2/v2.0/authorize}"
+  MS_OAUTH_TOKEN_URL: "${MS_OAUTH_TOKEN_URL:-https://login.microsoftonline.com/common/oauth2/v2.0/token}"
+  MS_REDIRECT_URL: "${MS_REDIRECT_URL:-/api/v1/callback/microsoft}"
+  MS_SCOPE: "${MS_SCOPE:-offline_access Files.ReadWrite.All User.Read}"
+  MS_RESPONSE_TYPE: "${MS_RESPONSE_TYPE:-code}"
+  MS_GRAPH_ENDPOINT: "${MS_GRAPH_ENDPOINT:-https://graph.microsoft.com/v1.0}"
+
+# Settings resolves installation credentials from read-only secret files. Only the
+# web service receives the onboarding token secret; integration values are blanked
+# here and restored by the exact consumer below.
 x-app-secret-environment: &app-secret-environment
-  # `env_file` is evaluated before the image entrypoint. Blank loader hooks here so
-  # a stale/tampered .env cannot inject a shared library before init.sh can sanitize
-  # its descendants or capture TLS session keys.
+  <<: *app-configuration-environment
+  # Blank loader/proxy hooks explicitly as defense in depth for hand-written
+  # Compose overrides. The image entrypoint independently rejects/unsets them.
   LD_AUDIT: ""
   LD_LIBRARY_PATH: ""
   LD_PRELOAD: ""
   SSLKEYLOGFILE: ""
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  ALL_PROXY: ""
+  NO_PROXY: ""
+  http_proxy: ""
+  https_proxy: ""
+  all_proxy: ""
+  no_proxy: ""
+  REQUESTS_CA_BUNDLE: ""
+  CURL_CA_BUNDLE: ""
   # The stock image also supports a JSON configuration blob for non-Compose PaaS
   # deployments. Suppress that alternate source here so it cannot replace the
   # reviewed .env plus file-backed secret model. Pin the only settings module whose
@@ -119,25 +309,142 @@ x-app-secret-environment: &app-secret-environment
   # still contains one; the deployment preflight independently enforces this.
   DATABASE_URL: ""
   DB_PASSWORD: ""
-  DB_PASSWORD_FILE: /run/secrets/db_password
+  DB_PASSWORD_FILE: ""
   CELERY_BROKER_URL: ""
   RABBITMQ_PASSWORD: ""
-  RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_password
+  RABBITMQ_PASSWORD_FILE: ""
+  # Stock Docker authenticates every Celery publication with a lane-specific
+  # Ed25519 key. Consumers receive the public registry, never another lane's key.
+  BACKUPSHEEP_CELERY_SECURITY_REQUIRED: "true"
+  BACKUPSHEEP_CELERY_SECURITY_GENERATION: "${BACKUPSHEEP_CELERY_SECURITY_GENERATION:?BACKUPSHEEP_CELERY_SECURITY_GENERATION is required}"
+  CELERY_SIGNING_PRIVATE_KEY_FILE: ""
+  CELERY_TRUSTED_PUBLIC_KEYS_FILE: /run/secrets/celery_trusted_public_keys
   ONBOARDING_INSTALL_TOKEN: ""
-  # Keep SSH trust and the optional managed identity out of the shared backup
-  # work volume. Compose mounts the trust store only into roles that use SSH,
-  # and mounts the managed private key as a read-only file-backed secret.
-  SSH_KNOWN_HOSTS_PATH: /var/lib/backupsheep/ssh-trust/known_hosts
-  SSH_MANAGED_PRIVATE_KEY_PATH: /run/backupsheep/ssh/managed_private_key
+  # Keep lane-specific managed identities out of shared volumes.
+  # Every role may advertise the two public identities; each source worker mounts
+  # only its own private half and init.sh exports the generic runtime path.
+  SSH_MANAGED_PRIVATE_KEY_PATH: ""
+  SSH_MANAGED_PUBLIC_KEY: ""
+  SSH_MANAGED_DATABASE_PUBLIC_KEY: "${SSH_MANAGED_DATABASE_PUBLIC_KEY:-}"
+  SSH_MANAGED_FILES_PUBLIC_KEY: "${SSH_MANAGED_FILES_PUBLIC_KEY:-}"
+  SSH_MANAGED_LANE_ISOLATION_REQUIRED: "true"
+  # Stock enterprise custody is BSE1-only. Key identifiers and the decrypt allowlist
+  # are non-secret configuration. Database/files receive distinct credentials whose
+  # IAM policies must condition KMS access on their exact bse:lane context.
+  BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE: bse1
+  BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE: "true"
+  BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE: "false"
+  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER: aws-kms
+  BACKUPSHEEP_ARTIFACT_KMS_KEY_ID: "${BACKUPSHEEP_ARTIFACT_KMS_KEY_ID:?BACKUPSHEEP_ARTIFACT_KMS_KEY_ID is required}"
+  BACKUPSHEEP_ARTIFACT_KMS_REGION: "${BACKUPSHEEP_ARTIFACT_KMS_REGION:?BACKUPSHEEP_ARTIFACT_KMS_REGION is required}"
+  BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS: "${BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS:?BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS is required}"
+  BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL: ""
+  BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT: "false"
+  BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS: "${BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS:-5}"
+  BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS: "${BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS:-20}"
+  BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS: "${BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS:-3}"
+  BACKUPSHEEP_PLAINTEXT_ROOT: /code/_storage
+  BACKUPSHEEP_DATABASE_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/transfer/database
+  BACKUPSHEEP_FILES_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/transfer/files
+  BACKUPSHEEP_RESTORE_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/restore-transfer
+  BACKUPSHEEP_PRIVATE_MIN_FREE_BYTES: "${BACKUPSHEEP_PRIVATE_MIN_FREE_BYTES:-536870912}"
+  BACKUPSHEEP_PRIVATE_MIN_FREE_INODES: "${BACKUPSHEEP_PRIVATE_MIN_FREE_INODES:-1024}"
+  BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES: "${BACKUPSHEEP_TRANSFER_MIN_FREE_BYTES:-536870912}"
+  BACKUPSHEEP_TRANSFER_MIN_FREE_INODES: "${BACKUPSHEEP_TRANSFER_MIN_FREE_INODES:-1024}"
+  BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES: "${BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES:-536870912}"
+  BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES: "${BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES:-1024}"
+  # Empty every ambient AWS credential/role/metadata/endpoint source. Each source
+  # lane overrides only AWS_SHARED_CREDENTIALS_FILE below.
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_SESSION_TOKEN: ""
+  AWS_SECURITY_TOKEN: ""
+  AWS_PROFILE: ""
+  AWS_DEFAULT_PROFILE: ""
+  AWS_CONFIG_FILE: ""
+  AWS_CA_BUNDLE: ""
+  AWS_METADATA_SERVICE_ENDPOINT: ""
+  AWS_METADATA_SERVICE_ENDPOINT_MODE: ""
+  BOTO_CONFIG: ""
+  AWS_WEB_IDENTITY_TOKEN_FILE: ""
+  AWS_ROLE_ARN: ""
+  AWS_ROLE_SESSION_NAME: ""
+  AWS_CONTAINER_CREDENTIALS_FULL_URI: ""
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: ""
+  AWS_CONTAINER_AUTHORIZATION_TOKEN: ""
+  AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: ""
+  AWS_ENDPOINT_URL: ""
+  AWS_ENDPOINT_URL_KMS: ""
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_EC2_METADATA_V1_DISABLED: "true"
+  AWS_IGNORE_CONFIGURED_ENDPOINT_URLS: "true"
+  AWS_SHARED_CREDENTIALS_FILE: ""
 
-x-app-secrets: &app-secrets
-  - django_secret_key
-  - db_password
-  - rabbitmq_password
+  # Deployment-wide integration credentials must not become ambient secrets in every
+  # Django/Celery process. Each actual consumer restores only its own values below.
+  S3_ACCESS_KEY_ID: ""
+  S3_SECRET_ACCESS_KEY: ""
+  S3_STORAGE_BUCKET_NAME: ""
+  S3_ENDPOINT_URL: ""
+  S3_SIGNATURE_VERSION: ""
+  # Legacy hosted-deployment names are blanked too. They are not part of the current
+  # sample, but old .env files must not leak them into unrelated lanes during upgrade.
+  AWS_S3_ACCESS_KEY: ""
+  AWS_S3_SECRET_ACCESS_KEY: ""
+  AWS_S3_LOGS_BUCKET: ""
+  AWS_S3_LOGS_ENDPOINT: ""
+  AWS_S3_LOGS_REGION: ""
+  LOGS_S3_ACCESS_KEY_ID: ""
+  LOGS_S3_SECRET_ACCESS_KEY: ""
+  LOGS_S3_BUCKET: ""
+  LOGS_S3_ENDPOINT: ""
+  POSTMARK_API_KEY: ""
+  POSTMARK_DOMAIN: ""
+  POSTMARK_EMAIL: ""
+  POSTMARK_API_URL: ""
+  SES_REGION_NAME: ""
+  SES_REGION_ENDPOINT: ""
+  SES_ACCESS_KEY_ID: ""
+  SES_SECRET_ACCESS_KEY: ""
+  AWS_SES_REGION_NAME: ""
+  AWS_SES_REGION_ENDPOINT: ""
+  AWS_SES_ACCESS_KEY_ID: ""
+  AWS_SES_SECRET_ACCESS_KEY: ""
+  MAILGUN_DOMAIN: ""
+  MAILGUN_EMAIL: ""
+  MAILGUN_API_KEY: ""
+  MAILGUN_API_URL: ""
+  EMAIL_PROVIDER: ""
+  SLACK_TOKEN_URL: ""
+  SLACK_CLIENT_ID: ""
+  SLACK_CLIENT_SECRET: ""
+  TELEGRAM_BOT_KEY: ""
+  DROPBOX_APP_KEY: ""
+  DROPBOX_APP_SECRET: ""
+  PCLOUD_CLIENT_ID: ""
+  PCLOUD_CLIENT_SECRET: ""
+  BASECAMP_CLIENT_ID: ""
+  BASECAMP_CLIENT_SECRET: ""
+  MS_CLIENT_ID: ""
+  MS_OBJECT_ID: ""
+  MS_TENANT_ID: ""
+  MS_APPLICATION_ID: ""
+  MS_CLIENT_SECRET_VALUE: ""
+  MS_CLIENT_SECRET_ID: ""
+  GOOGLE_CLIENT_ID: ""
+  GOOGLE_CLIENT_SECRET: ""
+  DIGITALOCEAN_APP_CLIENT_ID: ""
+  DIGITALOCEAN_APP_CLIENT_SECRET: ""
+  OVH_CA_APP_KEY: ""
+  OVH_CA_APP_SECRET: ""
+  OVH_EU_APP_KEY: ""
+  OVH_EU_APP_SECRET: ""
+  OVH_US_APP_KEY: ""
+  OVH_US_APP_SECRET: ""
 
-# Shared stateful-service controls. PostgreSQL starts directly as its fixed non-root
-# user with no capabilities. RabbitMQ retains a service-local bootstrap capability
-# list solely to repair its named-volume ownership before dropping privilege.
+# Shared stateful-service controls. PostgreSQL and RabbitMQ start directly as their
+# fixed non-root users with an empty capability bounding set. A separate non-networked
+# RabbitMQ one-shot proves its already-correct named-volume ownership before startup.
 x-stateful-runtime: &stateful-runtime
   labels: *installation-labels
   privileged: false
@@ -174,16 +481,26 @@ x-internal-network: &internal-network
   internal: true
   attachable: false
 
+# Guard-side service discovery is non-secret, but it is still security-critical:
+# each namespace resolves these two stock service names onto its own dedicated
+# internal bridges and permits only the exact address/interface/TCP-port tuples.
+x-egress-internal-peer-environment: &egress-internal-peer-environment
+  BACKUPSHEEP_EGRESS_POLICY_GENERATION: "${BACKUPSHEEP_EGRESS_POLICY_GENERATION:?BACKUPSHEEP_EGRESS_POLICY_GENERATION is required}"
+  BACKUPSHEEP_EGRESS_DATABASE_HOST: "${DB_HOST:-db}"
+  BACKUPSHEEP_EGRESS_DATABASE_PORT: "${DB_PORT:-5432}"
+  BACKUPSHEEP_EGRESS_BROKER_HOST: "${RABBITMQ_HOST:-rabbitmq}"
+  BACKUPSHEEP_EGRESS_BROKER_PORT: "${RABBITMQ_PORT:-5672}"
+  BACKUPSHEEP_EGRESS_DNS_REFRESH_SECONDS: "1"
+
 services:
   db:
     <<: *stateful-runtime
     # Defense in depth with the image USER declaration: never enter the vendor
     # entrypoint's root ownership-repair branch for the stock named volume.
-    user: "999:999"
-    # Keep the Debian generation aligned with the PostgreSQL 18 image used to
-    # initialize existing volumes. Moving a cluster created with glibc 2.41 to
-    # Bookworm's older glibc 2.36 produces a collation-version mismatch and can
-    # invalidate ordering/index assumptions until every affected object is rebuilt.
+    user: "70:70"
+    # This Alpine/ICU runtime has a distinct storage generation. The legacy
+    # Debian/glibc `pgdata` volume is deliberately absent from this model and can be
+    # migrated only by the installer's stop-the-world logical migration gate.
     image: "${BACKUPSHEEP_POSTGRES_IMAGE:-backupsheep-postgres:local}"
     # Build only from the digest-pinned official PostgreSQL base and the reviewed
     # derived Dockerfile. A missing local tag is a hard failure, never a registry pull.
@@ -193,19 +510,26 @@ services:
       dockerfile: Dockerfile.postgres
     environment:
       POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
+      # The official image necessarily initializes POSTGRES_USER as a cluster
+      # superuser. Never reuse the long-lived Django runtime identity here.
+      POSTGRES_USER: ${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}
       # The official PostgreSQL entrypoint resolves this file and unsets the pointer
       # before it starts postgres, keeping the password out of container inspection.
-      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_bootstrap_password
+      POSTGRES_INITDB_ARGS: "--locale-provider=icu --icu-locale=und --encoding=UTF8 --auth-local=scram-sha-256 --auth-host=scram-sha-256"
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_POSTGRES_STORAGE_GENERATION: "${BACKUPSHEEP_POSTGRES_STORAGE_GENERATION:?BACKUPSHEEP_POSTGRES_STORAGE_GENERATION is required}"
+      BACKUPSHEEP_POSTGRES_STORAGE_INTENT: "${BACKUPSHEEP_POSTGRES_STORAGE_INTENT:?BACKUPSHEEP_POSTGRES_STORAGE_INTENT is required}"
+      BACKUPSHEEP_POSTGRES_STORAGE_WITNESS: "${BACKUPSHEEP_POSTGRES_STORAGE_WITNESS:?BACKUPSHEEP_POSTGRES_STORAGE_WITNESS is required}"
     secrets:
-      - db_password
+      - db_bootstrap_password
     volumes:
       # postgres:18+ images keep data in a versioned subdir of /var/lib/postgresql
       # and refuse to start when the mount is at the old .../data path.
-      - pgdata:/var/lib/postgresql
+      - postgres_data_v1:/var/lib/postgresql
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=${POSTGRES_TMPFS_SIZE:-128m},mode=1777
-      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=999,gid=999
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=70,gid=70
     pids_limit: "${POSTGRES_PIDS_LIMIT:-256}"
     mem_limit: "${POSTGRES_MEMORY_LIMIT:-2g}"
     cpus: "${POSTGRES_CPU_LIMIT:-2.0}"
@@ -214,7 +538,7 @@ services:
     healthcheck:
       # pg_isready reports server readiness even when authentication fails. Prove
       # the rotated file-backed credential over the same TCP path used by Django.
-      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/db_password)\" psql --no-password --host=127.0.0.1 --username=\"$${POSTGRES_USER}\" --dbname=\"$${POSTGRES_DB}\" --tuples-only --no-align --command='SELECT 1' | grep -qx '1'"]
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/db_bootstrap_password)\" psql --no-password --host=127.0.0.1 --username=\"$${POSTGRES_USER}\" --dbname=\"$${POSTGRES_DB}\" --tuples-only --no-align --command='SELECT 1' | grep -qx '1'"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -228,36 +552,47 @@ services:
       - logs-database
       - beat-database
       - preflight-database
+      - provision-database
     logging: *default-logging
     restart: unless-stopped
 
+  rabbitmq-volume-init:
+    <<: *stateful-runtime
+    user: "100:101"
+    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:?BACKUPSHEEP_RABBITMQ_DATA_GENERATION is required}"
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-volume-init", "init"]
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: "0.25"
+    network_mode: none
+    logging: *default-logging
+    restart: "no"
+
   rabbitmq:
     <<: *stateful-runtime
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - FOWNER
-      - SETGID
-      - SETUID
+    user: "100:101"
     image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
     # RabbitMQ derives its durable node database path from the node hostname.
     # Container IDs change on recreation, so keep the hostname stable or the same
     # named volume will appear to contain a brand-new, empty broker.
     hostname: rabbitmq
+    # RabbitMQ 4.3 has no supported DEFAULT_PASS_FILE input. This reviewed wrapper
+    # derives a salted hash into tmpfs and invokes the vendor entrypoint without ever
+    # exporting the plaintext bootstrap credential.
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-entrypoint"]
     environment:
-      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:-backupsheep}"
-      RABBITMQ_DEFAULT_VHOST: "${RABBITMQ_VHOST:-backupsheep}"
-      RABBITMQ_DEFAULT_PASS: ""
-    # RabbitMQ 4.3 rejects the formerly supported RABBITMQ_DEFAULT_PASS_FILE variable.
-    # Read the mounted secret in-process, then hand control back to the vendor entrypoint
-    # so its volume repair and UID 100 privilege drop remain intact.
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        export RABBITMQ_DEFAULT_PASS="$$(cat /run/secrets/rabbitmq_password)"
-        exec /usr/local/bin/docker-entrypoint.sh rabbitmq-server
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:?BACKUPSHEEP_RABBITMQ_DATA_GENERATION is required}"
     secrets:
-      - rabbitmq_password
+      - rabbitmq_bootstrap_password
     # Celery uses durable queues and persistent delivery, but RabbitMQ still needs
     # its own data directory persisted across container recreation. Without this,
     # `docker compose down && up` can discard queued backups before the database
@@ -268,19 +603,21 @@ services:
       # work. Database/file/storage commands can legitimately run for many hours,
       # so the broker timeout must exceed their longest supported command budget.
       - ./deploy/rabbitmq/90-backupsheep.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro
+      - ./deploy/rabbitmq/entrypoint.sh:/usr/local/bin/backupsheep-rabbitmq-entrypoint:ro
+      - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=${RABBITMQ_TMPFS_SIZE:-128m},mode=1777
       - /var/log/rabbitmq:rw,noexec,nosuid,nodev,size=64m,mode=0750,uid=100,gid=101
+      - /run/backupsheep-rabbitmq:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=100,gid=101
     pids_limit: "${RABBITMQ_PIDS_LIMIT:-512}"
     mem_limit: "${RABBITMQ_MEMORY_LIMIT:-1g}"
     cpus: "${RABBITMQ_CPU_LIMIT:-1.0}"
     stop_grace_period: "${RABBITMQ_STOP_GRACE_PERIOD:-3m}"
     healthcheck:
-      # A node ping can succeed before the restored authentication database is ready.
-      # Prove the dedicated file-backed credential as the broker user so dependent
-      # services cannot race that recovery, and so the probe cannot create a root-owned
-      # Erlang cookie. Neither the secret nor command output is persisted in health logs.
-      test: ["CMD-SHELL", "su-exec rabbitmq rabbitmqctl -q authenticate_user \"$${RABBITMQ_DEFAULT_USER}\" \"$$(cat /run/secrets/rabbitmq_password)\" >/dev/null 2>&1"]
+      # This first gate proves node readiness only. Every credential, permission and
+      # topology invariant is reconciled and authenticated by rabbitmq-provision before
+      # an application process is allowed to start.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -294,25 +631,291 @@ services:
       - logs-broker
       - beat-broker
       - preflight-broker
+      - provision-broker
+    depends_on:
+      rabbitmq-volume-init:
+        condition: service_completed_successfully
     logging: *default-logging
     restart: unless-stopped
+
+  # One-shot: reconcile the dedicated vhost after definitions import. It borrows only
+  # the broker volume's Erlang cookie read-only, then deletes the legacy shared login,
+  # rotates every role from its file secret, proves lane permissions and exits.
+  rabbitmq-provision:
+    <<: *stateful-runtime
+    user: "100:101"
+    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    environment:
+      HOME: /var/lib/rabbitmq
+      RABBITMQ_LEGACY_USER: "${RABBITMQ_LEGACY_USER:-backupsheep}"
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-provision"]
+    secrets:
+      - rabbitmq_bootstrap_password
+      - rabbitmq_app_password
+      - rabbitmq_preflight_password
+      - rabbitmq_beat_password
+      - rabbitmq_cloud_password
+      - rabbitmq_database_password
+      - rabbitmq_files_password
+      - rabbitmq_storage_password
+      - rabbitmq_logs_password
+    volumes:
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        read_only: true
+      - ./deploy/rabbitmq/provision.sh:/usr/local/bin/backupsheep-rabbitmq-provision:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: "0.5"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - provision-broker
+    logging: *default-logging
+    restart: "no"
+
+  # Root is confined to this networkless one-shot. It proves an installation-bound
+  # witness, rejects ambiguous/non-empty shared work, and assigns the fixed UID/GID
+  # layout before any application role can mount a staging volume.
+  staging-provision:
+    <<: *app-runtime
+    image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/backupsheep-provision-staging-volumes"]
+    environment:
+      DJANGO_SERVER: prod
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_STAGING_LAYOUT_INTENT: "${BACKUPSHEEP_STAGING_LAYOUT_INTENT:?BACKUPSHEEP_STAGING_LAYOUT_INTENT is required}"
+      BACKUPSHEEP_STAGING_LAYOUT_WITNESS: "${BACKUPSHEEP_STAGING_LAYOUT_WITNESS:?BACKUPSHEEP_STAGING_LAYOUT_WITNESS is required}"
+      BACKUPSHEEP_STAGING_MIN_FREE_BYTES: "${BACKUPSHEEP_STAGING_MIN_FREE_BYTES:-536870912}"
+      BACKUPSHEEP_STAGING_MIN_FREE_INODES: "${BACKUPSHEEP_STAGING_MIN_FREE_INODES:-1024}"
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      # Required only while this networkless one-shot applies mode 3771 after
+      # changing transfer-volume ownership; without FSETID the kernel clears setgid.
+      - FSETID
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      - type: volume
+        source: database_workdir
+        target: /volumes/database
+        volume:
+          nocopy: true
+      - type: volume
+        source: files_workdir
+        target: /volumes/files
+        volume:
+          nocopy: true
+      - type: volume
+        source: storage_workdir
+        target: /volumes/storage
+        volume:
+          nocopy: true
+      - type: volume
+        source: database_ciphertext_transfer
+        target: /volumes/database-transfer
+        volume:
+          nocopy: true
+      - type: volume
+        source: files_ciphertext_transfer
+        target: /volumes/files-transfer
+        volume:
+          nocopy: true
+      - type: volume
+        source: restore_ciphertext_transfer
+        target: /volumes/restore-transfer
+        volume:
+          nocopy: true
+      - type: volume
+        source: backup_storage
+        target: /volumes/backup-storage
+        volume:
+          nocopy: true
+      - type: volume
+        source: backup_workdir
+        target: /volumes/legacy
+        volume:
+          nocopy: true
+      - type: volume
+        source: staging_layout_witness
+        target: /volumes/witness
+        volume:
+          nocopy: true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: "0.25"
+    network_mode: none
+    logging: *default-logging
+    restart: "no"
+
+  # One-shot: provision the database identity boundary before Django can migrate or
+  # serve. It connects as the database-only bootstrap superuser, creates/rotates the
+  # marked migrator and per-lane roles in one transaction, transfers reviewed public
+  # object ownership to the migrator, and removes all runtime access until db-seal.
+  db-provision:
+    <<: *app-runtime
+    image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10007:10007"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: migration
+      # Provision/seal may run while install.sh deliberately leaves the durable .env
+      # witness pending. Long-lived services inherit that pending value and fail closed
+      # until db-seal exits successfully and the installer promotes generation 3.
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+      DB_BOOTSTRAP_USER: "${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}"
+      DB_MIGRATOR_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
+      DB_APP_USER: "${DB_APP_USER:-backupsheep_app}"
+      DB_PREFLIGHT_USER: "${DB_PREFLIGHT_USER:-backupsheep_preflight}"
+      DB_BEAT_USER: "${DB_BEAT_USER:-backupsheep_beat}"
+      DB_CLOUD_USER: "${DB_CLOUD_USER:-backupsheep_cloud}"
+      DB_DATABASE_USER: "${DB_DATABASE_USER:-backupsheep_database}"
+      DB_FILES_USER: "${DB_FILES_USER:-backupsheep_files}"
+      DB_STORAGE_USER: "${DB_STORAGE_USER:-backupsheep_storage}"
+      DB_LOGS_USER: "${DB_LOGS_USER:-backupsheep_logs}"
+      DB_USER: ""
+      # Pin the only reviewed privileged route; do not let libpq overrides redirect
+      # the bootstrap credential to an external endpoint.
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_BOOTSTRAP_PASSWORD_FILE: /run/secrets/db_bootstrap_password
+      DB_MIGRATOR_PASSWORD_FILE: /run/secrets/db_migrator_password
+      DB_APP_PASSWORD_FILE: /run/secrets/db_app_password
+      DB_PREFLIGHT_PASSWORD_FILE: /run/secrets/db_preflight_password
+      DB_BEAT_PASSWORD_FILE: /run/secrets/db_beat_password
+      DB_CLOUD_PASSWORD_FILE: /run/secrets/db_cloud_password
+      DB_DATABASE_PASSWORD_FILE: /run/secrets/db_database_password
+      DB_FILES_PASSWORD_FILE: /run/secrets/db_files_password
+      DB_STORAGE_PASSWORD_FILE: /run/secrets/db_storage_password
+      DB_LOGS_PASSWORD_FILE: /run/secrets/db_logs_password
+    secrets:
+      - db_bootstrap_password
+      - db_migrator_password
+      - db_app_password
+      - db_preflight_password
+      - db_beat_password
+      - db_cloud_password
+      - db_database_password
+      - db_files_password
+      - db_storage_password
+      - db_logs_password
+    command: ["python", "-m", "backupsheep.database_identity", "provision"]
+    mem_limit: "${DB_PROVISION_MEMORY_LIMIT:-512m}"
+    cpus: "${DB_PROVISION_CPU_LIMIT:-0.5}"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - provision-database
+    logging: *default-logging
+    restart: "no"
 
   # One-shot: apply DB migrations once, then exit. Every app-image service below waits
   # for this to complete successfully so nothing serves/works against an unmigrated DB.
   migrate:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
+    user: "10007:10007"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: migration
+      # Django imports the Celery settings while applying migrations. Use the
+      # zero-queue preflight broker identity rather than granting a publisher key;
+      # migrate never connects to RabbitMQ and cannot sign a task accidentally.
+      BACKUPSHEEP_CELERY_LANE: preflight
+      DB_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
+      DB_PASSWORD_FILE: /run/secrets/db_migrator_password
+      RABBITMQ_USER: backupsheep_preflight
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_preflight_password
+    secrets:
+      - django_secret_key
+      - db_migrator_password
+      - rabbitmq_preflight_password
     command: ["python", "manage.py", "migrate", "--noinput"]
     mem_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
     cpus: "${MIGRATE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
+      db-provision:
+        condition: service_completed_successfully
     networks:
       - migrate-database
+    logging: *default-logging
+    restart: "no"
+
+  # One-shot: after Django migrations, replace every broad/default grant with the
+  # reviewed per-lane table, column, sequence and routine ACLs, enable RLS on
+  # cross-lane ledgers, and bind policy comments to this installation. The bootstrap
+  # credential never enters a long-lived service.
+  db-seal:
+    <<: *app-runtime
+    image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    user: "10007:10007"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: migration
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+      DB_BOOTSTRAP_USER: "${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}"
+      DB_MIGRATOR_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
+      DB_APP_USER: "${DB_APP_USER:-backupsheep_app}"
+      DB_PREFLIGHT_USER: "${DB_PREFLIGHT_USER:-backupsheep_preflight}"
+      DB_BEAT_USER: "${DB_BEAT_USER:-backupsheep_beat}"
+      DB_CLOUD_USER: "${DB_CLOUD_USER:-backupsheep_cloud}"
+      DB_DATABASE_USER: "${DB_DATABASE_USER:-backupsheep_database}"
+      DB_FILES_USER: "${DB_FILES_USER:-backupsheep_files}"
+      DB_STORAGE_USER: "${DB_STORAGE_USER:-backupsheep_storage}"
+      DB_LOGS_USER: "${DB_LOGS_USER:-backupsheep_logs}"
+      DB_USER: ""
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_BOOTSTRAP_PASSWORD_FILE: /run/secrets/db_bootstrap_password
+      DB_MIGRATOR_PASSWORD_FILE: /run/secrets/db_migrator_password
+      DB_APP_PASSWORD_FILE: /run/secrets/db_app_password
+      DB_PREFLIGHT_PASSWORD_FILE: /run/secrets/db_preflight_password
+      DB_BEAT_PASSWORD_FILE: /run/secrets/db_beat_password
+      DB_CLOUD_PASSWORD_FILE: /run/secrets/db_cloud_password
+      DB_DATABASE_PASSWORD_FILE: /run/secrets/db_database_password
+      DB_FILES_PASSWORD_FILE: /run/secrets/db_files_password
+      DB_STORAGE_PASSWORD_FILE: /run/secrets/db_storage_password
+      DB_LOGS_PASSWORD_FILE: /run/secrets/db_logs_password
+    secrets:
+      - db_bootstrap_password
+      - db_migrator_password
+      - db_app_password
+      - db_preflight_password
+      - db_beat_password
+      - db_cloud_password
+      - db_database_password
+      - db_files_password
+      - db_storage_password
+      - db_logs_password
+    command: ["python", "-m", "backupsheep.database_identity", "seal"]
+    mem_limit: "${DB_SEAL_MEMORY_LIMIT:-1g}"
+    cpus: "${DB_SEAL_CPU_LIMIT:-1.0}"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - provision-database
     logging: *default-logging
     restart: "no"
 
@@ -322,18 +925,35 @@ services:
   preflight:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
+    user: "10007:10007"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: migration
+      BACKUPSHEEP_DATABASE_LANE: preflight
+      BACKUPSHEEP_CELERY_LANE: preflight
+      DB_USER: "${DB_PREFLIGHT_USER:-backupsheep_preflight}"
+      DB_PASSWORD_FILE: /run/secrets/db_preflight_password
+      RABBITMQ_USER: backupsheep_preflight
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_preflight_password
+    secrets:
+      - django_secret_key
+      - db_preflight_password
+      - rabbitmq_preflight_password
+      - celery_trusted_public_keys
     command: ["python", "manage.py", "docker_preflight"]
     mem_limit: "${PREFLIGHT_MEMORY_LIMIT:-1g}"
     cpus: "${PREFLIGHT_CPU_LIMIT:-1.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
+        condition: service_completed_successfully
+      db-seal:
         condition: service_completed_successfully
     networks:
       - preflight-database
@@ -341,45 +961,137 @@ services:
     logging: *default-logging
     restart: "no"
 
+  app-egress-guard:
+    <<: *egress-guard-runtime
+    build:
+      context: .
+      dockerfile: Dockerfile.egress
+    environment:
+      <<: *egress-internal-peer-environment
+      BACKUPSHEEP_EGRESS_ROLE: app
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_APP_EGRESS_MODE:-deny}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_APP_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_APP_EGRESS_ALLOW_IPV6:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS: "${BACKUPSHEEP_APP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS: "${BACKUPSHEEP_APP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_DNS_NAMES: "${BACKUPSHEEP_APP_EGRESS_ALLOW_DNS_NAMES:-}"
+    ports:
+      - "${BACKUPSHEEP_BIND_ADDRESS:-127.0.0.1}:${BACKUPSHEEP_BIND_PORT:-8000}:8000"
+    # restart:no is intentional, so give the guard one deterministic start only
+    # after both security-critical peer names are healthy and resolvable.
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      app-database: {}
+      app-broker: {}
+      app-egress:
+        gw_priority: 1
+
   app:
     <<: *app-runtime
     build:
       context: .
       dockerfile: Dockerfile
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
+    user: "10001:10001"
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: web
+      BACKUPSHEEP_DATABASE_LANE: app
+      BACKUPSHEEP_CELERY_LANE: app
+      DB_USER: "${DB_APP_USER:-backupsheep_app}"
+      DB_PASSWORD_FILE: /run/secrets/db_app_password
+      RABBITMQ_USER: backupsheep_app
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_app_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_app_private_key
       ONBOARDING_INSTALL_TOKEN_SECRET_FILE: /run/secrets/onboarding_token
+      # The web process owns provider setup/OAuth callbacks, notification setup and
+      # authenticated log-download URLs, so it is the sole role that needs every
+      # deployment-wide integration credential family.
+      S3_ACCESS_KEY_ID: "${S3_ACCESS_KEY_ID:-}"
+      S3_SECRET_ACCESS_KEY: "${S3_SECRET_ACCESS_KEY:-}"
+      S3_STORAGE_BUCKET_NAME: "${S3_STORAGE_BUCKET_NAME:-}"
+      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
+      S3_SIGNATURE_VERSION: "${S3_SIGNATURE_VERSION:-}"
+      AWS_S3_ACCESS_KEY: "${AWS_S3_ACCESS_KEY:-}"
+      AWS_S3_SECRET_ACCESS_KEY: "${AWS_S3_SECRET_ACCESS_KEY:-}"
+      AWS_S3_LOGS_BUCKET: "${AWS_S3_LOGS_BUCKET:-}"
+      AWS_S3_LOGS_ENDPOINT: "${AWS_S3_LOGS_ENDPOINT:-}"
+      AWS_S3_LOGS_REGION: "${AWS_S3_LOGS_REGION:-}"
+      LOGS_S3_ACCESS_KEY_ID: "${LOGS_S3_ACCESS_KEY_ID:-}"
+      LOGS_S3_SECRET_ACCESS_KEY: "${LOGS_S3_SECRET_ACCESS_KEY:-}"
+      LOGS_S3_BUCKET: "${LOGS_S3_BUCKET:-}"
+      LOGS_S3_ENDPOINT: "${LOGS_S3_ENDPOINT:-}"
+      POSTMARK_API_KEY: "${POSTMARK_API_KEY:-}"
+      POSTMARK_DOMAIN: "${POSTMARK_DOMAIN:-}"
+      POSTMARK_EMAIL: "${POSTMARK_EMAIL:-}"
+      POSTMARK_API_URL: "${POSTMARK_API_URL:-}"
+      SES_REGION_NAME: "${SES_REGION_NAME:-}"
+      SES_REGION_ENDPOINT: "${SES_REGION_ENDPOINT:-}"
+      SES_ACCESS_KEY_ID: "${SES_ACCESS_KEY_ID:-}"
+      SES_SECRET_ACCESS_KEY: "${SES_SECRET_ACCESS_KEY:-}"
+      AWS_SES_REGION_NAME: "${AWS_SES_REGION_NAME:-}"
+      AWS_SES_REGION_ENDPOINT: "${AWS_SES_REGION_ENDPOINT:-}"
+      AWS_SES_ACCESS_KEY_ID: "${AWS_SES_ACCESS_KEY_ID:-}"
+      AWS_SES_SECRET_ACCESS_KEY: "${AWS_SES_SECRET_ACCESS_KEY:-}"
+      MAILGUN_DOMAIN: "${MAILGUN_DOMAIN:-}"
+      MAILGUN_EMAIL: "${MAILGUN_EMAIL:-}"
+      MAILGUN_API_KEY: "${MAILGUN_API_KEY:-}"
+      MAILGUN_API_URL: "${MAILGUN_API_URL:-}"
+      EMAIL_PROVIDER: "${EMAIL_PROVIDER:-}"
+      SLACK_TOKEN_URL: "${SLACK_TOKEN_URL:-}"
+      SLACK_CLIENT_ID: "${SLACK_CLIENT_ID:-}"
+      SLACK_CLIENT_SECRET: "${SLACK_CLIENT_SECRET:-}"
+      TELEGRAM_BOT_KEY: "${TELEGRAM_BOT_KEY:-}"
+      DROPBOX_APP_KEY: "${DROPBOX_APP_KEY:-}"
+      DROPBOX_APP_SECRET: "${DROPBOX_APP_SECRET:-}"
+      PCLOUD_CLIENT_ID: "${PCLOUD_CLIENT_ID:-}"
+      PCLOUD_CLIENT_SECRET: "${PCLOUD_CLIENT_SECRET:-}"
+      BASECAMP_CLIENT_ID: "${BASECAMP_CLIENT_ID:-}"
+      BASECAMP_CLIENT_SECRET: "${BASECAMP_CLIENT_SECRET:-}"
+      MS_CLIENT_ID: "${MS_CLIENT_ID:-}"
+      MS_OBJECT_ID: "${MS_OBJECT_ID:-}"
+      MS_TENANT_ID: "${MS_TENANT_ID:-}"
+      MS_APPLICATION_ID: "${MS_APPLICATION_ID:-}"
+      MS_CLIENT_SECRET_VALUE: "${MS_CLIENT_SECRET_VALUE:-}"
+      MS_CLIENT_SECRET_ID: "${MS_CLIENT_SECRET_ID:-}"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      DIGITALOCEAN_APP_CLIENT_ID: "${DIGITALOCEAN_APP_CLIENT_ID:-}"
+      DIGITALOCEAN_APP_CLIENT_SECRET: "${DIGITALOCEAN_APP_CLIENT_SECRET:-}"
+      OVH_CA_APP_KEY: "${OVH_CA_APP_KEY:-}"
+      OVH_CA_APP_SECRET: "${OVH_CA_APP_SECRET:-}"
+      OVH_EU_APP_KEY: "${OVH_EU_APP_KEY:-}"
+      OVH_EU_APP_SECRET: "${OVH_EU_APP_SECRET:-}"
+      OVH_US_APP_KEY: "${OVH_US_APP_KEY:-}"
+      OVH_US_APP_SECRET: "${OVH_US_APP_SECRET:-}"
     secrets:
       - django_secret_key
-      - db_password
-      - rabbitmq_password
+      - db_app_password
+      - rabbitmq_app_password
+      - celery_signing_app_private_key
+      - celery_trusted_public_keys
       - onboarding_token
-      - ssh_managed_private_key
     # Uses the image ENTRYPOINT (init.sh) to start gunicorn on :8000.
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
-    ports:
-      - "${BACKUPSHEEP_BIND_ADDRESS:-127.0.0.1}:${BACKUPSHEEP_BIND_PORT:-8000}:8000"
+      staging-provision:
+        condition: service_completed_successfully
+      app-egress-guard:
+        condition: service_healthy
     mem_limit: "${APP_MEMORY_LIMIT:-2g}"
     cpus: "${APP_CPU_LIMIT:-2.0}"
     volumes:
-      # The Internet-facing web process can update only the reviewed SSH trust
-      # database. It receives no backup_workdir mount, so staged archives, cache,
-      # logs and worker locks are neither readable nor writable after web RCE.
-      - ssh_trust:/var/lib/backupsheep/ssh-trust
-      - type: volume
-        source: backup_storage
-        target: /backups
-        read_only: true
       # Empty, read-only sentinel volume whose immutable Docker label lets the
       # installer prove project ownership even after `docker compose down` removes
       # all containers and networks. It contains no application or secret data.
@@ -387,19 +1099,35 @@ services:
         source: installation_identity
         target: /run/backupsheep-installation
         read_only: true
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=3)"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
-    networks:
-      app-database: {}
-      app-broker: {}
-      app-egress:
-        gw_priority: 1
+        volume:
+          nocopy: true
+    healthcheck: *egress-workload-healthcheck
+    network_mode: service:app-egress-guard
     logging: *default-logging
     restart: unless-stopped
+
+  cloud-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      <<: *egress-internal-peer-environment
+      BACKUPSHEEP_EGRESS_ROLE: cloud
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_CLOUD_EGRESS_MODE:-deny}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV6:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS: "${BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS: "${BACKUPSHEEP_CLOUD_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_DNS_NAMES: "${BACKUPSHEEP_CLOUD_EGRESS_ALLOW_DNS_NAMES:-}"
+    profiles: ["operations"]
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      cloud-database: {}
+      cloud-broker: {}
+      cloud-egress:
+        gw_priority: 1
 
   # API-only provider snapshots + general/notification tasks. Stateless (no _storage
   # or /backups volume), so this is the only worker safe to scale horizontally.
@@ -408,187 +1136,477 @@ services:
   worker-cloud:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
+    user: "10008:10008"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10008,gid=10008
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: cloud
+      BACKUPSHEEP_DATABASE_LANE: cloud
+      BACKUPSHEEP_CELERY_LANE: cloud
+      DB_USER: "${DB_CLOUD_USER:-backupsheep_cloud}"
+      DB_PASSWORD_FILE: /run/secrets/db_cloud_password
+      RABBITMQ_USER: backupsheep_cloud
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_cloud_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_cloud_private_key
+      DIGITALOCEAN_APP_CLIENT_ID: "${DIGITALOCEAN_APP_CLIENT_ID:-}"
+      DIGITALOCEAN_APP_CLIENT_SECRET: "${DIGITALOCEAN_APP_CLIENT_SECRET:-}"
+      OVH_CA_APP_KEY: "${OVH_CA_APP_KEY:-}"
+      OVH_CA_APP_SECRET: "${OVH_CA_APP_SECRET:-}"
+      OVH_EU_APP_KEY: "${OVH_EU_APP_KEY:-}"
+      OVH_EU_APP_SECRET: "${OVH_EU_APP_SECRET:-}"
+      OVH_US_APP_KEY: "${OVH_US_APP_KEY:-}"
+      OVH_US_APP_SECRET: "${OVH_US_APP_SECRET:-}"
+    secrets:
+      - django_secret_key
+      - db_cloud_password
+      - rabbitmq_cloud_password
+      - celery_signing_cloud_private_key
+      - celery_trusted_public_keys
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_CLOUD_MEMORY_LIMIT:-1g}"
     cpus: "${WORKER_CLOUD_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
-    networks:
-      cloud-database: {}
-      cloud-broker: {}
-      cloud-egress:
-        gw_priority: 1
+      staging-provision:
+        condition: service_completed_successfully
+      cloud-egress-guard:
+        condition: service_healthy
+    network_mode: service:cloud-egress-guard
+    healthcheck: *egress-workload-healthcheck
     logging: *default-logging
     restart: unless-stopped
 
-  # Database dumps (pg_dump/mysqldump). Heavy CPU/disk, low concurrency. Writes the dump
-  # to the shared backup_workdir volume; worker-storage handles the upload.
+  database-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      <<: *egress-internal-peer-environment
+      BACKUPSHEEP_EGRESS_ROLE: database
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_DATABASE_EGRESS_MODE:-deny}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV6:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS: "${BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS: "${BACKUPSHEEP_DATABASE_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_DNS_NAMES: "${BACKUPSHEEP_DATABASE_EGRESS_ALLOW_DNS_NAMES:-}"
+    profiles: ["operations"]
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      database-database: {}
+      database-broker: {}
+      database-egress:
+        gw_priority: 1
+
+  # Database dumps (pg_dump/mysqldump). Plaintext remains in the database UID's
+  # private volume; storage receives only a published BSE1 handoff.
   worker-database:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
-    environment: *app-secret-environment
+    user: "10002:10002"
+    group_add:
+      - "10989"
+      - "10990"
+      - "10994"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10002,gid=10002
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: database
+      BACKUPSHEEP_DATABASE_LANE: database
+      DB_USER: "${DB_DATABASE_USER:-backupsheep_database}"
+      DB_PASSWORD_FILE: /run/secrets/db_database_password
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_database_aws_credentials
+      BACKUPSHEEP_CELERY_LANE: database
+      RABBITMQ_USER: backupsheep_database
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_database_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_database_private_key
     secrets:
       - django_secret_key
-      - db_password
-      - rabbitmq_password
-      - ssh_managed_private_key
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
+      - db_database_password
+      - rabbitmq_database_password
+      - celery_signing_database_private_key
+      - celery_trusted_public_keys
+      - ssh_managed_database_private_key
+      - artifact_kms_database_aws_credentials
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_DATABASE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
+      staging-provision:
+        condition: service_completed_successfully
+      database-egress-guard:
+        condition: service_healthy
     volumes:
-      - backup_workdir:/code/_storage
       - type: volume
-        source: ssh_trust
-        target: /var/lib/backupsheep/ssh-trust
-        read_only: true
+        source: database_workdir
+        target: /code/_storage
+        volume:
+          nocopy: true
       - type: volume
-        source: backup_storage
-        target: /backups
+        source: database_ciphertext_transfer
+        target: /var/lib/backupsheep/transfer/database
+        volume:
+          nocopy: true
+      - type: volume
+        source: restore_ciphertext_transfer
+        target: /var/lib/backupsheep/restore-transfer
         read_only: true
-    networks:
-      database-database: {}
-      database-broker: {}
-      database-egress:
-        gw_priority: 1
+        volume:
+          nocopy: true
+    network_mode: service:database-egress-guard
+    healthcheck: *egress-workload-healthcheck
     logging: *default-logging
     restart: unless-stopped
 
-  # Website / WordPress / Basecamp file dumps. Heavy CPU/disk, low concurrency. Writes the
-  # dump to the shared backup_workdir volume; worker-storage handles the upload.
+  files-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      <<: *egress-internal-peer-environment
+      BACKUPSHEEP_EGRESS_ROLE: files
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_FILES_EGRESS_MODE:-deny}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV6:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS: "${BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS: "${BACKUPSHEEP_FILES_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_DNS_NAMES: "${BACKUPSHEEP_FILES_EGRESS_ALLOW_DNS_NAMES:-}"
+    profiles: ["operations"]
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      files-database: {}
+      files-broker: {}
+      files-egress:
+        gw_priority: 1
+
+  # Website / WordPress / Basecamp source material stays private to the files UID.
   worker-files:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
-    environment: *app-secret-environment
+    user: "10003:10003"
+    group_add:
+      - "10991"
+      - "10992"
+      - "10993"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10003,gid=10003
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: files
+      BACKUPSHEEP_DATABASE_LANE: files
+      DB_USER: "${DB_FILES_USER:-backupsheep_files}"
+      DB_PASSWORD_FILE: /run/secrets/db_files_password
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_files_aws_credentials
+      BACKUPSHEEP_CELERY_LANE: files
+      RABBITMQ_USER: backupsheep_files
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_files_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_files_private_key
+      BASECAMP_CLIENT_ID: "${BASECAMP_CLIENT_ID:-}"
+      BASECAMP_CLIENT_SECRET: "${BASECAMP_CLIENT_SECRET:-}"
     secrets:
       - django_secret_key
-      - db_password
-      - rabbitmq_password
-      - ssh_managed_private_key
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
+      - db_files_password
+      - rabbitmq_files_password
+      - celery_signing_files_private_key
+      - celery_trusted_public_keys
+      - ssh_managed_files_private_key
+      - artifact_kms_files_aws_credentials
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_FILES_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
+      staging-provision:
+        condition: service_completed_successfully
+      files-egress-guard:
+        condition: service_healthy
     volumes:
-      - backup_workdir:/code/_storage
       - type: volume
-        source: ssh_trust
-        target: /var/lib/backupsheep/ssh-trust
-        read_only: true
+        source: files_workdir
+        target: /code/_storage
+        volume:
+          nocopy: true
       - type: volume
-        source: backup_storage
-        target: /backups
+        source: files_ciphertext_transfer
+        target: /var/lib/backupsheep/transfer/files
+        volume:
+          nocopy: true
+      - type: volume
+        source: restore_ciphertext_transfer
+        target: /var/lib/backupsheep/restore-transfer
         read_only: true
-    networks:
-      files-database: {}
-      files-broker: {}
-      files-egress:
-        gw_priority: 1
+        volume:
+          nocopy: true
+    network_mode: service:files-egress-guard
+    healthcheck: *egress-workload-healthcheck
     logging: *default-logging
     restart: unless-stopped
 
-  # Dedicated upload pool: takes each finished dump from the shared backup_workdir volume,
-  # uploads it to every configured storage backend (storage_upload), finalizes the backup
-  # and cleans up local files. Reads the same volume the dump workers write, so scale it
-  # out freely for more upload throughput:
-  #     ./backupsheep-compose --profile operations up -d --scale worker-storage=4
+  storage-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      <<: *egress-internal-peer-environment
+      BACKUPSHEEP_EGRESS_ROLE: storage
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_STORAGE_EGRESS_MODE:-deny}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV6:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS: "${BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS: "${BACKUPSHEEP_STORAGE_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_DNS_NAMES: "${BACKUPSHEEP_STORAGE_EGRESS_ALLOW_DNS_NAMES:-}"
+    profiles: ["operations"]
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      storage-database: {}
+      storage-broker: {}
+      storage-egress:
+        gw_priority: 1
+
+  # Dedicated upload pool copies source-owned BSE1 bytes into storage-private work,
+  # verifies the durable hash/size, uploads, and cleans only its fenced paths.
+  #     ./backupsheep-compose --profile operations up --detach --no-deps --force-recreate --scale worker-storage=4 storage-egress-guard worker-storage
   worker-storage:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
+    user: "10004:10004"
+    group_add:
+      - "10990"
+      - "10992"
+      - "10993"
+      - "10994"
+      - "10995"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10004,gid=10004
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: storage
+      BACKUPSHEEP_DATABASE_LANE: storage
+      BACKUPSHEEP_CELERY_LANE: storage
+      DB_USER: "${DB_STORAGE_USER:-backupsheep_storage}"
+      DB_PASSWORD_FILE: /run/secrets/db_storage_password
+      RABBITMQ_USER: backupsheep_storage
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_storage_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_storage_private_key
+      DROPBOX_APP_KEY: "${DROPBOX_APP_KEY:-}"
+      DROPBOX_APP_SECRET: "${DROPBOX_APP_SECRET:-}"
+      PCLOUD_CLIENT_ID: "${PCLOUD_CLIENT_ID:-}"
+      PCLOUD_CLIENT_SECRET: "${PCLOUD_CLIENT_SECRET:-}"
+      MS_CLIENT_ID: "${MS_CLIENT_ID:-}"
+      MS_OBJECT_ID: "${MS_OBJECT_ID:-}"
+      MS_TENANT_ID: "${MS_TENANT_ID:-}"
+      MS_APPLICATION_ID: "${MS_APPLICATION_ID:-}"
+      MS_CLIENT_SECRET_VALUE: "${MS_CLIENT_SECRET_VALUE:-}"
+      MS_CLIENT_SECRET_ID: "${MS_CLIENT_SECRET_ID:-}"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+    secrets:
+      - django_secret_key
+      - db_storage_password
+      - rabbitmq_storage_password
+      - celery_signing_storage_private_key
+      - celery_trusted_public_keys
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_STORAGE_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_STORAGE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
+      staging-provision:
+        condition: service_completed_successfully
+      storage-egress-guard:
+        condition: service_healthy
     volumes:
-      - backup_workdir:/code/_storage
-      - backup_storage:/backups
-    networks:
-      storage-database: {}
-      storage-broker: {}
-      storage-egress:
-        gw_priority: 1
+      - type: volume
+        source: storage_workdir
+        target: /code/_storage
+        volume:
+          nocopy: true
+      - type: volume
+        source: database_ciphertext_transfer
+        target: /var/lib/backupsheep/transfer/database
+        read_only: true
+        volume:
+          nocopy: true
+      - type: volume
+        source: files_ciphertext_transfer
+        target: /var/lib/backupsheep/transfer/files
+        read_only: true
+        volume:
+          nocopy: true
+      - type: volume
+        source: restore_ciphertext_transfer
+        target: /var/lib/backupsheep/restore-transfer
+        volume:
+          nocopy: true
+      - type: volume
+        source: backup_storage
+        target: /backups
+        volume:
+          nocopy: true
+    network_mode: service:storage-egress-guard
+    healthcheck: *egress-workload-healthcheck
     logging: *default-logging
     restart: unless-stopped
 
+  logs-egress-guard:
+    <<: *egress-guard-runtime
+    environment:
+      <<: *egress-internal-peer-environment
+      BACKUPSHEEP_EGRESS_ROLE: logs
+      BACKUPSHEEP_EGRESS_MODE: "${BACKUPSHEEP_LOGS_EGRESS_MODE:-deny}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4: "${BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV4:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6: "${BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV6:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS: "${BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS: "${BACKUPSHEEP_LOGS_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS:-}"
+      BACKUPSHEEP_EGRESS_ALLOW_DNS_NAMES: "${BACKUPSHEEP_LOGS_EGRESS_ALLOW_DNS_NAMES:-}"
+    profiles: ["operations"]
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      logs-database: {}
+      logs-broker: {}
+      logs-egress:
+        gw_priority: 1
+
   # Log pipeline: writes log entries to the DB (send_log_to_db) and fans out
-  # Slack/Telegram notifications. Local run-log pruning is routed to worker-storage,
-  # keeping this externally connected notification role away from staged artifacts.
+  # Slack/Telegram notifications. Local run-log pruning executes independently in
+  # the database/files/storage lanes that own those private workdirs.
   worker-logs:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
+    user: "10005:10005"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10005,gid=10005
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: logs
+      BACKUPSHEEP_DATABASE_LANE: logs
+      BACKUPSHEEP_CELERY_LANE: logs
+      DB_USER: "${DB_LOGS_USER:-backupsheep_logs}"
+      DB_PASSWORD_FILE: /run/secrets/db_logs_password
+      RABBITMQ_USER: backupsheep_logs
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_logs_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_logs_private_key
+      POSTMARK_API_KEY: "${POSTMARK_API_KEY:-}"
+      POSTMARK_DOMAIN: "${POSTMARK_DOMAIN:-}"
+      POSTMARK_EMAIL: "${POSTMARK_EMAIL:-}"
+      POSTMARK_API_URL: "${POSTMARK_API_URL:-}"
+      SES_REGION_NAME: "${SES_REGION_NAME:-}"
+      SES_REGION_ENDPOINT: "${SES_REGION_ENDPOINT:-}"
+      SES_ACCESS_KEY_ID: "${SES_ACCESS_KEY_ID:-}"
+      SES_SECRET_ACCESS_KEY: "${SES_SECRET_ACCESS_KEY:-}"
+      AWS_SES_REGION_NAME: "${AWS_SES_REGION_NAME:-}"
+      AWS_SES_REGION_ENDPOINT: "${AWS_SES_REGION_ENDPOINT:-}"
+      AWS_SES_ACCESS_KEY_ID: "${AWS_SES_ACCESS_KEY_ID:-}"
+      AWS_SES_SECRET_ACCESS_KEY: "${AWS_SES_SECRET_ACCESS_KEY:-}"
+      MAILGUN_DOMAIN: "${MAILGUN_DOMAIN:-}"
+      MAILGUN_EMAIL: "${MAILGUN_EMAIL:-}"
+      MAILGUN_API_KEY: "${MAILGUN_API_KEY:-}"
+      MAILGUN_API_URL: "${MAILGUN_API_URL:-}"
+      EMAIL_PROVIDER: "${EMAIL_PROVIDER:-}"
+      SLACK_TOKEN_URL: "${SLACK_TOKEN_URL:-}"
+      SLACK_CLIENT_ID: "${SLACK_CLIENT_ID:-}"
+      SLACK_CLIENT_SECRET: "${SLACK_CLIENT_SECRET:-}"
+      TELEGRAM_BOT_KEY: "${TELEGRAM_BOT_KEY:-}"
+    secrets:
+      - django_secret_key
+      - db_logs_password
+      - rabbitmq_logs_password
+      - celery_signing_logs_private_key
+      - celery_trusted_public_keys
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_LOGS_MEMORY_LIMIT:-512m}"
     cpus: "${WORKER_LOGS_CPU_LIMIT:-1.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
         condition: service_completed_successfully
-    networks:
-      logs-database: {}
-      logs-broker: {}
-      logs-egress:
-        gw_priority: 1
+      staging-provision:
+        condition: service_completed_successfully
+      logs-egress-guard:
+        condition: service_healthy
+    network_mode: service:logs-egress-guard
+    healthcheck: *egress-workload-healthcheck
     logging: *default-logging
     restart: unless-stopped
 
   beat:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
-    env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
+    user: "10006:10006"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+      - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10006,gid=10006
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_RUNTIME_ROLE: beat
+      BACKUPSHEEP_DATABASE_LANE: beat
+      BACKUPSHEEP_CELERY_LANE: beat
+      DB_USER: "${DB_BEAT_USER:-backupsheep_beat}"
+      DB_PASSWORD_FILE: /run/secrets/db_beat_password
+      RABBITMQ_USER: backupsheep_beat
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_beat_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_beat_private_key
+    secrets:
+      - django_secret_key
+      - db_beat_password
+      - rabbitmq_beat_password
+      - celery_signing_beat_private_key
+      - celery_trusted_public_keys
     command: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "backupsheep.scheduler:BackupDatabaseScheduler"]
     profiles: ["operations"]
     mem_limit: "${BEAT_MEMORY_LIMIT:-512m}"
@@ -596,11 +1614,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
+        condition: service_completed_successfully
+      staging-provision:
         condition: service_completed_successfully
     networks:
       - beat-database
@@ -626,6 +1646,8 @@ networks:
   beat-broker: *internal-network
   preflight-database: *internal-network
   preflight-broker: *internal-network
+  provision-database: *internal-network
+  provision-broker: *internal-network
   app-egress: *egress-network
   cloud-egress: *egress-network
   database-egress: *egress-network
@@ -634,14 +1656,23 @@ networks:
   logs-egress: *egress-network
 
 volumes:
-  pgdata:
+  # New Alpine/ICU generation only. `${project}_pgdata` is retained detached after
+  # an explicit logical migration so rollback never depends on destructive adoption.
+  postgres_data_v1:
+    labels: *installation-labels
   rabbitmq_data:
+  # Legacy shared work is visible only to staging-provision. Existing installs must
+  # prove it empty before the new per-lane layout receives a durable witness.
   backup_workdir:
-  # UI-approved host keys are isolated from staged backup data. The app is the
-  # only writer; SSH-capable workers mount this trust store read-only.
-  ssh_trust:
-  # This is where 'Local Storage' backups live (mounted at /backups in the app and
-  # worker containers). To keep backups on a big disk or an NFS share instead of the
+  database_workdir:
+  files_workdir:
+  storage_workdir:
+  database_ciphertext_transfer:
+  files_ciphertext_transfer:
+  restore_ciphertext_transfer:
+  staging_layout_witness:
+  # This is where 'Local Storage' backups live (mounted at /backups only in the
+  # storage worker). To keep backups on a big disk or an NFS share instead of the
   # Docker-managed volume, override with a bind mount in docker-compose.override.yml:
   #   volumes:
   #     backup_storage:
@@ -663,11 +1694,67 @@ volumes:
 secrets:
   django_secret_key:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/django_secret_key
-  db_password:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_password
-  rabbitmq_password:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_password
+  db_bootstrap_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_bootstrap_password
+  db_migrator_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_migrator_password
+  db_app_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_app_password
+  db_preflight_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_preflight_password
+  db_beat_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_beat_password
+  db_cloud_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_cloud_password
+  db_database_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_database_password
+  db_files_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_files_password
+  db_storage_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_storage_password
+  db_logs_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_logs_password
+  rabbitmq_bootstrap_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_bootstrap_password
+  rabbitmq_app_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_app_password
+  rabbitmq_preflight_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_preflight_password
+  rabbitmq_beat_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_beat_password
+  rabbitmq_cloud_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_cloud_password
+  rabbitmq_database_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_database_password
+  rabbitmq_files_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_files_password
+  rabbitmq_storage_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_storage_password
+  rabbitmq_logs_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_logs_password
+  celery_signing_app_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_app_private_key
+  celery_signing_beat_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_beat_private_key
+  celery_signing_cloud_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_cloud_private_key
+  celery_signing_database_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_database_private_key
+  celery_signing_files_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_files_private_key
+  celery_signing_storage_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_storage_private_key
+  celery_signing_logs_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_logs_private_key
+  celery_trusted_public_keys:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_trusted_public_keys
   onboarding_token:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/onboarding_token
-  ssh_managed_private_key:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_private_key
+  ssh_managed_database_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_database_private_key
+  ssh_managed_files_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_files_private_key
+  artifact_kms_database_aws_credentials:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_kms_database_aws_credentials
+  artifact_kms_files_aws_credentials:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_kms_files_aws_credentials

@@ -1,15 +1,16 @@
 # Configuration reference
 
-Configuration is resolved at boot. Stock Compose supplies non-secret and optional
-integration values from `.env`, while the Django, database, broker, onboarding and
-optional managed-SSH-key values come from separate read-only files under `.secrets`. Copy
-`.env_sample` to `.env`, retain its keys, and follow the
-[manual Compose secret setup](guides/installation.md#manual-docker-compose-installation).
+Configuration is resolved at boot. Stock Compose reads non-secret and optional
+integration values from `.env`, then blanks known integration credential families and
+restores only each role's exact family, while Django, per-lane database/broker/signing,
+onboarding, database/files KMS and optional managed-SSH-key values come from separate
+read-only files under `.secrets`. Prefer the exact-ref installer; for a reviewed manual
+pause follow the [installer-staged Compose setup](guides/installation.md#manual-docker-compose-installation).
 
 **How keys are read.** `.env_sample` also supplies the non-secret defaults when a platform
 injects environment variables without mounting a `.env` file (such as Render or Railway).
 A real `.env` and then process environment override those defaults. File-backed values
-then override the four allowlisted direct secrets. For a stock manual install, keep
+then override the allowlisted direct secrets. For a stock manual install, keep
 `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
 `ONBOARDING_INSTALL_TOKEN` blank in `.env`; Compose sets fixed `/run/secrets/...` pointers
 and grants each role only the files it needs.
@@ -60,9 +61,14 @@ missing/malformed/multiple dedicated header safely falls back to `REMOTE_ADDR`.
 | Variable | Required | Compose value | Purpose |
 |----------|:--------:|---------------|---------|
 | `DB_NAME` | ✅ | `backupsheep` | Database name (the `db` service also reads it as `POSTGRES_DB`). |
-| `DB_USER` | ✅ | `backupsheep` | Username (`POSTGRES_USER`). |
+| `BACKUPSHEEP_DATABASE_IDENTITY_GENERATION` | Compose | `3` | Installer-owned identity/ACL/RLS witness; pending values block every long-lived lane. |
+| `DB_BOOTSTRAP_USER` | Compose | `backupsheep_bootstrap` | Bundled-cluster bootstrap superuser used only by PostgreSQL, `db-provision` and `db-seal`. |
+| `DB_MIGRATOR_USER` | Compose | `backupsheep_migrator` | Non-superuser database/schema owner used by `migrate`. |
+| `DB_APP_USER`, `DB_PREFLIGHT_USER`, `DB_BEAT_USER` | Compose | `backupsheep_<lane>` | Independently authenticated web, gate and scheduler identities. |
+| `DB_CLOUD_USER`, `DB_DATABASE_USER`, `DB_FILES_USER`, `DB_STORAGE_USER`, `DB_LOGS_USER` | Compose | `backupsheep_<lane>` | Independently authenticated worker identities with explicit table/column/RLS policy. |
+| `DB_USER` | ✅ | `backupsheep_app` | Compatibility alias for non-Compose deployments; stock Compose pins each service user. |
 | `DB_PASSWORD` | non-stock only | blank in stock `.env` | Direct password for non-Compose deployments. |
-| `DB_PASSWORD_FILE` | Compose | `/run/secrets/db_password` | File-backed password for application roles; PostgreSQL reads the same secret with `POSTGRES_PASSWORD_FILE`. |
+| `DB_PASSWORD_FILE` | Compose | `/run/secrets/db_<lane>_password` | Each long-lived service mounts exactly one lane password; bootstrap/migrator enter only their reviewed one-shots. |
 | `DB_HOST` | ✅ | `db` | Host — the Compose service name. |
 | `DB_PORT` | ✅ | `5432` | Port. |
 | `DATABASE_URL` | optional | unset | Managed PostgreSQL URL. When set, it overrides the five discrete `DB_*` connection values. |
@@ -72,6 +78,12 @@ missing/malformed/multiple dedicated header safely falls back to `REMOTE_ADDR`.
 Production allows plaintext PostgreSQL only through a Unix socket, loopback, or the exact
 stock `db` Compose service. Any other hostname or address (including RFC1918/private
 networks) must use `verify-full` and a CA bundle so the server identity is authenticated.
+
+The database/files identities cannot SELECT any `core_storage*` configuration table
+and cannot mutate backup-to-destination through rows. Local source work pauses until
+the storage lane validates the frozen destination request and commits a non-secret
+authorization witness; missing validation fails closed and is recovered by periodic
+durable sweeps.
 
 ## Task queue (Celery / RabbitMQ)
 
@@ -89,21 +101,80 @@ fragments are present.
 | `RABBITMQ_HOST` | Compose | `rabbitmq` | RabbitMQ hostname for fragment-based configuration. |
 | `RABBITMQ_PORT` | optional | `5672` | RabbitMQ AMQP port for fragment-based configuration. |
 | `RABBITMQ_SCHEME` | optional | `amqp` | Use `amqps` for any broker outside the stock Compose/loopback boundary. |
-| `RABBITMQ_USER` | Compose | `backupsheep` | Dedicated RabbitMQ user. |
+| `RABBITMQ_USER` | Compose | `backupsheep_app` | Compatibility/app identity; stock Compose pins a different user for preflight, Beat and every worker lane. |
 | `RABBITMQ_PASSWORD` | non-stock only | blank in stock `.env` | Direct broker password for non-Compose deployments. |
-| `RABBITMQ_PASSWORD_FILE` | Compose | `/run/secrets/rabbitmq_password` | File-backed dedicated broker password; `install.sh` generates its host file. |
+| `RABBITMQ_PASSWORD_FILE` | Compose | `/run/secrets/rabbitmq_<lane>_password` | File-backed lane password; `install.sh` generates distinct host files and each service receives only its own. |
+| `BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION` | Compose | `2` | Installer-owned per-lane broker identity/ACL witness. |
+| `BACKUPSHEEP_CELERY_SECURITY_GENERATION` | Compose | `3` | Installer-owned signed-task protocol/replay witness. |
+| `BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION` | Compose | positive integer | Active per-publisher signing-key registry generation. |
 | `RABBITMQ_VHOST` | Compose | `backupsheep` | Dedicated RabbitMQ virtual host. |
 | `RABBITMQ_CA_CERT` | optional | system roots | Private CA bundle for `amqps`; hostname verification is always enabled. |
-| `LOG_RETENTION_DAYS` | optional | `30` | Days to keep backup run logs on local disk *and* activity-log entries in the database before `delete_old_logs` (03:00) / `delete_old_db_logs` (03:30) prune them. |
-| `S3_DOWNLOAD_URL_EXPIRES` | optional | `300` | Seconds before a provider-signed backup URL expires; values above `3600` are rejected. |
+| `LOG_RETENTION_DAYS` | optional | `30` | Days to keep run logs in the files/database/storage private work volumes and activity rows in PostgreSQL. Lane tasks prune files at 03:00, database at 03:05 and storage at 03:10; `delete_old_db_logs` prunes `CoreLog` rows at 03:30. |
+| `S3_DOWNLOAD_URL_EXPIRES` | optional | `300` | Compatibility-only provider-signed URL lifetime for explicitly enabled non-enterprise legacy artifacts; values above `3600` are rejected. It does not enable stock BSE1 direct download. |
 | `WORDPRESS_PRIVATE_TARGET_CIDRS` | optional | blank | Exact comma-separated RFC1918/ULA CIDRs allowed for HTTPS WordPress origins. Blank rejects all private targets; loopback, link-local, reserved and metadata addresses are always rejected. |
 | `ALLOW_INSECURE_FTP` | optional | `false` | Compatibility escape hatch for plaintext FTP. Keep disabled; prefer SFTP or certificate-verified FTPS because FTP exposes credentials and backup data in transit. |
-| `SSH_KNOWN_HOSTS_PATH` | optional | `_storage/ssh_known_hosts` outside stock Compose | Reviewed OpenSSH `known_hosts` file used for SSH/SFTP sources. Stock Compose fixes it at `/var/lib/backupsheep/ssh-trust/known_hosts` on the dedicated trust volume. |
-| `SSH_MANAGED_PRIVATE_KEY_PATH` | optional | blank outside stock Compose | Managed private-key runtime path. Stock Compose/entrypoint owns this setting and exports `/run/backupsheep/ssh/managed_private_key` only after staging a valid non-empty source. |
+| `SSH_KNOWN_HOSTS_PATH` | compatibility only | `_storage/ssh_known_hosts` outside stock Compose | Separately reviewed non-stock file setting. Stock Compose uses account-scoped PostgreSQL approvals/audit and transient exact per-operation private-runtime trust files instead. |
+| `SSH_MANAGED_DATABASE_PUBLIC_KEY` | optional | blank | Public half of the database-worker Ed25519 identity; must match its lane secret and differ from the files identity. |
+| `SSH_MANAGED_FILES_PUBLIC_KEY` | optional | blank | Public half of the files-worker Ed25519 identity; must match its lane secret and differ from the database identity. |
+| `SSH_MANAGED_PRIVATE_KEY_PATH` / `SSH_MANAGED_PUBLIC_KEY` | legacy | blank | Shared-identity compatibility settings; both must remain blank in stock Compose. |
 
 Production allows plaintext AMQP only on loopback or the exact stock `rabbitmq` Compose
 service. External and multi-host brokers must use `amqps`; certificate validation and
 hostname matching are mandatory. System trust roots are used unless a private CA is set.
+
+## Artifact encryption and KMS
+
+Stock production requires BSE1 chunked AES-256-GCM-SIV envelopes, enterprise mode,
+AWS KMS and legacy restore disabled. The exact installer requires a resolved symmetric
+KMS key ARN, its region, an ARN allowlist containing every key still required for
+restore/rotation, and two distinct canonical private AWS credential files. Only the
+matching database/files source lane receives each resulting secret; storage receives
+ciphertext and no KMS identity.
+
+IAM and key policy must restrict cryptographic actions by the complete encryption-context
+key set and exact `bse:lane` value. Prove same-lane success and cross-lane denial before
+enabling operations. Enterprise mode rejects custom/insecure KMS endpoints and the local
+development key provider. See [Private staging and ciphertext handoff](security/staging-isolation.md).
+
+## Container egress
+
+Each Internet-capable role has a no-secret namespace guard. Stock `deny` mode admits only
+the exact internal database and broker peers and blocks every outward destination.
+`allowlist` mode adds only that role's reviewed exact IPv4 `CIDR:port` or IPv6
+`[CIDR]:port` TCP tuples and exact names. `public` is an explicit compatibility risk
+opt-in that permits ordinary public destinations while denying special/private,
+discovered-gateway and well-known NAT64 ranges by default. Its exact tuples are explicit
+special-range exceptions intended only for narrow reviewed private targets. Fixed
+`never` destinations and discovered gateways remain blocked; the fixed set includes both
+well-known NAT64 prefixes and no tuple can override them. A tuple can override only the
+ordinary private/reserved set. The guard handles
+PostgreSQL/RabbitMQ separately as exact directly connected interface/address/TCP-port
+tuples on distinct bridges and blocks them when peer resolution is incomplete. Operations
+that need the Internet deliberately fail until the operator configures the smallest
+practical role allowlist.
+
+In `allowlist` mode, the matching `BACKUPSHEEP_<ROLE>_EGRESS_ALLOW_DNS_NAMES` must list
+every exact required name and CNAME target; the complete policy, including non-literal
+DB/broker names, is capped at 66 unique names. A loopback-only zero-capability UID-`10021`
+parser validates hostile packets and sends only an immutable-name index plus A/AAAA
+selector to the distinct zero-capability UID-`10022` forwarder. Only UID 10022 constructs
+canonical queries and reaches Docker DNS. Direct external TCP/UDP 53 is blocked. `deny`
+uses the same split only for exact internal peers, while `public` uses ordinary DNS and
+requires an empty name list.
+
+DNS and exact IP/port grants are independent. The allowlist is transport-level defense
+in depth, not a resource-aware exfiltration boundary: a compromised role can still reach
+another tenant or resource on the same IP and port. Enterprise operations require
+dedicated/private endpoints or a controlled resource-aware proxy. Site-specific NAT64
+prefixes remain a host/network responsibility and must be disabled or blocked and tested
+separately.
+
+Generation 2 is mandatory and retires non-empty address-only
+`BACKUPSHEEP_<ROLE>_EGRESS_ALLOW_IPV4`/`ALLOW_IPV6` values. Existing stock installs must
+review dependencies and authorize the safe reset once with `--migrate-egress-policy`;
+all six roles become `deny` and all lists are cleared. Customized or mixed legacy policy
+must be reviewed and manually reset first, and the migration flag is rejected once
+generation 2 is active.
 
 WordPress integration keys and optional HTTP Basic credentials are sent only over
 certificate-verified HTTPS. BackupSheep resolves each target once, rejects the entire DNS
@@ -116,13 +187,14 @@ and must be upgraded before rolling this application change out to WordPress use
 Pinned WordPress traffic also ignores ambient HTTP(S) proxy variables because a proxy
 would replace the verified connection peer.
 
-In stock Compose, `.secrets/ssh_managed_private_key` is a mode-`0444` source mounted only
-in app/database/files. Leave it empty to disable the managed identity. On startup, a
-non-empty source must be a regular, NUL-free file no larger than 64 KiB and an unencrypted
-key accepted by `ssh-keygen`; the entrypoint copies it into the role's private tmpfs at
-`/run/backupsheep/ssh/managed_private_key`, mode `0600`. Do not point SSH directly at the
-mode-`0444` `/run/secrets/ssh_managed_private_key` source. See the upgrade guide before
-moving trust/key material out of legacy `_storage`.
+Stock Compose stores host-key approvals and their append-only audit in PostgreSQL, then
+materializes the exact current approval only for the operation that needs it. Optional
+`.secrets/ssh_managed_database_private_key` and
+`.secrets/ssh_managed_files_private_key` Ed25519 sources are distinct and granted only to
+their matching workers; the app receives neither. The entrypoint validates and copies its
+lane key into private tmpfs as mode `0600`. Managed-key mode requires exactly one account;
+multi-account installations use customer-supplied private keys. See the upgrade guide
+before retiring legacy global trust or a shared identity.
 
 ## Transactional email
 
@@ -159,16 +231,16 @@ and Cloudflare R2). Optional; backup *run* logs are kept on local disk regardles
 
 ## Local Storage backup destination (optional)
 
-The **Local Storage** provider keeps backup zips as plain files on this server (no
-external bucket). It needs no credentials — only the root directory the files live under.
+The **Local Storage** provider keeps BSE1 ciphertext archives on this server (no external
+bucket). It needs no destination credential, but source-lane artifact encryption still
+uses the required external-KMS policy. Only the storage worker may access the archive root.
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|
-| `BS_LOCAL_STORAGE_PATH` | optional | `/backups` | Root directory for 'Local Storage' backups. Stock Compose mounts `backup_storage` read/write only in `worker-storage`, read-only in app/cloud/database/files, and not at all in logs/Beat. |
+| `BS_LOCAL_STORAGE_PATH` | optional | `/backups` | Root directory for Local Storage backups. Stock Compose mounts `backup_storage` read/write only in `worker-storage`; app/cloud/database/files/logs/Beat receive no `/backups` mount. |
 
-To keep backups on a bigger disk or an NFS share, either point
-`BS_LOCAL_STORAGE_PATH` at that mount, or bind-mount over `/backups` via
-`docker-compose.override.yml`:
+To keep backups on a bigger disk or an NFS share, keep the stock in-container path and back
+the `backup_storage` volume with a reviewed bind mount via `docker-compose.override.yml`:
 
 ```yaml
 volumes:
@@ -213,6 +285,14 @@ these env vars only override the public API hosts or enable OAuth-based connecti
   to Basecamp's public hosts).
 
 See [Providers](providers.md) for which integrations need what.
+
+Stock Compose grants deployment-wide integration credentials by role: web receives all
+families for setup/OAuth callbacks; cloud only DigitalOcean/OVH; files only Basecamp;
+storage only Dropbox/pCloud/Microsoft/Google; logs only
+Postmark/Mailgun/SES/Slack/Telegram; database, Beat and one-shot roles receive none. The
+entrypoint rejects misplaced values even if a stale `.env` contains them. `SENTRY_DSN`
+remains shared because every Django/Celery process initializes the scrubbed Sentry client
+and the DSN grants event ingestion, not provider-account authorization.
 
 ## Self-hosted server public IPs (optional)
 

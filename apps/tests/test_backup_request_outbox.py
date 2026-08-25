@@ -776,14 +776,21 @@ class ConcurrentBackupRequestRecoveryTests(
             finally:
                 close_old_connections()
 
-        with mock.patch.object(
-            backup_dispatch.current_app,
-            "send_task",
-            side_effect=broker_publish,
-        ):
+        # Celery's ``current_app`` is a thread-local proxy. Patching the app it
+        # resolves to in this main test thread can leave the recovery thread using
+        # a different, unpatched app after another test changes Celery state. Replace
+        # the module proxy itself so both recovery threads always exercise this
+        # deterministic broker boundary and can never attempt a real connection.
+        broker_app = mock.Mock()
+        broker_app.send_task.side_effect = broker_publish
+        with mock.patch.object(backup_dispatch, "current_app", broker_app):
             first = threading.Thread(target=recover)
             first.start()
-            self.assertTrue(first_publisher_entered.wait(timeout=10))
+            # Full security runs deliberately exercise PostgreSQL with constrained
+            # CPU/memory. Preserve the concurrency assertion while allowing the
+            # first thread enough time to acquire its database connection and lease
+            # on a loaded CI runner.
+            self.assertTrue(first_publisher_entered.wait(timeout=30))
 
             second = threading.Thread(target=recover)
             second.start()

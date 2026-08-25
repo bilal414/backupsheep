@@ -169,10 +169,37 @@ class UpCloudComputeLiveUIHarnessSafetyTests(SimpleTestCase):
 
     def test_cli_dispatches_all_compute_and_workload_commands(self):
         fake = mock.Mock()
-        fake.setup_compute.return_value = {"status": "setup"}
-        fake.verify_compute.return_value = {"status": "compute"}
-        fake.verify_workloads.return_value = {"status": "workloads"}
-        fake.cleanup_compute.return_value = {"status": "cleanup"}
+        fake.setup_compute.return_value = {
+            "status": "ready_for_ui_attachment",
+            "source_server_id": "11111111-1111-4111-8111-111111111111",
+            "source_volume_id": "22222222-2222-4222-8222-222222222222",
+            "source_boot_storage_id": "33333333-3333-4333-8333-333333333333",
+            "zone": "fi-hel1",
+            "plan": {},
+            "fixture": {},
+            "workloads": {},
+            "ui_resource_types": {},
+            "safe_config_sha256": "a" * 64,
+        }
+        fake.verify_compute.return_value = {
+            "status": "verified",
+            "source_server_id": "11111111-1111-4111-8111-111111111111",
+            "source_volume_id": "22222222-2222-4222-8222-222222222222",
+            "volume": {},
+            "server": {},
+        }
+        fake.verify_workloads.return_value = {
+            "status": "verified",
+            "source": {},
+            "restored": {},
+            "backup_artifact_verification": "verified",
+        }
+        fake.cleanup_compute.return_value = {
+            "status": "completed",
+            "deleted_storage_ids": [],
+            "source_server_id": None,
+            "restored_server_id": None,
+        }
         commands = (
             (["setup-compute"], "setup_compute"),
             (["verify-compute", "--manifest", "manifest.json"], "verify_compute"),
@@ -713,6 +740,91 @@ class UpCloudComputeLiveUIHarnessSafetyTests(SimpleTestCase):
         fingerprint = live_harness.UpCloudLiveHarness._ssh_host_key_fingerprint(client)
         self.assertTrue(fingerprint.startswith("SHA256:"))
         self.assertNotIn("public-host-key-material", fingerprint)
+
+    def test_ssh_requires_independent_exact_host_key_pin_and_never_uses_tofu(self):
+        host = "198.51.100.30"
+        host_key = mock.Mock()
+        host_key.asbytes.return_value = b"upcloud-exact-host-key"
+        expected = live_harness._ssh_public_key_fingerprint(host_key)
+        harness = self.harness()
+        harness.environment.update(
+            {
+                "UPCLOUD_E2E_SOURCE_SSH_HOST": host,
+                "UPCLOUD_E2E_SOURCE_SSH_HOST_KEY_SHA256": expected,
+            }
+        )
+        server = {
+            "ip_addresses": {
+                "ip_address": [
+                    {
+                        "access": "public",
+                        "family": "IPv4",
+                        "address": host,
+                    }
+                ]
+            }
+        }
+        client = mock.Mock()
+        client.get_transport.return_value.get_remote_server_key.return_value = host_key
+        with (
+            mock.patch.object(
+                harness,
+                "_ensure_ssh_key",
+                return_value=(self.root / "upcloud-key", "ssh-rsa TEST"),
+            ),
+            mock.patch("paramiko.SSHClient", return_value=client),
+            mock.patch(
+                "paramiko.RSAKey.from_private_key_file",
+                return_value=mock.sentinel.private_key,
+            ),
+        ):
+            connected = harness._ssh_client(
+                server, host_variable="UPCLOUD_E2E_SOURCE_SSH_HOST"
+            )
+
+        self.assertIs(connected, client)
+        policy = client.set_missing_host_key_policy.call_args.args[0]
+        self.assertEqual(policy.expected_fingerprint, expected)
+        policy.missing_host_key(client, host, host_key)
+        client.load_host_keys.assert_not_called()
+        client.save_host_keys.assert_not_called()
+
+        wrong_key = mock.Mock()
+        wrong_key.asbytes.return_value = b"upcloud-attacker-host-key"
+        with self.assertRaisesRegex(live_harness.HarnessError, "exact pin"):
+            policy.missing_host_key(client, host, wrong_key)
+
+    def test_ssh_missing_host_key_pin_fails_before_paramiko_client(self):
+        host = "198.51.100.30"
+        harness = self.harness()
+        harness.environment["UPCLOUD_E2E_SOURCE_SSH_HOST"] = host
+        server = {
+            "ip_addresses": {
+                "ip_address": [
+                    {
+                        "access": "public",
+                        "family": "IPv4",
+                        "address": host,
+                    }
+                ]
+            }
+        }
+        with (
+            mock.patch.object(
+                harness,
+                "_ensure_ssh_key",
+                return_value=(self.root / "upcloud-key", "ssh-rsa TEST"),
+            ),
+            mock.patch("paramiko.SSHClient") as ssh_client,
+            self.assertRaisesRegex(
+                live_harness.HarnessError,
+                "UPCLOUD_E2E_SOURCE_SSH_HOST_KEY_SHA256 must be",
+            ),
+        ):
+            harness._ssh_client(
+                server, host_variable="UPCLOUD_E2E_SOURCE_SSH_HOST"
+            )
+        ssh_client.assert_not_called()
 
     def test_mount_detection_ignores_parent_root_and_requires_exact_target(self):
         mount_path = f"/mnt/backupsheep-e2e-{self.run_id}"

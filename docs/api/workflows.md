@@ -13,6 +13,12 @@ fields differ, so use the corresponding Bruno request for the exact JSON body.
 
 Use `Authorization: Token {{apiKey}}` on every subsequent request.
 
+Provider OAuth is a browser-session workflow, not a bearer-token automation workflow.
+DigitalOcean and OVH authorization starts use `POST .../oauth_url/` and require the
+console's CSRF proof when authenticated by cookie. That explicit POST restarts the
+provider transaction; merely rendering or refreshing a console GET page preserves a
+still-valid, account/member-bound state instead of rotating it.
+
 ## 2. Add and validate a source
 
 A protected source is normally assembled from three resources:
@@ -28,11 +34,11 @@ flowchart LR
 Example for a website:
 
 1. Create credentials with `POST /api/v1/connections/website/`.
-2. Validate them with `GET /api/v1/connections/website/{connection_id}/validate/`.
+2. Validate them with `POST /api/v1/connections/website/{connection_id}/validate/`.
 3. Discover remote objects, when needed, with the connection's `objects` action.
 4. Create the website source with `POST /api/v1/websites/` and the connection ID.
 5. Read the unified node from `GET /api/v1/nodes/`.
-6. Validate the node with `GET /api/v1/nodes/{node_id}/validate/`.
+6. Validate the node with `POST /api/v1/nodes/{node_id}/validate/`.
 
 For databases use `/connections/database/` and `/databases/`. For cloud servers,
 managed databases, SaaS sources, and volumes, use the matching provider under
@@ -43,7 +49,7 @@ managed databases, SaaS sources, and volumes, use the matching provider under
 1. Select a destination from the provider matrix.
 2. Create it with `POST /api/v1/storage/{provider}/`.
 3. Validate live access with
-   `GET /api/v1/storage/{provider}/{storage_id}/validate/`.
+   `POST /api/v1/storage/{provider}/{storage_id}/validate/`.
 4. Confirm it appears in `GET /api/v1/storage/` or `/api/v1/storage/all/`.
 
 Validation can perform a live write/read/delete probe for object storage. Use a bucket
@@ -80,19 +86,25 @@ Retry a failed file/database/SaaS backup with the backup family's `retry` action
 provider snapshot may have a provider-specific reconciliation path instead. Do not
 blindly create a second request after an unknown provider outcome.
 
-## 6. Download an archive or logs
+## 6. Inspect copies; do not directly download BSE1 archives
 
-File-producing backup families expose some of these actions:
+File-producing backup families retain some of these routes:
 
-- `download` — archive or a time-limited download response;
+- `download` — compatibility route; it refuses current BSE1 artifacts rather than
+  returning ciphertext as a ZIP or exposing a provider URL;
 - `download_transfer_log` — transfer/run log;
 - `download_dir_tree` — website directory inventory;
 - `storage_points` — copies of this backup by destination.
 
 Local storage also exposes
-`GET /api/v1/storage/local/file/{stored_backup_id}/`.
+`GET /api/v1/storage/local/file/{stored_backup_id}/`; it returns `409 Conflict` for a
+BSE1 artifact. The self-hosted build also does not provide the former SaaS-hosted
+transfer-log and directory-tree download objects. Use the durable execution state,
+storage-point status, activity log and authenticated database/website restore routes.
 
-Signed URLs and downloaded archives are sensitive. Do not write them to CI logs.
+Do not weaken these refusals with a web `/backups` mount or an ad hoc ciphertext stream.
+If a reviewed legacy-artifact deployment still returns a signed URL, treat the URL and
+downloaded content as secrets and never write them to CI logs.
 
 ## 7. Restore a backup
 

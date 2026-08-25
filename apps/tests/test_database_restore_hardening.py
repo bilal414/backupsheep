@@ -878,7 +878,10 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         malformed_zip = os.path.join(self.tmp, "bad.zip")
         with open(malformed_zip, "wb") as output:
             output.write(b"not-a-zip")
-        def fake_fetch(_stored, destination):
+        expected_restore = restore
+
+        def fake_fetch(_stored, destination, *, restore=None):
+            self.assertIs(restore, expected_restore)
             with open(destination, "wb") as output:
                 output.write(b"not-a-zip")
             return destination
@@ -2593,15 +2596,18 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
                 self.channel = Channel()
                 self.file = RemoteFile()
                 self.chmods = []
+                self.events = []
 
             def get_channel(self):
                 return self.channel
 
-            def open(self, _name, _mode):
+            def open(self, name, mode):
+                self.events.append(("open", name, mode))
                 return self.file
 
             def chmod(self, name, mode):
                 self.chmods.append((name, mode))
+                self.events.append(("chmod", name, mode))
 
             def close(self):
                 pass
@@ -2631,6 +2637,13 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         ssh = SSH(sftp)
         RD._sftp_write(ssh, "bs-credentials", "password=TOP-SECRET\n")
         self.assertEqual(sftp.chmods, [("bs-credentials", 0o600)])
+        self.assertEqual(
+            sftp.events,
+            [
+                ("open", "bs-credentials", "x"),
+                ("chmod", "bs-credentials", 0o600),
+            ],
+        )
         backup = _fake_backup()
         with mock.patch.object(RD, "_write_log") as log:
             self.assertEqual(

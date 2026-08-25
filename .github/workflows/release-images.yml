@@ -1,0 +1,671 @@
+name: Signed container release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Dormant until an administrator explicitly opts in. Candidate images are
+# written only to quarantine. The protected signing job is the sole path to an
+# official SemVer tag, and it promotes already-verified digest bytes.
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release_regression:
+    name: Re-run the exact security regression for this tag
+    if: >-
+      github.repository == 'bilal414/backupsheep' &&
+      vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'
+    uses: ./.github/workflows/supply-chain-security.yml
+    permissions:
+      contents: read
+
+  build_scan:
+    name: Build and scan quarantine digests
+    needs: release_regression
+    if: >-
+      github.repository == 'bilal414/backupsheep' &&
+      vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      app_digest: ${{ steps.build-app.outputs.digest }}
+      postgres_digest: ${{ steps.build-postgres.outputs.digest }}
+      egress_digest: ${{ steps.build-egress.outputs.digest }}
+    env:
+      APP_QUARANTINE: ghcr.io/bilal414/backupsheep-quarantine
+      POSTGRES_QUARANTINE: ghcr.io/bilal414/backupsheep-postgres-quarantine
+      EGRESS_QUARANTINE: ghcr.io/bilal414/backupsheep-egress-quarantine
+      ARTIFACT_DIR: release-candidate/release-artifacts
+      LAYOUT_DIR: release-candidate/release-layouts
+      TOOL_DIR: /tmp/backupsheep-release-tools
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+      DOCKER_BUILD_SUMMARY: "false"
+    steps:
+      - name: Check out the exact tagged commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable release inputs
+        shell: bash
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_REF" == "refs/tags/$RELEASE_TAG" ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse --verify HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
+          git diff --quiet
+          git diff --cached --quiet
+          git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main
+          python3 -m json.tool deploy/release-policy.json >/dev/null
+
+      - name: Install hash-verified scanners without registry credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/install_release_tools.py \
+            --policy deploy/release-policy.json \
+            --destination "$TOOL_DIR" \
+            --tool syft \
+            --tool trivy
+          "$TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
+          "$TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+
+      - name: Install pinned QEMU emulation
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        with:
+          image: tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541
+          platforms: arm64
+
+      - name: Create a pinned BuildKit builder
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        with:
+          version: v0.29.1
+          driver-opts: >-
+            image=moby/buildkit:v0.26.2@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa
+          install: true
+          use: true
+
+      - name: Prepare private local OCI layouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          install -d -m 0700 "$LAYOUT_DIR"
+
+      - name: Build application candidate from exact remote commit
+        id: build-app
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/release-candidate/release-layouts/app,tar=false
+          tags: ghcr.io/bilal414/backupsheep-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Build PostgreSQL candidate from exact remote commit
+        id: build-postgres
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.postgres
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/release-candidate/release-layouts/postgres,tar=false
+          tags: ghcr.io/bilal414/backupsheep-postgres-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Build egress-guard candidate from exact remote commit
+        id: build-egress
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.egress
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/release-candidate/release-layouts/egress,tar=false
+          tags: ghcr.io/bilal414/backupsheep-egress-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Collect raw OCI indexes and actual BuildKit provenance
+        shell: bash
+        env:
+          APP_DIGEST: ${{ steps.build-app.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.build-postgres.outputs.digest }}
+          EGRESS_DIGEST: ${{ steps.build-egress.outputs.digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$POSTGRES_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$EGRESS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          install -d -m 0700 "$ARTIFACT_DIR"/{oci,provenance,sbom,scans,bundles}
+          install -m 0600 deploy/release-policy.json "$ARTIFACT_DIR/release-policy.json"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image app \
+            --digest "$APP_DIGEST" \
+            --oci-layout "$LAYOUT_DIR/app"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image postgres \
+            --digest "$POSTGRES_DIGEST" \
+            --oci-layout "$LAYOUT_DIR/postgres"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image egress \
+            --digest "$EGRESS_DIGEST" \
+            --oci-layout "$LAYOUT_DIR/egress"
+
+      - name: Scan exact child digests and generate complete SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          while IFS=$'\t' read -r image platform digest; do
+            [[ "$platform" == "linux/amd64" || "$platform" == "linux/arm64" ]]
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            platform_slug="${platform//\//-}"
+
+            env -i \
+              HOME="$HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
+              XDG_CACHE_HOME="$RUNNER_TEMP/trivy-cache" \
+              TRIVY_SKIP_VERSION_CHECK=true \
+              "$TOOL_DIR/trivy" --config "$TOOL_DIR/empty-trivy.yaml" image \
+                --ignorefile "$TOOL_DIR/empty-trivy.ignore" \
+                --quiet \
+                --scanners vuln \
+                --pkg-types os,library \
+                --list-all-pkgs \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                --timeout 30m \
+                --format json \
+                --output "$ARTIFACT_DIR/scans/$image-$platform_slug.trivy.json" \
+                --platform "$platform" \
+                --input "$LAYOUT_DIR/$image"
+
+            env -i \
+              HOME="$HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
+              SYFT_CHECK_FOR_APP_UPDATE=false \
+              "$TOOL_DIR/syft" --config "$TOOL_DIR/empty-syft.yaml" scan "oci-dir:$LAYOUT_DIR/$image" \
+                --platform "$platform" \
+                --output "syft-json=$ARTIFACT_DIR/sbom/$image-$platform_slug.syft.json" \
+                --output "spdx-json=$ARTIFACT_DIR/sbom/$image-$platform_slug.spdx.json" \
+                --output "cyclonedx-json=$ARTIFACT_DIR/sbom/$image-$platform_slug.cdx.json"
+
+            python3 scripts/normalize_local_scan_evidence.py \
+              --policy deploy/release-policy.json \
+              --index "$ARTIFACT_DIR/oci/$image.index.json" \
+              --image "$image" \
+              --platform "$platform" \
+              --syft "$ARTIFACT_DIR/sbom/$image-$platform_slug.syft.json" \
+              --trivy "$ARTIFACT_DIR/scans/$image-$platform_slug.trivy.json"
+          done < <(
+            python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from build_release_manifest import _platform_digests
+
+          import json
+
+          images = json.loads(Path("deploy/release-policy.json").read_text())["images"]
+          for image in images:
+              for platform, digest in _platform_digests(
+                  Path(os.environ["ARTIFACT_DIR"]) / "oci" / f"{image}.index.json",
+                  ["linux/amd64", "linux/arm64"],
+              ).items():
+                  print(image, platform, digest, sep="\t")
+          PY
+          )
+          find "$ARTIFACT_DIR" -type f -exec chmod 0600 {} +
+
+      - name: Build and verify the digest-bound candidate manifest
+        shell: bash
+        env:
+          APP_DIGEST: ${{ steps.build-app.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.build-postgres.outputs.digest }}
+          EGRESS_DIGEST: ${{ steps.build-egress.outputs.digest }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          WORKFLOW_RUN: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          umask 077
+          created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python3 scripts/build_release_manifest.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --output "$ARTIFACT_DIR/release-manifest.json" \
+            --tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --workflow-run "$WORKFLOW_RUN" \
+            --created-at "$created_at" \
+            --app-digest "$APP_DIGEST" \
+            --app-index "$ARTIFACT_DIR/oci/app.index.json" \
+            --postgres-digest "$POSTGRES_DIGEST" \
+            --postgres-index "$ARTIFACT_DIR/oci/postgres.index.json" \
+            --egress-digest "$EGRESS_DIGEST" \
+            --egress-index "$ARTIFACT_DIR/oci/egress.index.json"
+          python3 scripts/verify_release.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --offline
+
+      - name: Retain candidate evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-candidate
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 9
+
+  sign_promote:
+    name: Sign, verify, and promote exact digests
+    needs: build_scan
+    if: >-
+      github.repository == 'bilal414/backupsheep' &&
+      vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: signed-release
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      ARTIFACT_DIR: candidate-download/release-artifacts
+      LAYOUT_DIR: candidate-download/release-layouts
+      PUBLICATION_DIR: release-publication
+      TOOL_DIR: /tmp/backupsheep-release-tools
+    steps:
+      - name: Check out verifier from the tagged commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install hash-verified signing tools before registry login
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/install_release_tools.py \
+            --policy deploy/release-policy.json \
+            --destination "$TOOL_DIR" \
+            --tool cosign \
+            --tool oras
+          "$TOOL_DIR/cosign" version | grep -Eq 'v?3\.1\.3'
+          "$TOOL_DIR/oras" version | grep -Eq '1\.3\.3'
+
+      - name: Download candidate evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate-download
+
+      - name: Revalidate candidate evidence before credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod -R go-rwx "$ARTIFACT_DIR"
+          chmod -R go-rwx "$LAYOUT_DIR"
+          cmp -s deploy/release-policy.json "$ARTIFACT_DIR/release-policy.json"
+          python3 scripts/verify_release.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --offline
+
+      - name: Authenticate for signatures and promotion
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+          logout: true
+
+      - name: Push exact verified local layouts to quarantine after approval
+        shell: bash
+        env:
+          QUARANTINE_TAG: candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 scripts/push_quarantine_layouts.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --layouts-dir "$LAYOUT_DIR" \
+            --quarantine-tag "$QUARANTINE_TAG" \
+            --oras "$TOOL_DIR/oras"
+
+      - name: Sign and attest quarantine digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          unset COSIGN_PASSWORD
+
+          sign_repository() {
+            local role="$1"
+            while IFS=$'\t' read -r image repository index_digest; do
+              local index_reference="$repository@$index_digest"
+              "$TOOL_DIR/cosign" sign --yes --oidc-provider github-actions \
+                --bundle "$ARTIFACT_DIR/bundles/$role-$image-index.signature.json" \
+                "$index_reference"
+              while IFS=$'\t' read -r platform child_digest statement spdx cyclonedx; do
+                local slug="${platform//\//-}"
+                local child_reference="$repository@$child_digest"
+                "$TOOL_DIR/cosign" sign --yes --oidc-provider github-actions \
+                  --bundle "$ARTIFACT_DIR/bundles/$role-$image-$slug.signature.json" \
+                  "$child_reference"
+                "$TOOL_DIR/cosign" attest --yes --oidc-provider github-actions \
+                  --statement "$ARTIFACT_DIR/$statement" \
+                  --bundle "$ARTIFACT_DIR/bundles/$role-$image-$slug.provenance.json" \
+                  "$child_reference"
+                "$TOOL_DIR/cosign" attest --yes --oidc-provider github-actions \
+                  --type spdxjson \
+                  --predicate "$ARTIFACT_DIR/$spdx" \
+                  --bundle "$ARTIFACT_DIR/bundles/$role-$image-$slug.spdx.json" \
+                  "$child_reference"
+                "$TOOL_DIR/cosign" attest --yes --oidc-provider github-actions \
+                  --type cyclonedx \
+                  --predicate "$ARTIFACT_DIR/$cyclonedx" \
+                  --bundle "$ARTIFACT_DIR/bundles/$role-$image-$slug.cyclonedx.json" \
+                  "$child_reference"
+              done < <(
+                python3 - "$image" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          image = json.loads((Path(os.environ["ARTIFACT_DIR"]) / "release-manifest.json").read_text())["images"][sys.argv[1]]
+          provenance = {record["platform"]: record["file"] for record in image["provenance"]}
+          sboms = {(record["platform"], record["format"]): record["file"] for record in image["sboms"]}
+          for platform, digest in image["platforms"].items():
+              print(
+                  platform,
+                  digest,
+                  provenance[platform],
+                  sboms[(platform, "spdx-json")],
+                  sboms[(platform, "cyclonedx-json")],
+                  sep="\t",
+              )
+          PY
+              )
+            done < <(
+              python3 - "$role" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          role = sys.argv[1]
+          manifest = json.loads((Path(os.environ["ARTIFACT_DIR"]) / "release-manifest.json").read_text())
+          for name, image in manifest["images"].items():
+              print(name, image[f"{role}_repository"], image["digest"], sep="\t")
+          PY
+            )
+          }
+
+          sign_repository quarantine
+          "$TOOL_DIR/cosign" sign-blob --yes --oidc-provider github-actions \
+            --bundle "$ARTIFACT_DIR/release-manifest.bundle.json" \
+            "$ARTIFACT_DIR/release-manifest.json"
+
+      - name: Verify quarantine before any official write
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_release.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --manifest-bundle "$ARTIFACT_DIR/release-manifest.bundle.json" \
+            --cosign "$TOOL_DIR/cosign" \
+            --oras "$TOOL_DIR/oras" \
+            --phase candidate
+
+      - name: Stage exact verified indexes in official repositories without SemVer tags
+        shell: bash
+        env:
+          OFFICIAL_STAGING_TAG: staged-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 scripts/stage_release_images.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --staging-tag "$OFFICIAL_STAGING_TAG" \
+            --oras "$TOOL_DIR/oras"
+
+      - name: Sign official digests and run final verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          unset COSIGN_PASSWORD
+
+          while IFS=$'\t' read -r image repository index_digest; do
+            index_reference="$repository@$index_digest"
+            "$TOOL_DIR/cosign" sign --yes --oidc-provider github-actions \
+              --bundle "$ARTIFACT_DIR/bundles/official-$image-index.signature.json" \
+              "$index_reference"
+            while IFS=$'\t' read -r platform child_digest statement spdx cyclonedx; do
+              slug="${platform//\//-}"
+              child_reference="$repository@$child_digest"
+              "$TOOL_DIR/cosign" sign --yes --oidc-provider github-actions \
+                --bundle "$ARTIFACT_DIR/bundles/official-$image-$slug.signature.json" \
+                "$child_reference"
+              "$TOOL_DIR/cosign" attest --yes --oidc-provider github-actions \
+                --statement "$ARTIFACT_DIR/$statement" \
+                --bundle "$ARTIFACT_DIR/bundles/official-$image-$slug.provenance.json" \
+                "$child_reference"
+              "$TOOL_DIR/cosign" attest --yes --oidc-provider github-actions \
+                --type spdxjson --predicate "$ARTIFACT_DIR/$spdx" \
+                --bundle "$ARTIFACT_DIR/bundles/official-$image-$slug.spdx.json" \
+                "$child_reference"
+              "$TOOL_DIR/cosign" attest --yes --oidc-provider github-actions \
+                --type cyclonedx --predicate "$ARTIFACT_DIR/$cyclonedx" \
+                --bundle "$ARTIFACT_DIR/bundles/official-$image-$slug.cyclonedx.json" \
+                "$child_reference"
+            done < <(
+              python3 - "$image" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          image = json.loads((Path(os.environ["ARTIFACT_DIR"]) / "release-manifest.json").read_text())["images"][sys.argv[1]]
+          provenance = {record["platform"]: record["file"] for record in image["provenance"]}
+          sboms = {(record["platform"], record["format"]): record["file"] for record in image["sboms"]}
+          for platform, digest in image["platforms"].items():
+              print(platform, digest, provenance[platform], sboms[(platform, "spdx-json")], sboms[(platform, "cyclonedx-json")], sep="\t")
+          PY
+            )
+          done < <(
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads((Path(os.environ["ARTIFACT_DIR"]) / "release-manifest.json").read_text())
+          for name, image in manifest["images"].items():
+              print(name, image["official_repository"], image["digest"], sep="\t")
+          PY
+          )
+
+          python3 scripts/verify_release.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --manifest-bundle "$ARTIFACT_DIR/release-manifest.bundle.json" \
+            --cosign "$TOOL_DIR/cosign" \
+            --oras "$TOOL_DIR/oras" \
+            --phase final
+
+      - name: Publish signed official digests under SemVer tags last
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/promote_release_images.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --oras "$TOOL_DIR/oras"
+
+      - name: Create deterministic signed evidence archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          install -d -m 0700 "$PUBLICATION_DIR"
+          tar --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --mode='u+rw,go-rwx' \
+            -C "$ARTIFACT_DIR" -cf - . \
+            | gzip -n > "$PUBLICATION_DIR/signed-release-evidence.tar.gz"
+          (
+            cd "$PUBLICATION_DIR"
+            sha256sum signed-release-evidence.tar.gz > signed-release-evidence.tar.gz.sha256
+          )
+          "$TOOL_DIR/cosign" sign-blob --yes --oidc-provider github-actions \
+            --bundle "$PUBLICATION_DIR/signed-release-evidence.tar.gz.bundle.json" \
+            "$PUBLICATION_DIR/signed-release-evidence.tar.gz"
+          install -m 0600 "$ARTIFACT_DIR/release-manifest.json" "$PUBLICATION_DIR/release-manifest.json"
+          install -m 0600 "$ARTIFACT_DIR/release-manifest.bundle.json" "$PUBLICATION_DIR/release-manifest.bundle.json"
+          install -m 0600 deploy/release-policy.json "$PUBLICATION_DIR/release-policy.json"
+
+      - name: Retain signed publication evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-release-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-publication
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  publish_evidence:
+    name: Publish durable release evidence
+    needs: sign_promote
+    if: >-
+      github.repository == 'bilal414/backupsheep' &&
+      vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      PUBLICATION_DIR: release-publication
+      TOOL_DIR: /tmp/backupsheep-release-tools
+    steps:
+      - name: Check out publisher from the tagged commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install hash-verified verification tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/install_release_tools.py \
+            --policy deploy/release-policy.json \
+            --destination "$TOOL_DIR" \
+            --tool cosign
+
+      - name: Download signed publication evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-release-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-publication
+
+      - name: Verify archive and publish immutable GitHub release assets
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          chmod -R go-rwx "$PUBLICATION_DIR"
+          cmp -s deploy/release-policy.json "$PUBLICATION_DIR/release-policy.json"
+          (
+            cd "$PUBLICATION_DIR"
+            sha256sum -c signed-release-evidence.tar.gz.sha256
+          )
+          "$TOOL_DIR/cosign" verify-blob \
+            --bundle "$PUBLICATION_DIR/signed-release-evidence.tar.gz.bundle.json" \
+            --certificate-identity-regexp '^https://github\.com/bilal414/backupsheep/\.github/workflows/release-images\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+            --certificate-github-workflow-sha "$SOURCE_COMMIT" \
+            --certificate-github-workflow-ref "refs/tags/$RELEASE_TAG" \
+            --certificate-github-workflow-trigger push \
+            "$PUBLICATION_DIR/signed-release-evidence.tar.gz"
+          python3 scripts/publish_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --asset "$PUBLICATION_DIR/signed-release-evidence.tar.gz" \
+            --asset "$PUBLICATION_DIR/signed-release-evidence.tar.gz.sha256" \
+            --asset "$PUBLICATION_DIR/signed-release-evidence.tar.gz.bundle.json" \
+            --asset "$PUBLICATION_DIR/release-manifest.json" \
+            --asset "$PUBLICATION_DIR/release-manifest.bundle.json" \
+            --asset "$PUBLICATION_DIR/release-policy.json"

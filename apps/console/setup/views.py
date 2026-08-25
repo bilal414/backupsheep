@@ -1,9 +1,7 @@
-import os
-import secrets
-import time
 from urllib.parse import urlencode
 
 from django.conf import settings
+from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db.models import Q
 from django.shortcuts import redirect
@@ -15,12 +13,13 @@ from apps.console.storage.models import CoreStorage, CoreStorageType
 from requests_oauthlib import OAuth2Session
 from apps.api.v1.utils.api_permissions import member_has_perm
 from apps.api.v1.utils.oauth_security import (
-    issue_oauth_state,
+    get_or_issue_oauth_state,
     validated_https_endpoint,
 )
-
-
-PCLOUD_OAUTH_STATE_SESSION_KEY = "pcloud_oauth_state"
+from backupsheep.source_recovery_policy import (
+    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
+    source_backup_creation_available,
+)
 
 
 class IntegrationSelectView(LoginRequiredMixin, TemplateView):
@@ -31,6 +30,12 @@ class IntegrationSelectView(LoginRequiredMixin, TemplateView):
 
         context["heading"] = "Integrations"
         context["active_url"] = "setup"
+        context["wordpress_source_protection_available"] = (
+            source_backup_creation_available("wordpress")
+        )
+        context["basecamp_source_protection_available"] = (
+            source_backup_creation_available("basecamp")
+        )
         return self.render_to_response(context)
 
 
@@ -52,8 +57,17 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
 
         if CoreIntegration.objects.filter(code=integration_code).exists():
             integration = CoreIntegration.objects.get(code=integration_code)
+            source_protection_available = source_backup_creation_available(
+                integration.code
+            )
+            context["source_protection_available"] = (
+                source_protection_available
+            )
+            context["source_recovery_unavailable_message"] = (
+                SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+            )
 
-            if integration.code == "basecamp" and member_has_perm(
+            if source_protection_available and integration.code == "basecamp" and member_has_perm(
                 request, "integration_changes"
             ):
                 authorization_endpoint = validated_https_endpoint(
@@ -63,7 +77,7 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
                 )
                 if authorization_endpoint:
                     account = member.get_current_account()
-                    oauth_state = issue_oauth_state(
+                    oauth_state = get_or_issue_oauth_state(
                         request,
                         provider="basecamp",
                         member=member,
@@ -98,12 +112,30 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
             context["show_link_icon"] = True
             context["show_link_url"] = reverse("console:setup:integration_select")
             context["integration"] = integration
-            context["ssh_managed_public_key"] = settings.SSH_MANAGED_PUBLIC_KEY
-            context["ssh_managed_key_enabled"] = bool(
-                settings.SSH_MANAGED_PUBLIC_KEY
-                and settings.SSH_MANAGED_PRIVATE_KEY_PATH
-                and os.path.isfile(settings.SSH_MANAGED_PRIVATE_KEY_PATH)
+            from apps.console.connection.managed_ssh import (
+                ManagedSSHOperationError,
+                assert_managed_ssh_single_account,
+                managed_public_key_for_lane,
+                managed_public_key_fingerprint,
             )
+
+            lane = {"database": "database", "website": "files"}.get(
+                integration.code
+            )
+            managed_public_key = ""
+            if lane is not None:
+                try:
+                    assert_managed_ssh_single_account(member.get_current_account().pk)
+                    configured_key = managed_public_key_for_lane(lane)
+                    managed_public_key_fingerprint(configured_key)
+                    fields = configured_key.split()
+                    managed_public_key = f"{fields[0]} {fields[1]}"
+                except (ManagedSSHOperationError, IndexError):
+                    managed_public_key = ""
+            context["ssh_managed_public_key"] = managed_public_key
+            # The web role deliberately cannot inspect either private key. Each
+            # source worker proves only its lane's public/private match at startup.
+            context["ssh_managed_key_enabled"] = bool(managed_public_key)
         else:
             return redirect("console:setup:integration_select")
 
@@ -185,7 +217,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
 
             if storage_type.code == "dropbox" and can_change_storage:
                 # DROPBOX
-                oauth_state = issue_oauth_state(
+                oauth_state = get_or_issue_oauth_state(
                     request,
                     provider="dropbox",
                     member=member,
@@ -209,7 +241,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
             elif storage_type.code == "google_drive" and can_change_storage:
                 # GOOGLE DRIVE
                 scope = ["https://www.googleapis.com/auth/drive.file"]
-                oauth_state = issue_oauth_state(
+                oauth_state = get_or_issue_oauth_state(
                     request,
                     provider="google_drive",
                     member=member,
@@ -232,13 +264,13 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                 context["connect_url"] = authorization_url
             elif storage_type.code == "pcloud":
                 if can_change_storage:
-                    state = secrets.token_urlsafe(32)
-                    request.session[PCLOUD_OAUTH_STATE_SESSION_KEY] = {
-                        "state": state,
-                        "member_id": member.pk,
-                        "account_id": member.get_current_account().pk,
-                        "issued_at": time.time(),
-                    }
+                    oauth_state = get_or_issue_oauth_state(
+                        request,
+                        provider="pcloud",
+                        member=member,
+                        account=member.get_current_account(),
+                        legacy_session_key="pcloud_oauth_state",
+                    )
                     context["connect_url"] = (
                         f"{settings.PCLOUD_AUTH_URL}?"
                         + urlencode(
@@ -246,7 +278,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                                 "client_id": settings.PCLOUD_CLIENT_ID,
                                 "response_type": settings.PCLOUD_RESPONSE_TYPE,
                                 "redirect_uri": settings.APP_URL + settings.PCLOUD_REDIRECT_URL,
-                                "state": state,
+                                "state": oauth_state["state"],
                             }
                         )
                     )
@@ -257,7 +289,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                     allowed_path_suffixes={"/oauth2/v2.0/authorize"},
                 )
                 if authorization_endpoint:
-                    oauth_state = issue_oauth_state(
+                    oauth_state = get_or_issue_oauth_state(
                         request,
                         provider="microsoft",
                         member=member,
@@ -290,6 +322,13 @@ class IntegrationCreateNodeView(LoginRequiredMixin, TemplateView):
         context["active_url"] = "setup"
         integration_code = self.kwargs.get("integration_code")
         connection_id = self.kwargs.get("connection_id")
+
+        if not source_backup_creation_available(integration_code):
+            messages.error(request, SOURCE_RECOVERY_UNAVAILABLE_MESSAGE)
+            return redirect(
+                "console:setup:integration_open",
+                integration_code=integration_code,
+            )
 
         member = self.request.user.member
 

@@ -72,6 +72,14 @@ from apps._tasks.integration.storage.wasabi import (
     storage_wasabi_delete,
 )
 from apps._tasks.execution import verify_and_commit_source_artifact
+from apps._tasks.artifact_encryption import (
+    ArtifactPipelineError,
+    cleanup_terminal_restore_ciphertext_handoff,
+    cleanup_terminal_source_ciphertext,
+    ensure_destination_ciphertext_ledger,
+    materialize_local_restore_ciphertext_handoff,
+    storage_upload_artifact,
+)
 from apps._tasks.integration.storage.lease import (
     DurableStorageUploadLease,
     StorageCleanupNotEligible,
@@ -101,6 +109,8 @@ from apps.console.backup.models import (
     CoreWordPressBackup, CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints,
     CoreWordPressBackupStoragePoints, CoreBasecampBackup,
     CoreBasecampBackupStoragePoints,
+    CoreDatabaseRestore,
+    CoreWebsiteRestore,
     StoragePointLeaseLostError,
 )
 from apps.console.node.models import CoreNode
@@ -118,6 +128,46 @@ class UnsupportedStorageBackend(RuntimeError):
 
 class SourceArtifactInvalid(RuntimeError):
     pass
+
+
+_STORAGE_ADAPTER_INVENTORY = {
+    "dropbox": (storage_dropbox, "remote-stream-sha256"),
+    "google_drive": (storage_google_drive, "remote-stream-sha256"),
+    "aws_s3": (storage_aws_s3, "verified-s3-object"),
+    "wasabi": (storage_wasabi, "verified-s3-object"),
+    "do_spaces": (storage_do_spaces, "verified-s3-object"),
+    "filebase": (storage_filebase, "verified-s3-object"),
+    "backblaze_b2": (storage_backblaze_b2, "verified-s3-object"),
+    "linode": (storage_linode, "verified-s3-object"),
+    "vultr": (storage_vultr, "verified-s3-object"),
+    "upcloud": (storage_upcloud, "verified-s3-object"),
+    "exoscale": (storage_exoscale, "verified-s3-object"),
+    "oracle": (storage_oracle, "verified-s3-object"),
+    "scaleway": (storage_scaleway, "verified-s3-object"),
+    "pcloud": (storage_pcloud, "remote-stream-sha256"),
+    "onedrive": (storage_onedrive, "remote-stream-sha256"),
+    "cloudflare": (storage_cloudflare, "verified-s3-object"),
+    "google_cloud": (storage_google_cloud, "remote-stream-sha256"),
+    "azure": (storage_azure, "remote-stream-sha256"),
+    "leviia": (storage_leviia, "verified-s3-object"),
+    "idrive": (storage_idrive, "verified-s3-object"),
+    "ionos": (storage_ionos, "verified-s3-object"),
+    "alibaba": (storage_alibaba, "verified-s3-object"),
+    "tencent": (storage_tencent, "verified-s3-object"),
+    "rackcorp": (storage_rackcorp, "verified-s3-object"),
+    "ibm": (storage_ibm, "verified-s3-object"),
+    "local": (storage_local, "local-readback-sha256"),
+}
+
+
+def _dispatch_storage_adapter(stored_backup):
+    """Run one inventoried adapter; every entry must persist readback evidence."""
+
+    entry = _STORAGE_ADAPTER_INVENTORY.get(stored_backup.storage.type.code)
+    if entry is None:
+        raise UnsupportedStorageBackend()
+    adapter, _verification_mechanism = entry
+    adapter(stored_backup)
 
 
 def _mark_storage_upload_started(backup):
@@ -181,6 +231,147 @@ _BACKUP_POINT_RELATIONS = {
     "wordpress": "stored_wordpress_backups",
     "basecamp": "stored_basecamp_backups",
 }
+_LOCAL_RESTORE_MODELS = {
+    "website": CoreWebsiteRestore,
+    "database": CoreDatabaseRestore,
+}
+
+
+def _frozen_local_backup_request(backup):
+    """Reconstruct the source message from the durable concrete backup only."""
+
+    metadata = dict(backup.metadata or {})
+    storage_ids, _invalid_count = CoreNode._canonical_backup_storage_ids(
+        metadata.get("_backup_storage_ids")
+    )
+    return {
+        "node_id": int(backup.node.pk),
+        "schedule_id": int(backup.schedule_id) if backup.schedule_id else None,
+        "storage_ids": storage_ids,
+        "notes": backup.notes,
+        "resume": True,
+    }
+
+
+def _publish_prepared_local_backup(model_key, backup):
+    """Publish the stable source task only after storage authorization commits."""
+
+    node = backup.node
+    if not node.authorized_local_destination_point_ids(backup):
+        return False
+    task_id = str(backup.celery_task_id or "")
+    if not task_id:
+        raise RuntimeError("prepared local backup has no stable source task id")
+    current_app.send_task(
+        node.backup_task_name(),
+        task_id=task_id,
+        kwargs=_frozen_local_backup_request(backup),
+        delivery_mode=2,
+        mandatory=True,
+        retry=True,
+        retry_policy={
+            "max_retries": 3,
+            "interval_start": 0,
+            "interval_step": 1,
+            "interval_max": 3,
+        },
+    )
+    return True
+
+
+def _prepare_local_backup_destinations_id(model_key, backup_id):
+    """Validate one durable local request and hand it back to its source lane."""
+
+    model_key = str(model_key or "")
+    model = _BACKUP_MODELS.get(model_key)
+    canonical_id = _canonical_positive_id(backup_id)
+    if model is None or canonical_id is None:
+        return {"result": "invalid_request"}
+    backup = model.objects.filter(pk=canonical_id).first()
+    if backup is None:
+        return {"result": "not_found"}
+    if backup.status not in UtilBackup.ACTIVE_STATUSES:
+        return {"result": "terminal"}
+
+    node = backup.node
+    metadata = dict(backup.metadata or {})
+    storage_ids, _invalid_count = CoreNode._canonical_backup_storage_ids(
+        metadata.get("_backup_storage_ids")
+    )
+    prepared = node.backup_initiate(
+        backup.celery_task_id,
+        backup.type or UtilBackup.Type.ON_DEMAND,
+        max(1, int(backup.attempt_no or 1)),
+        backup.schedule_id,
+        storage_ids,
+        backup.notes,
+        prepare_destinations=True,
+    )
+    if prepared is None:
+        backup.refresh_from_db(fields=["status", "metadata"])
+        if backup.status == UtilBackup.Status.STORAGE_VALIDATION_FAILED:
+            return {"result": "rejected"}
+        return {"result": "busy"}
+    if not _publish_prepared_local_backup(model_key, prepared):
+        return {"result": "not_authorized"}
+    return {"result": "published"}
+
+
+@current_app.task(
+    name="prepare_local_backup_destinations",
+    bind=True,
+    default_retry_delay=60,
+    max_retries=16,
+    ignore_result=True,
+)
+def prepare_local_backup_destinations(self, model_key, backup_id):
+    """Run credential-bearing destination validation in the storage lane."""
+
+    try:
+        result = _prepare_local_backup_destinations_id(model_key, backup_id)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(exc=error)
+    if result.get("result") == "busy":
+        raise self.retry(countdown=60)
+    return result
+
+
+@current_app.task(
+    name="resume_pending_backup_destination_validations",
+    ignore_result=True,
+)
+def resume_pending_backup_destination_validations():
+    """Repair source/setup publication gaps from durable local backup rows."""
+
+    try:
+        batch_size = max(
+            1,
+            min(
+                int(getattr(settings, "BACKUP_RECOVERY_BATCH_SIZE", 100)),
+                1000,
+            ),
+        )
+    except (TypeError, ValueError):
+        batch_size = 100
+    preparation_published = []
+    for model_key, model in _BACKUP_MODELS.items():
+        candidates = list(
+            model.objects.filter(status__in=UtilBackup.ACTIVE_STATUSES)
+            .order_by("modified", "pk")[:batch_size]
+        )
+        for backup in candidates:
+            if backup.node.authorized_local_destination_point_ids(backup):
+                # Once authorization commits, the existing lane-specific source
+                # recovery sweep owns a lost storage-to-source publish. It already
+                # honors the source execution lease and stable task id.
+                continue
+            prepare_local_backup_destinations.apply_async(
+                args=[model_key, backup.pk],
+                task_id=CoreNode.local_destination_preparation_task_id(backup),
+            )
+            preparation_published.append((model_key, backup.pk))
+    return preparation_published
 
 
 def _canonical_positive_id(value):
@@ -846,7 +1037,10 @@ def _storage_error_outcome(error, point):
             point.Status.UPLOAD_FAILED,
             False,
         )
-    if _caused_by(error, (S3ObjectIntegrityError, SourceArtifactInvalid)) or (
+    if _caused_by(
+        error,
+        (S3ObjectIntegrityError, SourceArtifactInvalid, ArtifactPipelineError),
+    ) or (
         _chain_has_class_name(error, "_LocalStorageIntegrityError")
     ):
         return (
@@ -1007,6 +1201,25 @@ def _storage_error_outcome(error, point):
     )
 
 
+def _publish_backup_finalizer_if_terminal(node, backup, stored_backup):
+    """Publish finalization only after this durable destination is terminal."""
+
+    stored_backup.refresh_from_db(fields=["status"])
+    pending_statuses = {
+        stored_backup.Status.UPLOAD_READY,
+        stored_backup.Status.UPLOAD_RETRY,
+        stored_backup.Status.UPLOAD_IN_PROGRESS,
+        stored_backup.Status.UPLOAD_VALIDATION,
+    }
+    if stored_backup.status in pending_statuses:
+        return False
+    # ``finalize_backup`` is resolved when the upload executes, after module task
+    # registration has completed. A fresh task id is intentional: duplicate
+    # finalizers are harmless, while the signed id remains replay-protected.
+    finalize_backup.apply_async(args=[node.pk, backup.pk])
+    return True
+
+
 @current_app.task(
     name="storage_upload",
     track_started=True,
@@ -1049,6 +1262,13 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     try:
         stored_backup = lease.claim()
     except StorageUploadAlreadyComplete:
+        try:
+            _publish_backup_finalizer_if_terminal(node, backup, stored_backup)
+        except Exception as finalizer_error:
+            # The point is already terminal, so replaying its provider mutation
+            # would be unsafe. The durable recovery sweep will republish the
+            # idempotent finalizer if the broker is temporarily unavailable.
+            capture_exception(finalizer_error)
         return
     except StorageUploadLeaseBusy as error:
         raise self.retry(
@@ -1071,79 +1291,26 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     log_file.write(f"{storage_type_name}: {stored_backup.storage.name} \n")
 
     try:
-        # A destination may only upload the immutable source identity committed by
-        # the dump worker.  This catches disk corruption and stale-file reuse before
-        # a provider receives any bytes.
-        try:
-            verify_and_commit_source_artifact(backup)
-        except FileNotFoundError:
-            raise
-        except Exception as error:
-            raise SourceArtifactInvalid(
-                "The committed source artifact failed verification."
-            ) from error
-
-        if stored_backup.storage.type.code == "dropbox":
-            storage_dropbox(stored_backup)
-        elif stored_backup.storage.type.code == "google_drive":
-            storage_google_drive(stored_backup)
-        elif stored_backup.storage.type.code == "aws_s3":
-            storage_aws_s3(stored_backup)
-        elif stored_backup.storage.type.code == "wasabi":
-            storage_wasabi(stored_backup)
-        elif stored_backup.storage.type.code == "do_spaces":
-            storage_do_spaces(stored_backup)
-        elif stored_backup.storage.type.code == "filebase":
-            storage_filebase(stored_backup)
-        elif stored_backup.storage.type.code == "backblaze_b2":
-            storage_backblaze_b2(stored_backup)
-        elif stored_backup.storage.type.code == "linode":
-            storage_linode(stored_backup)
-        elif stored_backup.storage.type.code == "vultr":
-            storage_vultr(stored_backup)
-        elif stored_backup.storage.type.code == "upcloud":
-            storage_upcloud(stored_backup)
-        elif stored_backup.storage.type.code == "exoscale":
-            storage_exoscale(stored_backup)
-        elif stored_backup.storage.type.code == "oracle":
-            storage_oracle(stored_backup)
-        elif stored_backup.storage.type.code == "scaleway":
-            storage_scaleway(stored_backup)
-        elif stored_backup.storage.type.code == "pcloud":
-            storage_pcloud(stored_backup)
-        elif stored_backup.storage.type.code == "onedrive":
-            storage_onedrive(stored_backup)
-        elif stored_backup.storage.type.code == "cloudflare":
-            storage_cloudflare(stored_backup)
-        elif stored_backup.storage.type.code == "google_cloud":
-            storage_google_cloud(stored_backup)
-        elif stored_backup.storage.type.code == "azure":
-            storage_azure(stored_backup)
-        elif stored_backup.storage.type.code == "leviia":
-            storage_leviia(stored_backup)
-        elif stored_backup.storage.type.code == "idrive":
-            storage_idrive(stored_backup)
-        elif stored_backup.storage.type.code == "ionos":
-            storage_ionos(stored_backup)
-        elif stored_backup.storage.type.code == "alibaba":
-            storage_alibaba(stored_backup)
-        elif stored_backup.storage.type.code == "tencent":
-            storage_tencent(stored_backup)
-        elif stored_backup.storage.type.code == "rackcorp":
-            storage_rackcorp(stored_backup)
-        elif stored_backup.storage.type.code == "ibm":
-            storage_ibm(stored_backup)
-        elif stored_backup.storage.type.code == "local":
-            storage_local(stored_backup)
-        else:
-            raise UnsupportedStorageBackend()
-
-        lease.ensure_owned()
+        # In BSE1 mode this context materializes only authenticated-header,
+        # ledger-matched ciphertext into storage's private volume.  The .zip
+        # suffix is retained solely for compatibility with existing adapters;
+        # remote objects contain BSE1 bytes and are never decrypted here.
+        with storage_upload_artifact(
+            backup,
+            legacy_verifier=verify_and_commit_source_artifact,
+        ) as source_artifact:
+            _dispatch_storage_adapter(stored_backup)
+            lease.ensure_owned()
+            ensure_destination_ciphertext_ledger(
+                backup,
+                stored_backup,
+                source_artifact,
+            )
 
         # The backend sets the storage point to UPLOAD_COMPLETE on success (or a
         # failure status / raises). Backup-level completion (status, notification,
-        # retention) is handled exactly once by the finalize_backup chord callback
-        # after every upload finishes.
+        # retention) is handled by the idempotent finalizer once every point is
+        # terminal.
         log_file.write(f"{storage_type_name}: {stored_backup.get_status_display()} \n")
 
     except (StorageUploadLeaseLost, StoragePointLeaseLostError) as error:
@@ -1233,6 +1400,13 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
                 # mutation. The bounded periodic sweep will republish this exact
                 # terminal point.
                 capture_exception(cleanup_error)
+        try:
+            _publish_backup_finalizer_if_terminal(node, backup, stored_backup)
+        except Exception as finalizer_error:
+            # Never replay a completed provider mutation merely because the
+            # broker was unavailable for the follow-up. The bounded recovery
+            # sweep can derive and republish finalization from durable rows.
+            capture_exception(finalizer_error)
 
 
 @current_app.task(
@@ -1374,6 +1548,126 @@ def storage_sweep_owned_multipart_cleanup(self):
     return {"enqueued": enqueued, "scanned": scanned}
 
 
+def _cleanup_source_ciphertext(model_key, backup_id, *, expected_lane):
+    if model_key not in _BACKUP_MODELS:
+        raise ArtifactPipelineError("The ciphertext cleanup model is invalid.")
+    if (
+        (expected_lane == "database" and model_key != "database")
+        or (expected_lane == "files" and model_key == "database")
+    ):
+        raise ArtifactPipelineError(
+            "The ciphertext cleanup model is routed to the wrong lane."
+        )
+    canonical_id = _canonical_positive_id(backup_id)
+    if canonical_id is None:
+        raise ArtifactPipelineError("The ciphertext cleanup backup id is invalid.")
+    backup = _BACKUP_MODELS[model_key].objects.get(pk=canonical_id)
+    return cleanup_terminal_source_ciphertext(backup, expected_lane=expected_lane)
+
+
+@current_app.task(
+    name="cleanup_database_ciphertext_fence",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=24,
+)
+def cleanup_database_ciphertext_fence(self, backup_id):
+    """Clean a terminal database fence only inside the database source lane."""
+
+    try:
+        return _cleanup_source_ciphertext(
+            "database", backup_id, expected_lane="database"
+        )
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(
+            exc=ArtifactPipelineError(
+                "Database ciphertext-fence cleanup did not complete safely."
+            )
+        ) from None
+
+
+@current_app.task(
+    name="cleanup_files_ciphertext_fence",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=24,
+)
+def cleanup_files_ciphertext_fence(self, model_key, backup_id):
+    """Clean terminal website/SaaS fences only inside the files source lane."""
+
+    try:
+        return _cleanup_source_ciphertext(
+            model_key, backup_id, expected_lane="files"
+        )
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(
+            exc=ArtifactPipelineError(
+                "Files ciphertext-fence cleanup did not complete safely."
+            )
+        ) from None
+
+
+def _local_restore(model_key, restore_id):
+    model = _LOCAL_RESTORE_MODELS.get(str(model_key))
+    canonical_id = _canonical_positive_id(restore_id)
+    if model is None or canonical_id is None:
+        raise ArtifactPipelineError("The local restore handoff identity is invalid.")
+    return model.objects.get(pk=canonical_id)
+
+
+@current_app.task(
+    name="stage_local_restore_ciphertext",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=96,
+    time_limit=48 * 3600,
+    soft_time_limit=47 * 3600,
+)
+def stage_local_restore_ciphertext(self, model_key, restore_id):
+    """Stage an exact local BSE1 object for one database/files restore lane."""
+
+    try:
+        restore = _local_restore(model_key, restore_id)
+        return materialize_local_restore_ciphertext_handoff(
+            restore,
+            task_id=self.request.id,
+        )
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(
+            exc=ArtifactPipelineError(
+                "Local restore ciphertext staging did not complete safely."
+            )
+        ) from None
+
+
+@current_app.task(
+    name="cleanup_local_restore_ciphertext",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=24,
+)
+def cleanup_local_restore_ciphertext(self, model_key, restore_id):
+    """Clean one reverse local-restore handoff after durable terminal state."""
+
+    try:
+        restore = _local_restore(model_key, restore_id)
+        return cleanup_terminal_restore_ciphertext_handoff(restore)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(
+            exc=ArtifactPipelineError(
+                "Local restore ciphertext cleanup did not complete safely."
+            )
+        ) from None
+
+
 @current_app.task(
     name="finalize_backup",
     track_started=True,
@@ -1382,9 +1676,12 @@ def storage_sweep_owned_multipart_cleanup(self):
     max_retries=8,
 )
 def finalize_backup(self, node_id, backup_id):
-    """Chord callback: runs exactly once after every storage_upload for a backup
-    finishes. Decides the backup's final state from the real upload tally, applies
-    the schedule retention policy, and cleans up the local working files.
+    """Idempotently finalize a backup after its storage uploads become terminal.
+
+    Each terminal storage worker can publish this task, and recovery can publish it
+    again after broker loss. The locked durable tally below ensures early or
+    duplicate delivery cannot commit a false or repeated result. It applies the
+    schedule retention policy and cleans up the local working files.
 
     Marking completion here (instead of inside each parallel storage_upload) removes
     the previous race conditions and the false "complete on first success".
@@ -1417,10 +1714,9 @@ def finalize_backup(self, node_id, backup_id):
         ),
     }[node.type]
 
-    # The callback is normally invoked by a chord, but it can also be published by
-    # recovery or be duplicated by broker redelivery. Lock both the backup row and
-    # all of its storage points so a second finalizer cannot tally a moving upload
-    # set or send a second completion notification.
+    # Lock both the backup row and all of its storage points so an early or duplicate
+    # finalizer cannot tally a moving upload set or send a second completion
+    # notification.
     with transaction.atomic():
         backup = backup.__class__.objects.select_for_update().get(pk=backup.pk)
         storage_relation = getattr(backup, relation_name)
@@ -1607,4 +1903,34 @@ def finalize_backup(self, node_id, backup_id):
         # Local working files are no longer needed once the terminal DB decision is
         # committed. If the DB transaction above failed, control never reaches this
         # block, preserving the files for recovery.
-        delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
+        try:
+            if backup.artifact_records.filter(
+                role="source",
+                storage__isnull=True,
+                artifact_format="bse1",
+                encryption_envelope__isnull=False,
+            ).exists():
+                if node.type == CoreNode.Type.DATABASE:
+                    cleanup_database_ciphertext_fence.apply_async(args=[backup.pk])
+                else:
+                    model_key = (
+                        "website"
+                        if node.type == CoreNode.Type.WEBSITE
+                        else (
+                            "wordpress"
+                            if node.connection.integration.code == "wordpress"
+                            else "basecamp"
+                        )
+                    )
+                    cleanup_files_ciphertext_fence.apply_async(
+                        args=[model_key, backup.pk]
+                    )
+            delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
+        except Exception as error:
+            capture_exception(error)
+            raise self.retry(
+                exc=ArtifactPipelineError(
+                    "Terminal artifact cleanup publication did not complete safely."
+                ),
+                countdown=60,
+            ) from None

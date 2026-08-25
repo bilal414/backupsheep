@@ -707,8 +707,9 @@ superseded for current status by the live execution record below.
   `/code/_storage` bind while the app persisted the approved key in the normal
   `backup_workdir` volume. It therefore could not read the UI-approved trust record.
   Backup `51` was cancelled through the signed-in UI. The disposable worker was
-  replaced with one that keeps its block-backed work path but mounts the normal trust
-  volume read-only at `/ssh-trust`; app and worker then shared exact known-hosts
+  replaced with one that, at that historical revision, kept its block-backed work path
+  but mounted the then-current legacy trust volume read-only at `/ssh-trust`; app and
+  worker then shared exact known-hosts
   SHA-256 `6df2e0c6c2ca1e1a4b2082940b1400fa7717ac829b3c9168e04d14614d6d26eb`.
 - A second signed-in request created backup `52`/point `54`, UUID
   `bs-bs-remed-20260818-0d08dc-n110-b52`. It completed once at 1,197/1,197 bytes with
@@ -3232,8 +3233,8 @@ Implementation update — 2026-08-19:
   `/srv/bs-remed-casefold/source` with `all_paths=false`; connection and node remain
   at status `1`. Creation committed
   before post-transaction connection validation returned the safe strict-host-key
-  error, “The SSH host key has not been reviewed for this destination.” The shared
-  known-hosts file contains zero approved entries for
+  error, “The SSH host key has not been reviewed for this destination.” At that historical
+  revision, the legacy shared known-hosts file contained zero approved entries for
   `bs-remed-casefold-sftp-20260820`. No host-key preview or approval was performed;
   the source has exactly zero product backups and zero restores. Consequently there
   is no live `RESTORE_TARGET_NAME_COLLISION` result and this does not close Slice 4.

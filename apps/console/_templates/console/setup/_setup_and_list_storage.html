@@ -1087,7 +1087,7 @@
             async validateStorage(storage_id) {
                 Alpine.store('showLoading').toggle();
 
-                let method = "GET";
+                let method = "POST";
                 let url = "/api/v1/storage/{{storage.code}}/" + storage_id + "/validate/";
 
                 let response = await fetch(url, {
@@ -1096,6 +1096,7 @@
                         'Content-Type': 'application/json'
                     },
                     method: method,
+                    body: '{}',
                 }).then(async (response) => {
                     Alpine.store('showLoading').toggle();
                     if (response.ok) {

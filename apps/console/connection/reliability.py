@@ -1,17 +1,22 @@
 """Connection failure classification shared by API validation and workers.
 
-The source exception is deliberately not returned to API clients.  Database and
-SSH libraries routinely include usernames, host strings, and occasionally command
-fragments in their messages.  BackupSheep stores the original exception in Sentry,
-while this module exposes a stable, non-secret error contract to operators.
+The source exception is deliberately not returned to API clients or copied into
+telemetry. Database and SSH libraries routinely include usernames, host strings,
+and occasionally command fragments in their messages. BackupSheep records only
+the classifier's stable code and stage for these boundaries while exposing a
+stable, non-secret error contract to operators.
 """
 
 from __future__ import annotations
 
 import errno
+import logging
 import socket
 from dataclasses import dataclass
 from typing import Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,13 @@ class DatabaseTLSRequiredError(Exception):
 
     def __init__(self):
         super().__init__("database server requires an SSL/TLS connection")
+
+
+class SSHHostKeyApprovalRequiredError(Exception):
+    """Internal signal that this account has no approved key for the endpoint."""
+
+    def __init__(self):
+        super().__init__("account-scoped SSH host-key approval is required")
 
 
 def database_tls_required_message(value: object) -> bool:
@@ -151,6 +163,15 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
             "authorization",
             False,
             "Grant the EVENT privilege on every database selected for backup, then validate the connection again.",
+        )
+
+    if isinstance(error, SSHHostKeyApprovalRequiredError):
+        return _failure(
+            "HOST_KEY_UNKNOWN",
+            "The SSH host key has not been reviewed for this destination.",
+            "host_key",
+            False,
+            "Verify the fingerprint out of band and approve it for this BackupSheep account before retrying.",
         )
 
     # Import optional client libraries lazily so this helper remains usable from
@@ -242,7 +263,7 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
             "The SSH host key has not been reviewed for this destination.",
             "host_key",
             False,
-            "Verify the server fingerprint out of band and add it to BackupSheep's shared known-hosts store.",
+            "Verify the fingerprint out of band and approve it for this BackupSheep account before retrying.",
         )
     if "host key" in message and ("changed" in message or "mismatch" in message):
         return _failure(
@@ -302,6 +323,29 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
         False,
         "Review the destination address, credentials, permissions, and worker connectivity, then retry validation.",
     )
+
+
+def classify_and_record_connection_error(
+    error: BaseException,
+    stage: str = "connection",
+) -> ConnectionFailure:
+    """Classify a failure and emit only bounded, non-secret telemetry.
+
+    Do not use ``logger.exception`` or interpolate ``error`` here. Provider and
+    client exceptions can contain credentials, private hostnames, SQL fragments,
+    or command lines. The classifier code and stage are fixed public-contract
+    values and are sufficient for aggregate operational monitoring.
+    """
+
+    failure = classify_connection_error(error, stage=stage)
+    logger.warning(
+        "Connection operation failed.",
+        extra={
+            "connection_failure_code": failure.code,
+            "connection_failure_stage": failure.stage,
+        },
+    )
+    return failure
 
 
 def classified_connection_error(error: BaseException, stage: str = "connection") -> ClassifiedConnectionError:

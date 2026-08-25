@@ -32,12 +32,29 @@ reviewed release commit:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
+KMS_KEY_ARN='arn:aws:kms:us-east-1:123456789012:key/<reviewed-key-id>'
+KMS_REGION='us-east-1'
+KMS_DATABASE_CREDENTIALS='/absolute/protected/kms-database.credentials'
+KMS_FILES_CREDENTIALS='/absolute/protected/kms-files.credentials'
 curl -fSLo install.sh \
   "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
 less install.sh
 chmod 700 install.sh
-./install.sh --ref "${COMMIT}" --domain backups.example.com
+./install.sh \
+  --ref "${COMMIT}" \
+  --install-dir "$HOME/.local/share/backupsheep" \
+  --project-name backupsheep \
+  --domain backups.example.com \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
 ```
+
+The two credential inputs must be distinct, canonical, user-owned mode-`0400`/`0600`
+files for separate AWS identities whose IAM/KMS policies enforce the matching database or
+files encryption context.
 
 The installer prints an SSH-tunnel command and an explicit trusted-shell command for
 retrieving the onboarding token after the health check passes; it does not put the token
@@ -57,7 +74,7 @@ absent from installation logs:
 
 ```bash
 cd "$HOME/.local/share/backupsheep"
-./backupsheep-compose ps
+./backupsheep-compose ps --all
 cat .secrets/onboarding_token
 ```
 
@@ -68,8 +85,10 @@ cat .secrets/onboarding_token
 - Place BackupSheep behind an HTTPS reverse proxy before public use, then set
   `DJANGO_HTTPS=true`, `APP_PROTOCOL=https://`, `APP_DOMAIN`, and
   `DJANGO_ALLOWED_HOSTS` in the installation `.env`.
-- If using Local Storage, mount the provider block volume at `/backups` before retaining
-  archives there. An external storage destination remains the safer long-term target.
+- If using Local Storage, back the Compose `backup_storage` volume with the provider block
+  volume before retaining archives there. Stock Compose exposes it as `/backups` only in
+  `worker-storage`; do not bind it into app or another worker. An external storage
+  destination remains the safer long-term target.
 
 See [production deployment](deployment.md) for TLS and hardening, and
 [configuration](configuration.md#local-storage-backup-destination-optional) for persistent

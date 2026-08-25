@@ -6,6 +6,7 @@ from django.conf import settings
 from apps.console.vultr_monitoring import (
     VultrMonitoringError,
     list_instance_backups,
+    vultr_monitoring_public_message,
 )
 from apps.tests.base import BaseTestCase
 
@@ -19,6 +20,19 @@ def _response(status_code, payload):
 
 
 class VultrAutomaticBackupMonitoringTests(BaseTestCase):
+    def test_public_message_ignores_provider_exception_text(self):
+        canary = "provider-secret-canary-monitoring"
+        error = VultrMonitoringError(
+            canary,
+            classification="authentication",
+            status_code=401,
+        )
+        public = vultr_monitoring_public_message(
+            error.classification, error.status_code
+        )
+        self.assertEqual(public, "Vultr authentication was rejected. (HTTP 401).")
+        self.assertNotIn(canary, public)
+
     def test_lists_all_cursor_pages_and_sanitizes_payload(self):
         auth = SimpleNamespace(get_client=lambda: {"Authorization": "Bearer test"})
         responses = [

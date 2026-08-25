@@ -8,13 +8,16 @@ account must present an install token that proves access to the host or containe
 Confirm that migrations succeeded and the application is healthy:
 
 ```bash
+cd "$HOME/.local/share/backupsheep"  # or the exact --install-dir you selected
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=100 migrate preflight app
+./backupsheep-compose logs --tail=100 \
+  rabbitmq-volume-init rabbitmq-provision staging-provision \
+  db-provision migrate db-seal preflight app-egress-guard app
 curl -fsS http://127.0.0.1:8000/healthz/
 ```
 
-The `migrate` and `preflight` services should be `Exited (0)`, `app` should become healthy
-and the health request should return `ok`.
+Every provision/migration/seal/preflight one-shot should be `Exited (0)`; the egress
+guard and `app` should be healthy and the health request should return `ok`.
 
 The verified installer and stock Compose deployment mount a fixed onboarding token only
 into `app`; its direct `.env` value remains blank. Read it from the protected host file as
@@ -75,7 +78,7 @@ With email disabled, backups still run, but password-reset and invitation messag
 be delivered. An operator can recover a password from the host:
 
 ```bash
-./backupsheep-compose run --rm app python manage.py changepassword owner@example.com
+./backupsheep-compose run --rm --no-deps app python manage.py changepassword owner@example.com
 ```
 
 ### 4. Add storage
@@ -84,7 +87,8 @@ The wizard lists enabled storage types. Opening a provider takes you to its norm
 setup flow; after adding and validating it, return to onboarding. Multiple destinations
 can be added now or later.
 
-Local Storage needs durable capacity beneath `/backups`. Object-storage destinations need
+Local Storage needs durable capacity in `backup_storage`, mounted at `/backups` only in
+`worker-storage`; its objects are BSE1 ciphertext. Object-storage destinations need
 provider credentials and an existing bucket/container as required by their adapter. OAuth
 destinations need application credentials in `.env` before starting their connect flow.
 See the [provider matrix](../reference/provider-matrix.md).
@@ -109,8 +113,16 @@ review credentials, any restored database/broker state and durable queued/recove
 before enabling them. Starting this profile can execute existing provider mutations:
 
 ```bash
-./backupsheep-compose --profile operations up --detach
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+./backupsheep-compose --profile operations up --detach --no-build --no-deps beat
 ```
+
+Broad or workload-only `up` is refused after the core pair exists; operations must enter
+through the exact guard/workload pairs above.
 
 ## Console owner versus Django superuser
 
@@ -126,7 +138,7 @@ Create a Django superuser only when direct Django administration is operationall
 required:
 
 ```bash
-./backupsheep-compose run --rm app python manage.py createsuperuser
+./backupsheep-compose run --rm --no-deps app python manage.py createsuperuser
 ```
 
 A Django superuser is not a substitute for a BackupSheep member and is redirected away

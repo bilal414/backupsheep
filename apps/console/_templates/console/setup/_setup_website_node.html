@@ -937,6 +937,46 @@
                 this.website.includes_glob = this.website.includes_glob.filter(el => el !== object);
             },
 
+            async waitForManagedObjectDiscovery(accepted) {
+                if (!accepted?.operation_id) return accepted;
+                const statusUrl = "/api/v1/connections/" + this.integration_code
+                    + "/" + encodeURIComponent(this.connection_id)
+                    + "/managed-ssh-operations/"
+                    + encodeURIComponent(accepted.operation_id) + "/";
+                const deadline = Date.now() + 300000;
+                let state = accepted;
+                while (Date.now() < deadline) {
+                    const status = String(state.operation_status || "pending").toLowerCase();
+                    if (status === "complete") return state.result || {};
+                    if (status === "failed" || status === "expired") {
+                        const failure = state.error || {};
+                        throw new Error(
+                            [failure.detail, failure.remediation].filter(Boolean).join(" ")
+                            || "Object discovery failed."
+                        );
+                    }
+                    await new Promise((resolve) => window.setTimeout(resolve, 750));
+                    const controller = new AbortController();
+                    const timeout = window.setTimeout(() => controller.abort(), 20000);
+                    try {
+                        const response = await fetch(statusUrl, {
+                            headers: {'Accept': 'application/json'},
+                            method: 'GET',
+                            cache: 'no-store',
+                            signal: controller.signal,
+                        });
+                        let payload = {};
+                        try { payload = await response.json(); } catch (ignored) {}
+                        if (!response.ok) {
+                            throw new Error(payload.detail || "Object discovery status is unavailable.");
+                        }
+                        state = payload;
+                    } finally {
+                        window.clearTimeout(timeout);
+                    }
+                }
+                throw new Error("Object discovery timed out. Retry the operation.");
+            },
             async getObjects(path) {
                 this.loading = true;
                 this.errorObjectList = null;
@@ -960,7 +1000,8 @@
                         'Accept': 'application/json',
                         'Content-Type': 'application/json'
                     },
-                    method: 'GET',
+                    method: 'POST',
+                    body: JSON.stringify({path: path || null}),
                 }).then(async (response) => {
                     if (response.ok) {
                         return response.json();
@@ -976,12 +1017,15 @@
                         this.scheduleErrors = json;
                         throw new Error(json.detail);
                     }
+                }).then(async (json) => {
+                    return await this.waitForManagedObjectDiscovery(json);
                 }).then((json) => {
                     {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
                     this.objectList = json.eligible_objects;
                     this.pathTree = json.path_tree;
                     this.loading = false;
                 }).catch((error) => {
+                    this.loading = false;
                     Alpine.store('notifications').items.push({
                         show: true,
                         error: true,

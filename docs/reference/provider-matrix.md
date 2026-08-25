@@ -13,10 +13,10 @@ encrypted at rest in PostgreSQL.
 
 | Source | Connection and backup | Restore behavior | Important limits |
 | --- | --- | --- | --- |
-| Website | Explicit/implicit FTPS or SFTP; selected remote paths; incremental mirror or full collection; ZIP plus file manifest. Plain FTP is a default-off compatibility mode. | Downloads one selected storage copy and writes it to the configured website target; overlay is default, optional exact mirror deletes target files absent from backup | SSH host keys are mandatory for SFTP. Server-side tar is an SFTP/SSH optimization, not a fourth protocol, and requires remote shell/tar permission. FTPS certificate verification is on by default. Plain FTP requires `ALLOW_INSECURE_FTP=true` and exposes credentials/data in transit. |
-| WordPress | WordPress connection combines site files and database-aware workflow into an archive | No automatic WordPress restore model is implemented; download or transfer the stored archive and recover with WordPress/database tooling | Validate both file and database access; a successful API/UI connection alone does not prove either data plane. |
-| Database | Direct or SSH-tunneled MySQL, MariaDB and PostgreSQL dumps; optional TLS; selected database | Downloads one selected storage copy; console restore defaults to a deterministic new-database fork, while the API also has an explicit in-place mode | In-place restore changes target data. Fork restore needs target-creation privileges. Client compatibility, free space, locks and TLS/authentication must be rehearsed. |
-| Basecamp | OAuth connection and API snapshot packaged for offsite storage | Backup/export is implemented; no dedicated in-place Basecamp restore model is present | Configure Basecamp application credentials and exact callback URL. Treat the artifact as export/recovery material. |
+| Website | Explicit/implicit FTPS or SFTP; selected remote paths; incremental mirror or full collection; ZIP plus file manifest sealed as BSE1 before handoff. Plain FTP is a default-off compatibility mode. | Storage publishes one selected BSE1 copy through the files reverse fence; files authenticates/decrypts and writes it to the configured website target. Overlay is default; optional exact mirror deletes target files absent from backup | SSH host keys are mandatory for SFTP. Server-side tar is an SFTP/SSH optimization, not a fourth protocol, and requires remote shell/tar permission. FTPS certificate verification is on by default. Plain FTP requires `ALLOW_INSECURE_FTP=true` and exposes credentials/data in transit. |
+| WordPress | Stock enterprise/BSE1 mode hides the source and refuses new connections, nodes, schedules, runs, retries and worker replays. Explicit non-enterprise legacy compatibility can combine site files and database-aware output into a plaintext archive | No enterprise automatic restore or authenticated plaintext-export action is implemented; direct BSE1 download is disabled and the transfer UI has no complete server action/task. Legacy compatibility uses the authenticated existing download action | Existing rows stay readable. Do not rely on WordPress copies for enterprise recoverability until an authenticated BSE1 export/restore path is implemented and rehearsed. Compatibility requires the family flag, `legacy-only`, legacy restore enabled and enterprise mode disabled, plus secure connector v2. |
+| Database | Direct or SSH-tunneled MySQL, MariaDB and PostgreSQL dumps; optional TLS; selected database; archive sealed as BSE1 | Storage publishes one selected BSE1 copy through the database reverse fence; database authenticates/decrypts. Console restore defaults to a deterministic new-database fork, while the API also has an explicit in-place mode | In-place restore changes target data. Fork restore needs target-creation privileges. Client compatibility, free space, locks and TLS/authentication must be rehearsed. |
+| Basecamp | Stock enterprise/BSE1 mode hides the source and refuses new OAuth connections, nodes, schedules, runs, retries and worker replays. Explicit non-enterprise legacy compatibility can package an API snapshot as a plaintext archive | No enterprise automatic restore or authenticated plaintext-export action is implemented; direct BSE1 download is disabled and the transfer UI has no complete server action/task. Legacy compatibility uses the authenticated existing download action | Existing rows stay readable. Do not rely on Basecamp copies for enterprise recoverability until an authenticated BSE1 export/restore path is implemented and rehearsed. Compatibility requires the family flag, `legacy-only`, legacy restore enabled and enterprise mode disabled. |
 
 ### Database versions exposed by the model
 
@@ -31,17 +31,24 @@ actual server/client pair before relying on it.
 
 ### Website modes and authentication
 
-Website authentication supports password, supplied private key and an optional
-operator-managed key pair. `SSH_MANAGED_PRIVATE_KEY_PATH` and
-`SSH_MANAGED_PUBLIC_KEY` must both resolve before managed-key mode appears. In stock
-Compose, put the optional private key in `.secrets/ssh_managed_private_key` (or leave it
-empty to disable); only app/database/files receive its mode-`0444` source, and their
-entrypoint validates and copies it into private tmpfs as
-`/run/backupsheep/ssh/managed_private_key`, mode `0600`. SSH never reads the source mount
-directly. Reviewed host keys live separately in `ssh_trust` (app read/write,
-database/files read-only).
+Website authentication supports passwords, customer-supplied private keys and the optional
+files-worker managed identity. Database SSH tunnels use the distinct database-worker
+identity. In stock Compose, the private halves are
+`.secrets/ssh_managed_files_private_key` and
+`.secrets/ssh_managed_database_private_key`; each mode-`0444` source is granted only to its
+worker lane, validated as Ed25519, and copied to that worker's private tmpfs as mode `0600`.
+The app and other roles receive neither private key. Managed identities are available only
+while the installation contains exactly one account; creating a second account atomically
+disables and fences managed-key connections. Customer-supplied, account-scoped private keys
+remain the multi-account option.
 
-Incremental mode maintains a persistent per-node cache under `backup_workdir`; full mode
+Reviewed host keys are account-scoped PostgreSQL approvals with append-only audit events.
+For each operation, the worker receives only the exact current approval material in a
+transient mode-`0600` private-runtime `known_hosts` file, which is deleted after use. Stock
+Compose has no shared SSH-trust volume or global `known_hosts` file.
+
+Incremental mode maintains a persistent per-node cache in the files lane's private
+`files_workdir`; full mode
 re-collects the selected tree. For eligible SFTP full backups, the server-side-tar path
 creates a temporary remote tar over SSH, downloads it over SFTP, inventories it and
 creates the final local ZIP. The worker cleans the temporary remote archive, but the
@@ -104,8 +111,8 @@ operations BackupSheep actually performs.
 
 | Code | Destination | Credential/API style | Repository-specific notes |
 | --- | --- | --- | --- |
-| `local` | Local Storage | Mounted filesystem; no provider credential | Root is `BS_LOCAL_STORAGE_PATH` (`/backups` in Compose). It must be durable; stock Compose grants read/write only to storage, read-only to app/cloud/database/files, and no mount to logs/Beat. |
-| `aws_s3` | Amazon S3 | AWS access/secret key, region and bucket | Supports expected bucket owner, version-aware records, presigned downloads, lifecycle transition settings and S3 Object Lock retention/legal hold. |
+| `local` | Local Storage | Mounted filesystem; no provider credential | Root is `BS_LOCAL_STORAGE_PATH` (`/backups` in Compose). It must be durable; stock Compose grants the mount read/write only to `worker-storage` and grants no `/backups` mount to app, cloud, database, files, logs or Beat. |
+| `aws_s3` | Amazon S3 | AWS access/secret key, region and bucket | Supports expected bucket owner, version-aware records, lifecycle transition settings and S3 Object Lock retention/legal hold. Presigned archive URLs are compatibility-only for explicitly enabled non-enterprise legacy artifacts; stock BSE1 direct download is refused. |
 | `backblaze_b2` | Backblaze B2 | S3-compatible key/secret, endpoint and bucket | Uses S3-compatible multipart upload with provider-specific error normalization. |
 | `wasabi` | Wasabi | S3-compatible key/secret, region/endpoint and bucket | Bucket must exist and match the selected service URL/region. |
 | `do_spaces` | DigitalOcean Spaces | S3-compatible key/secret, region endpoint and bucket | Uses the regional Spaces endpoint. |
@@ -139,16 +146,17 @@ and validated through the Storage page/API.
 
 - A successful upload records destination status and provider evidence such as size,
   checksum/ETag or object version where the adapter can prove it.
-- Download/restore uses a concrete storage-point row; losing one copy does not implicitly
-  select an unrelated destination.
+- Ciphertext transfer/restore uses a concrete storage-point row; losing one copy does not
+  implicitly select an unrelated destination. Stock BSE1 direct browser download is
+  refused.
 - Retention is implemented per backup/destination relationship. A failed delete remains
   visible rather than being silently treated as deleted.
 - Amazon S3 Object Lock is the implemented immutable-storage policy surface. Protected
   versions remain cataloged and a Beat task retries eligible deletes after retention or
   legal-hold conditions change.
 - Provider-side lifecycle/cold tiers can make an object temporarily unavailable. Restore
-  the object in the storage provider before requesting a BackupSheep download when the
-  adapter reports cold storage.
+  or thaw the object in the storage provider before requesting an authenticated
+  BackupSheep restore when the adapter reports cold storage.
 
 ## Capability validation checklist
 

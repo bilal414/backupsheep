@@ -2,9 +2,9 @@
 
 BackupSheep reads configuration when each process starts. Compose passes non-secret and
 optional integration settings from `.env` to each application service. The stock stack
-mounts the Django, PostgreSQL and RabbitMQ credentials from separate files in `.secrets`;
-only `app` also receives the onboarding-token file. Changing either configuration source
-requires recreating the affected containers.
+mounts Django, per-lane PostgreSQL/RabbitMQ, task-signing, onboarding and source-lane KMS
+material from separate files in `.secrets`, and each role receives only its exact grant.
+Changing either configuration source requires recreating the affected containers.
 
 ## Configuration precedence
 
@@ -24,11 +24,12 @@ contract.
 
 For normal Compose deployments, copy `.env_sample` wholesale and retain optional blank
 keys. Keep `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
-`ONBOARDING_INSTALL_TOKEN` blank after creating the four required protected files and the
-optional `ssh_managed_private_key` file exactly as shown in the
-[installation guide](installation.md#manual-docker-compose-installation). Keep direct
-`SSH_MANAGED_PRIVATE_KEY_PATH` blank: the image entrypoint exports the validated private
-tmpfs copy itself. The
+`ONBOARDING_INSTALL_TOKEN` blank. Let the exact installer create the protected per-lane
+database, broker, signing, onboarding and KMS files plus the two optional lane-specific
+managed-key files exactly as shown in the
+[installation guide](installation.md#manual-docker-compose-installation). Keep legacy
+`SSH_MANAGED_PRIVATE_KEY_PATH` and `SSH_MANAGED_PUBLIC_KEY` blank: each eligible worker
+exports only its validated private-tmpfs copy. The
 exhaustive key list is in the
 [environment-variable reference](../reference/environment-variables.md).
 
@@ -46,9 +47,12 @@ cp -p .env .env.before-config-change
 chmod 600 .env .env.before-config-change
 # Edit .env with your preferred editor.
 ./backupsheep-compose config --quiet
-./backupsheep-compose up --detach
+./backupsheep-compose up --detach --no-build --no-deps --force-recreate \
+  app-egress-guard app
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=100 migrate preflight app
+./backupsheep-compose logs --tail=100 \
+  rabbitmq-volume-init rabbitmq-provision staging-provision \
+  db-provision migrate db-seal preflight app-egress-guard app
 ```
 
 `./backupsheep-compose config` expands the Compose model and can include resolved environment
@@ -58,8 +62,16 @@ configuration backup. If operations were already enabled and the change affects 
 review durable queue/recovery state before recreating them explicitly:
 
 ```bash
-./backupsheep-compose --profile operations up --detach
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+./backupsheep-compose --profile operations up --detach --no-build --no-deps beat
 ```
+
+Once a guard/workload pair exists, broad, guard-only and workload-only `up` operations
+are refused; configuration changes use the exact paired lifecycle above.
 
 ## The public URL tuple
 
@@ -97,9 +109,12 @@ Provider, source and storage credentials entered through the console are encrypt
 a per-account Fernet key stored with the account data. Back up PostgreSQL securely and
 treat it as sensitive even though credential fields are encrypted.
 
-For the bundled stack, create a strong `.secrets/db_password` before the `pgdata` volume is
-created. Changing that file after PostgreSQL initialization does not change the database
-role's existing password. Keep the direct `.env` key blank.
+For the bundled stack, let the verified installer create strong, distinct
+`db_bootstrap_password`, `db_migrator_password`, and `db_<lane>_password` files for
+app, preflight, Beat, cloud, database, files, storage and logs. Keep the direct `.env`
+password blank. Bootstrap is mounted only into PostgreSQL and the provision/seal
+one-shots, migrator only into those one-shots and `migrate`, and every long-lived
+service receives exactly one lane password.
 
 ## Database configuration
 
@@ -107,15 +122,35 @@ The bundled database uses:
 
 ```dotenv
 DB_NAME='backupsheep'
-DB_USER='backupsheep'
+BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3'
+DB_BOOTSTRAP_USER='backupsheep_bootstrap'
+DB_MIGRATOR_USER='backupsheep_migrator'
+DB_APP_USER='backupsheep_app'
+DB_PREFLIGHT_USER='backupsheep_preflight'
+DB_BEAT_USER='backupsheep_beat'
+DB_CLOUD_USER='backupsheep_cloud'
+DB_DATABASE_USER='backupsheep_database'
+DB_FILES_USER='backupsheep_files'
+DB_STORAGE_USER='backupsheep_storage'
+DB_LOGS_USER='backupsheep_logs'
+DB_USER='backupsheep_app'
 DB_PASSWORD=''
 DB_HOST='db'
 DB_PORT='5432'
 ```
 
-The stock Compose file supplies `DB_PASSWORD_FILE=/run/secrets/db_password` to Django and
-`POSTGRES_PASSWORD_FILE=/run/secrets/db_password` to PostgreSQL from the protected host
-file. Do not duplicate the value in `.env`.
+Stock Compose pins `DB_USER`, `BACKUPSHEEP_DATABASE_LANE`, and
+`DB_PASSWORD_FILE=/run/secrets/db_<lane>_password` independently per service.
+PostgreSQL initializes with `db_bootstrap_password`; `migrate` uses
+`db_migrator_password`; `db-seal` applies exact ACL/RLS policy before preflight.
+Do not duplicate any value in `.env` or reuse a credential. Follow the
+[database identity migration gate](database-identity-migration.md) for an existing
+bundled database; never change the generation marker by hand.
+
+`worker-database` and `worker-files` have no SQL visibility into `core_storage*`
+destination configuration and have SELECT-only access to their destination through
+rows. The storage lane validates the frozen destination selection and commits the
+non-secret authorization witness before it republishes the stable source task.
 
 For managed PostgreSQL, set `DATABASE_URL`. A non-empty URL overrides all five discrete
 connection values for Django. It must use `postgres://` or `postgresql://`. Production
@@ -147,16 +182,81 @@ BackupSheep accepts RabbitMQ brokers only. Configuration precedence is:
    are set (non-production development retains a warning-only compatibility fallback).
 
 Use `amqp://` or `amqps://`. Never use RabbitMQ's well-known `guest/guest` account, even
-on an internal network. Stock Compose requires a non-empty
-`.secrets/rabbitmq_password`, keeps the direct environment value blank, creates a
-dedicated `backupsheep` user/vhost only on a fresh volume, and persists broker state in
-`rabbitmq_data`. Plaintext `amqp` is accepted in production only for loopback or the exact
-stock `rabbitmq` service. An external broker, including one reached over a private network,
-must use `amqps`; BackupSheep requires a trusted certificate and verifies its hostname.
+on an internal network. Stock Compose keeps the direct password blank and gives app,
+preflight, Beat, cloud, database, files, storage and logs distinct
+`.secrets/rabbitmq_<lane>_password` files. The networked `rabbitmq-provision` one-shot
+reconciles the exact users/vhost/ACL/topology; workers cannot configure topology or read
+another queue. Task-auth generation 3 also gives each publisher a private Ed25519 signing
+key while consumers receive only the installation-bound public registry. Broker state
+persists in `rabbitmq_data`. Plaintext `amqp` is accepted in production only for loopback
+or the exact stock `rabbitmq` service. An external broker, including one reached over a
+private network, must use `amqps`; BackupSheep requires a trusted certificate and verifies its hostname.
 Set `RABBITMQ_CA_CERT` when the broker uses a private CA, otherwise system roots apply.
 Do not put `ssl_*` overrides in the broker URL; they are rejected so certificate checking
 cannot be disabled. Use one certificate-valid broker/load-balancer hostname in production
 rather than a semicolon-separated failover URL.
+
+## Artifact encryption and AWS KMS
+
+Stock production requires `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=bse1`, enterprise mode,
+AWS KMS and legacy restore disabled. The installer requires one resolved symmetric key
+ARN, its region, an ARN allowlist containing every key still needed for restore/rotation,
+and two distinct canonical AWS credential files. It stores each credential file beneath
+`.secrets` and mounts it only into the matching database or files source lane. Storage,
+web, cloud, logs and Beat receive no KMS identity.
+
+Use two AWS principals. Their identity policies and the KMS key policy must condition
+cryptographic actions on the exact installation-bound encryption context and
+`bse:lane=database` or `bse:lane=files`; do not grant an unconditional alternate path
+through an instance profile, role, grant or container credential endpoint. Prove both
+same-lane success and cross-lane denial before enabling operations. Enterprise mode also
+rejects a custom KMS endpoint, an insecure endpoint and the local-development provider.
+See [Private staging and ciphertext handoff](../security/staging-isolation.md) for the
+exact context and key-wrap rotation procedure.
+
+## Container egress policy
+
+App and each Internet-capable worker share a network namespace with its own no-secret
+guard. Stock `deny` mode admits only the exact internal PostgreSQL/RabbitMQ peers and
+blocks every outward destination. Generation-2 `allowlist` permits only the role's
+reviewed exact IPv4 `CIDR:port` or IPv6 `[CIDR]:port` TCP tuples and names. `public` is
+an explicit compatibility risk opt-in that permits ordinary public endpoints while
+blocking special/private, discovered-gateway and well-known NAT64 destinations by
+default. Exact tuples are explicit special-range exceptions intended only for narrow
+reviewed private targets in public mode. Fixed `never` destinations and discovered
+gateways remain blocked; the fixed set includes both well-known NAT64 prefixes and no
+tuple can override them. A tuple can override only the ordinary private/reserved set. In
+`allowlist` mode, also set the role's exact comma-separated
+`BACKUPSHEEP_<ROLE>_EGRESS_ALLOW_DNS_NAMES`; every CNAME target must be listed separately.
+Operations that need the Internet deliberately fail until their role receives the
+smallest workable exact tuple and name allowlists. The complete canonical name policy is
+capped at 66 unique names, including non-literal DB/broker names.
+
+The guard authorizes stock PostgreSQL and RabbitMQ independently from outward policy:
+only the exact directly connected interface/address/TCP-port tuple for each peer is
+accepted, the two peers must be on distinct bridges, and a one-second DNS refresh blocks
+both if either becomes absent or ambiguous. Never add a whole Docker bridge CIDR as a
+shortcut.
+
+Public mode uses ordinary DNS and requires an empty exact-name list. `deny` and strict
+`allowlist` redirect workload Docker-DNS traffic to a loopback-only zero-capability
+UID-`10021` parser. It validates the hostile packet and sends only an immutable-name index
+plus A/AAAA selector over a Unix socket. A distinct zero-capability UID-`10022` forwarder
+authenticates the parser, constructs the canonical query and alone reaches Docker DNS.
+Direct external TCP/UDP 53 is blocked.
+
+In `allowlist`, name approval and the outward exact IP/port tuple are independent; both
+must permit a provider connection. This is transport-level defense in depth, not resource
+authorization: a compromised role can reach another tenant or resource served on the
+same IP and port. Enterprise operations require dedicated/private endpoints or a
+resource-aware controlled proxy. Deployment-specific NAT64 prefixes remain a host/network
+control.
+
+Set `BACKUPSHEEP_EGRESS_POLICY_GENERATION=2`. Address-only `ALLOW_IPV4`/`ALLOW_IPV6`
+values are retired and fail closed. For an older stock install, review outbound
+dependencies and run the installer once with `--migrate-egress-policy`; it resets all six
+roles to `deny`, clears all lists, and refuses later reuse. Mixed or customized legacy
+policy requires manual review and reset rather than automatic translation.
 
 ## Website transfer security
 
@@ -173,42 +273,56 @@ escape hatch, not an enterprise-safe mode.
 
 | Path | Compose volume | Contents | Required visibility |
 | --- | --- | --- | --- |
-| `/code/_storage` | `backup_workdir` | Staged work, restore/run logs, incremental website cache, manifests and worker locks | Read/write in database, files and storage workers; completely absent from app, cloud, logs and Beat |
-| `/var/lib/backupsheep/ssh-trust/known_hosts` | `ssh_trust` | UI-approved, out-of-band-verified OpenSSH host keys | Read/write in app; read-only in database and files workers; absent from cloud, storage, logs and Beat |
-| `/run/secrets/ssh_managed_private_key` -> `/run/backupsheep/ssh/managed_private_key` | `.secrets/ssh_managed_private_key` | Optional deployment-managed, unencrypted SSH private key; empty means disabled | Read-only mode-`0444` source mount in app/database/files only; entrypoint validates and copies it to private tmpfs mode `0600` before exporting the target path |
-| `/backups` | `backup_storage` | Archives created by the Local Storage destination | Read/write only in the storage worker; read-only in app, cloud, database and files workers; absent from logs and Beat |
+| `/code/_storage` | `database_workdir` | Plaintext database dump/restore work, database run logs and lane-local locks | Read/write only in `worker-database`; absent from every other runtime role |
+| `/code/_storage` | `files_workdir` | Plaintext website/WordPress/Basecamp work, website incremental cache, files-lane run logs and locks | Read/write only in `worker-files`; absent from every other runtime role |
+| `/code/_storage` | `storage_workdir` | Storage-private BSE1 materialization, provider transfer work and destination-upload run logs | Read/write only in `worker-storage`; absent from every other runtime role |
+| `/var/lib/backupsheep/transfer/database` | `database_ciphertext_transfer` | Fenced, published BSE1 handoff from database to storage | Read/write in `worker-database`, read-only in `worker-storage`; absent elsewhere |
+| `/var/lib/backupsheep/transfer/files` | `files_ciphertext_transfer` | Fenced, published BSE1 handoff from files to storage | Read/write in `worker-files`, read-only in `worker-storage`; absent elsewhere |
+| `/var/lib/backupsheep/restore-transfer` | `restore_ciphertext_transfer` | Fenced BSE1 reverse handoff from storage to the exact restore lane | Read/write in `worker-storage`, read-only in database/files; per-lane reader groups prevent cross-lane access |
+| `/run/backupsheep/ssh` | private tmpfs | Exact per-operation approved host keys and, when enabled, the current lane's managed identity | Present only in database/files workers; trust/key files are mode `0600`, scoped to the operation/lane and removed after use |
+| `/run/secrets/ssh_managed_database_private_key` | `.secrets/ssh_managed_database_private_key` | Optional database-lane Ed25519 identity; empty means disabled | Read-only mode-`0444` source in `worker-database` only; copied to private tmpfs before use |
+| `/run/secrets/ssh_managed_files_private_key` | `.secrets/ssh_managed_files_private_key` | Optional files-lane Ed25519 identity; empty means disabled | Read-only mode-`0444` source in `worker-files` only; copied to private tmpfs before use |
+| `/backups` | `backup_storage` | BSE1 archives created by the Local Storage destination | Read/write only in `worker-storage`; no other runtime role receives this mount |
 
-`BS_LOCAL_STORAGE_PATH` changes the Local Storage root inside each process. If it points
-somewhere other than `/backups`, preserve the same role-specific access policy: writable
-only in the storage worker and read-only in roles that inspect or consume archives. Do not
-point it at a container-only ephemeral filesystem.
+The legacy `backup_workdir` is not a runtime handoff. It is mounted only in the networkless
+`staging-provision` one-shot so an existing installation can prove the old shared volume is
+empty before the v3 layout witness is committed. Do not restore data into it or attach it to
+an application role.
+
+Stock Compose fixes `BS_LOCAL_STORAGE_PATH` at `/backups`. A reviewed override that changes
+the path must mount the same durable target read/write only in `worker-storage` and must pass
+the entrypoint/preflight mount checks; do not add a Local Storage mount to app, cloud,
+database, files, logs or Beat.
 
 The web/API process can request an incremental-cache reset but has no staging mount.
-`reset_incremental_cache` runs in the storage queue, validates the canonical node ID,
-anchors every removal to an opened cache-directory descriptor with no-follow checks, and
-takes the same per-node incremental lock held across mirror/archive work. It therefore
-cannot race a live cache writer or follow a swapped parent path. On-disk `delete_old_logs`,
-upload, finalization and local cleanup are also storage-routed. Keep custom queue routing
-and Compose overrides consistent with that boundary.
+`reset_incremental_cache` runs in the files lane, validates the canonical node ID, anchors
+every removal to an opened cache-directory descriptor with no-follow checks, and takes the
+same per-node incremental lock held across mirror/archive work. Files-lane run-log pruning
+runs there at 03:00 UTC as `delete_old_logs`; database run-log pruning runs separately at
+03:05 UTC in the database lane as `delete_old_database_logs`; destination-upload run-log
+pruning runs at 03:10 UTC in the storage lane as `delete_old_storage_logs`. PostgreSQL
+`CoreLog` rows are pruned separately at 03:30 UTC by `delete_old_db_logs`. Storage
+upload/finalization otherwise touches only
+storage-private work and the fenced ciphertext handoffs. Keep custom queue routing and
+Compose overrides consistent with those ownership boundaries.
 
-Outside stock Compose, `SSH_KNOWN_HOSTS_PATH` defaults to `_storage/ssh_known_hosts` and
-relative values resolve beneath the repository base directory. Stock Compose instead
-fixes it to `/var/lib/backupsheep/ssh-trust/known_hosts` on the dedicated `ssh_trust`
-volume. Unknown SSH/SFTP hosts are rejected. Add a key through the app only after
-verifying the server fingerprint through an independent channel; workers consume the
-result read-only.
+`SSH_KNOWN_HOSTS_PATH` is a compatibility-only file setting for separately reviewed
+non-stock deployments. Stock Compose does not set or mount it. The app stores exact,
+account-scoped host-key approvals and append-only approval/replacement/revocation events in
+PostgreSQL. Workers materialize only the current approval required by one operation in a
+transient private-runtime file. Unknown, changed, noncanonical or stale-generation keys are
+rejected. Approve or replace a key only after verifying its fingerprint independently.
 
-Managed SSH-key authentication is advertised only when both
-`SSH_MANAGED_PRIVATE_KEY_PATH` and `SSH_MANAGED_PUBLIC_KEY` are configured and the private
-key file exists. In stock Compose, put the optional key in installer-managed
-`.secrets/ssh_managed_private_key` (mode `0444` beneath the mode-`0700` directory). Only
-app/database/files receive that immutable source. Docker's source mount cannot be used
-directly because OpenSSH rejects a private key with mode `0444`; the entrypoint accepts an
-empty file as disabled, otherwise requires a regular, unencrypted, valid key no larger
-than 64 KiB, copies it to private tmpfs as mode `0600`, and exports
-`SSH_MANAGED_PRIVATE_KEY_PATH=/run/backupsheep/ssh/managed_private_key`. Do not point SSH
-at `/run/secrets/ssh_managed_private_key`. Never store the key in `backup_workdir`,
-`.env`, a broker message, or an image.
+Stock managed SSH authentication uses distinct Ed25519 identities. Put the database
+private half in `.secrets/ssh_managed_database_private_key` and the files private half in
+`.secrets/ssh_managed_files_private_key`, each mode `0444` beneath the mode-`0700` secret
+directory; the installer derives their public settings. `worker-database` and
+`worker-files` each receive only their own source, validate it, and copy it into private
+tmpfs as mode `0600`. The app and other roles receive neither private key. Both identities
+must be configured together and differ. This mode is available only when PostgreSQL
+contains exactly one account; creation of a second account atomically disables and fences
+managed-key connections. Multi-account installations use customer-supplied private keys.
+Never store a private key in a work/transfer volume, `.env`, a broker message, or an image.
 
 ## Email and notifications
 
@@ -252,6 +366,38 @@ or application-signing flows:
 API-host and OAuth-endpoint variables have public defaults in settings. Override them only
 for a reviewed provider change, proxy or test environment.
 
+`WORDPRESS_INTEGRATION_ENABLED` and `BASECAMP_INTEGRATION_ENABLED` both default to `false`.
+They are compatibility switches, not enterprise feature switches: either source is usable
+only when enterprise mode is explicitly false, artifact mode is `legacy-only`, and legacy
+restore/download is explicitly enabled. Enterprise/BSE1 installs ignore a true family
+switch, hide the source choices, reject every new-protection/backup initiation boundary,
+and preserve existing records for inspection.
+
+### Compose credential-lane boundary
+
+Stock Compose reads `.env` only as an interpolation source and never attaches the file
+wholesale to an application container. The model names every accepted configuration
+key, blanks loader/proxy hooks and deployment-wide credentials, and restores each
+credential family only to its required consumer:
+
+| Runtime role | Deployment-wide integration credentials available |
+| --- | --- |
+| `app` (web) | All families, for OAuth/setup callbacks, notification setup and authenticated legacy log-URL handling |
+| `worker-cloud` | DigitalOcean application credentials and the matching OVH CA/EU/US application pairs |
+| `worker-files` | Basecamp application credentials |
+| `worker-storage` | Dropbox, pCloud, Microsoft OneDrive and Google Drive application credentials |
+| `worker-logs` | Postmark, Mailgun, SES, Slack and Telegram credentials |
+| `worker-database`, Beat, migration/preflight/provisioning roles | None of these integration credential families |
+
+The immutable entrypoint independently rejects a non-empty credential from any
+non-owning role, so a stale or tampered `.env` cannot silently broaden a lane. A new or
+unknown key is not passed until the Compose allowlist and its consumer contract are
+reviewed. This is a
+process-compromise containment boundary, not permission to reuse provider secrets: scope
+each credential at the provider and rotate it on suspected disclosure. `SENTRY_DSN`
+remains available to every Django/Celery role because each initializes the scrubbed Sentry
+integration and a DSN is an ingest identifier, not a provider-authorization credential.
+
 ## Recovery and timeout tuning
 
 The sample values coordinate renewable leases, worker heartbeats and periodic recovery.
@@ -272,7 +418,8 @@ reliability tests; they are not production tuning controls and must remain unset
 ## Apply and verify a change
 
 ```bash
-./backupsheep-compose up --detach
+./backupsheep-compose up --detach --no-build --no-deps --force-recreate \
+  app-egress-guard app
 ./backupsheep-compose ps --all
 curl -fsS http://127.0.0.1:8000/healthz/
 ./backupsheep-compose exec app python manage.py check
@@ -283,7 +430,12 @@ were previously authorized, recreate and inspect those services separately after
 durable queue/recovery state:
 
 ```bash
-./backupsheep-compose --profile operations up --detach
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+./backupsheep-compose --profile operations up --detach --no-build --no-deps beat
 ./backupsheep-compose --profile operations exec worker-cloud celery -A backupsheep inspect ping
 ```
 

@@ -1,6 +1,7 @@
 import json
 from unittest.mock import Mock, patch
 
+from django.test import override_settings
 from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
 
@@ -387,6 +388,12 @@ class CloudConnectionSerializerHardeningTests(BaseTestCase):
                 self.assertTrue(field.write_only, f"{serializer_class.__name__}.{field_name}")
                 self.assertFalse(field.required, f"{serializer_class.__name__}.{field_name}")
 
+    @override_settings(
+        BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="legacy-only",
+        BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+        WORDPRESS_INTEGRATION_ENABLED=True,
+    )
     def test_partial_credential_pairs_are_rejected_without_provider_calls(self):
         specs = (
             (CoreAuthAWSWriteSerializer, {"access_key": "only-access"}),

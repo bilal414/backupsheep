@@ -109,16 +109,36 @@ WordPress uses the BackupSheep WordPress connection/plugin flow and can protect:
 - database only;
 - files only.
 
-The resulting archive is uploaded to selected storage destinations. The
-console offers download and transfer of completed copies, but it does not expose
-an automatic WordPress restore action.
+The stock enterprise/BSE1 deployment does not advertise WordPress and refuses new
+connections, nodes, schedules, on-demand runs, retries, outbox dispatches, and replayed
+worker tasks. Existing connection, node, schedule, and backup rows remain visible for
+inspection and retention; the gate does not delete them. This is necessary because direct
+BSE1 browser/ZIP download is disabled, the rendered transfer UI has no complete server
+action/task, and there is no automatic WordPress restore or authenticated plaintext-export
+action.
+
+An explicitly non-enterprise compatibility deployment may enable new WordPress backups
+only with `WORDPRESS_INTEGRATION_ENABLED=true`,
+`BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=legacy-only`,
+`BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true`, and
+`BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=false`. That path creates legacy plaintext archives
+whose existing authenticated download action is usable; it is not an enterprise recovery
+claim and still requires the secure connector v2.
 
 ## Basecamp
 
-Basecamp uses OAuth and can protect all projects or a selected project list.
-The resulting archive is uploaded to selected storage destinations. Completed
-copies can be downloaded or transferred; no automatic Basecamp restore action
-is exposed in the node console.
+Basecamp uses OAuth and can protect all projects or a selected project list only in the
+explicit legacy compatibility mode described below. The stock enterprise/BSE1 deployment
+does not advertise Basecamp and refuses new connections, nodes, schedules, on-demand runs,
+retries, outbox dispatches, and replayed worker tasks while preserving existing rows for
+inspection. Direct BSE1 browser/ZIP download is disabled, the rendered transfer UI has no
+complete server action/task, and no automatic Basecamp restore or authenticated
+plaintext-export action is exposed in the node console.
+
+Compatibility requires `BASECAMP_INTEGRATION_ENABLED=true` plus the same explicit
+`legacy-only`, legacy-restore-enabled, non-enterprise settings listed for WordPress. It
+relies on the authenticated legacy archive download path and is not an enterprise recovery
+claim.
 
 ## Not yet wired as backup sources
 

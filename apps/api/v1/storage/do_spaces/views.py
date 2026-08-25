@@ -68,7 +68,7 @@ class CoreStorageDoSpacesView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         regions = CoreDoSpacesRegion.objects.filter().values()
         return Response(regions)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             storage = self.get_object()

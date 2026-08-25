@@ -20,6 +20,7 @@ from apps.console.connection.models import (
 from apps.console.node.models import CoreDatabase, CoreNode, CoreSchedule, CoreScheduleRun
 from apps.console.storage.models import CoreStorage
 from croniter import croniter
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 class CoreAccountSerializer(serializers.ModelSerializer):
@@ -53,6 +54,7 @@ class CoreScheduleRunSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         schedule = data["schedule"]
+        require_source_backup_creation(schedule.node.connection.integration.code)
         request_id = data["request_id"]
         if CoreScheduleRun.objects.filter(request_id=request_id, schedule=schedule).exists():
             raise serializers.ValidationError(
@@ -210,6 +212,11 @@ class CoreScheduleSerializer(serializers.ModelSerializer):
             data['year'] = None
 
         node = data.get("node", getattr(instance, "node", None))
+        resulting_status = data.get(
+            "status", getattr(instance, "status", CoreSchedule.Status.ACTIVE)
+        )
+        if node is not None and resulting_status == CoreSchedule.Status.ACTIVE:
+            require_source_backup_creation(node.connection.integration.code)
         storage_points = data.get("storage_points")
         if storage_points is None:
             storage_points = instance.storage_points.all() if instance else []

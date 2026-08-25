@@ -18,8 +18,10 @@ The public backup lifecycle includes:
 - deletion and download transition states.
 
 **Partial** is a usable-but-degraded outcome: at least one requested storage
-destination completed and at least one did not. The completed storage-point
-rows remain available for download, transfer, or restore.
+destination completed and at least one did not. The completed storage-point rows remain
+cataloged and, where implemented/eligible, available for authenticated restore.
+Compatibility download actions refuse current BSE1 artifacts, and the transfer UI has no
+complete current server action/task.
 
 ## Durable execution status
 
@@ -65,8 +67,8 @@ Actions include:
 - cancel an in-flight backup;
 - delete a terminal backup and its unprotected provider/storage copies;
 - inspect storage-point status;
-- download a completed archive copy;
-- transfer a completed archive to another configured destination;
+- invoke a compatibility download action, which refuses current BSE1 artifacts;
+- open the legacy transfer UI, which is not backed by a complete current server action/task;
 - start a supported restore;
 - inspect the execution status and retry/reconciliation information.
 
@@ -74,6 +76,11 @@ Some website/database transfer-log endpoints remain unavailable in the
 self-hosted build because the former hosted log bucket is not present. This does
 not remove the run's database status, execution status, storage points, or
 activity entries.
+
+Direct browser/ZIP export is intentionally not a recovery path for BSE1. The storage lane
+has ciphertext but no source KMS identity, while the web process has neither the artifact
+mount nor a source-lane KMS identity. Database and website restores use the fenced reverse
+ciphertext handoff and authenticate/decrypt only in the exact source lane.
 
 ## Crash and duplicate-delivery behavior
 

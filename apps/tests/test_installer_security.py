@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -85,19 +86,133 @@ semver_at_least 2.34.0-rc.1 2.33.1
 
     def test_installer_starts_only_the_core_without_explicit_operations_opt_in(self):
         self.assertIn(
-            "readonly -a CORE_SERVICES=(db rabbitmq migrate preflight app)",
+            "readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision db-provision migrate db-seal preflight app-egress-guard app)",
             self.installer,
         )
         self.assertIn('if [[ "$ENABLE_OPERATIONS" == true ]]', self.installer)
         self.assertIn("compose --profile operations up", self.installer)
-        self.assertIn('compose --profile operations stop "${OPERATION_SERVICES[@]}"', self.installer)
+        self.assertIn(
+            '--force-recreate "${OPERATION_GUARD_SERVICES[@]}"', self.installer
+        )
+        self.assertIn('"${OPERATION_WORKER_SERVICES[@]}"', self.installer)
+        self.assertIn(
+            "compose --profile operations up --detach --no-build --no-deps beat",
+            self.installer,
+        )
+        self.assertIn("compose --profile operations down --timeout 300", self.installer)
+        stop_operations = self.installer.split("stop_operations() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertLess(
+            stop_operations.index("refuse_egress_oneoffs_before_topology_removal"),
+            stop_operations.index("compose --profile operations down --timeout 300"),
+        )
+        self.assertIn(
+            "compose up --detach --no-build --no-deps --force-recreate",
+            self.installer,
+        )
+        self.assertNotIn(
+            'stop "${OPERATION_SERVICES[@]}" "${OPERATION_GUARD_SERVICES[@]}"',
+            self.installer,
+        )
         self.assertLess(
             self.installer.index("    stop_operations\n", self.installer.index("start_core()")),
-            self.installer.index("    compose build --pull db app", self.installer.index("start_core()")),
+            self.installer.index("    compose build --pull db app app-egress-guard", self.installer.index("start_core()")),
         )
         self.assertNotIn("up --build --detach --remove-orphans", self.installer)
         self.assertIn("/proc/1/task/1/children", self.installer)
-        self.assertIn("celery -A backupsheep inspect ping", self.installer)
+        self.assertNotIn("celery -A backupsheep inspect ping", self.installer)
+        self.assertIn("/run/backupsheep/celery-ready", self.installer)
+
+    def test_installer_refuses_stranded_egress_oneoff_before_down(self):
+        command = r'''
+source "$1"
+PROJECT_NAME=backupsheep
+DOCKER_BIN=mock_docker
+mock_docker() {
+    if [[ "$1" == ps ]]; then
+        printf 'oneoff-container\n'
+        return 0
+    fi
+    return 91
+}
+docker_resource_label() {
+    case "$3" in
+        com.docker.compose.oneoff) printf 'True\n' ;;
+        com.docker.compose.service) printf '%s\n' "${ONEOFF_SERVICE}" ;;
+        *) return 92 ;;
+    esac
+}
+refuse_egress_oneoffs_before_topology_removal
+'''
+        for service in ("app", "worker-storage"):
+            with self.subTest(service=service):
+                environment = os.environ.copy()
+                environment["ONEOFF_SERVICE"] = service
+                result = subprocess.run(
+                    ["bash", "-c", command, "installer-test", str(INSTALLER)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    f"egress-backed Compose one-off for {service} still exists",
+                    result.stderr,
+                )
+
+    def test_installer_mutation_lock_is_shared_portable_and_stale_fail_closed(self):
+        wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
+        self.assertIn(
+            'mutation_lock_dir="${root_dir}.backupsheep-mutation-lock"', wrapper
+        )
+        self.assertIn(
+            'MUTATION_LOCK_DIR="${INSTALL_DIR}.backupsheep-mutation-lock"',
+            self.installer,
+        )
+        self.assertNotIn("command -v flock", wrapper)
+        self.assertNotIn("command -v flock", self.installer)
+        self.assertNotRegex(wrapper, re.compile(r"(?m)^\s*flock(?:\s|$)"))
+        self.assertNotRegex(self.installer, re.compile(r"(?m)^\s*flock(?:\s|$)"))
+
+        with tempfile.TemporaryDirectory(prefix="backupsheep-lock-test-") as directory:
+            install_dir = Path(directory) / "installation"
+            lock_dir = Path(f"{install_dir}.backupsheep-mutation-lock")
+            command = r'''
+source "$1"
+INSTALL_DIR="$2"
+acquire_installation_mutation_lock
+[[ -d "$MUTATION_LOCK_DIR" && ! -L "$MUTATION_LOCK_DIR" ]]
+[[ "$(file_mode "$MUTATION_LOCK_DIR")" == 700 ]]
+[[ -f "$MUTATION_LOCK_OWNER_FILE" && ! -L "$MUTATION_LOCK_OWNER_FILE" ]]
+[[ "$(file_mode "$MUTATION_LOCK_OWNER_FILE")" == 600 ]]
+[[ "$(<"$MUTATION_LOCK_OWNER_FILE")" == "$MUTATION_LOCK_TOKEN" ]]
+release_mutation_lock
+[[ ! -e "$MUTATION_LOCK_DIR" && ! -L "$MUTATION_LOCK_DIR" ]]
+'''
+            subprocess.run(
+                ["bash", "-c", command, "installer-lock-test", str(INSTALLER), str(install_dir)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            lock_dir.mkdir(mode=0o700)
+            owner = lock_dir / "owner"
+            stale_value = "version=1;tool=install.sh;pid=999999;uid=0\n"
+            owner.write_text(stale_value, encoding="utf-8")
+            owner.chmod(0o600)
+            stale = subprocess.run(
+                ["bash", "-c", 'source "$1"; INSTALL_DIR="$2"; acquire_installation_mutation_lock',
+                 "installer-lock-test", str(INSTALLER), str(install_dir)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("stale fail-closed lock remains", stale.stderr)
+            self.assertEqual(owner.read_text(encoding="utf-8"), stale_value)
 
     def test_compose_control_plane_is_explicit(self):
         for token in (
@@ -147,34 +262,86 @@ semver_at_least 2.34.0-rc.1 2.33.1
     def test_preflight_failure_is_terminal(self):
         self.assertIn("preflight_container_id", self.installer)
         self.assertIn("Docker security preflight failed", self.installer)
-        self.assertIn("logs --tail=100 migrate preflight app", self.installer)
+        self.assertIn(
+            "logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate db-seal preflight app",
+            self.installer,
+        )
+        self.assertIn("RabbitMQ identity provisioning failed", self.installer)
+        self.assertIn("provision_container_id", self.installer)
+        self.assertIn("Database identity provisioning failed", self.installer)
 
 
 class InstallerSecretMigrationTests(TestCase):
     def setUp(self):
-        self.temp_dir = Path(tempfile.mkdtemp(prefix="backupsheep-installer-test-"))
+        self.temp_dir = Path(
+            tempfile.mkdtemp(prefix="backupsheep-installer-test-")
+        ).resolve()
         self.env_file = self.temp_dir / ".env"
         shutil.copyfile(SAMPLE_ENV, self.env_file)
         os.chmod(self.env_file, 0o600)
         content = self.env_file.read_text(encoding="utf-8")
-        self.legacy_secrets = {
-            "django_secret_key": "d" * 64,
-            "db_password": "p" * 32,
-            "rabbitmq_password": "r" * 40,
-            "onboarding_token": "o" * 40,
+        # Static canaries model a legacy plaintext installation; they are not
+        # credentials and must disappear from .env during migration.
+        self.legacy_canaries = {
+            "framework": "d" * 64,
+            "database": "p" * 32,
+            "broker": "r" * 40,
+            "onboarding": "o" * 40,
         }
         replacements = {
             "BACKUPSHEEP_COMPOSE_PROJECT_NAME=''": "BACKUPSHEEP_COMPOSE_PROJECT_NAME='backupsheep'",
-            "DJANGO_SECRET_KEY='change-this-key'": f"DJANGO_SECRET_KEY='{self.legacy_secrets['django_secret_key']}'",
-            "DB_PASSWORD='change-this-password'": f"DB_PASSWORD='{self.legacy_secrets['db_password']}'",
-            "RABBITMQ_PASSWORD=''": f"RABBITMQ_PASSWORD='{self.legacy_secrets['rabbitmq_password']}'",
-            "ONBOARDING_INSTALL_TOKEN=''": f"ONBOARDING_INSTALL_TOKEN='{self.legacy_secrets['onboarding_token']}'",
+            "DJANGO_SECRET_KEY='change-this-key'": f"DJANGO_SECRET_KEY='{self.legacy_canaries['framework']}'",
+            "DB_PASSWORD='change-this-password'": f"DB_PASSWORD='{self.legacy_canaries['database']}'",
+            "RABBITMQ_PASSWORD=''": f"RABBITMQ_PASSWORD='{self.legacy_canaries['broker']}'",
+            "ONBOARDING_INSTALL_TOKEN=''": f"ONBOARDING_INSTALL_TOKEN='{self.legacy_canaries['onboarding']}'",
         }
         for old, new in replacements.items():
             self.assertIn(old, content)
             content = content.replace(old, new, 1)
+        # Model an installation created before generation-2 identities existed.
+        content = content.replace("DB_USER='backupsheep_app'", "DB_USER='backupsheep'", 1)
+        content = content.replace("RABBITMQ_USER='backupsheep_app'", "RABBITMQ_USER='backupsheep'", 1)
+        content = "\n".join(
+            line
+            for line in content.splitlines()
+            if not line.startswith(
+                (
+                    "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION=",
+                    "DB_BOOTSTRAP_USER=",
+                    "DB_MIGRATOR_USER=",
+                    "DB_APP_USER=",
+                    "DB_PREFLIGHT_USER=",
+                    "DB_BEAT_USER=",
+                    "DB_CLOUD_USER=",
+                    "DB_DATABASE_USER=",
+                    "DB_FILES_USER=",
+                    "DB_STORAGE_USER=",
+                    "DB_LOGS_USER=",
+                    "BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION=",
+                    "BACKUPSHEEP_CELERY_SECURITY_GENERATION=",
+                    "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION=",
+                    "RABBITMQ_LEGACY_USER=",
+                )
+            )
+        ) + "\n"
         self.env_file.write_text(content, encoding="utf-8")
         os.chmod(self.env_file, 0o600)
+        self.database_kms_credentials = self.temp_dir / "database-kms.ini"
+        self.files_kms_credentials = self.temp_dir / "files-kms.ini"
+        self.database_kms_credentials.write_text(
+            "[default]\n"
+            "aws_access_key_id = AKIADATABASE00001\n"
+            f"aws_secret_access_key = {'d' * 40}\n",
+            encoding="utf-8",
+        )
+        self.files_kms_credentials.write_text(
+            "[default]\n"
+            "aws_access_key_id = AKIAFILES00000001\n"
+            f"aws_secret_access_key = {'f' * 40}\n",
+            encoding="utf-8",
+        )
+        os.chmod(self.database_kms_credentials, 0o600)
+        os.chmod(self.files_kms_credentials, 0o600)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
@@ -187,6 +354,22 @@ INSTALL_REF="$3"
 PUBLIC_HOST=localhost
 APP_DOMAIN=localhost:8000
 INSTALL_WAS_PRESENT=true
+ARTIFACT_KMS_KEY_ID='arn:aws:kms:us-east-1:123456789012:key/11111111-2222-4333-8444-555555555555'
+ARTIFACT_KMS_REGION='us-east-1'
+ARTIFACT_KMS_ALLOWED_KEY_ARNS="$ARTIFACT_KMS_KEY_ID"
+ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE="$2/database-kms.ini"
+ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE="$2/files-kms.ini"
+ENV_FILE="$2/.env"
+DOCKER_BIN=mock_docker
+mock_docker() {{
+    if [[ "$1" == volume && "$2" == ls && "$3" == --format ]]; then
+        return 0
+    fi
+    return 64
+}}
+if [[ -z "$(read_env_value BACKUPSHEEP_STAGING_LAYOUT_INTENT)" ]]; then
+    MIGRATE_STAGING_LAYOUT=true
+fi
 {body}
 """
         return subprocess.run(
@@ -198,13 +381,18 @@ INSTALL_WAS_PRESENT=true
 
     def test_existing_env_secrets_migrate_atomically_and_rerun_without_rotation(self):
         self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
             "create_or_migrate_configuration\nvalidate_runtime_configuration"
         )
 
         secret_dir = self.temp_dir / ".secrets"
         self.assertEqual(stat.S_IMODE(secret_dir.stat().st_mode), 0o700)
         expected = {
-            name: f"{value}\n" for name, value in self.legacy_secrets.items()
+            "django_secret_key": f"{self.legacy_canaries['framework']}\n",
+            "db_bootstrap_password": f"{self.legacy_canaries['database']}\n",
+            "rabbitmq_bootstrap_password": f"{self.legacy_canaries['broker']}\n",
+            "onboarding_token": f"{self.legacy_canaries['onboarding']}\n",
         }
         for filename, value in expected.items():
             secret_path = secret_dir / filename
@@ -222,25 +410,342 @@ INSTALL_WAS_PRESENT=true
             r"BACKUPSHEEP_INSTALLATION_ID='[0-9a-f]{64}'",
         )
         self.assertIn("DJANGO_SECRET_KEY=''", migrated_env)
+        self.assertIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3-pending-upgrade'",
+            migrated_env,
+        )
+        self.assertIn("DB_BOOTSTRAP_USER='backupsheep'", migrated_env)
+        self.assertIn("DB_MIGRATOR_USER='backupsheep_migrator'", migrated_env)
+        for lane in (
+            "app",
+            "preflight",
+            "beat",
+            "cloud",
+            "database",
+            "files",
+            "storage",
+            "logs",
+        ):
+            self.assertIn(
+                f"DB_{lane.upper()}_USER='backupsheep_{lane}'", migrated_env
+            )
+        self.assertIn("DB_USER='backupsheep_app'", migrated_env)
+        self.assertIn("DB_PASSWORD=''", migrated_env)
+        self.assertIn("BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION='2'", migrated_env)
+        self.assertIn("BACKUPSHEEP_CELERY_SECURITY_GENERATION='3'", migrated_env)
+        self.assertIn(
+            "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION='1'", migrated_env
+        )
+        self.assertIn("RABBITMQ_USER='backupsheep_app'", migrated_env)
+        self.assertIn("RABBITMQ_LEGACY_USER='backupsheep'", migrated_env)
+        self.assertIn("RABBITMQ_PASSWORD=''", migrated_env)
         self.assertIn("SSH_MANAGED_PRIVATE_KEY_PATH=''", migrated_env)
         self.assertIn(f"BACKUPSHEEP_IMAGE='backupsheep:{COMMIT}'", migrated_env)
         self.assertIn(
             f"BACKUPSHEEP_POSTGRES_IMAGE='backupsheep-postgres:{COMMIT}'",
             migrated_env,
         )
-        managed_key = secret_dir / "ssh_managed_private_key"
-        self.assertEqual(stat.S_IMODE(managed_key.stat().st_mode), 0o444)
-        self.assertEqual(managed_key.read_bytes(), b"")
+        self.assertIn(
+            f"BACKUPSHEEP_EGRESS_IMAGE='backupsheep-egress:{COMMIT}'",
+            migrated_env,
+        )
+        self.assertIn(
+            "BACKUPSHEEP_STAGING_LAYOUT_INTENT='migrate-empty-legacy-v3'",
+            migrated_env,
+        )
+        database_kms = secret_dir / "artifact_kms_database_aws_credentials"
+        files_kms = secret_dir / "artifact_kms_files_aws_credentials"
+        self.assertEqual(stat.S_IMODE(database_kms.stat().st_mode), 0o444)
+        self.assertEqual(stat.S_IMODE(files_kms.stat().st_mode), 0o444)
+        self.assertNotEqual(database_kms.read_bytes(), files_kms.read_bytes())
+        self.assertFalse((secret_dir / "ssh_managed_private_key").exists())
+        for lane in ("database", "files"):
+            managed_key = secret_dir / f"ssh_managed_{lane}_private_key"
+            self.assertEqual(stat.S_IMODE(managed_key.stat().st_mode), 0o444)
+            self.assertEqual(managed_key.read_bytes(), b"")
+        for generated_name in (
+            "db_migrator_password",
+            "db_app_password",
+            "db_preflight_password",
+            "db_beat_password",
+            "db_cloud_password",
+            "db_database_password",
+            "db_files_password",
+            "db_storage_password",
+            "db_logs_password",
+        ):
+            generated_value = (secret_dir / generated_name).read_text(encoding="utf-8")
+            self.assertRegex(generated_value, r"^[0-9a-f]{64}\n$")
+            self.assertNotEqual(
+                generated_value.strip(), self.legacy_canaries["database"]
+            )
+        rabbit_passwords = []
+        for role in (
+            "bootstrap",
+            "app",
+            "preflight",
+            "beat",
+            "cloud",
+            "database",
+            "files",
+            "storage",
+            "logs",
+        ):
+            value = (secret_dir / f"rabbitmq_{role}_password").read_text(
+                encoding="utf-8"
+            )
+            if role == "bootstrap":
+                self.assertEqual(value, f"{self.legacy_canaries['broker']}\n")
+            else:
+                self.assertRegex(value, r"^[0-9a-f]{64}\n$")
+            rabbit_passwords.append(value)
+        self.assertEqual(len(rabbit_passwords), len(set(rabbit_passwords)))
+        for lane in ("app", "beat", "cloud", "database", "files", "storage", "logs"):
+            key_path = secret_dir / f"celery_signing_{lane}_private_key"
+            self.assertEqual(stat.S_IMODE(key_path.stat().st_mode), 0o444)
+            self.assertIn("BEGIN OPENSSH PRIVATE KEY", key_path.read_text(encoding="utf-8"))
+        registry = (secret_dir / "celery_trusted_public_keys").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"installation_id"', registry)
+        self.assertIn('"version":2', registry)
+        self.assertIn('"generation":1', registry)
+        self.assertIn('"keys"', registry)
 
         before = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
         self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
             "create_or_migrate_configuration\nvalidate_runtime_configuration"
         )
         after = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
         self.assertEqual(before, after)
 
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "complete_database_identity_generation\n"
+            "validate_runtime_configuration"
+        )
+        completed_env = self.env_file.read_text(encoding="utf-8")
+        self.assertIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3'", completed_env
+        )
+        self.assertFalse((secret_dir / "db_password").exists())
+        completed = {
+            path.name: path.read_bytes() for path in secret_dir.iterdir()
+        }
+        self.run_installer_functions(
+            "create_or_migrate_configuration\nvalidate_runtime_configuration"
+        )
+        rerun = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
+        self.assertEqual(completed, rerun)
+
+    def test_existing_database_identity_transition_requires_explicit_opt_in(self):
+        result = self.run_installer_functions(
+            "create_or_migrate_configuration", check=False
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--migrate-database-identities", result.stderr)
+        self.assertIn("encrypted rollback", result.stderr)
+        self.assertNotIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3'",
+            self.env_file.read_text(encoding="utf-8"),
+        )
+        secret_dir = self.temp_dir / ".secrets"
+        self.assertFalse((secret_dir / "db_bootstrap_password").exists())
+        self.assertFalse((secret_dir / "db_migrator_password").exists())
+
+    def test_generation_two_task_auth_requires_resumable_explicit_rotation(self):
+        self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration"
+        )
+        secret_dir = self.temp_dir / ".secrets"
+        registry_path = secret_dir / "celery_trusted_public_keys"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        legacy_registry = {
+            "version": 1,
+            "installation_id": registry["installation_id"],
+            "keys": registry["keys"],
+        }
+        registry_path.chmod(0o600)
+        registry_path.write_text(
+            json.dumps(legacy_registry, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        registry_path.chmod(0o444)
+        configured = self.env_file.read_text(encoding="utf-8")
+        configured = configured.replace(
+            "BACKUPSHEEP_CELERY_SECURITY_GENERATION='3'",
+            "BACKUPSHEEP_CELERY_SECURITY_GENERATION='2'",
+            1,
+        ).replace(
+            "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION='1'",
+            "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION=''",
+            1,
+        )
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+
+        refused = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "configure_rabbitmq_identity_generation",
+            check=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--rotate-celery-signing-keys", refused.stderr)
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "ROTATE_CELERY_SIGNING_KEYS=true\n"
+            "configure_rabbitmq_identity_generation\n"
+            "validate_secret_dir"
+        )
+        pending = self.env_file.read_text(encoding="utf-8")
+        self.assertIn(
+            "BACKUPSHEEP_CELERY_SECURITY_GENERATION='3-pending-rotation'",
+            pending,
+        )
+        self.assertIn(
+            "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION='2'", pending
+        )
+        for lane in ("app", "beat", "cloud", "database", "files", "storage", "logs"):
+            candidate = secret_dir / f".celery_rotation_{lane}_private_key"
+            self.assertEqual(stat.S_IMODE(candidate.stat().st_mode), 0o444)
+        candidate_registry = json.loads(
+            (secret_dir / ".celery_rotation_trusted_public_keys").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(candidate_registry["version"], 2)
+        self.assertEqual(candidate_registry["generation"], 2)
+
+    def test_kms_lane_credentials_require_distinct_access_key_identities(self):
+        self.files_kms_credentials.write_text(
+            "[default]\n"
+            "aws_access_key_id = AKIADATABASE00001\n"
+            f"aws_secret_access_key = {'f' * 40}\n",
+            encoding="utf-8",
+        )
+        os.chmod(self.files_kms_credentials, 0o600)
+        result = self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different AWS access-key identities", result.stderr)
+
+    def test_ambiguous_partial_database_secret_transition_fails_closed(self):
+        secret_dir = self.temp_dir / ".secrets"
+        secret_dir.mkdir(mode=0o700)
+        for name in ("db_password", "db_migrator_password"):
+            path = secret_dir / name
+            path.write_text("x" * 32 + "\n", encoding="utf-8")
+            path.chmod(0o444)
+
+        result = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "configure_database_identity_generation",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("incomplete or ambiguous", result.stderr)
+        self.assertFalse((secret_dir / "db_bootstrap_password").exists())
+
+    def test_fresh_database_identity_configuration_generates_per_lane_credentials(self):
+        shutil.copyfile(SAMPLE_ENV, self.env_file)
+        os.chmod(self.env_file, 0o600)
+        secret_dir = self.temp_dir / ".secrets"
+        secret_dir.mkdir(mode=0o700)
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=false\n"
+            "set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION 3-pending-fresh\n"
+            "configure_database_identity_generation"
+        )
+
+        configured = self.env_file.read_text(encoding="utf-8")
+        self.assertIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3-pending-fresh'",
+            configured,
+        )
+        for name in (
+            "db_bootstrap_password",
+            "db_migrator_password",
+            "db_app_password",
+            "db_preflight_password",
+            "db_beat_password",
+            "db_cloud_password",
+            "db_database_password",
+            "db_files_password",
+            "db_storage_password",
+            "db_logs_password",
+        ):
+            self.assertRegex(
+                (secret_dir / name).read_text(encoding="utf-8"),
+                r"^[0-9a-f]{64}\n$",
+            )
+
+    def test_interrupted_fresh_database_identity_configuration_resumes_exactly(self):
+        shutil.copyfile(SAMPLE_ENV, self.env_file)
+        os.chmod(self.env_file, 0o600)
+        content = self.env_file.read_text(encoding="utf-8").replace(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION=''",
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3-pending-fresh'",
+            1,
+        )
+        self.env_file.write_text(content, encoding="utf-8")
+        os.chmod(self.env_file, 0o600)
+        secret_dir = self.temp_dir / ".secrets"
+        secret_dir.mkdir(mode=0o700)
+        bootstrap = secret_dir / "db_bootstrap_password"
+        bootstrap.write_text("b" * 64 + "\n", encoding="utf-8")
+        bootstrap.chmod(0o444)
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "configure_database_identity_generation"
+        )
+
+        self.assertEqual(bootstrap.read_text(encoding="utf-8"), "b" * 64 + "\n")
+        self.assertTrue((secret_dir / "db_migrator_password").is_file())
+        for lane in (
+            "app",
+            "preflight",
+            "beat",
+            "cloud",
+            "database",
+            "files",
+            "storage",
+            "logs",
+        ):
+            self.assertTrue((secret_dir / f"db_{lane}_password").is_file())
+        self.assertIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='3-pending-fresh'",
+            self.env_file.read_text(encoding="utf-8"),
+        )
+
     def test_database_image_tag_is_persisted_and_tampering_fails_closed(self):
-        self.run_installer_functions("create_or_migrate_configuration")
+        self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration"
+        )
         result = self.run_installer_functions(
             'ENV_FILE="$INSTALL_DIR/.env"\n'
             'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
@@ -263,6 +768,101 @@ INSTALL_WAS_PRESENT=true
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Compose project drift refused", result.stderr)
+
+    def test_existing_install_without_egress_generation_requires_explicit_migration(self):
+        result = self.run_installer_functions(
+            'set_env_value BACKUPSHEEP_EGRESS_POLICY_GENERATION ""\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_EGRESS_POLICY=false\n"
+            "configure_egress_policy_generation",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rerun once with --migrate-egress-policy", result.stderr)
+
+    def test_old_stock_public_egress_is_reset_to_generation_two_deny(self):
+        self.run_installer_functions(
+            'set_env_value BACKUPSHEEP_EGRESS_POLICY_GENERATION ""\n'
+            'for role in "${EGRESS_ROLES[@]}"; do\n'
+            '  set_env_value "BACKUPSHEEP_${role}_EGRESS_MODE" public\n'
+            "done\n"
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_EGRESS_POLICY=true\n"
+            "configure_egress_policy_generation"
+        )
+        configured = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("BACKUPSHEEP_EGRESS_POLICY_GENERATION='2'", configured)
+        for role in ("APP", "CLOUD", "DATABASE", "FILES", "STORAGE", "LOGS"):
+            self.assertIn(f"BACKUPSHEEP_{role}_EGRESS_MODE='deny'", configured)
+            for suffix in (
+                "ALLOW_IPV4",
+                "ALLOW_IPV6",
+                "ALLOW_IPV4_TCP_ENDPOINTS",
+                "ALLOW_IPV6_TCP_ENDPOINTS",
+                "ALLOW_DNS_NAMES",
+            ):
+                self.assertIn(f"BACKUPSHEEP_{role}_EGRESS_{suffix}=''", configured)
+
+    def test_custom_or_mixed_legacy_egress_is_never_guessed(self):
+        original = self.env_file.read_text(encoding="utf-8")
+        scenarios = (
+            'set_env_value BACKUPSHEEP_APP_EGRESS_ALLOW_IPV4 "203.0.113.1/32"',
+            'set_env_value BACKUPSHEEP_APP_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS "203.0.113.1/32:443"',
+            'set_env_value BACKUPSHEEP_APP_EGRESS_MODE allowlist',
+        )
+        for setup in scenarios:
+            with self.subTest(setup=setup):
+                self.env_file.write_text(original, encoding="utf-8")
+                os.chmod(self.env_file, 0o600)
+                result = self.run_installer_functions(
+                    'set_env_value BACKUPSHEEP_EGRESS_POLICY_GENERATION ""\n'
+                    'for role in "${EGRESS_ROLES[@]}"; do\n'
+                    '  set_env_value "BACKUPSHEEP_${role}_EGRESS_MODE" public\n'
+                    "done\n"
+                    f"{setup}\n"
+                    "ENV_WAS_PRESENT=true\n"
+                    "MIGRATE_EGRESS_POLICY=true\n"
+                    "configure_egress_policy_generation",
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Customized legacy egress", result.stderr)
+
+    def test_generation_two_egress_validation_is_fail_closed(self):
+        original = self.env_file.read_text(encoding="utf-8")
+        scenarios = (
+            (
+                'set_env_value BACKUPSHEEP_APP_EGRESS_ALLOW_IPV4 "203.0.113.1/32"',
+                "Address-only APP egress allowlists are retired",
+            ),
+            (
+                'set_env_value BACKUPSHEEP_APP_EGRESS_MODE allowlist',
+                "Allowlist-mode APP egress requires at least one exact TCP endpoint",
+            ),
+            (
+                'set_env_value BACKUPSHEEP_APP_EGRESS_MODE public\n'
+                'set_env_value BACKUPSHEEP_APP_EGRESS_ALLOW_DNS_NAMES provider.example',
+                "must not carry an ignored exact-name list",
+            ),
+        )
+        for setup, message in scenarios:
+            with self.subTest(setup=setup):
+                self.env_file.write_text(original, encoding="utf-8")
+                os.chmod(self.env_file, 0o600)
+                result = self.run_installer_functions(
+                    f"{setup}\nconfigure_egress_policy_generation",
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+    def test_egress_migration_flag_is_one_time(self):
+        result = self.run_installer_functions(
+            "MIGRATE_EGRESS_POLICY=true\nconfigure_egress_policy_generation",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("one-time", result.stderr)
 
     def test_only_exact_private_deployment_override_is_approved_in_canonical_history(self):
         override = self.temp_dir / "docker-compose.override.yml"
@@ -330,14 +930,18 @@ INSTALL_WAS_PRESENT=true
     def test_empty_legacy_onboarding_token_is_replaced_with_a_random_secret(self):
         content = self.env_file.read_text(encoding="utf-8")
         content = content.replace(
-            f"ONBOARDING_INSTALL_TOKEN='{self.legacy_secrets['onboarding_token']}'",
+            f"ONBOARDING_INSTALL_TOKEN='{self.legacy_canaries['onboarding']}'",
             "ONBOARDING_INSTALL_TOKEN=''",
             1,
         )
         self.env_file.write_text(content, encoding="utf-8")
         os.chmod(self.env_file, 0o600)
 
-        self.run_installer_functions("create_or_migrate_configuration")
+        self.run_installer_functions(
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration"
+        )
         token = (self.temp_dir / ".secrets" / "onboarding_token").read_text(
             encoding="utf-8"
         )
@@ -354,7 +958,10 @@ INSTALL_WAS_PRESENT=true
         os.chmod(self.env_file, 0o600)
 
         result = self.run_installer_functions(
-            "create_or_migrate_configuration", check=False
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration",
+            check=False,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(".secrets/ssh_managed_private_key", result.stderr)
@@ -367,7 +974,10 @@ INSTALL_WAS_PRESENT=true
         secret_dir.mkdir(mode=0o700)
         secret_path = secret_dir / "django_secret_key"
         secret_path.write_bytes(b"first\nsecond")
-        os.chmod(secret_path, 0o444)
+        # Installer-managed secrets are intentionally exact 0444 so the
+        # unprivileged container identities can read Docker's bind mount.
+        secret_path.chmod(0o444)
+        self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o444)
 
         result = self.run_installer_functions(
             'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
@@ -382,7 +992,8 @@ INSTALL_WAS_PRESENT=true
         secret_dir.mkdir(mode=0o700)
         first = secret_dir / "django_secret_key"
         first.write_text("secret\n", encoding="utf-8")
-        os.chmod(first, 0o444)
+        first.chmod(0o444)
+        self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o444)
         os.link(first, self.temp_dir / "second-link")
 
         result = self.run_installer_functions(
@@ -416,6 +1027,24 @@ INSTALL_WAS_PRESENT=true
         self.env_file.write_text(original, encoding="utf-8")
         os.chmod(self.env_file, 0o600)
 
+    def test_nul_bytes_in_env_are_rejected_before_awk_parsing(self):
+        original = self.env_file.read_bytes()
+        expected = b"BACKUPSHEEP_COMPOSE_PROJECT_NAME='backupsheep'"
+        self.assertIn(expected, original)
+        for replacement in (
+            b"BACKUPSHEEP_COMPOSE_PROJECT_NAME=backupsheep\x00evil",
+            b"BACKUPSHEEP_COMPOSE_PROJECT_NAME=\x00backupsheep",
+        ):
+            with self.subTest(replacement=replacement):
+                self.env_file.write_bytes(original.replace(expected, replacement, 1))
+                os.chmod(self.env_file, 0o600)
+                result = self.run_installer_functions(
+                    'ENV_FILE="$INSTALL_DIR/.env"\nvalidate_env_file',
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("NUL byte", result.stderr)
+
     def test_json_configuration_replacement_is_rejected(self):
         with self.env_file.open("a", encoding="utf-8") as handle:
             handle.write("BACKUPSHEEP_SECRETS='{}'\n")
@@ -446,6 +1075,7 @@ INSTALL_WAS_PRESENT=true
             "[[ \"${COMPOSE_BAKE-}\" == 'false' ]] || exit 45\n"
             "[[ -z \"${BUILDX_BAKE_FILE+x}\" ]] || exit 46\n"
             "[[ -z \"${DOCKER_BUILDKIT+x}\" ]] || exit 47\n"
+            "[[ \"${LC_ALL-}\" == 'C' ]] || exit 48\n"
             "exit 0\n",
             encoding="utf-8",
         )
@@ -537,7 +1167,10 @@ class InstallerLegacyProjectAdoptionTests(TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
 
-    def run_adoption(self, scenario="exact", *, full_ownership=False, direct=False):
+    def run_adoption(
+        self, scenario="exact", *, full_ownership=False, direct=False,
+        adopt_legacy=True,
+    ):
         if direct:
             invocation = "adopt_legacy_compose_down_project"
         elif full_ownership:
@@ -554,15 +1187,19 @@ source "$1"
 INSTALL_DIR=/srv/backupsheep
 ENV_FILE=/srv/backupsheep/.env
 PROJECT_NAME=backupsheep
-ADOPT_LEGACY_PROJECT=backupsheep
+ADOPT_LEGACY_PROJECT={"backupsheep" if adopt_legacy else ""}
 ENV_WAS_PRESENT=true
 DOCKER_BIN=mock_docker
 INSTALLATION_ID={self.installation_id}
+POSTGRES_MIGRATION_REQUIRED=true
 
 read_env_value() {{
     case "$1" in
         BACKUPSHEEP_COMPOSE_PROJECT_NAME) : ;;
         BACKUPSHEEP_INSTALLATION_ID) printf '%s' "$INSTALLATION_ID" ;;
+        BACKUPSHEEP_POSTGRES_STORAGE_GENERATION) printf '%s' '18-alpine-icu-v1-pending-upgrade' ;;
+        BACKUPSHEEP_POSTGRES_STORAGE_INTENT) printf '%s' 'migrated-debian-v1' ;;
+        BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID) printf '%s' 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;;
         *) : ;;
     esac
 }}
@@ -595,13 +1232,46 @@ legacy_volume_listing() {{
     esac
 }}
 
+emit_label() {{
+    local label_value="${{1-}}"
+    local LC_ALL=C
+    printf '%s:%s%s\n' "${{#label_value}}" "$label_value" \
+        '__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+}}
+
+emit_project_label() {{
+    case "$SCENARIO" in
+        *_project_option) emit_label --version ;;
+        *_project_uppercase) emit_label BackupSheep ;;
+        *_project_embedded_lf)
+            printf '17:backupsheep\nother%s\n' \
+                '__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+            ;;
+        *_project_trailing_lf)
+            printf '12:backupsheep\n%s\n' \
+                '__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+            ;;
+        *_project_nul)
+            printf '12:backupsheep\0%s\n' \
+                '__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+            ;;
+        *_project_marker)
+            emit_label 'backupsheep__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+            ;;
+        *_project_utf8) emit_label 'backupsheepé' ;;
+        *) emit_label backupsheep ;;
+    esac
+}}
+
 mock_docker() {{
     local template="" resource_id="" last_arg=""
     local saw_project=false saw_logical=false saw_installation=false
 
     if [[ "$1" == ps ]]; then
         [[ "$SCENARIO" != container_inventory_error ]] || return 71
-        if [[ "$SCENARIO" == existing_container && "${{4:-}}" == --filter ]]; then
+        if [[ "$SCENARIO" == container_project_* ]]; then
+            printf 'legacy-container\n'
+        elif [[ "$SCENARIO" == existing_container && "${{4:-}}" == --filter ]]; then
             printf 'legacy-container\n'
         fi
         return 0
@@ -628,6 +1298,8 @@ mock_docker() {{
             return 0
         fi
         if [[ "${{5:-}}" == label=com.backupsheep.installation-id=* ]]; then
+            [[ "$SCENARIO" == sentinel_project_* ]] \
+                && printf 'backupsheep_installation_identity\n'
             return 0
         fi
         [[ "$SCENARIO" != volume_inventory_error ]] || return 74
@@ -652,6 +1324,21 @@ mock_docker() {{
             printf 'unexpected-volume\n'
         else
             printf '%s\n' "$last_arg"
+        fi
+        return 0
+    fi
+    if [[ "$1" == inspect ]]; then
+        template="$3"
+        resource_id="$4"
+        [[ "$resource_id" == legacy-container ]] || return 89
+        if [[ "$template" == *'project.working_dir'* ]]; then
+            emit_label /srv/backupsheep
+        elif [[ "$template" == *'project.config_files'* ]]; then
+            emit_label /srv/backupsheep/docker-compose.yml
+        elif [[ "$template" == *'com.docker.compose.project'* ]]; then
+            emit_project_label
+        else
+            return 90
         fi
         return 0
     fi
@@ -682,27 +1369,32 @@ mock_docker() {{
             printf '%s\n' "$resource_id"
         elif [[ "$template" == *'com.docker.compose.project'* ]]; then
             if [[ "$SCENARIO" == wrong_project_label && "$resource_id" != backupsheep_installation_identity ]]; then
-                printf 'foreign-project\n'
+                emit_label foreign-project
+            elif [[ "$SCENARIO" == sentinel_project_* \
+                    && "$resource_id" == backupsheep_installation_identity ]]; then
+                emit_project_label
             else
-                printf 'backupsheep\n'
+                emit_label backupsheep
             fi
         elif [[ "$template" == *'com.docker.compose.volume'* ]]; then
             if [[ "$resource_id" == backupsheep_installation_identity ]]; then
-                printf 'installation_identity\n'
+                emit_label installation_identity
             elif [[ "$SCENARIO" == wrong_logical_label && "$resource_id" == backupsheep_pgdata ]]; then
-                printf 'foreign\n'
+                emit_label foreign
             else
-                printf '%s\n' "${{resource_id#backupsheep_}}"
+                emit_label "${{resource_id#backupsheep_}}"
             fi
         elif [[ "$template" == *'com.backupsheep.installation-id'* ]]; then
             if [[ "$resource_id" == backupsheep_installation_identity ]]; then
                 if [[ "$SCENARIO" == wrong_sentinel_identity ]]; then
-                    printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+                    emit_label bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
                 else
-                    printf '%s\n' "$INSTALLATION_ID"
+                    emit_label "$INSTALLATION_ID"
                 fi
             elif [[ "$SCENARIO" == identified_legacy_volume && "$resource_id" == backupsheep_pgdata ]]; then
-                printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+                emit_label bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            else
+                emit_label ''
             fi
         else
             return 78
@@ -717,12 +1409,12 @@ compose() {{
     for last_arg in "$@"; do :; done
     case "$last_arg" in
         --services)
-            printf '%s\n' db rabbitmq migrate preflight app worker-cloud \
+            printf '%s\n' db rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app worker-cloud \
                 worker-database worker-files worker-storage worker-logs beat
             ;;
         --networks) printf '%s\n' app-database app-broker ;;
         --volumes)
-            printf '%s\n' pgdata rabbitmq_data backup_workdir ssh_trust \
+            printf '%s\n' pgdata rabbitmq_data backup_workdir \
                 backup_storage installation_identity
             ;;
         *) return 80 ;;
@@ -755,35 +1447,85 @@ PROJECT_NAME=backupsheep
 INSTALL_WAS_PRESENT=true
 DOCKER_BIN=mock_docker
 INSTALLATION_ID={self.installation_id}
+POSTGRES_MIGRATION_REQUIRED=true
 
 read_env_value() {{
-    [[ "$1" != BACKUPSHEEP_INSTALLATION_ID ]] || printf '%s' "$INSTALLATION_ID"
+    case "$1" in
+        BACKUPSHEEP_INSTALLATION_ID) printf '%s' "$INSTALLATION_ID" ;;
+        BACKUPSHEEP_POSTGRES_STORAGE_GENERATION) printf '%s' '18-alpine-icu-v1-pending-upgrade' ;;
+        BACKUPSHEEP_POSTGRES_STORAGE_INTENT) printf '%s' 'migrated-debian-v1' ;;
+        BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID) printf '%s' 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;;
+    esac
+}}
+
+emit_label() {{
+    local label_value="${{1-}}"
+    local LC_ALL=C
+    printf '%s:%s%s\n' "${{#label_value}}" "$label_value" \
+        '__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
 }}
 
 mock_docker() {{
     local template="" resource_id="" last_arg=""
     if [[ "$1" == ps ]]; then
-        printf 'legacy-app\n'
+        if [[ "$*" == *'volume=backupsheep_ssh_trust'* ]]; then
+            case "$SCENARIO" in
+                retired_ssh_attached_running) printf 'running-legacy-container\n' ;;
+                retired_ssh_attached_stopped) printf 'stopped-legacy-container\n' ;;
+            esac
+        elif [[ "$SCENARIO" != fresh && "$SCENARIO" != fresh_resume ]]; then
+            printf 'legacy-app\n'
+        fi
         return 0
     fi
     if [[ "$1" == network && "$2" == ls ]]; then
+        if [[ "$SCENARIO" == fresh || "$SCENARIO" == fresh_resume ]]; then
+            return 0
+        fi
         if [[ "$3" == --format ]]; then
-            if [[ "$SCENARIO" == noncanonical_network ]]; then
+            if [[ "$SCENARIO" == option_network ]]; then
+                printf 'backupsheep_--version\n'
+            elif [[ "$SCENARIO" == noncanonical_network ]]; then
                 printf 'backupsheep_evil-network\n'
             else
                 printf 'backupsheep_app-database\n'
             fi
+        elif [[ "$SCENARIO" == option_network ]]; then
+            printf 'hostile-network\n'
         else
             printf 'legacy-network\n'
         fi
         return 0
     fi
     if [[ "$1" == volume && "$2" == ls ]]; then
+        if [[ "$SCENARIO" == fresh ]]; then
+            return 0
+        fi
+        if [[ "$SCENARIO" == fresh_resume ]]; then
+            printf 'backupsheep_installation_identity\n'
+            return 0
+        fi
+        if [[ "$SCENARIO" == option_volume ]]; then
+            printf '%s\n' backupsheep_installation_identity backupsheep_--version
+            return 0
+        fi
         printf '%s\n' \
             backupsheep_pgdata \
             backupsheep_rabbitmq_data \
             backupsheep_backup_workdir \
             backupsheep_backup_storage
+        case "$SCENARIO" in
+            retired_ssh_trust|retired_ssh_wrong_id|retired_ssh_wrong_labels|retired_ssh_attached_running|retired_ssh_attached_stopped)
+                printf 'backupsheep_installation_identity\n'
+                ;;
+        esac
+        case "$SCENARIO" in
+            retired_ssh_trust|retired_ssh_without_sentinel|retired_ssh_wrong_id|retired_ssh_wrong_labels|retired_ssh_attached_running|retired_ssh_attached_stopped)
+                if [[ "$SCENARIO" != retired_ssh_wrong_labels || "$3" == --format ]]; then
+                printf 'backupsheep_ssh_trust\n'
+                fi
+                ;;
+        esac
         return 0
     fi
     if [[ "$1" == volume && "$2" == create ]]; then
@@ -795,19 +1537,25 @@ mock_docker() {{
     if [[ "$1" == inspect ]]; then
         template="$3"
         if [[ "$template" == *'project.working_dir'* ]]; then
-            [[ "$SCENARIO" != foreign_path ]] || {{ printf '/srv/foreign\n'; return 0; }}
-            printf '/srv/backupsheep\n'
+            [[ "$SCENARIO" != foreign_path ]] || {{ emit_label /srv/foreign; return 0; }}
+            emit_label /srv/backupsheep
         elif [[ "$template" == *'project.config_files'* ]]; then
-            [[ "$SCENARIO" != foreign_config ]] || {{ printf '/srv/foreign.yml\n'; return 0; }}
-            printf '/srv/backupsheep/docker-compose.yml\n'
+            [[ "$SCENARIO" != foreign_config ]] || {{ emit_label /srv/foreign.yml; return 0; }}
+            emit_label /srv/backupsheep/docker-compose.yml
         elif [[ "$template" == *'compose.service'* ]]; then
-            [[ "$SCENARIO" != foreign_service ]] || {{ printf 'foreign\n'; return 0; }}
-            printf 'app\n'
+            [[ "$SCENARIO" != foreign_service ]] || {{ emit_label foreign; return 0; }}
+            if [[ "$SCENARIO" == option_service ]]; then
+                emit_label --version
+            else
+                emit_label app
+            fi
         elif [[ "$template" == *'installation-id'* ]]; then
             if [[ "$SCENARIO" == matching_id_without_sentinel ]]; then
-                printf '%s\n' "$INSTALLATION_ID"
+                emit_label "$INSTALLATION_ID"
             elif [[ "$SCENARIO" == wrong_id ]]; then
-                printf '%064d\n' 0
+                emit_label "$(printf '%064d' 0)"
+            else
+                emit_label ''
             fi
         fi
         return 0
@@ -815,17 +1563,23 @@ mock_docker() {{
     if [[ "$1" == network && "$2" == inspect ]]; then
         template="$4"
         if [[ "$template" == '{{{{.Name}}}}' ]]; then
-            if [[ "$SCENARIO" == noncanonical_network ]]; then
+            if [[ "$SCENARIO" == option_network ]]; then
+                printf 'backupsheep_--version\n'
+            elif [[ "$SCENARIO" == noncanonical_network ]]; then
                 printf 'backupsheep_evil-network\n'
             else
                 printf 'backupsheep_app-database\n'
             fi
         elif [[ "$template" == *'compose.project'* ]]; then
-            printf 'backupsheep\n'
+            emit_label backupsheep
         elif [[ "$template" == *'compose.network'* ]]; then
-            printf 'app-database\n'
+            if [[ "$SCENARIO" == option_network ]]; then
+                emit_label --version
+            else
+                emit_label app-database
+            fi
         elif [[ "$template" == *'installation-id'* ]]; then
-            :
+            emit_label ''
         fi
         return 0
     fi
@@ -836,11 +1590,11 @@ mock_docker() {{
             if [[ "$template" == '{{{{.Name}}}}' ]]; then
                 printf 'backupsheep_installation_identity\n'
             elif [[ "$template" == *'compose.project'* ]]; then
-                printf 'backupsheep\n'
+                emit_label backupsheep
             elif [[ "$template" == *'compose.volume'* ]]; then
-                printf 'installation_identity\n'
+                emit_label installation_identity
             elif [[ "$template" == *'installation-id'* ]]; then
-                printf '%s\n' "$INSTALLATION_ID"
+                emit_label "$INSTALLATION_ID"
             fi
             return 0
         fi
@@ -851,12 +1605,26 @@ mock_docker() {{
                 printf '%s\n' "$resource_id"
             fi
         elif [[ "$template" == *'compose.project'* ]]; then
-            printf 'backupsheep\n'
+            if [[ "$SCENARIO" == retired_ssh_wrong_labels \
+                    && "$resource_id" == backupsheep_ssh_trust ]]; then
+                emit_label foreign-project
+            else
+                emit_label backupsheep
+            fi
         elif [[ "$template" == *'compose.volume'* ]]; then
-            printf '%s\n' "${{resource_id#backupsheep_}}"
+            if [[ "$SCENARIO" == option_volume ]]; then
+                emit_label --version
+            else
+                emit_label "${{resource_id#backupsheep_}}"
+            fi
         elif [[ "$template" == *'installation-id'* ]]; then
             if [[ "$SCENARIO" == matching_id_without_sentinel ]]; then
-                printf '%s\n' "$INSTALLATION_ID"
+                emit_label "$INSTALLATION_ID"
+            elif [[ "$SCENARIO" == retired_ssh_wrong_id \
+                    && "$resource_id" == backupsheep_ssh_trust ]]; then
+                emit_label "$(printf '%064d' 0)"
+            else
+                emit_label ''
             fi
         fi
         return 0
@@ -868,11 +1636,11 @@ compose() {{
     local last_arg=""
     for last_arg in "$@"; do :; done
     case "$last_arg" in
-        --services) printf '%s\n' db rabbitmq migrate preflight app worker-cloud \
+        --services) printf '%s\n' db rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app worker-cloud \
             worker-database worker-files worker-storage worker-logs beat ;;
         --networks) printf 'app-database\n' ;;
         --volumes) printf '%s\n' pgdata rabbitmq_data backup_workdir backup_storage \
-            ssh_trust installation_identity ;;
+            installation_identity ;;
         *) return 92 ;;
     esac
 }}
@@ -906,6 +1674,44 @@ validate_compose_project_ownership
         self.assertEqual(
             self.events(), ["CREATE:backupsheep_installation_identity"]
         )
+
+    def test_fresh_project_creates_sentinel_before_mutation_and_resume_reuses_it(self):
+        result = self.run_exact_path_container_adoption("fresh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.events(), ["CREATE:backupsheep_installation_identity"]
+        )
+
+        result = self.run_exact_path_container_adoption("fresh_resume")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.events(), ["CREATE:backupsheep_installation_identity"]
+        )
+
+    def test_develop_ssh_trust_volume_is_preserved_only_with_exact_ownership(self):
+        result = self.run_exact_path_container_adoption("retired_ssh_trust")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events(), [])
+
+        for scenario, message in (
+            (
+                "retired_ssh_without_sentinel",
+                "exactly one matching installation-identity sentinel",
+            ),
+            ("retired_ssh_wrong_id", "belongs to a different"),
+            (
+                "retired_ssh_wrong_labels",
+                "collides with the retired BackupSheep trust volume",
+            ),
+            ("retired_ssh_attached_running", "still has attached containers"),
+            ("retired_ssh_attached_stopped", "still has attached containers"),
+        ):
+            with self.subTest(scenario=scenario):
+                self.event_log.unlink(missing_ok=True)
+                result = self.run_exact_path_container_adoption(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(self.events(), [])
 
     def test_exact_path_container_adoption_rejects_every_ownership_drift(self):
         scenarios = (
@@ -994,3 +1800,107 @@ parse_args --project-name first --adopt-legacy-project second
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must name the same project", result.stderr)
+
+    def test_project_name_option_is_single_use_and_boundary_checked(self):
+        duplicate = subprocess.run(
+            [
+                "/bin/bash", "-c",
+                'source "$1"; parse_args --project-name one --project-name two',
+                "project-name-test", str(INSTALLER),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn("may be specified only once", duplicate.stderr)
+
+        safe_names = ("a", "0", "a_b-c", "a" * 63)
+        invalid_names = (
+            "", "A", "-project", "_project", "a" * 64, "project.name",
+            "project/name", "project name", "--version", "project\nname",
+            "backupsheepé",
+        )
+        command = (
+            'source "$1"; parse_args --project-name "$2"; '
+            'validate_project_name; printf "%s" "$PROJECT_NAME"'
+        )
+        for project_name in safe_names:
+            with self.subTest(project_name=project_name):
+                result = subprocess.run(
+                    ["/bin/bash", "-c", command, "project-name-test", str(INSTALLER), project_name],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, project_name)
+        for project_name in invalid_names:
+            with self.subTest(project_name=project_name):
+                result = subprocess.run(
+                    ["/bin/bash", "-c", command, "project-name-test", str(INSTALLER), project_name],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_hostile_locale_cannot_broaden_installer_ascii_grammars(self):
+        environment = os.environ.copy()
+        environment["LC_ALL"] = "en_US.US-ASCII"
+
+        project = subprocess.run(
+            [
+                "/bin/bash", "-c",
+                'source "$1"; [[ "$LC_ALL" == C ]]; '
+                'parse_args --project-name BackupSheep; validate_project_name',
+                "project-locale-test", str(INSTALLER),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertNotEqual(project.returncode, 0)
+        self.assertIn("lowercase letter or digit", project.stderr)
+
+        uppercase_identity = "A" * 64
+        identity = subprocess.run(
+            [
+                "/bin/bash", "-c",
+                'source "$1"; [[ "$LC_ALL" == C ]]; '
+                'UPPERCASE_ID="$2"; '
+                'read_env_value() { printf "%s" "$UPPERCASE_ID"; }; '
+                'ensure_installation_id',
+                "identity-locale-test", str(INSTALLER), uppercase_identity,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertNotEqual(identity.returncode, 0)
+        self.assertIn("lowercase hexadecimal", identity.stderr)
+
+    def test_hostile_inferred_project_labels_never_persist_or_mutate(self):
+        suffixes = (
+            "option", "uppercase", "embedded_lf", "trailing_lf", "nul",
+            "marker", "utf8",
+        )
+        for witness_kind in ("container", "sentinel"):
+            for suffix in suffixes:
+                scenario = f"{witness_kind}_project_{suffix}"
+                with self.subTest(scenario=scenario):
+                    self.event_log.unlink(missing_ok=True)
+                    result = self.run_adoption(scenario, adopt_legacy=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(self.events(), [])
+
+    def test_option_shaped_logical_labels_cannot_bypass_installer_membership(self):
+        for scenario in ("option_service", "option_network", "option_volume"):
+            with self.subTest(scenario=scenario):
+                self.event_log.unlink(missing_ok=True)
+                result = self.run_exact_path_container_adoption(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unexpected", result.stderr)
+                self.assertEqual(self.events(), [])

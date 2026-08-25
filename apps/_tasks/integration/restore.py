@@ -10,6 +10,7 @@ from django.utils.dateparse import parse_datetime
 from sentry_sdk import capture_exception
 
 from apps._tasks.diagnostics import capture_execution_diagnostic
+from apps._tasks.artifact_encryption import local_restore_phase_task_id
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.restore_lease import (
     DurableRestoreLease,
@@ -327,6 +328,21 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
             else None
         )
         metadata = dict(restore.execution_metadata or {})
+        # The storage lane may finish a local ciphertext handoff while this
+        # source task is classifying the expected "handoff pending" retry. Keep
+        # the newer DB-bound handoff witness instead of overwriting it with the
+        # source task's pre-publication in-memory metadata.
+        current_metadata = (
+            restore.__class__.objects.filter(pk=restore.pk)
+            .values_list("execution_metadata", flat=True)
+            .first()
+        )
+        current_handoff = dict(
+            (current_metadata or {}).get("local_restore_ciphertext_handoff")
+            or {}
+        )
+        if current_handoff:
+            metadata["local_restore_ciphertext_handoff"] = current_handoff
         if retry_due_at is not None:
             metadata[SCHEDULED_RETRY_RESERVED_UNTIL] = (
                 _scheduled_retry_reservation_deadline(retry_due_at).isoformat()
@@ -413,6 +429,30 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
             )
     finally:
         lease.release()
+
+
+def _schedule_local_restore_handoff_cleanup(restore):
+    state = dict(
+        (restore.execution_metadata or {}).get(
+            "local_restore_ciphertext_handoff"
+        )
+        or {}
+    )
+    if restore.status not in {restore.Status.COMPLETE, restore.Status.FAILED} or state.get(
+        "status"
+    ) not in {"ready", "authenticated"}:
+        return
+    from apps._tasks.integration.storage.tasks import (
+        cleanup_local_restore_ciphertext,
+    )
+
+    model_key = (
+        "website" if isinstance(restore, CoreWebsiteRestore) else "database"
+    )
+    cleanup_local_restore_ciphertext.apply_async(
+        args=[model_key, restore.pk],
+        task_id=local_restore_phase_task_id(restore, "cleanup"),
+    )
 
 
 def _refresh_bound_restore(lease):
@@ -869,7 +909,7 @@ def restore_website_backup(self, node_id=None, backup_id=None, restore_id=None):
     backup = node.website.backups.get(id=backup_id)
     restore = CoreWebsiteRestore.objects.get(id=restore_id, backup=backup)
 
-    return _run_materialized_restore(
+    result = _run_materialized_restore(
         self,
         node=node,
         backup=backup,
@@ -877,6 +917,13 @@ def restore_website_backup(self, node_id=None, backup_id=None, restore_id=None):
         engine=restore_website,
         phase="website_restore",
     )
+    restore.refresh_from_db()
+    try:
+        _schedule_local_restore_handoff_cleanup(restore)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(exc=error, countdown=60, max_retries=2880)
+    return result
 
 
 @current_app.task(
@@ -900,7 +947,7 @@ def restore_database_backup(self, node_id=None, backup_id=None, restore_id=None)
     backup = node.database.backups.get(id=backup_id)
     restore = CoreDatabaseRestore.objects.get(id=restore_id, backup=backup)
 
-    return _run_materialized_restore(
+    result = _run_materialized_restore(
         self,
         node=node,
         backup=backup,
@@ -908,6 +955,13 @@ def restore_database_backup(self, node_id=None, backup_id=None, restore_id=None)
         engine=restore_database,
         phase="database_restore",
     )
+    restore.refresh_from_db()
+    try:
+        _schedule_local_restore_handoff_cleanup(restore)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(exc=error, countdown=60, max_retries=2880)
+    return result
 
 
 def _recoverable_restore_rows(model, *, now, cutoff, batch_size):
@@ -1017,9 +1071,8 @@ def _dispatch_restore_recovery(restore):
     current_app.send_task(task_name, task_id=task_id, args=args)
 
 
-@current_app.task(name="resume_in_progress_restores", bind=True, ignore_result=True)
-def resume_in_progress_restores(self):
-    """Recover restore messages lost during worker, broker, or server failure."""
+def _resume_in_progress_restore_models(models):
+    """Recover only restore rows owned by one worker/database lane."""
     now = timezone.now()
     stale_seconds = int(
         getattr(settings, "RESTORE_RECOVERY_STALE_SECONDS", 5 * 60)
@@ -1029,12 +1082,6 @@ def resume_in_progress_restores(self):
     )
     batch_size = int(getattr(settings, "RESTORE_RECOVERY_BATCH_SIZE", 100))
     cutoff = now - timedelta(seconds=stale_seconds)
-    models = (
-        CoreCloudRestore,
-        CoreWebsiteRestore,
-        CoreDatabaseRestore,
-        CoreVultrDatabaseRestore,
-    )
     for model in models:
         for candidate in _recoverable_restore_rows(
             model,
@@ -1055,3 +1102,30 @@ def resume_in_progress_restores(self):
                 # The short DB reservation expires automatically. A provider or
                 # broker outage therefore retries safely without exposing details.
                 capture_exception(error)
+
+
+@current_app.task(name="resume_in_progress_restores", bind=True, ignore_result=True)
+def resume_in_progress_restores(self):
+    """Recover cloud-provider restores only in the cloud lane."""
+
+    return _resume_in_progress_restore_models(
+        (CoreCloudRestore, CoreVultrDatabaseRestore)
+    )
+
+
+@current_app.task(
+    name="resume_in_progress_database_restores", bind=True, ignore_result=True
+)
+def resume_in_progress_database_restores(self):
+    """Recover database restores only in the database source lane."""
+
+    return _resume_in_progress_restore_models((CoreDatabaseRestore,))
+
+
+@current_app.task(
+    name="resume_in_progress_files_restores", bind=True, ignore_result=True
+)
+def resume_in_progress_files_restores(self):
+    """Recover website restores only in the files source lane."""
+
+    return _resume_in_progress_restore_models((CoreWebsiteRestore,))

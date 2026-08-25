@@ -105,7 +105,7 @@ def backup_website(
             Node itself should be available now.
             """
             node.status = CoreNode.Status.ACTIVE
-            node.save()
+            node.save(update_fields=["status", "modified"])
 
         except ConnectionValidationFailedError as error:
             node.notify_backup_fail(error, backup_type)

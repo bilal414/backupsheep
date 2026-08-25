@@ -5,6 +5,7 @@ from datetime import timedelta
 import humanfriendly
 from django.contrib.contenttypes.fields import GenericRelation
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
@@ -1058,6 +1059,47 @@ class UtilBackup(TimeStampedModel):
         with transaction.atomic():
             backup = self.__class__.objects.select_for_update().get(pk=self.pk)
             state = self._locked_execution_state(backup)
+            from apps.console.backup.models import CoreBackupEncryptionEnvelope
+
+            encryption_envelope = (
+                CoreBackupEncryptionEnvelope.objects.select_for_update()
+                .filter(execution=state)
+                .first()
+            )
+            source_ciphertext = None
+            if encryption_envelope is not None:
+                if (
+                    encryption_envelope.status
+                    != CoreBackupEncryptionEnvelope.Status.ACTIVE
+                ):
+                    raise ValidationError(
+                        "Artifact evidence cannot be recorded while encryption custody is pending."
+                    )
+                encryption_envelope.validate_restore_state()
+                source_rows = list(
+                    artifact_model.objects.select_for_update().filter(
+                        backup_content_type=content_type,
+                        backup_object_id=self.pk,
+                        storage__isnull=True,
+                        role="source",
+                        artifact_format="bse1",
+                        encryption_envelope=encryption_envelope,
+                    )
+                )
+                if len(source_rows) != 1:
+                    raise ValidationError(
+                        "An active encryption envelope requires one source ciphertext artifact."
+                    )
+                source_ciphertext = source_rows[0]
+                if (
+                    byte_count != source_ciphertext.byte_count
+                    or str(checksum_algorithm or "").lower() != "sha256"
+                    or str(checksum_value or "")
+                    != source_ciphertext.checksum_value
+                ):
+                    raise ValidationError(
+                        "Artifact evidence does not identify the active source ciphertext."
+                    )
             lookup = {
                 "backup_content_type": content_type,
                 "backup_object_id": self.pk,
@@ -1072,6 +1114,10 @@ class UtilBackup(TimeStampedModel):
                 artifact.metadata = dict(metadata)
             for field, value in values.items():
                 setattr(artifact, field, value)
+            if encryption_envelope is not None:
+                artifact.artifact_format = artifact.Format.BSE1
+                artifact.encryption_envelope = encryption_envelope
+                artifact.full_clean()
             artifact.save()
             if str(role) == "source" and storage is None:
                 state.artifact_bytes = byte_count
@@ -1137,18 +1183,30 @@ class UtilBackup(TimeStampedModel):
 
     def retry(self):
         from celery import current_app
-        import json
-        from apps.console.storage.models import CoreStorage
+        from apps.console.backup.models import CoreBackupRequest
+        from backupsheep.source_recovery_policy import require_source_backup_creation
 
         if self.schedule:
+            require_source_backup_creation(
+                self.schedule.node.connection.integration.code
+            )
+            request = CoreBackupRequest.objects.filter(
+                task_id=self.celery_task_id,
+                task_name=self.schedule.node.backup_task_name(),
+                node_id=self.schedule.node_id,
+            ).first()
+            if request is None:
+                # Generation-2 compatibility: reconstruct only from the durable
+                # backup row, never from request parameters supplied to this view.
+                from apps._tasks.helper.tasks import _backup_recovery_kwargs
+
+                payload = _backup_recovery_kwargs(self, self.schedule.node)
+            else:
+                payload = dict(request.payload or {})
             current_app.send_task(
                 self.schedule.node.backup_task_name(),
                 task_id=self.celery_task_id,
-                kwargs={
-                    "node_id": self.schedule.node.id,
-                    "schedule_id": self.schedule.id,
-                    "storage_ids": self.schedule.storage_ids,
-                },
+                kwargs=payload,
             )
 
 

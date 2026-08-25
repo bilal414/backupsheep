@@ -40,6 +40,7 @@ from apps.console.node.models import CoreNode
 from rest_framework import status
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 def _log_activity(request, log_type, data):
@@ -78,6 +79,7 @@ class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def retry(self, request, *args, **kwargs):
+        require_source_backup_creation("basecamp")
         instance = self.get_object()
         instance.retry()
         return Response(status=status.HTTP_202_ACCEPTED, data={})

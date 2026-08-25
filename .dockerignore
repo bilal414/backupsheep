@@ -18,6 +18,9 @@
 !init.sh
 !manage.py
 !.env_sample
+!deploy/
+!deploy/staging/
+!deploy/staging/provision-volumes.sh
 
 # Runtime Python packages, templates, and committed static source assets.
 !apps/

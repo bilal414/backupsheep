@@ -57,6 +57,7 @@ COMPUTE_MAX_WAIT_POLLS = 120
 COMPUTE_POLL_SECONDS = 5
 SSH_MAX_WAIT_POLLS = 60
 SSH_POLL_SECONDS = 5
+SSH_FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 FIREWALL_RULE_LIMIT = 1000
 FIREWALL_MAX_WAIT_POLLS = 24
 FIREWALL_POLL_SECONDS = 5
@@ -79,6 +80,31 @@ FIREWALL_RULE_FIELDS = (
     "action",
     "comment",
 )
+
+
+def _ssh_public_key_fingerprint(key) -> str:
+    """Return the OpenSSH SHA-256 fingerprint for one public host key."""
+    try:
+        raw = key.asbytes()
+    except Exception:
+        raise HarnessError("Pinned SSH host key was not readable.") from None
+    if not isinstance(raw, bytes) or not raw:
+        raise HarnessError("Pinned SSH host key was malformed.")
+    return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode(
+        "ascii"
+    ).rstrip("=")
+
+
+class _ExactHostKeyPolicy:
+    """Accept a missing Paramiko host only when an independent pin matches."""
+
+    def __init__(self, expected_fingerprint: str):
+        self.expected_fingerprint = expected_fingerprint
+
+    def missing_host_key(self, _client, _hostname, key) -> None:
+        actual = _ssh_public_key_fingerprint(key)
+        if not secrets.compare_digest(actual, self.expected_fingerprint):
+            raise HarnessError("The UpCloud SSH host key did not match the exact pin.")
 RUNTIME_DIR = ROOT / "scripts" / ".upcloud-runtime"
 RUNTIME_SCHEMA = "backupsheep-upcloud-mos-runtime-v1"
 COMPUTE_RUNTIME_SCHEMA = "backupsheep-upcloud-compute-runtime-v1"
@@ -761,6 +787,515 @@ def _contains_sensitive_key(value) -> bool:
     elif isinstance(value, list):
         return any(_contains_sensitive_key(child) for child in value)
     return False
+
+
+_SENSITIVE_DIAGNOSTIC_ASSIGNMENT_RE = re.compile(
+    r"(?i)(authorization|proxy[_ .-]?authorization|x[_ .-]?api[_ .-]?key|"
+    r"api[_ .-]?key|access[_ .-]?key|secret(?:[_ .-]?(?:access[_ .-]?)?key)?|"
+    r"private[_ .-]?key|client[_ .-]?secret|credential|token|password|passwd|pwd)"
+    r"\s*[:=]\s*\S+"
+)
+_AUTHORIZATION_SCHEME_RE = re.compile(
+    r"(?i)(?:authorization|proxy[_ .-]?authorization)\s*(?::|=)?\s*"
+    r"(?:bearer|basic)\s+\S+"
+)
+_BARE_AUTHORIZATION_SCHEME_RE = re.compile(
+    r"(?i)(?:^|[\s,(])(?:bearer|basic)\s+\S+"
+)
+_URL_USERINFO_RE = re.compile(
+    r"(?i)(?:[a-z][a-z0-9+.-]*:)?//[^\s/?#]*@"
+)
+_URL_PARAMETER_RE = re.compile(
+    r"[?&#;]([^?&#;=\s]{1,256})(?:(?==)|(?=[?&#;]|$))"
+)
+_REFUSED_OUTPUT_DIAGNOSTIC = (
+    "The UpCloud harness refused a diagnostic or result containing credentials."
+)
+_PUBLIC_CREDENTIAL_METADATA_KEYS = frozenset(
+    {
+        "credential_runtime_file",
+        "credential_service_scaffolding",
+        "credentials_file",
+        "credentials_read",
+        "object_storage_credentials",
+        "protected_runtime_file_verified",
+        "ssh_private_key_file",
+    }
+)
+_SENSITIVE_OUTPUT_KEY_TOKENS = (
+    "authorization",
+    "credential",
+    "api_key",
+    "password",
+    "private_key",
+    "secret",
+    "signature",
+    "token",
+    "access_key",
+)
+_SENSITIVE_OUTPUT_KEY_COMPACT_TOKENS = tuple(
+    token.replace("_", "") for token in _SENSITIVE_OUTPUT_KEY_TOKENS
+)
+_SENSITIVE_QUERY_PARAMETER_NAMES = frozenset(
+    {"auth", "code", "jwt", "key", "session", "sessionid", "sig", "ticket"}
+)
+_SENSITIVE_GENERIC_OUTPUT_KEY_NAMES = frozenset(
+    {"auth", "jwt", "key", "session", "sessionid", "ticket"}
+)
+_SENSITIVE_COMPOSITE_KEY_PREFIXES = (
+    "auth",
+    "encryption",
+    "jwt",
+    "oauth",
+    "session",
+    "signing",
+    "ticket",
+)
+_SENSITIVE_COMPOSITE_KEY_SUFFIXES = (
+    "code",
+    "cookie",
+    "credential",
+    "data",
+    "key",
+    "keybytes",
+    "keydata",
+    "keyid",
+    "keymaterial",
+    "keyvalue",
+    "material",
+    "otp",
+    "passcode",
+    "state",
+    "token",
+    "value",
+    "verifier",
+)
+_SENSITIVE_COMPOSITE_OUTPUT_KEY_NAMES = frozenset(
+    prefix + suffix
+    for prefix in _SENSITIVE_COMPOSITE_KEY_PREFIXES
+    for suffix in _SENSITIVE_COMPOSITE_KEY_SUFFIXES
+) | frozenset(
+    "key" + suffix
+    for suffix in ("bytes", "data", "id", "identifier", "material", "value")
+)
+_SENSITIVE_OUTPUT_KEY_TERMINALS = (
+    "code",
+    "cookie",
+    "key",
+    "otp",
+    "passcode",
+    "verifier",
+)
+_PUBLIC_NON_SECRET_KEY_METADATA_KEYS = frozenset(
+    {
+        "key_fingerprints",
+        "object_key",
+        "public_key_sha256",
+    }
+)
+_PUBLIC_OUTPUT_TOP_LEVEL_KEYS = {
+    "plan": (
+        frozenset(
+            {
+                "commands",
+                "credentials_read",
+                "gates",
+                "network_calls",
+                "status",
+                "workflow",
+            }
+        ),
+    ),
+    "export-manifests": (
+        frozenset(
+            {"files", "generation_dir", "generation_marker", "status"}
+        ),
+    ),
+    "setup-compute": (
+        frozenset(
+            {
+                "fixture",
+                "plan",
+                "safe_config_sha256",
+                "source_boot_storage_id",
+                "source_server_id",
+                "source_volume_id",
+                "status",
+                "ui_resource_types",
+                "workloads",
+                "zone",
+            }
+        ),
+    ),
+    "verify-compute": (
+        frozenset(
+            {
+                "server",
+                "source_server_id",
+                "source_volume_id",
+                "status",
+                "volume",
+            }
+        ),
+    ),
+    "verify-workloads": (
+        frozenset(
+            {"backup_artifact_verification", "restored", "source", "status"}
+        ),
+    ),
+    "cleanup-compute": (
+        frozenset(
+            {
+                "deleted_storage_ids",
+                "restored_server_id",
+                "source_server_id",
+                "status",
+            }
+        ),
+    ),
+    "setup-object-storage": (
+        frozenset(
+            {
+                "bucket_name",
+                "credentials_file",
+                "endpoint",
+                "prefix",
+                "service_uuid",
+                "status",
+                "ui_no_delete",
+                "versioning",
+            }
+        ),
+    ),
+    "arm-object-storage": (
+        frozenset(
+            {"bucket_name", "prefix", "service_uuid", "status", "versioning"}
+        ),
+    ),
+    "verify-object-storage": (
+        frozenset({"objects", "status"}),
+    ),
+    "cleanup-object-storage": (
+        frozenset({"status"}),
+        frozenset(
+            {
+                "credential_service_scaffolding",
+                "data_cleanup",
+                "retained_by_instruction",
+                "service_uuid",
+                "status",
+            }
+        ),
+    ),
+    "reconcile-object-storage-evidence": (
+        frozenset(
+            {
+                "bucket_name",
+                "configuration_provenance",
+                "ownership_marker",
+                "prefix",
+                "service_uuid",
+                "status",
+                "versioning",
+            }
+        ),
+    ),
+    "inventory": (
+        frozenset(
+            {
+                "exact_run",
+                "mos_name_only_collisions",
+                "name_only_collisions",
+                "phase",
+                "retained_by_instruction",
+                "status",
+            }
+        ),
+    ),
+}
+_PUBLIC_OUTPUT_STATUSES = {
+    "arm-object-storage": frozenset({"armed_for_versioned_ui_backups"}),
+    "cleanup-compute": frozenset({"completed"}),
+    "cleanup-object-storage": frozenset({"completed", "nothing_to_cleanup"}),
+    "export-manifests": frozenset({"exported"}),
+    "inventory": frozenset({"verified"}),
+    "plan": frozenset({"plan_only"}),
+    "reconcile-object-storage-evidence": frozenset({"verified"}),
+    "setup-compute": frozenset({"ready_for_ui_attachment"}),
+    "setup-object-storage": frozenset({"ready_for_ui_storage_configuration"}),
+    "verify-compute": frozenset({"verified"}),
+    "verify-object-storage": frozenset({"verified"}),
+    "verify-workloads": frozenset({"verified"}),
+}
+_PUBLIC_OUTPUT_STATUS_BY_ENVELOPE = {
+    "cleanup-object-storage": {
+        frozenset({"status"}): frozenset({"nothing_to_cleanup"}),
+        frozenset(
+            {
+                "credential_service_scaffolding",
+                "data_cleanup",
+                "retained_by_instruction",
+                "service_uuid",
+                "status",
+            }
+        ): frozenset({"completed"}),
+    },
+}
+_PUBLIC_OBJECT_KEY_RE = re.compile(
+    r"^backupsheep-e2e/[A-Za-z0-9][A-Za-z0-9._:-]{0,254}/"
+    r"[A-Za-z0-9][A-Za-z0-9._:-]{0,511}\.zip$"
+)
+_OUTPUT_PERCENT_DECODE_ROUNDS = 8
+
+
+def _decoded_output_text_candidates(value: str) -> tuple[str, ...]:
+    """Return raw and bounded percent-decoded forms for output inspection."""
+
+    candidates = [str(value)]
+    for _ in range(_OUTPUT_PERCENT_DECODE_ROUNDS):
+        decoded = unquote(candidates[-1])
+        if decoded == candidates[-1]:
+            break
+        candidates.append(decoded)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _output_percent_decoding_was_truncated(value: str) -> bool:
+    candidates = _decoded_output_text_candidates(value)
+    return unquote(candidates[-1]) != candidates[-1]
+
+
+def _normalized_output_key(value: str) -> tuple[str, str]:
+    decoded = _decoded_output_text_candidates(str(value))[-1]
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", decoded)
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", separated).strip("_").casefold()
+    compact = re.sub(r"[^a-z0-9]+", "", decoded.casefold())
+    return normalized, compact
+
+
+def _output_name_is_sensitive(value: str) -> bool:
+    if _output_percent_decoding_was_truncated(value):
+        return True
+    normalized, compact = _normalized_output_key(value)
+    return (
+        normalized in _SENSITIVE_GENERIC_OUTPUT_KEY_NAMES
+        or compact in _SENSITIVE_GENERIC_OUTPUT_KEY_NAMES
+        or compact in _SENSITIVE_COMPOSITE_OUTPUT_KEY_NAMES
+        # Credential producers use many provider-specific labels. A result key
+        # ending in a credential terminal is private unless a separate exact
+        # metadata validator below proves that the field is a public witness.
+        # This closes arbitrary variants such as client_key, session_cookie,
+        # verification_code, one_time_code, and their compact/camel forms.
+        or any(
+            compact.endswith(terminal)
+            for terminal in _SENSITIVE_OUTPUT_KEY_TERMINALS
+        )
+        or any(token in normalized for token in _SENSITIVE_OUTPUT_KEY_TOKENS)
+        or any(token in compact for token in _SENSITIVE_OUTPUT_KEY_COMPACT_TOKENS)
+    )
+
+
+def _query_parameter_name_is_sensitive(value: str) -> bool:
+    normalized, compact = _normalized_output_key(value)
+    return _output_name_is_sensitive(value) or normalized in {
+        "session_id",
+    } or compact in _SENSITIVE_QUERY_PARAMETER_NAMES
+
+
+def _text_contains_sensitive_material(value: str) -> bool:
+    if _output_percent_decoding_was_truncated(value):
+        return True
+    for candidate in _decoded_output_text_candidates(value):
+        if (
+            _SENSITIVE_DIAGNOSTIC_ASSIGNMENT_RE.search(candidate)
+            or _AUTHORIZATION_SCHEME_RE.search(candidate)
+            or _BARE_AUTHORIZATION_SCHEME_RE.search(candidate)
+            or _URL_USERINFO_RE.search(candidate)
+        ):
+            return True
+        for match in _URL_PARAMETER_RE.finditer(candidate):
+            if _query_parameter_name_is_sensitive(match.group(1)):
+                return True
+    return False
+
+
+def _public_credential_metadata_is_safe(key: str, value) -> bool:
+    if key in {
+        "credential_runtime_file",
+        "credentials_file",
+        "ssh_private_key_file",
+    }:
+        if (
+            not isinstance(value, str)
+            or not 0 < len(value) <= 4096
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            or "?" in value
+            or "#" in value
+        ):
+            return False
+        path = Path(value)
+        return (
+            path.is_absolute()
+            and path.anchor == "/"
+            and str(path) == value
+            and not any(part in {".", ".."} for part in path.parts)
+            and not _text_contains_sensitive_material(value)
+        )
+    if key in {"credentials_read", "protected_runtime_file_verified"}:
+        return type(value) is bool
+    if key == "credential_service_scaffolding":
+        return value == USER_RETAINED_BY_INSTRUCTION
+    if key == "object_storage_credentials":
+        return value == (
+            "preserve-credentials is mandatory and default-on; this harness "
+            "has no credential revoke mode"
+        )
+    return False
+
+
+def _public_non_secret_key_metadata_is_safe(key: str, value) -> bool:
+    """Validate exact public witnesses whose names intentionally contain key."""
+
+    if key == "object_key":
+        return (
+            isinstance(value, str)
+            and 0 < len(value) <= 1024
+            and _PUBLIC_OBJECT_KEY_RE.fullmatch(value) is not None
+            and not value.startswith("/")
+            and "\\" not in value
+            and "?" not in value
+            and "#" not in value
+            and not any(
+                ord(character) < 32 or ord(character) == 127
+                for character in value
+            )
+            and not _text_contains_sensitive_material(value)
+        )
+    if key == "key_fingerprints":
+        return (
+            isinstance(value, list)
+            and len(value) <= MAX_ITEMS
+            and all(
+                isinstance(item, str) and SHA256_RE.fullmatch(item)
+                for item in value
+            )
+            and value == sorted(set(value))
+        )
+    if key == "public_key_sha256":
+        return isinstance(value, str) and SHA256_RE.fullmatch(value) is not None
+    return False
+
+
+def _contains_sensitive_output_key(value) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            if key_text in _PUBLIC_CREDENTIAL_METADATA_KEYS:
+                if not _public_credential_metadata_is_safe(key_text, child):
+                    return True
+            elif key_text in _PUBLIC_NON_SECRET_KEY_METADATA_KEYS:
+                if not _public_non_secret_key_metadata_is_safe(key_text, child):
+                    return True
+            elif _output_name_is_sensitive(key_text):
+                return True
+            if _contains_sensitive_output_key(child):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_contains_sensitive_output_key(child) for child in value)
+    return False
+
+
+def _contains_sensitive_value(value, sensitive_values) -> bool:
+    secrets_to_check = tuple(
+        str(secret) for secret in sensitive_values if str(secret or "")
+    )
+    if not secrets_to_check:
+        return False
+    if isinstance(value, dict):
+        return any(
+            _contains_sensitive_value(key, secrets_to_check)
+            or _contains_sensitive_value(child, secrets_to_check)
+            for key, child in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(
+            _contains_sensitive_value(child, secrets_to_check) for child in value
+        )
+    if isinstance(value, str):
+        return any(
+            secret in candidate
+            for candidate in _decoded_output_text_candidates(value)
+            for secret in secrets_to_check
+        )
+    return False
+
+
+def _contains_sensitive_output_text(value) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            if (
+                key_text in _PUBLIC_CREDENTIAL_METADATA_KEYS
+                and _public_credential_metadata_is_safe(key_text, child)
+            ):
+                continue
+            if _contains_sensitive_output_text(child):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_contains_sensitive_output_text(child) for child in value)
+    return isinstance(value, str) and _text_contains_sensitive_material(value)
+
+
+def _output_secret_values(environment, harness=None) -> tuple[str, ...]:
+    values = []
+    token = str((environment or {}).get("UPCLOUD_API_TOKEN") or "").strip()
+    if token:
+        values.append(token)
+    if harness is not None:
+        remembered = getattr(harness, "__dict__", {}).get(
+            "_output_secret_values", ()
+        )
+        if isinstance(remembered, (frozenset, list, set, tuple)):
+            values.extend(remembered)
+    return tuple(dict.fromkeys(str(value) for value in values if str(value or "")))
+
+
+def _emit_public_json(value, *, command: str, sensitive_values=()) -> None:
+    """Write one JSON result only after a fail-closed credential check."""
+
+    expected_envelopes = _PUBLIC_OUTPUT_TOP_LEVEL_KEYS.get(command)
+    expected_statuses = _PUBLIC_OUTPUT_STATUSES.get(command)
+    actual_envelope = frozenset(value) if isinstance(value, dict) else None
+    if actual_envelope is not None:
+        expected_statuses = _PUBLIC_OUTPUT_STATUS_BY_ENVELOPE.get(
+            command, {}
+        ).get(actual_envelope, expected_statuses)
+    if (
+        expected_envelopes is None
+        or expected_statuses is None
+        or not isinstance(value, dict)
+        or actual_envelope not in expected_envelopes
+        or value.get("status") not in expected_statuses
+        or _contains_sensitive_output_key(value)
+        or _contains_sensitive_output_text(value)
+        or _contains_sensitive_value(value, sensitive_values)
+    ):
+        raise HarnessError(_REFUSED_OUTPUT_DIAGNOSTIC)
+    print(json.dumps(value, indent=2, sort_keys=True))
+
+
+def _public_error_message(_error, *, sensitive_values=()) -> str:
+    """Return a fixed diagnostic without rendering a provider exception.
+
+    Provider SDKs do not have a reliable secret-bearing exception schema. Pattern
+    matching can protect structured success output, but it is not a sound basis for
+    deciding that arbitrary provider prose is public. Keep the argument for a narrow
+    call contract while deliberately never converting it to text.
+    """
+
+    del sensitive_values
+    return _REFUSED_OUTPUT_DIAGNOSTIC
 
 
 def _strict_object_pairs(pairs):
@@ -1492,6 +2027,13 @@ class UpCloudLiveHarness:
             scope=config.account,
         )
         self.account = ""
+        self._output_secret_values = {token} if token else set()
+
+    def _remember_output_secrets(self, payload: dict, fields) -> None:
+        for field in fields:
+            value = str(payload.get(field) or "")
+            if value:
+                self._output_secret_values.add(value)
 
     def _require_compute_config(self):
         if not self.config.zone:
@@ -2338,6 +2880,7 @@ class UpCloudLiveHarness:
             self._validate_runtime(runtime, service)
             if runtime["access_key"] != key_id:
                 raise HarnessError("The runtime access key does not match the ledger.")
+            self._remember_output_secrets(runtime, ("access_key", "secret_key"))
             if intent_matches:
                 self.intents.clear(intent_key)
             return runtime
@@ -2379,6 +2922,7 @@ class UpCloudLiveHarness:
         runtime = self._runtime_payload(
             service=service, access_key=key_id, secret_key=secret_key
         )
+        self._remember_output_secrets(runtime, ("access_key", "secret_key"))
         # The one-time secret becomes durable before any non-secret read-back.
         _write_runtime_secret(self.config.runtime_path, runtime)
         exact = self._access_key_read(service_id, username, key_id)
@@ -2414,6 +2958,7 @@ class UpCloudLiveHarness:
         runtime = self._validate_runtime(
             _read_runtime_secret(self.config.runtime_path), service
         )
+        self._remember_output_secrets(runtime, ("access_key", "secret_key"))
         key_entry = self._one_active("mos_access_key")
         if (
             not key_entry
@@ -2807,8 +3352,8 @@ class UpCloudLiveHarness:
         return {
             "status": "armed_for_versioned_ui_backups",
             "service_uuid": service_entry["resource_id"],
-            "bucket_name": bucket,
-            "prefix": runtime["prefix"],
+            "bucket_name": self.names["bucket"],
+            "prefix": self.names["prefix"],
             "versioning": "Enabled",
         }
 
@@ -3035,8 +3580,8 @@ class UpCloudLiveHarness:
         return {
             "status": "verified",
             "service_uuid": service_id,
-            "bucket_name": runtime["bucket_name"],
-            "prefix": runtime["prefix"],
+            "bucket_name": self.names["bucket"],
+            "prefix": self.names["prefix"],
             "versioning": "Enabled",
             "configuration_provenance": (config_entry.get("ownership") or {}).get(
                 "provenance"
@@ -3657,6 +4202,7 @@ class UpCloudLiveHarness:
         runtime = self._validate_runtime(
             _read_runtime_secret(self.config.runtime_path), service
         )
+        self._remember_output_secrets(runtime, ("access_key", "secret_key"))
         if _hash(str(runtime.get("access_key") or "")) != key_entry["resource_id"]:
             raise HarnessError(
                 "The protected runtime credential no longer matches its exact "
@@ -5294,18 +5840,25 @@ class UpCloudLiveHarness:
         except Exception:
             raise HarnessError("Paramiko is required for UpCloud data verification.") from None
         private_path, _public_key = self._ensure_ssh_key()
-        _private, _public, known_hosts = self._key_paths()
         addresses = set(self._server_public_addresses(server))
         configured = str(self.environment.get(host_variable) or "").strip()
         host = configured or (sorted(addresses)[0] if addresses else "")
         if not host or host not in addresses:
             raise HarnessError("SSH host is not an exact provider-reported address.")
+        pin_variable = f"{host_variable}_KEY_SHA256"
+        expected_fingerprint = str(
+            self.environment.get(pin_variable) or ""
+        ).strip()
+        if not SSH_FINGERPRINT_RE.fullmatch(expected_fingerprint):
+            raise HarnessError(
+                f"{pin_variable} must be an exact OpenSSH SHA-256 host-key fingerprint."
+            )
         client = paramiko.SSHClient()
-        if known_hosts.exists():
-            client.load_host_keys(str(known_hosts))
-        first_connection = host not in client.get_host_keys()
+        # A provider-reported IP is not an authenticated host identity. Require
+        # a fingerprint collected through an independent provider/console path;
+        # never persist or reuse a key learned from this SSH connection.
         client.set_missing_host_key_policy(
-            paramiko.AutoAddPolicy() if first_connection else paramiko.RejectPolicy()
+            _ExactHostKeyPolicy(expected_fingerprint)
         )
         try:
             key = paramiko.RSAKey.from_private_key_file(str(private_path))
@@ -5319,11 +5872,17 @@ class UpCloudLiveHarness:
                 banner_timeout=REQUEST_TIMEOUT[1],
                 auth_timeout=REQUEST_TIMEOUT[1],
             )
-            if first_connection:
-                known_hosts.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                client.save_host_keys(str(known_hosts))
-                os.chmod(known_hosts, 0o600)
+            remote_key = client.get_transport().get_remote_server_key()
+            if not secrets.compare_digest(
+                _ssh_public_key_fingerprint(remote_key), expected_fingerprint
+            ):
+                raise HarnessError(
+                    "The connected UpCloud SSH host key did not match the exact pin."
+                )
             return client
+        except HarnessError:
+            client.close()
+            raise
         except Exception:
             client.close()
             raise HarnessError("SSH connection to the exact UpCloud test server failed.") from None
@@ -5345,14 +5904,10 @@ class UpCloudLiveHarness:
     @staticmethod
     def _ssh_host_key_fingerprint(client) -> str:
         try:
-            raw = client.get_transport().get_remote_server_key().asbytes()
+            key = client.get_transport().get_remote_server_key()
         except Exception:
             raise HarnessError("The UpCloud SSH host key was not readable.") from None
-        if not isinstance(raw, bytes) or not raw:
-            raise HarnessError("The UpCloud SSH host key was malformed.")
-        return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode(
-            "ascii"
-        ).rstrip("=")
+        return _ssh_public_key_fingerprint(key)
 
     def _guest_restore_evidence(self, client, server: dict) -> dict:
         """Verify the restored guest network, boot, and bounded egress state."""
@@ -5881,6 +6436,7 @@ ALTER TABLE events OWNER TO {database_user};
                 )
             ):
                 raise HarnessError("The UpCloud compute runtime scope changed.")
+            self._remember_output_secrets(payload, ("database_password",))
             return payload
         if self._one_active("compute_workload_fixture"):
             raise SecretUnavailable(
@@ -5900,6 +6456,7 @@ ALTER TABLE events OWNER TO {database_user};
             "database_user": names["database_user"],
             "database_password": secrets.token_hex(32),
         }
+        self._remember_output_secrets(payload, ("database_password",))
         _write_compute_runtime_secret(path, payload)
         return payload
 
@@ -6743,6 +7300,7 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
         runtime = _read_compute_runtime_secret(
             _compute_runtime_path(self.config.runtime_path, self.config.run_id)
         )
+        self._remember_output_secrets(runtime, ("database_password",))
         ownership = source.get("ownership") or {}
         client = self._ssh_client(
             server, host_variable="UPCLOUD_E2E_SOURCE_SSH_HOST"
@@ -8086,6 +8644,7 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
         runtime = _read_compute_runtime_secret(
             _compute_runtime_path(self.config.runtime_path, self.config.run_id)
         )
+        self._remember_output_secrets(runtime, ("database_password",))
         names = self._workload_names()
         website_entries = self._active_entries("ui_website_restore")
         database_entries = self._active_entries("ui_postgresql_restore")
@@ -8706,11 +9265,12 @@ def main(argv=None, *, environment=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     command = args.command or "plan"
-    if command == "plan":
-        print(json.dumps(_plan(), indent=2, sort_keys=True))
-        return 0
     environment = environment or os.environ
+    harness = None
     try:
+        if command == "plan":
+            _emit_public_json(_plan(), command=command)
+            return 0
         if command == "export-manifests":
             os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backupsheep.settings")
             import django
@@ -8736,7 +9296,11 @@ def main(argv=None, *, environment=None) -> int:
                 )
             except UpCloudManifestExportError as error:
                 raise HarnessError(str(error)) from None
-            print(json.dumps(result, indent=2, sort_keys=True))
+            _emit_public_json(
+                result,
+                command=command,
+                sensitive_values=_output_secret_values(environment),
+            )
             return 0
         config = HarnessConfig.from_environment(environment)
         harness = UpCloudLiveHarness(config, environment=environment)
@@ -8770,10 +9334,15 @@ def main(argv=None, *, environment=None) -> int:
             result = harness.inventory(phase=args.phase)
         else:
             raise HarnessError("Unknown UpCloud harness command.")
-        print(json.dumps(result, indent=2, sort_keys=True))
+        sensitive_values = _output_secret_values(environment, harness)
+        _emit_public_json(
+            result, command=command, sensitive_values=sensitive_values
+        )
         return 0
     except (HarnessError, LedgerError) as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        sensitive_values = _output_secret_values(environment, harness)
+        message = _public_error_message(error, sensitive_values=sensitive_values)
+        print(f"ERROR: {message}", file=sys.stderr)
         return 2
     except Exception:
         print("ERROR: The UpCloud harness stopped safely.", file=sys.stderr)
