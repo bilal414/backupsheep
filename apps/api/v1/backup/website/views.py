@@ -6,6 +6,7 @@ import boto3
 import pytz
 from botocore.config import Config
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 from django.utils.timezone import get_current_timezone
@@ -342,23 +343,30 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                 raise RestoreStoragePointRequired()
             stored_backup = stored_backups.first()
 
-        restore = CoreWebsiteRestore.objects.create(
-            backup=backup,
-            storage_point=stored_backup,
-            name=f"Restore of {backup.uuid}",
-            params={"delete": bool(request.data.get("delete"))},
-        )
+        with transaction.atomic():
+            restore = CoreWebsiteRestore.objects.create(
+                backup=backup,
+                storage_point=stored_backup,
+                name=f"Restore of {backup.uuid}",
+                params={"delete": bool(request.data.get("delete"))},
+            )
+            task_id = f"website-restore-{restore.correlation_id.hex}"
+            restore.celery_task_id = task_id
+            restore.save(update_fields=["celery_task_id", "modified"])
 
         try:
             restore_website_backup.apply_async(
+                task_id=task_id,
                 kwargs={
                     "node_id": backup.website.node.id,
                     "backup_id": backup.id,
                     "restore_id": restore.id,
                 }
             )
-        except Exception as e:
-            raise RestoreCreateError(e.__str__())
+        except Exception:
+            # Broker/client exceptions can include connection details. Keep the
+            # durable restore row for recovery, but return only the stable API error.
+            raise RestoreCreateError()
 
         return Response(
             CoreWebsiteRestoreSerializer(restore).data,

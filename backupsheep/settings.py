@@ -30,6 +30,7 @@ from dotenv import dotenv_values
 
 from backupsheep.sentry_security import scrub_sentry_event
 from backupsheep.runtime_secrets import resolve_file_backed_secrets
+from backupsheep.celery_task_manifest import celery_routes
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -1001,6 +1002,9 @@ CELERY_BROKER_USE_SSL = _broker_ssl_options(CELERY_BROKER_URL, config)
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE
+# No production caller consumes Celery result rows, and chords have been removed.
+# Keeping results would give every worker a shared cross-lane data/tamper surface.
+CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_TRACK_STARTED = True
 # Backup tasks perform remote side effects. A worker must acknowledge them only after
 # the task has committed its provider id/status, otherwise a worker crash can lose the
@@ -1063,11 +1067,12 @@ CELERY_TASK_DEFAULT_ROUTING_KEY = "default"
 CELERY_WORKER_ENABLE_REMOTE_CONTROL = False
 # Task modules the worker must import at boot so every task is registered. These
 # do not live in the conventional "<app>/tasks.py" location, so Celery's app
-# autodiscovery does not find them; backups are dispatched by name via
-# send_task()/chord(), which fails on an unregistered task unless listed here.
+# autodiscovery does not find them; some tasks are dispatched by registered name,
+# which fails on an unregistered task unless listed here.
 CELERY_IMPORTS = (
     "apps._tasks.helper.tasks",
     "apps._tasks.helper.maintenance",
+    "apps._tasks.managed_ssh",
     "apps._tasks.integration.aws",
     "apps._tasks.integration.aws_rds",
     "apps._tasks.integration.basecamp",
@@ -1142,7 +1147,7 @@ BACKUP_REQUEST_RECOVERY_BATCH_SIZE = int(
     config.get("BACKUP_REQUEST_RECOVERY_BATCH_SIZE", 100)
 )
 BACKUP_POLL_INTERVAL = int(config.get("BACKUP_POLL_INTERVAL", 120))
-# Short, renewable leases protect long-running local dumps and chord publication.
+# Short, renewable leases protect long-running local dumps and upload publication.
 # A worker heartbeat extends the lease; after a hard crash, recovery can safely take
 # over within minutes rather than waiting for the command's multi-hour timeout.
 BACKUP_WORKER_LEASE_SECONDS = int(
@@ -1303,8 +1308,8 @@ BACKUP_CREATE_LEASE_SECONDS = int(
     config.get("BACKUP_CREATE_LEASE_SECONDS", 60 * 60)
 )
 # A storage upload can legitimately run much longer than the general recovery
-# interval. Keep a separate claimant lease so a duplicate chord does not take over
-# a healthy long-running upload and invoke the finalizer too early.
+# interval. Keep a separate claimant lease so a duplicate delivery does not take
+# over a healthy long-running upload and invoke the finalizer too early.
 BACKUP_STORAGE_STALE_SECONDS = int(
     config.get("BACKUP_STORAGE_STALE_SECONDS", 6 * 60 * 60)
 )
@@ -1505,6 +1510,23 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_pending_backup_requests",
         "schedule": 60.0,
     },
+    # Destination credentials belong only to the storage lane. This sweep repairs
+    # both source-to-storage and storage-to-source publication gaps from the durable
+    # per-backup destination authorization witnesses.
+    "resume-pending-backup-destination-validations": {
+        "task": "resume_pending_backup_destination_validations",
+        "schedule": 60.0,
+    },
+    # Managed SSH API rows expire after five minutes. Each owning source lane
+    # repairs a lost publication and expires/retains only its own durable rows.
+    "maintain-managed-ssh-database-operations": {
+        "task": "maintain_managed_ssh_database_operations",
+        "schedule": 60.0,
+    },
+    "maintain-managed-ssh-files-operations": {
+        "task": "maintain_managed_ssh_files_operations",
+        "schedule": 60.0,
+    },
     # Bucket replication uses durable run/object leases and can resume after a
     # worker or server restart without issuing duplicate transfers.
     "sync-lightsail-bucket-replications": {
@@ -1545,6 +1567,19 @@ CELERY_BEAT_SCHEDULE = {
         "task": "recover_notification_deliveries",
         "schedule": 60.0,
     },
+    # A source worker commits the log request before broker publication. The logs
+    # lane expands pending requests into per-channel rows without exposing member
+    # identities or provider credentials to source lanes or RabbitMQ.
+    "recover-notification-fanouts": {
+        "task": "recover_notification_fanouts",
+        "schedule": 60.0,
+    },
+    # Retain terminal replay identities beyond every accepted signed message.
+    # Active/redeliverable rows are never selected by the cleanup task.
+    "cleanup-celery-task-replays": {
+        "task": "cleanup_celery_task_replays",
+        "schedule": crontab(minute=15, hour=4),
+    },
 }
 
 # Task routing across the worker types (see docker-compose.yml):
@@ -1556,91 +1591,27 @@ CELERY_BEAT_SCHEDULE = {
 #               mutation/cleanup; scalable pool sharing _storage with dump workers
 #   logs ...... DB log entries and Slack/Telegram notifications; no artifact volume
 #
-# storage_upload/finalize_backup/delete_from_disk go to "storage" so they always run on a
-# worker that can see the files the dump produced. Anything not listed here falls to the
-# default queue, drained by the cloud worker.
+# There is deliberately no catch-all route. The independent manifest defines every
+# production task's queue, publisher lanes, consumer lane, durable-intent resolver,
+# and signed lifetime. Worker and Beat startup compare the imported task registry and
+# this exact route map to the manifest and fail closed on any drift.
 CELERY_TASK_DEFAULT_QUEUE = "default"
-CELERY_TASK_ROUTES = {
-    # Local-disk dumps — isolated per type.
-    "backup_database": {"queue": "database"},
-    "backup_website": {"queue": "files"},
-    "backup_wordpress": {"queue": "files"},
-    "backup_basecamp": {"queue": "files"},
-    # Restores push data back to the source server — same per-type isolation.
-    "restore_website_backup": {"queue": "files"},
-    "restore_database_backup": {"queue": "database"},
-    # Storage finalization hands source-ciphertext fence cleanup back to the
-    # least-privilege source lane after every destination reaches a terminal state.
-    "cleanup_database_ciphertext_fence": {"queue": "database"},
-    "cleanup_files_ciphertext_fence": {"queue": "files"},
-    # Local-disk upload + cleanup — handled by the scalable worker-storage pool.
-    "storage_upload": {"queue": "storage"},
-    "finalize_backup": {"queue": "storage"},
-    "delete_from_disk": {"queue": "storage"},
-    # Local-restore ciphertext moves only through the storage lane; authenticated
-    # provenance limits both handoffs to the database/files source workers.
-    "stage_local_restore_ciphertext": {"queue": "storage"},
-    "cleanup_local_restore_ciphertext": {"queue": "storage"},
-    "reset_incremental_cache": {"queue": "storage"},
-    "delete_old_logs": {"queue": "storage"},
-    "validate_local_storage": {"queue": "storage"},
-    "validate_pending_local_storages": {"queue": "storage"},
-    "delete_backup_requested": {"queue": "storage"},
-    "delete_storage_requested": {"queue": "storage"},
-    "resume_requested_storage_deletions": {"queue": "storage"},
-    # These legacy maintenance paths can invoke storage-point deletion. Keep
-    # them on the same RW boundary even when an older django-celery-beat row
-    # publishes the task by its historical name.
-    "node_delete_requested": {"queue": "storage"},
-    "resume_requested_node_deletions": {"queue": "storage"},
-    "clean_delete_failed_backups": {"queue": "storage"},
-    "delete_requested_integrations": {"queue": "storage"},
-    "delete_requested_storages": {"queue": "storage"},
-    "account_delete": {"queue": "storage"},
-    # S3 lifecycle rule application + deferred Object Lock delete retries.
-    "storage_aws_s3_sync_lifecycle": {"queue": "storage"},
-    "retry_protected_storage_deletes": {"queue": "storage"},
-    "storage_cleanup_owned_multipart": {"queue": "storage"},
-    "storage_sweep_owned_multipart_cleanup": {"queue": "storage"},
-    "sync_lightsail_bucket_replications": {"queue": "storage"},
-    "resume_lightsail_bucket_replications": {"queue": "storage"},
-    "resume_lightsail_bucket_restores": {"queue": "storage"},
-    "start_lightsail_bucket_replication": {"queue": "storage"},
-    "replicate_lightsail_bucket": {"queue": "storage"},
-    "finalize_lightsail_bucket_replication": {"queue": "storage"},
-    "restore_lightsail_bucket_replication": {"queue": "storage"},
-    # Cloud/volume provider snapshots — API-only, no local disk.
-    "backup_digitalocean": {"queue": "cloud"},
-    "backup_hetzner": {"queue": "cloud"},
-    "backup_vultr": {"queue": "cloud"},
-    "backup_vultr_database": {"queue": "cloud"},
-    "poll_vultr_database_backup": {"queue": "cloud"},
-    "restore_vultr_database": {"queue": "cloud"},
-    "poll_vultr_database_restore": {"queue": "cloud"},
-    "restore_cloud_backup": {"queue": "cloud"},
-    "poll_cloud_restore": {"queue": "cloud"},
-    "backup_aws": {"queue": "cloud"},
-    "backup_aws_rds": {"queue": "cloud"},
-    "backup_lightsail": {"queue": "cloud"},
-    "backup_google_cloud": {"queue": "cloud"},
-    "backup_oracle": {"queue": "cloud"},
-    "backup_upcloud": {"queue": "cloud"},
-    "backup_ovh_ca": {"queue": "cloud"},
-    "backup_ovh_eu": {"queue": "cloud"},
-    "backup_ovh_us": {"queue": "cloud"},
-    # Async snapshot status polling (re-queues itself); API-only, no local disk.
-    "poll_cloud_backup": {"queue": "cloud"},
-    "reconcile_oracle_backup_deletion": {"queue": "cloud"},
-    "reconcile_oracle_backup_deletions": {"queue": "cloud"},
-    "resume_in_progress_backups": {"queue": "default"},
-    "resume_in_progress_restores": {"queue": "default"},
-    "resume_pending_backup_requests": {"queue": "default"},
-    # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram
-    # fan-out, and on-disk run-log retention.
-    "send_log_to_db": {"queue": "logs"},
-    "deliver_log_notification": {"queue": "logs"},
-    "recover_notification_deliveries": {"queue": "logs"},
-    "send_log_to_slack": {"queue": "logs"},
-    "send_log_to_telegram": {"queue": "logs"},
-    "delete_old_db_logs": {"queue": "logs"},
-}
+CELERY_TASK_ROUTES = celery_routes()
+
+CELERY_TASK_REPLAY_RETENTION_SECONDS = _bounded_positive_int(
+    "CELERY_TASK_REPLAY_RETENTION_SECONDS",
+    14 * 24 * 60 * 60,
+    365 * 24 * 60 * 60,
+)
+try:
+    CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE = int(
+        config.get("CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE", 1000)
+    )
+except (TypeError, ValueError) as error:
+    raise ImproperlyConfigured(
+        "CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE must be an integer."
+    ) from error
+if not 1 <= CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE <= 10000:
+    raise ImproperlyConfigured(
+        "CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE must be between 1 and 10000."
+    )

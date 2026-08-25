@@ -645,31 +645,29 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         sensitive_error.attempt_no = 1
         sensitive_error.backup_uuid = backup.uuid_str
 
-        with mock.patch.object(self.account.__class__, "create_log") as create_log, mock.patch(
-            "apps._tasks.helper.tasks.send_postmark_email.delay"
-        ) as send_email:
+        with mock.patch.object(self.account.__class__, "create_log") as create_log:
             node.notify_backup_fail(sensitive_error, UtilBackup.Type.ON_DEMAND)
 
         create_log.assert_called_once()
         logged_data = create_log.call_args.kwargs["data"]
-        send_email.assert_called_once()
-        emailed_data = send_email.call_args.args[2]
-        self.assertEqual(logged_data, emailed_data)
+        self.assertEqual(create_log.call_args.kwargs["email_event"], "fail")
+        self.assertEqual(
+            create_log.call_args.kwargs["email_template"], "error_during_backup"
+        )
         self.assertEqual(logged_data["error_code"], "BACKUP_FAILED")
         self.assertTrue(logged_data["remediation"])
         self.assertEqual(str(UUID(logged_data["correlation_id"])), logged_data["correlation_id"])
-        for payload in (logged_data, emailed_data):
-            self.assertNotIn("endpoint_ip", payload)
-            self.assertNotIn("endpoint_ipv6", payload)
-            serialized = repr(payload)
-            for secret in (
-                "provider-body",
-                "10.20.30.40",
-                "admin",
-                "/home/admin",
-                "SUPERSECRET",
-            ):
-                self.assertNotIn(secret, serialized)
+        self.assertNotIn("endpoint_ip", logged_data)
+        self.assertNotIn("endpoint_ipv6", logged_data)
+        serialized = repr(logged_data)
+        for secret in (
+            "provider-body",
+            "10.20.30.40",
+            "admin",
+            "/home/admin",
+            "SUPERSECRET",
+        ):
+            self.assertNotIn(secret, serialized)
 
         state = backup.get_execution_state(create=False)
         self.assertIsNotNone(state)
@@ -688,13 +686,10 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
 
         with mock.patch.object(
             self.account.__class__, "create_log"
-        ) as create_log, mock.patch(
-            "apps._tasks.helper.tasks.send_postmark_email.delay"
-        ) as send_email:
+        ) as create_log:
             node.notify_backup_fail(sensitive_error, UtilBackup.Type.ON_DEMAND)
 
         create_log.assert_not_called()
-        send_email.assert_not_called()
         state.refresh_from_db()
         self.assertEqual(state.last_error_code, "WEBSITE_MANIFEST_FAILED")
         history = state.metadata["public_attempt_history"]

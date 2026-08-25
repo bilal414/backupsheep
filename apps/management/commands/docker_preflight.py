@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import hmac
+import importlib
 import os
 import re
 import resource
@@ -27,6 +28,11 @@ from backupsheep.celery_security import (
     _load_private_key,
     _load_public_keys,
     _security_configuration,
+)
+from backupsheep.celery_task_manifest import (
+    TaskManifestError,
+    validate_configured_routes,
+    validate_registered_tasks,
 )
 
 
@@ -133,6 +139,23 @@ def _assert_celery_identity(environment):
     except Exception as error:
         raise CommandError(
             "Docker security preflight failed: Celery signing material is invalid"
+        ) from error
+
+
+def _assert_celery_task_manifest(runtime_settings):
+    """Import every reviewed task and reject registry/route drift before service start."""
+
+    from backupsheep.celery import app
+
+    try:
+        validate_configured_routes(runtime_settings.CELERY_TASK_ROUTES)
+        for module_name in runtime_settings.CELERY_IMPORTS:
+            importlib.import_module(module_name)
+        app.finalize()
+        validate_registered_tasks(app.tasks)
+    except (ImportError, TaskManifestError) as error:
+        raise CommandError(
+            "Docker security preflight failed: Celery task manifest drifted"
         ) from error
 
 
@@ -477,6 +500,7 @@ class Command(BaseCommand):
             secret_values=_read_stock_secret_values(required_secret_files),
         )
         _assert_celery_identity(os.environ)
+        _assert_celery_task_manifest(settings)
         _assert_artifact_encryption_boundary(
             environment=os.environ,
             runtime_settings=settings,

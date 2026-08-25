@@ -27,9 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from celery import Task, states
+from celery import Task, current_app, states
 from celery.exceptions import Ignore, Reject
-from celery.signals import before_task_publish, worker_ready
+from celery.signals import beat_init, before_task_publish, worker_init, worker_ready
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -44,9 +44,19 @@ from django.db import DatabaseError, transaction
 from django.utils import timezone
 from kombu.utils import json as kombu_json
 
+from backupsheep.celery_task_intent import TaskIntentError, resolve_task_intent
+from backupsheep.celery_task_manifest import (
+    DEFAULT_TASK_MAX_AGE_SECONDS,
+    LANES as MANIFEST_LANES,
+    TaskManifestError,
+    task_policy,
+    validate_configured_routes,
+    validate_registered_tasks,
+)
 
-SECURITY_GENERATION = "2"
-ENVELOPE_VERSION = 1
+
+SECURITY_GENERATION = "3"
+ENVELOPE_VERSION = 2
 AUTH_HEADER = "backupsheep_auth"
 SECRET_ROOT = Path("/run/secrets")
 MAX_KEY_FILE_BYTES = 16 * 1024
@@ -54,35 +64,14 @@ INSTALLATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 NONCE_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 LANES = ("app", "beat", "cloud", "database", "files", "storage", "logs")
+if set(LANES) != set(MANIFEST_LANES):  # pragma: no cover - import-time invariant
+    raise TaskManifestError("Celery security lanes drifted from the task manifest")
 CONSUMER_QUEUES = {
     "cloud": frozenset(("cloud", "default")),
     "database": frozenset(("database",)),
     "files": frozenset(("files",)),
     "storage": frozenset(("storage",)),
     "logs": frozenset(("logs",)),
-}
-CONTROL_PUBLISHERS = frozenset(("app", "beat"))
-LOG_HANDOFF_TASKS = frozenset(("send_log_to_db",))
-STORAGE_HANDOFF_TASKS = frozenset(
-    (
-        "storage_upload",
-        "finalize_backup",
-        "delete_from_disk",
-        "stage_local_restore_ciphertext",
-        "cleanup_local_restore_ciphertext",
-    )
-)
-CLOUD_RECOVERY_HANDOFFS = {
-    "backup_database": "database",
-    "restore_database_backup": "database",
-    "backup_website": "files",
-    "backup_wordpress": "files",
-    "backup_basecamp": "files",
-    "restore_website_backup": "files",
-}
-STORAGE_SOURCE_CLEANUP_HANDOFFS = {
-    "cleanup_database_ciphertext_fence": "database",
-    "cleanup_files_ciphertext_fence": "files",
 }
 MAX_CLOCK_SKEW_SECONDS = 300
 WORKER_READY_FILE = Path("/run/backupsheep/celery-ready")
@@ -138,6 +127,12 @@ class SecurityConfiguration:
     public_keys_file: str
 
 
+@dataclass(frozen=True)
+class TrustedKeyRegistry:
+    generation: int
+    keys: dict[str, Ed25519PublicKey]
+
+
 def _required_environment(name: str) -> str:
     value = str(os.environ.get(name) or "").strip()
     if not value:
@@ -149,7 +144,7 @@ def _security_configuration(*, publishing: bool) -> SecurityConfiguration:
     generation = _required_environment("BACKUPSHEEP_CELERY_SECURITY_GENERATION")
     if generation != SECURITY_GENERATION:
         raise TaskProvenanceError(
-            "BACKUPSHEEP_CELERY_SECURITY_GENERATION must be 2"
+            f"BACKUPSHEEP_CELERY_SECURITY_GENERATION must be {SECURITY_GENERATION}"
         )
     installation_id = _required_environment("BACKUPSHEEP_INSTALLATION_ID")
     if not INSTALLATION_ID_PATTERN.fullmatch(installation_id):
@@ -228,7 +223,9 @@ def _load_private_key(path_value: str) -> Ed25519PrivateKey:
     return key
 
 
-def _load_public_keys(path_value: str, installation_id: str) -> dict[str, Ed25519PublicKey]:
+def _load_public_registry(
+    path_value: str, installation_id: str
+) -> TrustedKeyRegistry:
     payload = _read_immutable_file(path_value, "Celery trusted public-key registry")
     try:
         document = json.loads(payload.decode("utf-8"))
@@ -238,9 +235,12 @@ def _load_public_keys(path_value: str, installation_id: str) -> dict[str, Ed2551
         ) from error
     if (
         not isinstance(document, dict)
-        or set(document) != {"version", "installation_id", "keys"}
+        or set(document) != {"version", "installation_id", "generation", "keys"}
         or document.get("version") != ENVELOPE_VERSION
         or document.get("installation_id") != installation_id
+        or isinstance(document.get("generation"), bool)
+        or not isinstance(document.get("generation"), int)
+        or not 1 <= document["generation"] <= 2**31 - 1
         or not isinstance(document.get("keys"), dict)
         or set(document["keys"]) != set(LANES)
     ):
@@ -258,7 +258,15 @@ def _load_public_keys(path_value: str, installation_id: str) -> dict[str, Ed2551
         if not isinstance(key, Ed25519PublicKey):
             raise TaskProvenanceError("Celery trusted public keys must be Ed25519")
         keys[lane] = key
-    return keys
+    return TrustedKeyRegistry(generation=document["generation"], keys=keys)
+
+
+def _load_public_keys(
+    path_value: str, installation_id: str
+) -> dict[str, Ed25519PublicKey]:
+    """Compatibility helper for the Docker preflight identity proof."""
+
+    return _load_public_registry(path_value, installation_id).keys
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -337,32 +345,20 @@ def _request_body_digest(task_args: Any, task_kwargs: Any, request: Any) -> str:
 
 
 def _task_destination(task_name: str) -> tuple[str, str, str]:
-    routes = getattr(settings, "CELERY_TASK_ROUTES", {})
-    route = routes.get(task_name, {}) if isinstance(routes, Mapping) else {}
-    queue = str(route.get("queue") or settings.CELERY_TASK_DEFAULT_QUEUE)
-    target_lane = "cloud" if queue in {"cloud", "default"} else queue
-    if target_lane not in CONSUMER_QUEUES or queue not in CONSUMER_QUEUES[target_lane]:
-        raise TaskProvenanceError(f"task {task_name} has an unreviewed queue route")
-    return queue, target_lane, f"backupsheep.{queue}"
+    try:
+        policy = task_policy(task_name)
+    except TaskManifestError as error:
+        raise TaskProvenanceError(str(error)) from error
+    queue = policy.queue
+    return queue, policy.target, f"backupsheep.{queue}"
 
 
 def _publisher_allowed(publisher: str, target: str, task_name: str) -> bool:
-    if publisher in CONTROL_PUBLISHERS:
-        return True
-    if publisher == target:
-        return True
-    if target == "logs" and task_name in LOG_HANDOFF_TASKS:
-        return publisher in CONSUMER_QUEUES
-    if target == "storage" and task_name in STORAGE_HANDOFF_TASKS:
-        return publisher in {"database", "files"}
-    if publisher == "cloud" and CLOUD_RECOVERY_HANDOFFS.get(task_name) == target:
-        return True
-    if (
-        publisher == "storage"
-        and STORAGE_SOURCE_CLEANUP_HANDOFFS.get(task_name) == target
-    ):
-        return True
-    return False
+    try:
+        policy = task_policy(task_name)
+    except TaskManifestError:
+        return False
+    return target == policy.target and publisher in policy.publishers
 
 
 def _signature_payload(envelope: Mapping[str, Any]) -> bytes:
@@ -390,13 +386,44 @@ def _build_envelope(
         raise TaskProvenanceError(
             f"Celery lane {config.lane} cannot publish {task_name} to {target}"
         )
+    try:
+        policy = task_policy(task_name)
+    except TaskManifestError as error:
+        raise TaskProvenanceError(str(error)) from error
     retries = headers.get("retries", 0)
     if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
         raise TaskProvenanceError("task retry count is invalid")
     issued_at = int(time.time() if now is None else now)
+    args, kwargs, _embed = _body_parts(body)
+    try:
+        intent = resolve_task_intent(
+            task_name=task_name,
+            task_id=task_id,
+            args=args,
+            kwargs=kwargs,
+            publisher=config.lane,
+            intent=policy.intent,
+            phase="publish",
+        )
+    except TaskIntentError as error:
+        raise TaskProvenanceError(f"task has no durable intent: {error}") from error
+    registry = _load_public_registry(
+        config.public_keys_file, config.installation_id
+    )
+    private_key = _load_private_key(config.private_key_file)
+    identity_probe = b"backupsheep-celery-key-generation"
+    try:
+        registry.keys[config.lane].verify(
+            private_key.sign(identity_probe), identity_probe
+        )
+    except InvalidSignature as error:
+        raise TaskProvenanceError(
+            "Celery signing key does not match the active registry generation"
+        ) from error
     envelope = {
         "version": ENVELOPE_VERSION,
         "installation_id": config.installation_id,
+        "key_generation": registry.generation,
         "publisher": config.lane,
         "target": target,
         "task": task_name,
@@ -405,14 +432,14 @@ def _build_envelope(
         "exchange": exchange,
         "retries": retries,
         "issued_at": issued_at,
+        "expires_at": issued_at + policy.max_age_seconds,
         "nonce": secrets.token_hex(16),
         "body_sha256": _body_digest(body),
         "execution_headers_sha256": _execution_headers_digest(headers),
         "custom_headers_sha256": _custom_headers_digest(headers),
+        "intent_sha256": _digest(intent),
     }
-    signature = _load_private_key(config.private_key_file).sign(
-        _signature_payload(envelope)
-    )
+    signature = private_key.sign(_signature_payload(envelope))
     envelope["signature"] = base64.b64encode(signature).decode("ascii")
     return envelope
 
@@ -457,6 +484,7 @@ def _validated_envelope(
     required = {
         "version",
         "installation_id",
+        "key_generation",
         "publisher",
         "target",
         "task",
@@ -465,10 +493,12 @@ def _validated_envelope(
         "exchange",
         "retries",
         "issued_at",
+        "expires_at",
         "nonce",
         "body_sha256",
         "execution_headers_sha256",
         "custom_headers_sha256",
+        "intent_sha256",
         "signature",
     }
     if not isinstance(envelope, dict) or set(envelope) != required:
@@ -483,6 +513,10 @@ def _validated_envelope(
     if envelope["target"] != config.lane:
         raise TaskProvenanceError("task was delivered to the wrong consumer lane")
     queue, target, expected_exchange = _task_destination(task_name)
+    try:
+        policy = task_policy(task_name)
+    except TaskManifestError as error:
+        raise TaskProvenanceError(str(error)) from error
     delivery = getattr(request, "delivery_info", {}) or {}
     actual_queue = str(delivery.get("routing_key") or "")
     actual_exchange = str(delivery.get("exchange") or "")
@@ -500,13 +534,18 @@ def _validated_envelope(
     if envelope["retries"] != retries:
         raise TaskProvenanceError("task retry context was modified")
     issued_at = envelope["issued_at"]
+    expires_at = envelope["expires_at"]
     current_time = int(time.time() if now is None else now)
     if (
         isinstance(issued_at, bool)
         or not isinstance(issued_at, int)
         or issued_at > current_time + MAX_CLOCK_SKEW_SECONDS
+        or isinstance(expires_at, bool)
+        or not isinstance(expires_at, int)
+        or expires_at != issued_at + policy.max_age_seconds
+        or current_time > expires_at
     ):
-        raise TaskProvenanceError("task issue time is invalid")
+        raise TaskProvenanceError("task signed lifetime is invalid or expired")
     if not isinstance(envelope["nonce"], str) or not NONCE_PATTERN.fullmatch(
         envelope["nonce"]
     ):
@@ -523,6 +562,10 @@ def _validated_envelope(
         envelope["custom_headers_sha256"], str
     ) or not DIGEST_PATTERN.fullmatch(envelope["custom_headers_sha256"]):
         raise TaskProvenanceError("task custom-header digest is invalid")
+    if not isinstance(
+        envelope["intent_sha256"], str
+    ) or not DIGEST_PATTERN.fullmatch(envelope["intent_sha256"]):
+        raise TaskProvenanceError("task intent digest is invalid")
     if envelope["body_sha256"] != _request_body_digest(
         task_args, task_kwargs, request
     ):
@@ -539,16 +582,40 @@ def _validated_envelope(
         raise TaskProvenanceError("task signature encoding is invalid") from error
     if len(signature) != 64:
         raise TaskProvenanceError("task signature length is invalid")
+    registry = _load_public_registry(config.public_keys_file, config.installation_id)
+    if (
+        isinstance(envelope["key_generation"], bool)
+        or envelope["key_generation"] != registry.generation
+    ):
+        raise TaskProvenanceError("task signing-key generation is not active")
     try:
-        _load_public_keys(config.public_keys_file, config.installation_id)[
-            publisher
-        ].verify(signature, _signature_payload(envelope))
+        registry.keys[publisher].verify(signature, _signature_payload(envelope))
     except InvalidSignature as error:
         raise TaskProvenanceError("task signature verification failed") from error
+    try:
+        durable_intent = resolve_task_intent(
+            task_name=task_name,
+            task_id=task_id,
+            args=task_args,
+            kwargs=task_kwargs,
+            publisher=publisher,
+            intent=policy.intent,
+            phase="consume",
+        )
+    except TaskIntentError as error:
+        raise TaskProvenanceError(f"task durable intent is invalid: {error}") from error
+    if envelope["intent_sha256"] != _digest(durable_intent):
+        raise TaskProvenanceError("task durable intent changed after publication")
 
     envelope_digest = hashlib.sha256(_signature_payload(envelope) + signature).hexdigest()
     execution_key = _digest(
-        [config.installation_id, task_name, task_id, envelope["retries"]]
+        [
+            config.installation_id,
+            task_name,
+            task_id,
+            envelope["retries"],
+            envelope["nonce"],
+        ]
     )
     return envelope, envelope_digest, execution_key
 
@@ -603,6 +670,59 @@ def _complete_delivery(execution_key: str, status: str) -> None:
         completed_at=timezone.now(),
         last_seen_at=timezone.now(),
     )
+
+
+def prune_completed_task_replays(*, now=None) -> int:
+    """Delete only expired terminal replays, never unfinished redeliveries."""
+
+    from datetime import timedelta
+
+    from apps.console.task_security.models import CoreCeleryTaskReplay
+
+    current_time = now or timezone.now()
+    configured_retention = int(
+        getattr(
+            settings,
+            "CELERY_TASK_REPLAY_RETENTION_SECONDS",
+            14 * 24 * 60 * 60,
+        )
+    )
+    minimum_retention = DEFAULT_TASK_MAX_AGE_SECONDS + MAX_CLOCK_SKEW_SECONDS
+    if configured_retention < minimum_retention:
+        raise TaskProvenanceError(
+            "Celery replay retention must exceed every accepted signature lifetime"
+        )
+    batch_size = int(
+        getattr(settings, "CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE", 1000)
+    )
+    if not 1 <= batch_size <= 10000:
+        raise TaskProvenanceError("Celery replay cleanup batch size is invalid")
+    cutoff = current_time - timedelta(seconds=configured_retention)
+    with transaction.atomic():
+        execution_keys = list(
+            CoreCeleryTaskReplay.objects.filter(
+                status__in=(
+                    CoreCeleryTaskReplay.Status.COMPLETE,
+                    CoreCeleryTaskReplay.Status.RETRY,
+                ),
+                completed_at__isnull=False,
+                last_seen_at__lte=cutoff,
+            )
+            .order_by("last_seen_at", "execution_key")
+            .values_list("execution_key", flat=True)[:batch_size]
+        )
+        if not execution_keys:
+            return 0
+        deleted, _details = CoreCeleryTaskReplay.objects.filter(
+            execution_key__in=execution_keys,
+            status__in=(
+                CoreCeleryTaskReplay.Status.COMPLETE,
+                CoreCeleryTaskReplay.Status.RETRY,
+            ),
+            completed_at__isnull=False,
+            last_seen_at__lte=cutoff,
+        ).delete()
+    return deleted
 
 
 class AuthenticatedTask(Task):
@@ -703,6 +823,27 @@ def mark_worker_ready(sender=None, **_kwargs) -> None:
         ) from error
 
 
+def validate_startup_task_manifest(sender=None, **_kwargs) -> None:
+    """Fail worker/Beat startup when registrations or routes drift from review."""
+
+    if not _security_required():
+        return
+    app = getattr(sender, "app", None)
+    if app is None and hasattr(sender, "tasks"):
+        app = sender
+    if app is None:
+        app = current_app
+    try:
+        validate_configured_routes(getattr(settings, "CELERY_TASK_ROUTES", {}))
+        validate_registered_tasks(app.tasks, required_base=AuthenticatedTask)
+    except TaskManifestError as error:
+        raise TaskProvenanceError(
+            f"Celery startup refused task-manifest drift: {error}"
+        ) from error
+
+
 def install_task_security() -> None:
     before_task_publish.connect(sign_task_message, weak=False)
+    worker_init.connect(validate_startup_task_manifest, weak=False)
+    beat_init.connect(validate_startup_task_manifest, weak=False)
     worker_ready.connect(mark_worker_ready, weak=False)

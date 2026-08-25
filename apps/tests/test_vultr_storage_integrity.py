@@ -99,23 +99,19 @@ class VultrStorageIntegrityTests(BaseTestCase):
         node = self.point.backup.website.node
         canary = "provider-secret-canary-upload"
         error = RuntimeError(f"provider body contains {canary}")
-        with mock.patch.object(self.account.__class__, "create_log") as create_log, mock.patch(
-            "apps._tasks.helper.tasks.send_postmark_email"
-        ) as send_email:
+        with mock.patch.object(self.account.__class__, "create_log") as create_log:
             node.notify_upload_fail(error, self.point.backup, self.storage)
 
         data = create_log.call_args.kwargs["data"]
         self.assertEqual(data["error_code"], "STORAGE_UPLOAD_FAILED")
         self.assertNotIn(canary, repr(data))
-        self.assertNotIn(canary, repr(send_email.delay.call_args))
+        self.assertEqual(create_log.call_args.kwargs["email_event"], "fail")
 
     def test_upload_notification_uses_explicit_safe_classification(self):
         node = self.point.backup.website.node
         canary = "provider-secret-canary-transient"
         error = RuntimeError(f"provider body contains {canary}")
-        with mock.patch.object(self.account.__class__, "create_log") as create_log, mock.patch(
-            "apps._tasks.helper.tasks.send_postmark_email"
-        ) as send_email:
+        with mock.patch.object(self.account.__class__, "create_log") as create_log:
             node.notify_upload_fail(
                 error,
                 self.point.backup,
@@ -126,15 +122,16 @@ class VultrStorageIntegrityTests(BaseTestCase):
         data = create_log.call_args.kwargs["data"]
         self.assertEqual(data["error_code"], "STORAGE_TRANSIENT_FAILURE")
         self.assertNotIn(canary, repr(data))
-        self.assertNotIn(canary, repr(send_email.delay.call_args))
+        self.assertEqual(
+            create_log.call_args.kwargs["email_template"],
+            "unable_to_upload_backup",
+        )
 
     def test_upload_notification_tolerates_legacy_safe_message(self):
         node = self.point.backup.website.node
         with mock.patch(
             "apps.console.node.models.capture_exception"
-        ) as capture, mock.patch(
-            "apps._tasks.helper.tasks.send_postmark_email"
-        ):
+        ) as capture:
             node.notify_upload_fail(
                 "The storage upload could not be completed.",
                 self.point.backup,

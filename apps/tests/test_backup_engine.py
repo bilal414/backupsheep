@@ -308,7 +308,7 @@ class PollCloudBackupTests(BaseTestCase):
         ), mock.patch.object(
             backup.__class__, "record_execution_error", wraps=backup.record_execution_error
         ) as record_error, mock.patch(
-            "apps._tasks.helper.tasks.send_postmark_email.delay"
+            "apps.console.account.models.CoreAccount.create_log"
         ):
             helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
 

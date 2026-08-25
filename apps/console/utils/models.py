@@ -1183,18 +1183,26 @@ class UtilBackup(TimeStampedModel):
 
     def retry(self):
         from celery import current_app
-        import json
-        from apps.console.storage.models import CoreStorage
+        from apps.console.backup.models import CoreBackupRequest
 
         if self.schedule:
+            request = CoreBackupRequest.objects.filter(
+                task_id=self.celery_task_id,
+                task_name=self.schedule.node.backup_task_name(),
+                node_id=self.schedule.node_id,
+            ).first()
+            if request is None:
+                # Generation-2 compatibility: reconstruct only from the durable
+                # backup row, never from request parameters supplied to this view.
+                from apps._tasks.helper.tasks import _backup_recovery_kwargs
+
+                payload = _backup_recovery_kwargs(self, self.schedule.node)
+            else:
+                payload = dict(request.payload or {})
             current_app.send_task(
                 self.schedule.node.backup_task_name(),
                 task_id=self.celery_task_id,
-                kwargs={
-                    "node_id": self.schedule.node.id,
-                    "schedule_id": self.schedule.id,
-                    "storage_ids": self.schedule.storage_ids,
-                },
+                kwargs=payload,
             )
 
 

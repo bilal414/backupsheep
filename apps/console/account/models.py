@@ -89,59 +89,69 @@ class CoreAccount(TimeStampedModel):
     def uuid_str(self):
         return slugify(f"bs-a{self.id}")
 
-    def create_log(self, data=None):
-        from apps._tasks.helper.tasks import send_log_to_db
+    def create_log(
+        self,
+        data=None,
+        *,
+        email_event=None,
+        email_template=None,
+        log_type=None,
+    ):
+        """Persist one notification request without reading recipient identities.
+
+        Source and provider workers may write the non-secret activity row, but only
+        the logs lane can enumerate members or notification-channel credentials.
+        The broker wake-up therefore carries this row's integer id only.
+        """
+
+        from apps._tasks.helper.tasks import (
+            REVIEWED_NOTIFICATION_EMAILS,
+            send_log_to_db,
+        )
         from apps.console.log.models import CoreLog
-        from apps.console.notification.models import CoreNotificationDelivery
+        from backupsheep.celery_task_intent import notification_fanout_task_id
 
         data = dict(data or {})
+        data.pop("notification_request", None)
+        data.pop("notification_fanout_status", None)
+        if email_event is not None or email_template is not None:
+            if REVIEWED_NOTIFICATION_EMAILS.get(str(email_template)) != str(email_event):
+                raise ValueError("email notification request is not reviewed")
+            data["notification_request"] = {
+                "version": 1,
+                "event": str(email_event),
+                "template": str(email_template),
+            }
         data["account_id"] = self.id
         data["created"] = int(time.time())
+        is_notification = (
+            data.get("sender_name") == "BackupSheep - Notification Bot"
+        )
+        if is_notification:
+            data["notification_fanout_status"] = "pending"
 
-        def publish_log_id(log_id):
+        def publish_log_id(log_id, task_id):
             try:
-                send_log_to_db.apply_async(args=[log_id])
+                send_log_to_db.apply_async(args=[log_id], task_id=task_id)
             except Exception:
-                # The committed per-channel rows below are the durable witness.
+                # The pending CoreLog request is the durable recovery witness.
                 # Broker/client exceptions can contain connection credentials, so
                 # do not send them (or this log's plaintext) to observability.
                 return
 
         with transaction.atomic():
-            log = CoreLog.objects.create(account_id=self.id, data=data)
-
-            # Persist every delivery in the same transaction as the log. Broker
-            # publication is only a wake-up hint: if it is lost after commit, the
-            # periodic outbox sweep can still recover these due rows. No provider
-            # credential, recipient value, or notification text crosses RabbitMQ.
-            if data.get("sender_name") == "BackupSheep - Notification Bot":
-                delivery_rows = [
-                    *(
-                        CoreNotificationDelivery(
-                            log=log,
-                            channel_type=CoreNotificationDelivery.ChannelType.SLACK,
-                            channel_id=channel_id,
-                        )
-                        for channel_id in self.notification_slack.values_list(
-                            "id", flat=True
-                        )
-                    ),
-                    *(
-                        CoreNotificationDelivery(
-                            log=log,
-                            channel_type=CoreNotificationDelivery.ChannelType.TELEGRAM,
-                            channel_id=channel_id,
-                        )
-                        for channel_id in self.notification_telegram.values_list(
-                            "id", flat=True
-                        )
-                    ),
-                ]
-                if delivery_rows:
-                    CoreNotificationDelivery.objects.bulk_create(delivery_rows)
-                    transaction.on_commit(
-                        lambda log_id=log.pk: publish_log_id(log_id)
+            log = CoreLog.objects.create(
+                account_id=self.id,
+                type=log_type or CoreLog.Type.GENERIC,
+                data=data,
+            )
+            if is_notification:
+                fanout_task_id = notification_fanout_task_id(log.pk, log.data)
+                transaction.on_commit(
+                    lambda log_id=log.pk, task_id=fanout_task_id: publish_log_id(
+                        log_id, task_id
                     )
+                )
         return log
 
     def create_storage_log(self, message, node, backup, storage):

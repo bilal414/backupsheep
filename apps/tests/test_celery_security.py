@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -11,6 +12,7 @@ from celery.worker.request import Request as WorkerRequest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from kombu.utils import json as kombu_json
 
 from apps.console.task_security.models import CoreCeleryTaskReplay
@@ -38,6 +40,7 @@ class CeleryTaskEnvelopeTests(TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.secret_root = Path(self.temporary.name)
         self.keys = {}
+        self.public_keys = {}
         public_keys = {}
         for lane in celery_security.LANES:
             key = Ed25519PrivateKey.generate()
@@ -55,12 +58,14 @@ class CeleryTaskEnvelopeTests(TestCase):
                 serialization.Encoding.OpenSSH,
                 serialization.PublicFormat.OpenSSH,
             ).decode("ascii")
+        self.public_keys = public_keys
         self.registry = self.secret_root / "celery_trusted_public_keys"
         self.registry.write_text(
             json.dumps(
                 {
                     "version": celery_security.ENVELOPE_VERSION,
                     "installation_id": self.installation_id,
+                    "generation": 1,
                     "keys": public_keys,
                 },
                 separators=(",", ":"),
@@ -72,8 +77,15 @@ class CeleryTaskEnvelopeTests(TestCase):
             celery_security, "SECRET_ROOT", self.secret_root
         )
         self.root_patch.start()
+        self.intent_patch = mock.patch.object(
+            celery_security,
+            "resolve_task_intent",
+            return_value={"kind": "test-intent", "id": "stable"},
+        )
+        self.intent_patch.start()
 
     def tearDown(self):
+        self.intent_patch.stop()
         self.root_patch.stop()
         self.temporary.cleanup()
 
@@ -181,11 +193,60 @@ class CeleryTaskEnvelopeTests(TestCase):
             now=now,
         )
 
-    def test_signed_delayed_task_validates_without_a_past_age_limit(self):
+    def test_signed_delayed_task_validates_only_within_reviewed_maximum_age(self):
         envelope = self.envelope(now=1000)
         validated, _digest, _execution_key = self.validate(envelope, now=100000)
         self.assertEqual(validated["publisher"], "app")
         self.assertEqual(validated["target"], "database")
+        self.assertEqual(
+            validated["expires_at"],
+            1000 + celery_security.task_policy("backup_database").max_age_seconds,
+        )
+        with self.assertRaises(celery_security.TaskProvenanceError):
+            self.validate(envelope, now=validated["expires_at"] + 1)
+
+    def test_key_generation_rotation_immediately_retires_old_signatures(self):
+        envelope = self.envelope(now=1000)
+        self.registry.write_text(
+            json.dumps(
+                {
+                    "version": celery_security.ENVELOPE_VERSION,
+                    "installation_id": self.installation_id,
+                    "generation": 2,
+                    "keys": self.public_keys,
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            celery_security.TaskProvenanceError, "generation"
+        ):
+            self.validate(envelope, now=1000)
+
+    def test_durable_intent_is_required_and_rechecked_by_consumer(self):
+        celery_security.resolve_task_intent.side_effect = (
+            celery_security.TaskIntentError("missing durable row")
+        )
+        with self.assertRaisesRegex(
+            celery_security.TaskProvenanceError, "durable intent"
+        ):
+            self.envelope()
+
+        celery_security.resolve_task_intent.side_effect = None
+        celery_security.resolve_task_intent.return_value = {
+            "kind": "test-intent",
+            "id": "published",
+        }
+        envelope = self.envelope()
+        celery_security.resolve_task_intent.return_value = {
+            "kind": "test-intent",
+            "id": "changed",
+        }
+        with self.assertRaisesRegex(
+            celery_security.TaskProvenanceError, "intent changed"
+        ):
+            self.validate(envelope)
 
     def test_body_signature_and_route_tampering_fail_closed(self):
         envelope = self.envelope()
@@ -343,6 +404,15 @@ class CeleryTaskEnvelopeTests(TestCase):
         )
         self.validate(restore_cleanup_envelope, headers=restore_cleanup_headers)
 
+        with self.assertRaises(celery_security.TaskProvenanceError):
+            self.envelope(lane="app", headers=cleanup_headers)
+
+        unreviewed = self.headers(task="unreviewed_new_task")
+        with self.assertRaisesRegex(
+            celery_security.TaskProvenanceError, "reviewed manifest"
+        ):
+            self.envelope(lane="app", headers=unreviewed)
+
     def test_key_files_must_be_direct_regular_nonlinked_secrets(self):
         original = self.secret_root / "celery_signing_app_private_key"
         symlink = self.secret_root / "symlink-key"
@@ -389,6 +459,46 @@ class CeleryTaskEnvelopeTests(TestCase):
             CoreCeleryTaskReplay.Status.RETRY,
         )
 
+    def test_fresh_signed_recovery_of_same_durable_task_is_not_a_broker_replay(self):
+        first = self.envelope()
+        _first, first_digest, first_key = self.validate(first)
+        self.assertEqual(
+            celery_security._register_delivery(
+                execution_key=first_key,
+                envelope_digest=first_digest,
+                envelope=first,
+                redelivered=False,
+            ),
+            "new",
+        )
+        celery_security._complete_delivery(first_key, "complete")
+
+        # A durable recovery sweep may republish the same task id after losing the
+        # broker. Its newly signed nonce is a distinct authorized publication, while
+        # replaying either exact signed envelope still resolves to its existing row.
+        second = self.envelope()
+        _second, second_digest, second_key = self.validate(second)
+        self.assertNotEqual(first["nonce"], second["nonce"])
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(
+            celery_security._register_delivery(
+                execution_key=second_key,
+                envelope_digest=second_digest,
+                envelope=second,
+                redelivered=False,
+            ),
+            "new",
+        )
+        self.assertEqual(
+            celery_security._register_delivery(
+                execution_key=first_key,
+                envelope_digest=first_digest,
+                envelope=first,
+                redelivered=True,
+            ),
+            "completed-replay",
+        )
+
     def test_retry_after_return_does_not_overwrite_retry_state(self):
         task = celery_security.AuthenticatedTask()
         task.bind(Celery("retry-state-test"))
@@ -406,3 +516,42 @@ class CeleryTaskEnvelopeTests(TestCase):
         finally:
             complete_patch.stop()
             task.pop_request()
+
+    @override_settings(
+        CELERY_TASK_REPLAY_RETENTION_SECONDS=14 * 24 * 60 * 60,
+        CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE=100,
+    )
+    def test_replay_cleanup_deletes_only_expired_terminal_rows(self):
+        now = timezone.now()
+
+        def create(key, status, completed_at):
+            row = CoreCeleryTaskReplay.objects.create(
+                execution_key=key * 64,
+                envelope_digest=key.upper() * 64,
+                task_id=f"task-{key}",
+                task_name="backup_database",
+                publisher_lane="app",
+                target_lane="database",
+                status=status,
+                completed_at=completed_at,
+            )
+            CoreCeleryTaskReplay.objects.filter(pk=row.pk).update(
+                completed_at=completed_at,
+                last_seen_at=completed_at,
+            )
+            return row
+
+        old = now - timedelta(days=15)
+        recent = now - timedelta(days=1)
+        create("a", CoreCeleryTaskReplay.Status.COMPLETE, old)
+        create("b", CoreCeleryTaskReplay.Status.RETRY, old)
+        create("c", CoreCeleryTaskReplay.Status.ACTIVE, old)
+        create("d", CoreCeleryTaskReplay.Status.COMPLETE, recent)
+
+        self.assertEqual(
+            celery_security.prune_completed_task_replays(now=now), 2
+        )
+        self.assertEqual(
+            set(CoreCeleryTaskReplay.objects.values_list("execution_key", flat=True)),
+            {"c" * 64, "d" * 64},
+        )

@@ -315,18 +315,22 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             restore.execution_metadata = metadata
             restore.execution_phase = "pending"
             restore.progress_unit = "databases"
+            task_id = f"database-restore-{restore.correlation_id.hex}"
+            restore.celery_task_id = task_id
             restore.save(
                 update_fields=[
                     "params",
                     "execution_metadata",
                     "execution_phase",
                     "progress_unit",
+                    "celery_task_id",
                     "modified",
                 ]
             )
 
         try:
             restore_database_backup.apply_async(
+                task_id=task_id,
                 kwargs={
                     "node_id": backup.database.node.id,
                     "backup_id": backup.id,

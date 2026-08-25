@@ -19,9 +19,9 @@ from sentry_sdk import capture_exception, capture_message
 
 from apps.console.account.models import CoreAccount
 from apps.console.connection.models import CoreAuthBasecamp
-from apps.console.member.models import CoreMember
 from apps.console.notification.models import (
     CoreNotificationDelivery,
+    CoreNotificationLogEmail,
     CoreNotificationSlack,
     CoreNotificationTelegram,
 )
@@ -29,6 +29,40 @@ from apps.console.storage.models import CoreStorageType, CoreStorage, CoreStorag
     CoreStorageGoogleDrive
 from apps.console.utils.models import UtilBackup
 from slack_sdk import WebhookClient
+from backupsheep.celery_task_intent import notification_fanout_task_id
+
+
+EMAIL_NOTIFICATION_CHANNEL = "email"
+REVIEWED_NOTIFICATION_EMAILS = {
+    "storage_validation_failed": "fail",
+    "unable_to_start_backup": "fail",
+    "error_during_backup": "fail",
+    "unable_to_upload_backup": "fail",
+    "backup_is_complete": "success",
+    "restore_started": "fail",
+    "restore_completed": "success",
+    "restore_failed": "fail",
+}
+
+
+def _reviewed_notification_request(data):
+    if (
+        not isinstance(data, dict)
+        or data.get("sender_name") != "BackupSheep - Notification Bot"
+    ):
+        raise ValueError("notification request has an invalid sender")
+    request = data.get("notification_request")
+    if request is None:
+        return None, None
+    if (
+        not isinstance(request, dict)
+        or set(request) != {"version", "event", "template"}
+        or request.get("version") != 1
+        or REVIEWED_NOTIFICATION_EMAILS.get(request.get("template"))
+        != request.get("event")
+    ):
+        raise ValueError("notification email request is not reviewed")
+    return request["event"], request["template"]
 
 
 @current_app.task(name="run_scheduled_backup", bind=True, ignore_result=True)
@@ -1684,52 +1718,23 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
     send_events=False,
 )
 def send_log_to_db(self, log_reference):
-    """Create durable per-channel deliveries for a persisted log row.
-
-    New callers send only an integer row id after commit. The dict branch is a
-    compatibility path for messages queued by older releases during an upgrade;
-    it persists that historical payload once. Every message published from this
-    point onward contains only an opaque delivery-row id.
-    """
+    """Expand one durable log request inside the identity-bearing logs lane."""
     from apps.console.log.models import CoreLog
 
     try:
-        if isinstance(log_reference, dict):
-            data = dict(log_reference)
-            if not data.get("account_id"):
-                return
-            log = CoreLog.objects.create(
-                account_id=data.get("account_id"), data=data
-            )
-        else:
-            try:
-                log_id = int(log_reference)
-            except (TypeError, ValueError):
-                return
-            if log_id <= 0 or str(log_id) != str(log_reference):
-                return
-            log = CoreLog.objects.select_related("account").filter(pk=log_id).first()
-            if log is None:
-                return
-            data = log.data if isinstance(log.data, dict) else {}
+        try:
+            log_id = int(log_reference)
+        except (TypeError, ValueError):
+            return
+        if log_id <= 0 or str(log_id) != str(log_reference):
+            return
+        log = CoreLog.objects.select_related("account").filter(pk=log_id).first()
+        if log is None:
+            return
+        data = log.data if isinstance(log.data, dict) else {}
 
         if data.get("sender_name") != "BackupSheep - Notification Bot":
             return
-
-        channel_references = [
-            *(
-                (CoreNotificationDelivery.ChannelType.SLACK, channel_id)
-                for channel_id in log.account.notification_slack.values_list(
-                    "id", flat=True
-                )
-            ),
-            *(
-                (CoreNotificationDelivery.ChannelType.TELEGRAM, channel_id)
-                for channel_id in log.account.notification_telegram.values_list(
-                    "id", flat=True
-                )
-            ),
-        ]
         delivery_ids = []
         now = timezone.now()
         with transaction.atomic():
@@ -1742,6 +1747,44 @@ def send_log_to_db(self, log_reference):
             )
             if current_log is None:
                 return
+            current_data = (
+                dict(current_log.data)
+                if isinstance(current_log.data, dict)
+                else {}
+            )
+            if current_data.get("notification_fanout_status") == "complete":
+                return
+            email_recipients = []
+            try:
+                event, _template = _reviewed_notification_request(current_data)
+            except ValueError:
+                return
+            if event is not None:
+                email_recipients = current_log.account.get_notification_recipients(
+                    event
+                )
+
+            # Credential and member tables are intentionally queried only here,
+            # by the logs lane. The source publisher never sees channel secrets or
+            # recipient identities and RabbitMQ receives only integer row ids.
+            channel_references = [
+                *(
+                    (CoreNotificationDelivery.ChannelType.SLACK, channel_id)
+                    for channel_id in current_log.account.notification_slack.values_list(
+                        "id", flat=True
+                    )
+                ),
+                *(
+                    (CoreNotificationDelivery.ChannelType.TELEGRAM, channel_id)
+                    for channel_id in current_log.account.notification_telegram.values_list(
+                        "id", flat=True
+                    )
+                ),
+                *(
+                    (EMAIL_NOTIFICATION_CHANNEL, member.pk)
+                    for member, _email in email_recipients
+                ),
+            ]
             for channel_type, channel_id in channel_references:
                 delivery, _created = CoreNotificationDelivery.objects.get_or_create(
                     log_id=current_log.pk,
@@ -1764,6 +1807,10 @@ def send_log_to_db(self, log_reference):
                     continue
                 delivery_ids.append(delivery.pk)
 
+            current_data["notification_fanout_status"] = "complete"
+            current_log.data = current_data
+            current_log.save(update_fields=["data", "modified"])
+
             if delivery_ids:
                 transaction.on_commit(
                     lambda ids=tuple(delivery_ids): _publish_notification_deliveries(
@@ -1771,11 +1818,63 @@ def send_log_to_db(self, log_reference):
                     )
                 )
     except Exception:
-        # The legacy input can contain notification plaintext, and model/query
-        # frames can contain encrypted provider credentials. Do not hand this
+        # Model/query frames can contain encrypted provider credentials. Do not hand this
         # exception to an observability SDK or retry the original payload. A
-        # successfully-created delivery is independently recovered by Beat.
+        # pending log or successfully-created delivery is independently recovered.
         return
+
+
+@current_app.task(
+    name="recover_notification_fanouts",
+    bind=True,
+    ignore_result=True,
+    acks_late=False,
+    send_events=False,
+)
+def recover_notification_fanouts(self):
+    """Republish pending log fanouts after a source-to-broker publication gap."""
+
+    from apps.console.log.models import CoreLog
+
+    try:
+        batch_size = max(
+            1,
+            min(
+                1000,
+                int(
+                    getattr(
+                        settings,
+                        "NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE",
+                        100,
+                    )
+                ),
+            ),
+        )
+    except (TypeError, ValueError):
+        batch_size = 100
+    candidates = list(
+        CoreLog.objects.filter(data__notification_fanout_status="pending")
+        .order_by("created", "pk")
+        .only("pk", "data")[:batch_size]
+    )
+    for log in candidates:
+        try:
+            _reviewed_notification_request(log.data)
+        except ValueError:
+            data = dict(log.data or {}) if isinstance(log.data, dict) else {}
+            data["notification_fanout_status"] = "rejected"
+            CoreLog.objects.filter(
+                pk=log.pk,
+                data__notification_fanout_status="pending",
+            ).update(data=data)
+            continue
+        try:
+            send_log_to_db.apply_async(
+                args=[log.pk],
+                task_id=notification_fanout_task_id(log.pk, log.data),
+            )
+        except Exception:
+            continue
 
 
 def _publish_notification_deliveries(delivery_ids):
@@ -1969,6 +2068,66 @@ def deliver_log_notification(self, delivery_reference):
     if delivery is None:
         return
 
+    if delivery.channel_type == EMAIL_NOTIFICATION_CHANNEL:
+        try:
+            event, template = _reviewed_notification_request(delivery.log.data)
+        except ValueError:
+            _finish_notification_delivery(
+                delivery_id,
+                lease_token,
+                skipped=True,
+                outcome_code="email_request_invalid",
+            )
+            return
+        if event is None or template is None:
+            _finish_notification_delivery(
+                delivery_id,
+                lease_token,
+                skipped=True,
+                outcome_code="email_request_missing",
+            )
+            return
+        eligible = {
+            member.pk: (member, email)
+            for member, email in delivery.log.account.get_notification_recipients(
+                event
+            )
+        }
+        recipient = eligible.get(delivery.channel_id)
+        if recipient is None:
+            _finish_notification_delivery(
+                delivery_id,
+                lease_token,
+                skipped=True,
+                outcome_code="email_recipient_ineligible",
+            )
+            return
+        member, email = recipient
+        context = dict(delivery.log.data)
+        context.pop("notification_request", None)
+        context.pop("notification_fanout_status", None)
+        try:
+            email_notification = CoreNotificationLogEmail.objects.create(
+                member=member,
+                email=email,
+                template=template,
+                context=context,
+            )
+            email_notification.send()
+        except Exception:
+            sent = False
+            outcome_code = "provider_exception"
+        else:
+            sent = True
+            outcome_code = "sent"
+        _finish_notification_delivery(
+            delivery_id,
+            lease_token,
+            sent=sent,
+            outcome_code=outcome_code,
+        )
+        return
+
     channel_model = {
         CoreNotificationDelivery.ChannelType.SLACK: CoreNotificationSlack,
         CoreNotificationDelivery.ChannelType.TELEGRAM: CoreNotificationTelegram,
@@ -2077,11 +2236,6 @@ def recover_notification_deliveries(self):
     _publish_notification_deliveries(delivery_ids)
 
 
-@current_app.task(
-    name="send_log_to_slack",
-    bind=True,
-    ignore_result=True,
-)
 def send_log_to_slack(self, url, message):
     """Drain a pre-outbox plaintext task once, without republishing it."""
 
@@ -2097,11 +2251,6 @@ def send_log_to_slack(self, url, message):
         return False
 
 
-@current_app.task(
-    name="send_log_to_telegram",
-    bind=True,
-    ignore_result=True,
-)
 def send_log_to_telegram(self, chat_id, message):
     """Drain only messages queued by older releases.
 
@@ -2154,43 +2303,6 @@ def account_delete(self):
     except Exception as e:
         capture_exception(e)
         raise self.retry()
-
-
-@current_app.task(
-    name="send_postmark_email",
-    bind=True,
-    ignore_result=True,
-)
-def send_postmark_email(self, to_email, template, context):
-    """Generic notification email task: log + render + send ANY email template.
-
-    Replaces the stale Postmark-only version, which filtered on a non-existent
-    CoreNotificationEmail.account FK and only ever sent password_reset emails.
-    Despite the historical task name (kept for backwards compatibility with
-    existing callers/queues), delivery goes through
-    CoreNotificationLogEmail.send(), which honors the configured email provider
-    (postmark / mailgun / ses). The log row needs the member FK, so emails to
-    an address with no matching member are skipped with a print-log.
-    """
-    try:
-        from apps.console.notification.models import CoreNotificationLogEmail
-
-        member = CoreMember.objects.filter(user__email=to_email).first()
-        if member is None:
-            print(f"no member found for email, skipping {template} email: {to_email}")
-            return
-
-        email_notification = CoreNotificationLogEmail()
-        email_notification.member = member
-        email_notification.email = to_email
-        email_notification.template = template
-        email_notification.context = context
-        email_notification.save()
-
-        # Now Send email (works for any template, not just password_reset)
-        email_notification.send()
-    except Exception as e:
-        capture_exception(e)
 
 
 """

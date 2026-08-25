@@ -2506,6 +2506,11 @@ class WebsiteRestoreAPITests(RestoreBackendBase):
         self.assertEqual(kwargs["node_id"], node.id)
         self.assertEqual(kwargs["backup_id"], backup.id)
         self.assertEqual(kwargs["restore_id"], resp.data["id"])
+        restore = CoreWebsiteRestore.objects.get(pk=resp.data["id"])
+        self.assertEqual(
+            dispatch.call_args.kwargs["task_id"], restore.celery_task_id
+        )
+        self.assertTrue(restore.celery_task_id.startswith("website-restore-"))
 
     def test_explicit_storage_point_accepted(self):
         node, backup = self._website_backup()
@@ -2598,6 +2603,11 @@ class DatabaseRestoreAPITests(RestoreBackendBase):
             resp.data["params"]["target_mapping"]["appdb"], "appdb"
         )
         dispatch.assert_called_once()
+        restore = CoreDatabaseRestore.objects.get(pk=resp.data["id"])
+        self.assertEqual(
+            dispatch.call_args.kwargs["task_id"], restore.celery_task_id
+        )
+        self.assertTrue(restore.celery_task_id.startswith("database-restore-"))
 
     def test_restores_list_shape_matches_ui_contract(self):
         node, backup = self._db_backup()
