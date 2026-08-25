@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "source_repository": "bilal414/backupsheep",
+  "release_workflow": ".github/workflows/release-images.yml",
+  "registry": "ghcr.io",
+  "images": {
+    "app": "ghcr.io/bilal414/backupsheep",
+    "postgres": "ghcr.io/bilal414/backupsheep-postgres"
+  },
+  "platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "release_tag_regex": "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$",
+  "identity": {
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "certificate_identity_regex": "^https://github\\.com/bilal414/backupsheep/\\.github/workflows/release-images\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$",
+    "workflow_trigger": "push"
+  },
+  "attestations": {
+    "provenance_predicate_type": "https://slsa.dev/provenance/v1",
+    "sbom_predicate_types": {
+      "cyclonedx-json": "https://cyclonedx.org/bom",
+      "spdx-json": "https://spdx.dev/Document"
+    }
+  },
+  "vulnerability_policy": {
+    "scanner": "trivy",
+    "scanner_version": "0.74.0",
+    "fail_severities": [
+      "HIGH",
+      "CRITICAL"
+    ],
+    "ignore_unfixed": false,
+    "allowlist": null
+  }
+}
