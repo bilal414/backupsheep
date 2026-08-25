@@ -442,7 +442,7 @@ up_no_dependencies=false
 record_selected_service() {
     local service_name="$1"
     case "$service_name" in
-        db|rabbitmq|migrate|preflight|app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
+        db|rabbitmq|db-provision|migrate|preflight|app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
             selected_services+=("$service_name")
             ;;
         *) die "unknown or unreviewed Compose service selection: ${service_name}." ;;
@@ -830,7 +830,7 @@ elif [[ "$compose_subcommand" == "up" || "$compose_subcommand" == "create" ]]; t
     if (( ${#selected_services[@]} > 0 )); then
         for argument in "${selected_services[@]}"; do
             case "$argument" in
-                db|migrate)
+                db|db-provision|migrate)
                     ;;
                 rabbitmq)
                     selected_rabbitmq=true

@@ -262,6 +262,9 @@ INSTALL_ARGS=(
   --project-name backupsheep
   --skip-start
 )
+# When and only when this installation still predates PostgreSQL identity generation 2,
+# first complete docs/guides/database-identity-migration.md and then add:
+# INSTALL_ARGS+=(--migrate-database-identities)
 # If and only if the reviewed deployment override exists:
 # INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")
 ./install.sh "${INSTALL_ARGS[@]}"
@@ -357,10 +360,11 @@ be fixed, not bypassed.
 
 ```bash
 bs_compose --profile operations ps --all
-bs_compose logs --tail=200 migrate preflight app
+bs_compose logs --tail=200 db-provision migrate preflight app
 bs_compose exec -T app python manage.py check
 curl -fsS http://127.0.0.1:8000/healthz/
-bs_compose exec -T db pg_isready -U backupsheep -d backupsheep
+bs_compose exec -T db sh -c \
+  'pg_isready --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"'
 bs_compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 bs_compose --profile operations exec -T worker-cloud celery -A backupsheep inspect ping
 ```

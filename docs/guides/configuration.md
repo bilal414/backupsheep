@@ -2,7 +2,8 @@
 
 BackupSheep reads configuration when each process starts. Compose passes non-secret and
 optional integration settings from `.env` to each application service. The stock stack
-mounts the Django, PostgreSQL and RabbitMQ credentials from separate files in `.secrets`;
+mounts the Django, three purpose-specific PostgreSQL, and RabbitMQ credentials from
+separate files in `.secrets`;
 only `app` also receives the onboarding-token file. Changing either configuration source
 requires recreating the affected containers.
 
@@ -24,7 +25,7 @@ contract.
 
 For normal Compose deployments, copy `.env_sample` wholesale and retain optional blank
 keys. Keep `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
-`ONBOARDING_INSTALL_TOKEN` blank after creating the four required protected files and the
+`ONBOARDING_INSTALL_TOKEN` blank after creating the six required protected files and the
 optional `ssh_managed_private_key` file exactly as shown in the
 [installation guide](installation.md#manual-docker-compose-installation). Keep direct
 `SSH_MANAGED_PRIVATE_KEY_PATH` blank: the image entrypoint exports the validated private
@@ -48,7 +49,7 @@ chmod 600 .env .env.before-config-change
 ./backupsheep-compose config --quiet
 ./backupsheep-compose up --detach
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=100 migrate preflight app
+./backupsheep-compose logs --tail=100 db-provision migrate preflight app
 ```
 
 `./backupsheep-compose config` expands the Compose model and can include resolved environment
@@ -97,9 +98,12 @@ Provider, source and storage credentials entered through the console are encrypt
 a per-account Fernet key stored with the account data. Back up PostgreSQL securely and
 treat it as sensitive even though credential fields are encrypted.
 
-For the bundled stack, create a strong `.secrets/db_password` before the `pgdata` volume is
-created. Changing that file after PostgreSQL initialization does not change the database
-role's existing password. Keep the direct `.env` key blank.
+For the bundled stack, create strong, distinct `.secrets/db_bootstrap_password`,
+`.secrets/db_migrator_password`, and `.secrets/db_password` values before the `pgdata`
+volume is created. The one-shot provisioner synchronizes the marked role passwords on
+each core start; keep direct `.env` password values blank. The bootstrap file is mounted
+only into PostgreSQL and the provisioner, the migrator file only into the provisioner
+and migration service, and the runtime file only where the application needs it.
 
 ## Database configuration
 
@@ -107,15 +111,20 @@ The bundled database uses:
 
 ```dotenv
 DB_NAME='backupsheep'
-DB_USER='backupsheep'
+BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='2'
+DB_BOOTSTRAP_USER='backupsheep_bootstrap'
+DB_MIGRATOR_USER='backupsheep_migrator'
+DB_USER='backupsheep_runtime'
 DB_PASSWORD=''
 DB_HOST='db'
 DB_PORT='5432'
 ```
 
-The stock Compose file supplies `DB_PASSWORD_FILE=/run/secrets/db_password` to Django and
-`POSTGRES_PASSWORD_FILE=/run/secrets/db_password` to PostgreSQL from the protected host
-file. Do not duplicate the value in `.env`.
+The stock Compose file supplies `DB_PASSWORD_FILE=/run/secrets/db_password` to normal
+Django processes. PostgreSQL initializes with `db_bootstrap_password`, while `migrate`
+uses `db_migrator_password`. Do not duplicate any value in `.env` or reuse one credential
+for another role. Follow the [database identity migration gate](database-identity-migration.md)
+for an existing bundled database; never change the generation marker by hand.
 
 For managed PostgreSQL, set `DATABASE_URL`. A non-empty URL overrides all five discrete
 connection values for Django. It must use `postgres://` or `postgresql://`. Production

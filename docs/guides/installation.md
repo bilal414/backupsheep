@@ -13,8 +13,9 @@ definition of the operating-system tools needed by database and file backups.
 | Manual processes | Operators who already manage Python, PostgreSQL, RabbitMQ and process supervision | Every web, worker and scheduler process separately |
 
 The stock Compose stack contains PostgreSQL, RabbitMQ, the web application, five
-specialized Celery workers, a scheduler, a one-shot migration service and a one-shot
-security preflight. It publishes the web application on loopback TCP port `8000`;
+specialized Celery workers, a scheduler, a one-shot database-identity provisioner, a
+one-shot migration service and a one-shot security preflight. It publishes the web
+application on loopback TCP port `8000`;
 PostgreSQL and RabbitMQ are not published to the host.
 
 ## Host prerequisites
@@ -90,6 +91,7 @@ Supported options are:
 | `--project-name NAME` | Pins the Compose project name instead of accepting it from `.env` or ambient Compose variables |
 | `--adopt-legacy-project NAME` | One-time recovery for the exact stock four-volume layout left by an old `compose down`; see the guarded workflow below |
 | `--approved-compose-file PATH` | Accepts only the private regular `INSTALL_DIR/docker-compose.override.yml`, rendered after the base file and included in exact ownership history |
+| `--migrate-database-identities` | One-time, explicit conversion of an existing stock database login into separate bootstrap, migrator and runtime identities; requires the reviewed rollback workflow |
 | `--skip-start` | Verifies/configures the installation but does not build or start Compose |
 | `--enable-operations` | After core health and security preflight pass, explicitly starts the provider workers and scheduler |
 
@@ -103,8 +105,9 @@ On a new installation the script:
    the resulting object database, rejects dirty/foreign/symlinked checkouts and compares
    the running installer with the committed copy;
 3. creates `.env` as mode `0600` and `.secrets` as a mode `0700` directory;
-4. generates independent Django, PostgreSQL, RabbitMQ and onboarding files plus an empty
-   optional `ssh_managed_private_key` file as mode `0444` inside that private directory,
+4. generates independent Django, PostgreSQL bootstrap/migrator/runtime, RabbitMQ and
+   onboarding files plus an empty optional `ssh_managed_private_key` file as mode `0444`
+   inside that private directory,
    keeping values out of Compose inspection and staging storage;
 5. creates and preserves a random 64-character lowercase hexadecimal installation ID.
    Service containers and an empty labeled sentinel volume carry that identity so a
@@ -117,8 +120,9 @@ On a new installation the script:
    installer-owned data-generation witness. It refuses orphaned, stopped, unhealthy,
    ambiguous, 3.13 or 4.2 broker state instead of guessing at a volume format;
 7. validates Compose through explicit `--project-name`, `--env-file` and `-f` arguments;
-8. builds commit-tagged PostgreSQL and application images and starts only PostgreSQL, RabbitMQ,
-   migrations, the fail-closed preflight and web UI on `127.0.0.1:8000`;
+8. builds commit-tagged PostgreSQL and application images and starts only PostgreSQL,
+   RabbitMQ, transactional database-identity provisioning, migrations, the fail-closed
+   preflight and web UI on `127.0.0.1:8000`;
 9. waits up to five minutes for the `app` health check;
 10. prints an SSH-tunnel command and an explicit server-side token retrieval command,
    without writing the token itself to install logs.
@@ -132,8 +136,13 @@ security preflight pass.
 
 An existing directory is reused only when it is the clean canonical repository at the
 same requested commit, with the expected ownership and permissions. The installer never
-upgrades a checkout in place. It migrates the four existing direct installation secrets
-without rotating them and then blanks their `.env` values. It creates the optional managed
+upgrades a checkout in place. It migrates existing direct installation secrets without
+rotating them and then blanks their `.env` values. A pre-generation-2 stock database is
+the deliberate exception: the operator must first stop work, make a verified encrypted
+rollback, and pass `--migrate-database-identities` once. The installer preserves its
+legacy credential only as the bootstrap credential and generates new independent
+migrator/runtime credentials. See the
+[database identity migration gate](database-identity-migration.md). It creates the optional managed
 SSH-key file empty for a new deployment. If a legacy `SSH_MANAGED_PRIVATE_KEY_PATH` is
 configured, the operator must first place that exact key in
 `.secrets/ssh_managed_private_key`, set mode `0444`, and clear the old path; the installer
@@ -200,7 +209,7 @@ another version requires the [operator-run RabbitMQ migration](rabbitmq-upgrade.
 cd "$HOME/.local/share/backupsheep"
 ./backupsheep-compose config --quiet
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=100 migrate preflight app
+./backupsheep-compose logs --tail=100 db-provision migrate preflight app
 curl -fsS http://127.0.0.1:8000/healthz/
 ```
 
@@ -247,28 +256,35 @@ BACKUPSHEEP_IMAGE='backupsheep:<same-40-character-reviewed-commit>'
 BACKUPSHEEP_POSTGRES_IMAGE='backupsheep-postgres:<same-40-character-reviewed-commit>'
 BACKUPSHEEP_INSTALLATION_ID='<stable-64-character-lowercase-hex-value>'
 BACKUPSHEEP_COMPOSE_PROJECT_NAME='backupsheep'
+BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='2'
 BACKUPSHEEP_SECRETS_DIR='.secrets'
 DJANGO_SETTINGS_MODULE='backupsheep.settings'
 DJANGO_SECRET_KEY=''
 DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1,backups.example.com'
 APP_PROTOCOL='http://'
 APP_DOMAIN='localhost:8000'
+DB_BOOTSTRAP_USER='backupsheep_bootstrap'
+DB_MIGRATOR_USER='backupsheep_migrator'
+DB_USER='backupsheep_runtime'
 DB_PASSWORD=''
 RABBITMQ_PASSWORD=''
 ONBOARDING_INSTALL_TOKEN=''
 ```
 
-Create the four required secret files and the empty optional managed-key file without
+Create the six required secret files and the empty optional managed-key file without
 writing values to shell history or standard output:
 
 ```bash
 umask 077
 od -An -N 48 -tx1 /dev/urandom | tr -d ' \n' > .secrets/django_secret_key
-od -An -N 24 -tx1 /dev/urandom | tr -d ' \n' > .secrets/db_password
+od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/db_bootstrap_password
+od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/db_migrator_password
+od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/db_password
 od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/rabbitmq_password
 od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/onboarding_token
 touch .secrets/ssh_managed_private_key
-chmod 444 .secrets/django_secret_key .secrets/db_password \
+chmod 444 .secrets/django_secret_key .secrets/db_bootstrap_password \
+  .secrets/db_migrator_password .secrets/db_password \
   .secrets/rabbitmq_password .secrets/onboarding_token \
   .secrets/ssh_managed_private_key
 ```
@@ -319,9 +335,14 @@ the security preflight and recovery review:
 bs_compose --profile operations up --detach
 ```
 
-`migrate` and `preflight` must both exit with code `0`. The preflight independently
-computes Django's migration plan and refuses any unapplied migration. The application and
-worker services wait for both one-shot gates before starting. Migrations also seed the
+`db-provision`, `migrate` and `preflight` must all exit with code `0`. The provisioner
+uses the bootstrap credential only on its dedicated internal bridge, creates or rotates
+installation-marked migrator/runtime roles in one transaction, transfers the reviewed
+public schema to the migrator and grants the runtime login DML without DDL or temporary
+tables. The preflight independently proves the active Django login has that exact
+least-privilege boundary, computes Django's migration plan and refuses any unapplied
+migration. The application and
+worker services wait for all three one-shot gates before starting. Migrations also seed the
 integration/storage catalogs and create the database-backed cache table. Application
 and PostgreSQL roles use `pull_policy: never`, so both explicit builds above are mandatory
 and a missing local image cannot be replaced silently from a registry. The database build
@@ -335,7 +356,8 @@ Every application-image command still passes through the image entrypoint. It re
 root or weakened runtime, neutralizes shell/Python/dynamic-loader startup hooks and runs
 the deployment preflight again before each web, worker or Beat process. This repeated
 gate also covers an automatic container restart after the earlier one-shot preflight has
-exited. Migration and the preflight command itself are the only intentional exceptions.
+exited. Database identity provisioning, migration and the preflight command itself are
+the only intentional exceptions.
 
 An existing RabbitMQ 3.13 volume requires the supported 3.13 -> 4.2 -> 4.3 sequence before
 this Compose file can be used. Follow the [RabbitMQ migration gate](rabbitmq-upgrade.md);
@@ -344,7 +366,7 @@ never start the 4.3 image directly against a 3.13 data directory.
 If startup fails:
 
 ```bash
-bs_compose logs --tail=200 migrate preflight app db rabbitmq
+bs_compose logs --tail=200 db-provision migrate preflight app db rabbitmq
 ```
 
 ### 3. Retrieve the install token

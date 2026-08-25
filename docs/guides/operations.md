@@ -31,12 +31,13 @@ cd /opt/backupsheep
 ./backupsheep-compose build db app
 ./backupsheep-compose up --detach
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=100 app migrate preflight
+./backupsheep-compose logs --tail=100 app db-provision migrate preflight
 ```
 
-That profile-less start is intentionally core-only: PostgreSQL, RabbitMQ, migrations,
-security preflight and the web UI. After reviewing credentials and durable queue/recovery
-state, explicitly start the provider-mutating workers and singleton scheduler:
+That profile-less start is intentionally core-only: PostgreSQL, RabbitMQ, database
+identity provisioning, migrations, security preflight and the web UI. After reviewing
+credentials and durable queue/recovery state, explicitly start the provider-mutating
+workers and singleton scheduler:
 
 ```bash
 ./backupsheep-compose --profile operations up --detach

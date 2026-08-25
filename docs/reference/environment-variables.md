@@ -13,7 +13,7 @@ or other process values are merged into that object. The stock installer and sec
 Compose wrapper reject this alternate source and stock Compose pins it blank.
 
 Compose supplies non-secret and optional integration values from `.env` to application
-roles. Its four required installation secrets and optional managed SSH key are file-backed
+roles. Its six required installation secrets and optional managed SSH key are file-backed
 under `.secrets`; see below. After
 editing configuration, validate and recreate the core:
 
@@ -41,6 +41,7 @@ These values control Compose/installer behavior rather than Django application f
 | `BACKUPSHEEP_IMAGE` | `backupsheep:local` | Exact locally built application image tag; the verified installer requires `backupsheep:<full-commit>` and application roles use `pull_policy: never` |
 | `BACKUPSHEEP_POSTGRES_IMAGE` | `backupsheep-postgres:local` | Exact locally built database image tag; the verified installer requires `backupsheep-postgres:<full-commit>` and the database role uses `pull_policy: never` |
 | `BACKUPSHEEP_INSTALLATION_ID` | blank sample; installer generates it | Stable random 64-character lowercase hexadecimal ownership marker. Required by stock Compose; do not rotate or copy it between installations |
+| `BACKUPSHEEP_DATABASE_IDENTITY_GENERATION` | blank sample; installer records `2` | Stock PostgreSQL identity-contract witness. Never set it manually on an existing installation to bypass provisioning |
 | `BACKUPSHEEP_SECRETS_DIR` | `.secrets` | Host directory containing the stock Compose secret files; the verified installer accepts only this relative path |
 | `BACKUPSHEEP_BIND_ADDRESS` | `127.0.0.1` | Host address that publishes the app; the verified installer accepts loopback only |
 | `BACKUPSHEEP_BIND_PORT` | `8000` | Host loopback port published to container port 8000 |
@@ -132,7 +133,9 @@ API token is issued.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DB_NAME` | `backupsheep` | Database name; also initializes bundled PostgreSQL |
-| `DB_USER` | `backupsheep` | Database role; also initializes bundled PostgreSQL |
+| `DB_BOOTSTRAP_USER` | `backupsheep_bootstrap` | Bundled PostgreSQL bootstrap login. The official image initializes it as the cluster superuser; it is mounted/used only by PostgreSQL and `db-provision` |
+| `DB_MIGRATOR_USER` | `backupsheep_migrator` | Non-superuser owner of the database/public schema used only by the one-shot migration service |
+| `DB_USER` | `backupsheep_runtime` | Non-owner runtime login shared by long-lived application roles |
 | `DB_PASSWORD` | unsafe placeholder outside stock Compose; blank in stock `.env` | Direct database password for non-stock deployments |
 | `DB_PASSWORD_FILE` | unset outside stock Compose | Absolute file-backed database-password pointer; stock application roles use `/run/secrets/db_password` |
 | `DB_HOST` | `db` | Database hostname in stock Compose |
@@ -141,9 +144,11 @@ API token is issued.
 | `DB_SSLMODE` | blank | libpq `sslmode`; external production databases require `verify-full` |
 | `DB_SSLROOTCERT` | blank | CA/root-certificate bundle for external PostgreSQL hostname verification |
 
-The bundled `db` service consumes `DB_NAME`/`DB_USER` and the same protected password file
-mounted as `POSTGRES_PASSWORD_FILE`, even when Django uses `DATABASE_URL`. Changing the
-file after PostgreSQL initialized does not change the existing database role. In
+The bundled `db` service consumes `DB_NAME`/`DB_BOOTSTRAP_USER` and
+`db_bootstrap_password` as `POSTGRES_PASSWORD_FILE`. `db-provision` rotates the two
+marked application-role passwords transactionally before every migration; the migration
+service receives only `db_migrator_password`, and long-lived roles receive only
+`db_password`. In
 production, plaintext PostgreSQL is allowed only for an exact
 stock `db` service name, loopback address, or Unix socket. Every other hostname or IP,
 including RFC1918 addresses, requires `sslmode=verify-full` plus `sslrootcert`; the two
@@ -176,11 +181,12 @@ semicolon failover list whose members could cross transport trust boundaries.
 ## Stock Compose secret files
 
 The verified installer creates `.secrets` as an owner-only mode-`0700` directory and
-stores `django_secret_key`, `db_password`, `rabbitmq_password` and `onboarding_token` as
-separate owner-owned, non-linked, mode-`0444` files. It also creates an empty optional
+stores `django_secret_key`, `db_bootstrap_password`, `db_migrator_password`,
+`db_password`, `rabbitmq_password` and `onboarding_token` as separate owner-owned,
+non-linked, mode-`0444` files. It also creates an empty optional
 `ssh_managed_private_key` file with the same ownership/link/mode rules. The private parent
 prevents host directory traversal while Docker bind-mounts each granted file read-only for
-the non-root application UID. Direct copies of the four required values and any legacy
+the non-root application UID. Direct copies of required values and any legacy
 managed-key path remain blank in `.env`, Compose expansion and container inspection. Do
 not change the modes independently or add arbitrary entries to the installer-managed
 directory.

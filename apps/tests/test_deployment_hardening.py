@@ -56,10 +56,14 @@ class DeploymentHardeningContractTests(TestCase):
             workflow,
             r'BACKUPSHEEP_INSTALLATION_ID:\s+["\'][0-9a-f]{64}["\']',
         )
+        self.assertRegex(
+            workflow,
+            r'BACKUPSHEEP_DATABASE_IDENTITY_GENERATION:\s+["\']2["\']',
+        )
 
     def test_postgres_healthcheck_authenticates_with_the_file_secret(self):
         database = self.service_block("db")
-        self.assertIn("cat /run/secrets/db_password", database)
+        self.assertIn("cat /run/secrets/db_bootstrap_password", database)
         self.assertIn("--host=127.0.0.1", database)
         self.assertIn("--command='SELECT 1'", database)
         self.assertNotIn('test: ["CMD-SHELL", "pg_isready', database)
@@ -99,9 +103,9 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertIn("3.13.x to 4.2.x", guide)
 
     def test_compose_bounds_logs_and_isolates_backend(self):
-        self.assertEqual(self.compose.count("logging: *default-logging"), 11)
+        self.assertEqual(self.compose.count("logging: *default-logging"), 12)
         self.assertIn("max-size: \"${DOCKER_LOG_MAX_SIZE:-10m}\"", self.compose)
-        self.assertEqual(self.compose.count(": *internal-network"), 17)
+        self.assertEqual(self.compose.count(": *internal-network"), 18)
         self.assertEqual(self.compose.count(": *egress-network"), 6)
         self.assertIn("com.docker.network.bridge.enable_icc: \"false\"", self.compose)
 
@@ -115,7 +119,7 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertIn("/code/_storage /backups", dockerfile)
         self.assertIn("/code/static", dockerfile)
         self.assertIn("umask 077", entrypoint)
-        self.assertEqual(self.compose.count("<<: *app-runtime"), 9)
+        self.assertEqual(self.compose.count("<<: *app-runtime"), 10)
         self.assertIn('user: "10001:10001"', self.compose)
         self.assertIn("pull_policy: never", self.compose)
         self.assertIn("read_only: true", self.compose)
@@ -150,7 +154,7 @@ class DeploymentHardeningContractTests(TestCase):
 
     def test_every_application_role_uses_one_explicit_image_reference(self):
         image_reference = 'image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"'
-        self.assertEqual(self.compose.count(image_reference), 9)
+        self.assertEqual(self.compose.count(image_reference), 10)
         self.assertNotIn("backupsheep:latest", self.compose)
 
         env_sample = (ROOT / ".env_sample").read_text(encoding="utf-8")
@@ -188,7 +192,9 @@ class DeploymentHardeningContractTests(TestCase):
                     block,
                 )
 
-        for service in ("db", "rabbitmq", "migrate", "preflight", "app"):
+        for service in (
+            "db", "rabbitmq", "db-provision", "migrate", "preflight", "app"
+        ):
             with self.subTest(core_service=service):
                 self.assertNotIn("profiles:", self.service_block(service))
 
@@ -210,6 +216,8 @@ class DeploymentHardeningContractTests(TestCase):
         for name in (
             "django_secret_key",
             "db_password",
+            "db_bootstrap_password",
+            "db_migrator_password",
             "rabbitmq_password",
             "onboarding_token",
             "ssh_managed_private_key",
@@ -250,6 +258,7 @@ class DeploymentHardeningContractTests(TestCase):
         app = self.service_block("app")
         self.assertIn("ONBOARDING_INSTALL_TOKEN_SECRET_FILE", app)
         for service in (
+            "db-provision",
             "migrate",
             "preflight",
             "worker-cloud",
@@ -264,6 +273,64 @@ class DeploymentHardeningContractTests(TestCase):
                     "ONBOARDING_INSTALL_TOKEN_SECRET_FILE",
                     self.service_block(service),
                 )
+
+    def test_database_bootstrap_migrator_and_runtime_identities_are_separated(self):
+        database = self.service_block("db")
+        provisioner = self.service_block("db-provision")
+        migrator = self.service_block("migrate")
+
+        self.assertIn(
+            "POSTGRES_USER: ${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}",
+            database,
+        )
+        self.assertIn("POSTGRES_PASSWORD_FILE: /run/secrets/db_bootstrap_password", database)
+        self.assertNotIn("db_migrator_password", database)
+        self.assertNotIn("- db_password\n", database)
+
+        self.assertIn(
+            'command: ["python", "-m", "backupsheep.database_identity", "provision"]',
+            provisioner,
+        )
+        self.assertIn(
+            "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION is required", provisioner
+        )
+        self.assertIn("DB_HOST: db", provisioner)
+        self.assertIn('DB_PORT: "5432"', provisioner)
+        for secret_name in (
+            "db_bootstrap_password",
+            "db_migrator_password",
+            "db_password",
+        ):
+            self.assertIn(f"- {secret_name}", provisioner)
+        self.assertNotIn("django_secret_key", provisioner)
+        self.assertNotIn("rabbitmq_password", provisioner)
+        self.assertIn("- provision-database", provisioner)
+        self.assertNotIn("- migrate-database", provisioner)
+
+        self.assertIn(
+            'DB_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"', migrator
+        )
+        self.assertIn("DB_PASSWORD_FILE: /run/secrets/db_migrator_password", migrator)
+        self.assertNotIn("db_bootstrap_password", migrator)
+        self.assertIn(
+            "db-provision:\n        condition: service_completed_successfully",
+            migrator,
+        )
+
+        for service in (
+            "preflight",
+            "app",
+            "worker-cloud",
+            "worker-database",
+            "worker-files",
+            "worker-storage",
+            "worker-logs",
+            "beat",
+        ):
+            with self.subTest(runtime_service=service):
+                block = self.service_block(service)
+                self.assertNotIn("db_bootstrap_password", block)
+                self.assertNotIn("db_migrator_password", block)
 
     def test_stateful_services_are_unpublished_and_minimally_privileged(self):
         for service in ("db", "rabbitmq"):

@@ -45,6 +45,8 @@
 #     RABBITMQ_VHOST=backupsheep
 # The installer stores the Django, database, broker, and onboarding secrets as private
 # file-backed Compose secrets under `.secrets`; their `.env` counterparts stay blank.
+# PostgreSQL has three distinct trust levels: a database-only bootstrap superuser, a
+# one-shot schema-owning migrator, and the non-owner application runtime identity.
 
 # Persist the installer-reviewed project identity in configuration as well as the
 # command line. This prevents a manual rerun from silently selecting a new project
@@ -95,7 +97,7 @@ x-app-runtime: &app-runtime
   stop_grace_period: "${BACKUPSHEEP_STOP_GRACE_PERIOD:-5m}"
 
 # `env_file` remains the compatibility/configuration surface, but direct copies of the
-# four installation secrets are explicitly removed from every application container.
+# direct installation secrets are explicitly removed from every application container.
 # Settings resolves the first three from the read-only secret files instead. Only the
 # web service receives the onboarding token secret.
 x-app-secret-environment: &app-secret-environment
@@ -193,12 +195,14 @@ services:
       dockerfile: Dockerfile.postgres
     environment:
       POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
+      # The official image necessarily initializes POSTGRES_USER as a cluster
+      # superuser. Never reuse the long-lived Django runtime identity here.
+      POSTGRES_USER: ${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}
       # The official PostgreSQL entrypoint resolves this file and unsets the pointer
       # before it starts postgres, keeping the password out of container inspection.
-      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_bootstrap_password
     secrets:
-      - db_password
+      - db_bootstrap_password
     volumes:
       # postgres:18+ images keep data in a versioned subdir of /var/lib/postgresql
       # and refuse to start when the mount is at the old .../data path.
@@ -214,7 +218,7 @@ services:
     healthcheck:
       # pg_isready reports server readiness even when authentication fails. Prove
       # the rotated file-backed credential over the same TCP path used by Django.
-      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/db_password)\" psql --no-password --host=127.0.0.1 --username=\"$${POSTGRES_USER}\" --dbname=\"$${POSTGRES_DB}\" --tuples-only --no-align --command='SELECT 1' | grep -qx '1'"]
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/db_bootstrap_password)\" psql --no-password --host=127.0.0.1 --username=\"$${POSTGRES_USER}\" --dbname=\"$${POSTGRES_DB}\" --tuples-only --no-align --command='SELECT 1' | grep -qx '1'"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -228,6 +232,7 @@ services:
       - logs-database
       - beat-database
       - preflight-database
+      - provision-database
     logging: *default-logging
     restart: unless-stopped
 
@@ -297,20 +302,64 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  # One-shot: provision the database identity boundary before Django can migrate or
+  # serve. It connects as the database-only bootstrap superuser, creates/rotates the
+  # marked migrator and runtime roles in one transaction, transfers reviewed public
+  # object ownership to the migrator, and grants the runtime identity DML without DDL.
+  db-provision:
+    <<: *app-runtime
+    image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    env_file: .env
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "${BACKUPSHEEP_DATABASE_IDENTITY_GENERATION:?BACKUPSHEEP_DATABASE_IDENTITY_GENERATION is required}"
+      DB_BOOTSTRAP_USER: "${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}"
+      DB_MIGRATOR_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
+      DB_USER: "${DB_USER:-backupsheep_runtime}"
+      # Pin the only reviewed privileged route; do not let env_file/libpq redirect
+      # the bootstrap credential to an external endpoint.
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_BOOTSTRAP_PASSWORD_FILE: /run/secrets/db_bootstrap_password
+      DB_MIGRATOR_PASSWORD_FILE: /run/secrets/db_migrator_password
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_bootstrap_password
+      - db_migrator_password
+      - db_password
+    command: ["python", "-m", "backupsheep.database_identity", "provision"]
+    mem_limit: "${DB_PROVISION_MEMORY_LIMIT:-512m}"
+    cpus: "${DB_PROVISION_CPU_LIMIT:-0.5}"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - provision-database
+    logging: *default-logging
+    restart: "no"
+
   # One-shot: apply DB migrations once, then exit. Every app-image service below waits
   # for this to complete successfully so nothing serves/works against an unmigrated DB.
   migrate:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
+    environment:
+      <<: *app-secret-environment
+      DB_USER: "${DB_MIGRATOR_USER:-backupsheep_migrator}"
+      DB_PASSWORD_FILE: /run/secrets/db_migrator_password
+    secrets:
+      - django_secret_key
+      - db_migrator_password
+      - rabbitmq_password
     command: ["python", "manage.py", "migrate", "--noinput"]
     mem_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
     cpus: "${MIGRATE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
+      db-provision:
+        condition: service_completed_successfully
     networks:
       - migrate-database
     logging: *default-logging
@@ -626,6 +675,7 @@ networks:
   beat-broker: *internal-network
   preflight-database: *internal-network
   preflight-broker: *internal-network
+  provision-database: *internal-network
   app-egress: *egress-network
   cloud-egress: *egress-network
   database-egress: *egress-network
@@ -665,6 +715,10 @@ secrets:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/django_secret_key
   db_password:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_password
+  db_bootstrap_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_bootstrap_password
+  db_migrator_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_migrator_password
   rabbitmq_password:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_password
   onboarding_token:

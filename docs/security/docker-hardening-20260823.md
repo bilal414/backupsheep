@@ -445,9 +445,11 @@ user-owned host acceptance test is still recommended.
    crafted task to another lane. Add per-role publisher/consumer users, queue ACLs or
    vhosts, authenticated task envelopes, task/argument authorization, and alerts for
    unexpected publisher/consumer combinations.
-2. **Shared PostgreSQL principal.** Application roles and migrations do not yet prove
-   separate least-privilege database identities. Split schema owner/migrator and
-   runtime roles, then narrow grants by service responsibility.
+2. **Shared runtime PostgreSQL principal across application lanes.** Generation 2 now
+   separates the database-only bootstrap superuser, schema-owning one-shot migrator and
+   non-owner runtime login, and preflight proves the runtime has no DDL/TEMP/elevated
+   role attributes. Web and all worker lanes still share that runtime DML identity.
+   Introduce lane-specific grants only after measuring the tables each role requires.
 3. **Unrestricted outbound internet access.** Role-specific egress bridges isolate
    containers but do not allowlist destinations or universally block cloud metadata.
    Portable Compose cannot supply a complete host egress firewall. Add an explicit

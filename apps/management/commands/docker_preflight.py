@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import hmac
 import os
+import re
 import resource
 import stat
 import tempfile
@@ -26,6 +27,7 @@ REQUIRED_SECRET_FILE_ENV = {
     "RABBITMQ_PASSWORD": "/run/secrets/rabbitmq_password",
 }
 FORBIDDEN_CREDENTIAL_URL_ENV = ("DATABASE_URL", "CELERY_BROKER_URL")
+INSTALLATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _assert_stock_configuration_sources(*, environment, runtime_settings, secret_values):
@@ -206,6 +208,113 @@ def _assert_no_pending_migrations(executor: MigrationExecutor):
     )
 
 
+def _assert_runtime_database_identity(*, cursor, environment, runtime_settings):
+    """Prove the active Django login is the marked, non-owner runtime role."""
+
+    errors = []
+    generation = str(environment.get("BACKUPSHEEP_DATABASE_IDENTITY_GENERATION") or "")
+    installation_id = str(environment.get("BACKUPSHEEP_INSTALLATION_ID") or "")
+    bootstrap_user = str(environment.get("DB_BOOTSTRAP_USER") or "")
+    migrator_user = str(environment.get("DB_MIGRATOR_USER") or "")
+    runtime_user = str(environment.get("DB_USER") or "")
+    configured_user = str(
+        runtime_settings.DATABASES.get("default", {}).get("USER", "") or ""
+    )
+    if generation != "2":
+        errors.append("database identity generation is not 2")
+    if not INSTALLATION_ID_PATTERN.fullmatch(installation_id):
+        errors.append("installation identity is malformed")
+    if not runtime_user or configured_user != runtime_user:
+        errors.append("Django is not configured for the stock runtime database role")
+    if len({bootstrap_user, migrator_user, runtime_user}) != 3 or not all(
+        (bootstrap_user, migrator_user, runtime_user)
+    ):
+        errors.append("database bootstrap, migrator, and runtime roles are not distinct")
+
+    cursor.execute(
+        """
+        SELECT current_user,
+               role.rolsuper, role.rolcreatedb, role.rolcreaterole,
+               role.rolreplication, role.rolbypassrls, role.rolcanlogin,
+               COALESCE(pg_catalog.shobj_description(role.oid, 'pg_authid'), ''),
+               pg_catalog.pg_get_userbyid(database.datdba),
+               pg_catalog.pg_get_userbyid(namespace.nspowner),
+               pg_catalog.has_database_privilege(
+                   current_user, current_database(), 'CREATE'
+               ),
+               pg_catalog.has_database_privilege(
+                   current_user, current_database(), 'TEMPORARY'
+               ),
+               pg_catalog.has_schema_privilege(current_user, 'public', 'CREATE')
+          FROM pg_catalog.pg_roles role
+          JOIN pg_catalog.pg_database database
+            ON database.datname = current_database()
+          JOIN pg_catalog.pg_namespace namespace
+            ON namespace.nspname = 'public'
+         WHERE role.rolname = current_user
+        """
+    )
+    record = cursor.fetchone()
+    if record is None:
+        errors.append("the active database login is absent from pg_roles")
+    else:
+        (
+            active_user,
+            superuser,
+            create_database,
+            create_role,
+            replication,
+            bypass_rls,
+            can_login,
+            marker,
+            database_owner,
+            schema_owner,
+            database_create,
+            database_temporary,
+            schema_create,
+        ) = record
+        if active_user != runtime_user:
+            errors.append("the active database login is not DB_USER")
+        if superuser or create_database or create_role or replication or bypass_rls:
+            errors.append("the runtime database role has elevated role attributes")
+        if not can_login:
+            errors.append("the runtime database role cannot log in")
+        expected_marker = (
+            f"backupsheep:database-identity-v2:{installation_id}:runtime"
+        )
+        if marker != expected_marker:
+            errors.append("the runtime database role marker does not match this installation")
+        if database_owner != migrator_user or schema_owner != migrator_user:
+            errors.append("the migrator does not own the database and public schema")
+        if database_create or database_temporary or schema_create:
+            errors.append("the runtime database role retains DDL or temporary-object privilege")
+
+    cursor.execute(
+        """
+        SELECT 'member of ' || parent.rolname
+          FROM pg_catalog.pg_auth_members membership
+          JOIN pg_catalog.pg_roles member ON member.oid = membership.member
+          JOIN pg_catalog.pg_roles parent ON parent.oid = membership.roleid
+         WHERE member.rolname = current_user
+        UNION ALL
+        SELECT 'granted to ' || member.rolname
+          FROM pg_catalog.pg_auth_members membership
+          JOIN pg_catalog.pg_roles member ON member.oid = membership.member
+          JOIN pg_catalog.pg_roles parent ON parent.oid = membership.roleid
+         WHERE parent.rolname = current_user
+         ORDER BY 1
+        """
+    )
+    memberships = [row[0] for row in cursor.fetchall()]
+    if memberships:
+        errors.append("the runtime database role has role memberships")
+
+    if errors:
+        raise CommandError(
+            "Docker security preflight failed: " + "; ".join(errors)
+        )
+
+
 class Command(BaseCommand):
     help = "Validate the stock Docker runtime boundary, database, and broker without consuming work."
 
@@ -264,6 +373,11 @@ class Command(BaseCommand):
                 cursor.execute("SELECT 1")
                 if cursor.fetchone() != (1,):
                     raise CommandError("Database authentication probe returned bad data")
+                _assert_runtime_database_identity(
+                    cursor=cursor,
+                    environment=os.environ,
+                    runtime_settings=settings,
+                )
             _assert_no_pending_migrations(MigrationExecutor(connection))
         except CommandError:
             raise
@@ -280,6 +394,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 "Docker security preflight passed: immutable non-root runtime, "
-                "file-backed secrets, applied migrations, database, and broker verified."
+                "file-backed secrets, least-privilege database identity, applied "
+                "migrations, database, and broker verified."
             )
         )

@@ -3,11 +3,12 @@
 ## Boot / setup
 
 **The `db` container won't start, or the app can't connect.**
-Make sure `.secrets/db_password` exists with the value used to initialize PostgreSQL and
-that `DB_HOST=db` / `DB_PORT=5432` are set for the Compose stack. Keep the direct
-`DB_PASSWORD` key blank. If you replace the secret *after* the `db` volume was first
-created, the volume keeps the original credential. Restore the original value or rotate
-the role from a trusted database console. Only for a disposable, proven-empty install may
+Make sure `.secrets/db_bootstrap_password`, `.secrets/db_migrator_password` and
+`.secrets/db_password` are present and distinct, and that `DB_HOST=db` / `DB_PORT=5432`
+are set for the Compose stack. Keep direct `DB_PASSWORD` blank. Inspect `db-provision`
+before `migrate`: it rotates marked application roles and refuses unreviewed ownership or
+privilege drift. Existing pre-generation-2 installs must follow the
+[database identity migration gate](guides/database-identity-migration.md). Only for a disposable, proven-empty install may
 you recreate volumes; `./backupsheep-compose --allow-data-deletion down -v` irreversibly deletes database, broker,
 work, SSH trust and Local Storage data.
 

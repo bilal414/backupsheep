@@ -9,12 +9,12 @@ Confirm that migrations succeeded and the application is healthy:
 
 ```bash
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=100 migrate preflight app
+./backupsheep-compose logs --tail=100 db-provision migrate preflight app
 curl -fsS http://127.0.0.1:8000/healthz/
 ```
 
-The `migrate` and `preflight` services should be `Exited (0)`, `app` should become healthy
-and the health request should return `ok`.
+The `db-provision`, `migrate` and `preflight` services should be `Exited (0)`, `app`
+should become healthy and the health request should return `ok`.
 
 The verified installer and stock Compose deployment mount a fixed onboarding token only
 into `app`; its direct `.env` value remains blank. Read it from the protected host file as

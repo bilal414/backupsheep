@@ -268,6 +268,11 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertIn("Docker init and a private PID namespace", self.entrypoint)
         self.assertIn("the Docker control socket must not be mounted", self.entrypoint)
         self.assertIn("python /code/manage.py docker_preflight", self.entrypoint)
+        self.assertIn(
+            "[ \"$3\" = 'backupsheep.database_identity' ]",
+            self.entrypoint,
+        )
+        self.assertIn("[ \"$4\" = 'provision' ]", self.entrypoint)
         for variable in (
             "LD_AUDIT",
             "LD_LIBRARY_PATH",

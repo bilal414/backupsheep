@@ -81,7 +81,8 @@ dumps. Validate retention, encryption, account isolation and restore permissions
 ```bash
 install -m 600 .env /secure/backups/backupsheep.env
 install -d -m 700 /secure/backups/backupsheep.secrets
-for secret in django_secret_key db_password rabbitmq_password onboarding_token ssh_managed_private_key; do
+for secret in django_secret_key db_bootstrap_password db_migrator_password \
+  db_password rabbitmq_password onboarding_token ssh_managed_private_key; do
   install -m 400 ".secrets/${secret}" "/secure/backups/backupsheep.secrets/${secret}"
 done
 test ! -f docker-compose.override.yml || \
@@ -132,7 +133,7 @@ production provider resources.
 
 - provide operator-managed Docker Engine 28.0.0+ and Compose 2.33.1+ on a supported host;
 - check out the recorded BackupSheep revision (or a reviewed compatible newer release);
-- restore `.env` with mode `0600`, `.secrets` as mode `0700`, its four required
+- restore `.env` with mode `0600`, `.secrets` as mode `0700`, its six required
   owner-owned files and optional `ssh_managed_private_key` source as mode `0444`; an empty
   optional file means disabled; restore deployment overrides;
 - recreate/mount the Local Storage, work and `ssh_trust` filesystems at the same container
@@ -174,7 +175,7 @@ never run this against an unverified database.
 ```bash
 bs_compose up --detach
 bs_compose ps --all
-bs_compose logs --tail=200 migrate preflight app
+bs_compose logs --tail=200 db-provision migrate preflight app
 bs_compose exec -T app python manage.py check
 ```
 

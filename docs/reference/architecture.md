@@ -48,9 +48,10 @@ The reverse proxy is an operator-supplied component; the repository does not shi
 proxy. PostgreSQL, RabbitMQ, the app, workers and Beat are defined in
 `docker-compose.yml`.
 
-A profile-less Compose start deliberately runs only PostgreSQL, RabbitMQ, migrations, the
-security preflight and the web app. Every provider worker and Beat belongs to the explicit
-`operations` profile because enabling it can execute queued or recoverable provider work.
+A profile-less Compose start deliberately runs only PostgreSQL, RabbitMQ, database
+identity provisioning, migrations, the security preflight and the web app. Every
+provider worker and Beat belongs to the explicit `operations` profile because enabling
+it can execute queued or recoverable provider work.
 
 ## Runtime components
 
@@ -58,6 +59,7 @@ security preflight and the web app. Every provider worker and Beat belongs to th
 | --- | --- | --- | --- |
 | `db` | locally built `backupsheep-postgres:<commit>` rooted in digest-pinned `postgres:18.6-trixie` | Accounts, configuration, schedules, credentials, backup/restore records, leases and evidence | Image and Compose fix UID/GID `999:999`, drop every capability and exec PostgreSQL as non-root PID 1; fresh named volumes inherit ownership and imported drift fails closed; preserve the cluster's libc collation generation during updates |
 | `rabbitmq` | digest-pinned `rabbitmq:4.3.5-alpine` | Durable Celery queues and persistent message delivery | Vendor entrypoint repairs the data-volume owner, drops privilege and execs RabbitMQ as non-root PID 1; dedicated credentials/vhost; backend network only |
+| `db-provision` | `python -m backupsheep.database_identity provision` | Creates/rotates installation-marked migrator/runtime roles, transfers reviewed public ownership and applies runtime DML grants in one transaction | One-shot on a dedicated database bridge; sole application-image recipient of the bootstrap credential |
 | `migrate` | `python manage.py migrate --noinput` | Applies schema migrations before other application roles start | One-shot; must complete successfully |
 | `preflight` | `python manage.py docker_preflight` | Fails closed on unsafe identity/capability/rootfs/secret/runtime settings, pending migrations, and unavailable database/broker dependencies | One-shot; must complete successfully |
 | `app` | image entrypoint, then Gunicorn on port 8000 | Console, REST API, onboarding, connection validation and static files through WhiteNoise | Scale only behind a proxy and with shared state/mounts |

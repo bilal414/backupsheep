@@ -21,7 +21,7 @@ CANONICAL_NETWORKS = (
     "cloud-broker", "database-database", "database-broker", "files-database",
     "files-broker", "storage-database", "storage-broker", "logs-database",
     "logs-broker", "beat-database", "beat-broker", "preflight-database",
-    "preflight-broker", "app-egress", "cloud-egress", "database-egress",
+    "preflight-broker", "provision-database", "app-egress", "cloud-egress", "database-egress",
     "files-egress", "storage-egress", "logs-egress",
 )
 CANONICAL_VOLUMES = (
@@ -31,7 +31,7 @@ CANONICAL_VOLUMES = (
     "ssh_managed_private_key",
 )
 CANONICAL_SERVICES = (
-    "db", "rabbitmq", "migrate", "preflight", "app", "worker-cloud",
+    "db", "rabbitmq", "db-provision", "migrate", "preflight", "app", "worker-cloud",
     "worker-database", "worker-files", "worker-storage", "worker-logs", "beat",
 )
 

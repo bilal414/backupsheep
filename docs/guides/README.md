@@ -18,6 +18,7 @@ validated against a live production account.
 | --- | --- |
 | [Operations](operations.md) | Daily checks, job control, scaling, retention and safe service intervention |
 | [Upgrades](upgrades.md) | Staging, backing up, migrating, verifying and rolling back a release |
+| [PostgreSQL identity generation 2](database-identity-migration.md) | One-time, rollback-gated conversion of a legacy bundled database login into bootstrap, migrator and runtime identities |
 | [Disaster recovery](disaster-recovery.md) | Protecting and restoring the BackupSheep control plane itself |
 | [Observability](observability.md) | Liveness, dependencies, durable job state, logs, alerts and restore rehearsals |
 | [Troubleshooting](troubleshooting.md) | Startup, proxy, worker, backup, restore, source and storage failures |

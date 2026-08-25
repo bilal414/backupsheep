@@ -12,7 +12,7 @@ git rev-parse HEAD
 git status --short --branch
 ./backupsheep-compose config --quiet
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=200 migrate preflight app
+./backupsheep-compose logs --tail=200 db-provision migrate preflight app
 curl -fsS http://127.0.0.1:8000/healthz/
 ./backupsheep-compose exec -T db pg_isready -U backupsheep -d backupsheep
 ./backupsheep-compose exec -T rabbitmq rabbitmq-diagnostics -q ping

@@ -9,7 +9,7 @@ optional managed-SSH-key values come from separate read-only files under `.secre
 **How keys are read.** `.env_sample` also supplies the non-secret defaults when a platform
 injects environment variables without mounting a `.env` file (such as Render or Railway).
 A real `.env` and then process environment override those defaults. File-backed values
-then override the four allowlisted direct secrets. For a stock manual install, keep
+then override the allowlisted direct secrets. For a stock manual install, keep
 `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
 `ONBOARDING_INSTALL_TOKEN` blank in `.env`; Compose sets fixed `/run/secrets/...` pointers
 and grants each role only the files it needs.
@@ -60,9 +60,12 @@ missing/malformed/multiple dedicated header safely falls back to `REMOTE_ADDR`.
 | Variable | Required | Compose value | Purpose |
 |----------|:--------:|---------------|---------|
 | `DB_NAME` | ✅ | `backupsheep` | Database name (the `db` service also reads it as `POSTGRES_DB`). |
-| `DB_USER` | ✅ | `backupsheep` | Username (`POSTGRES_USER`). |
+| `BACKUPSHEEP_DATABASE_IDENTITY_GENERATION` | Compose | `2` | Installer-owned identity-contract witness; never set it manually on an existing database. |
+| `DB_BOOTSTRAP_USER` | Compose | `backupsheep_bootstrap` | Bundled-cluster bootstrap superuser used only by PostgreSQL and `db-provision`. |
+| `DB_MIGRATOR_USER` | Compose | `backupsheep_migrator` | Non-superuser database/schema owner used by `migrate`. |
+| `DB_USER` | ✅ | `backupsheep_runtime` | Non-owner application runtime login. |
 | `DB_PASSWORD` | non-stock only | blank in stock `.env` | Direct password for non-Compose deployments. |
-| `DB_PASSWORD_FILE` | Compose | `/run/secrets/db_password` | File-backed password for application roles; PostgreSQL reads the same secret with `POSTGRES_PASSWORD_FILE`. |
+| `DB_PASSWORD_FILE` | Compose | `/run/secrets/db_password` | File-backed password for long-lived application roles. Separate bootstrap and migrator files are granted only to their one-shot services. |
 | `DB_HOST` | ✅ | `db` | Host — the Compose service name. |
 | `DB_PORT` | ✅ | `5432` | Port. |
 | `DATABASE_URL` | optional | unset | Managed PostgreSQL URL. When set, it overrides the five discrete `DB_*` connection values. |
