@@ -564,6 +564,17 @@ class SourceScanGateTests(TestCase):
         static_job = workflow.split("  static-python-security:\n", 1)[1].split(
             "  application-security-regression:\n", 1
         )[0]
+        checkout_step = static_job.split(
+            "      - name: Check out exact source\n", 1
+        )[1].split("      - name: Set up Python\n", 1)[0]
+        self.assertIn("ref: ${{ github.sha }}", checkout_step)
+        self.assertEqual(
+            workflow.count(
+                "uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+            ),
+            3,
+        )
+        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 3)
         for expected in (
             "deploy/static-analysis-requirements.lock",
             "c7234adc0f4ccc3e17fee62e41971c73bdfdf717623b43faf9bfd0b32bb8d76d",

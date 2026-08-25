@@ -105,13 +105,30 @@ class RuntimeImageHardeningTests(TestCase):
             '"libmariadb3=1:11.8.6-5ubuntu0.1"',
             '"libncurses6=6.6+20251231-1"',
             '"libpq5=18.6-0ubuntu0.26.04.1"',
-            '"libssl3t64=3.5.5-1ubuntu3.3"',
+            '"libssl3t64=3.5.5-1ubuntu3.4"',
             '"openssh-client=1:10.2p1-2ubuntu3.5"',
+            '"openssl=3.5.5-1ubuntu3.4"',
+            '"openssl-provider-legacy=3.5.5-1ubuntu3.4"',
             '"tzdata=2026c-0ubuntu0.26.04.1"',
         )
         for package in security_updates:
             with self.subTest(security_update=package):
                 self.assertIn(package, self.dockerfile)
+
+        self.assertEqual(self.dockerfile.count("3.5.5-1ubuntu3.3"), 0)
+        self.assertEqual(
+            self.dockerfile.count("libssl3t64 (= 3.5.5-1ubuntu3.4)"), 3
+        )
+        self.assertIn(
+            "assert_package libssl3t64 3.5.5-1ubuntu3.4", self.dockerfile
+        )
+        self.assertIn(
+            "assert_package openssl 3.5.5-1ubuntu3.4", self.dockerfile
+        )
+        self.assertIn(
+            "assert_package openssl-provider-legacy 3.5.5-1ubuntu3.4",
+            self.dockerfile,
+        )
 
         self.assertIn("signed-by=/usr/share/keyrings/pgdg.gpg", self.dockerfile)
         self.assertIn(

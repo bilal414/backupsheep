@@ -204,7 +204,7 @@ RUN set -eux; \
             "Source: postgresql-${pg_major} (${pg_version})" \
             "Architecture: ${TARGETARCH}" \
             'Maintainer: BackupSheep Security <security@backupsheep.com>' \
-            'Depends: libc6 (= 2.43-2ubuntu2.3), libpq5 (= 18.6-0ubuntu0.26.04.1), libreadline8t64 (= 8.3-4), libssl3t64 (= 3.5.5-1ubuntu3.3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
+            'Depends: libc6 (= 2.43-2ubuntu2.3), libpq5 (= 18.6-0ubuntu0.26.04.1), libreadline8t64 (= 8.3-4), libssl3t64 (= 3.5.5-1ubuntu3.4), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
             "Built-Using: postgresql-${pg_major} (= ${pg_version})" \
             'Section: database' \
             'Priority: optional' \
@@ -319,7 +319,7 @@ RUN set -eux; \
         'Source: mysql-community (8.4.11)' \
         "Architecture: ${TARGETARCH}" \
         'Maintainer: BackupSheep Security <security@backupsheep.com>' \
-        'Depends: libc6 (= 2.43-2ubuntu2.3), libgcc-s1 (= 16-20260322-1ubuntu1), libncurses6 (= 6.6+20251231-1), libssl3t64 (= 3.5.5-1ubuntu3.3), libstdc++6 (= 16-20260322-1ubuntu1), libzstd1 (= 1.5.7+dfsg-3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
+        'Depends: libc6 (= 2.43-2ubuntu2.3), libgcc-s1 (= 16-20260322-1ubuntu1), libncurses6 (= 6.6+20251231-1), libssl3t64 (= 3.5.5-1ubuntu3.4), libstdc++6 (= 16-20260322-1ubuntu1), libzstd1 (= 1.5.7+dfsg-3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
         'Built-Using: mysql-community (= 8.4.11)' \
         'Section: database' \
         'Priority: optional' \
@@ -394,7 +394,7 @@ RUN set -eux; \
         'Source: mariadb (1:11.8.6-5ubuntu0.1)' \
         "Architecture: ${mariadb_architecture}" \
         'Maintainer: BackupSheep Security <security@backupsheep.com>' \
-        'Depends: libc6, libgcc-s1, libssl3t64 (= 3.5.5-1ubuntu3.3), libstdc++6, libzstd1 (= 1.5.7+dfsg-3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
+        'Depends: libc6, libgcc-s1, libssl3t64 (= 3.5.5-1ubuntu3.4), libstdc++6, libzstd1 (= 1.5.7+dfsg-3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
         'Built-Using: mariadb (= 1:11.8.6-5ubuntu0.1)' \
         'Section: database' \
         'Priority: optional' \
@@ -436,7 +436,7 @@ RUN set -eux; \
         "libpq5=18.6-0ubuntu0.26.04.1" \
         "libreadline8t64=8.3-4" \
         "libsqlite3-0=3.46.1-9ubuntu0.2" \
-        "libssl3t64=3.5.5-1ubuntu3.3" \
+        "libssl3t64=3.5.5-1ubuntu3.4" \
         "libstdc++6=16-20260322-1ubuntu1" \
         "libuuid1=2.41.3-3ubuntu2" \
         "libzstd1=1.5.7+dfsg-3" \
@@ -447,8 +447,8 @@ RUN set -eux; \
         "mysql-common=5.8+1.1.1ubuntu2" \
         "netbase=6.5build1" \
         "openssh-client=1:10.2p1-2ubuntu3.5" \
-        "openssl=3.5.5-1ubuntu3.3" \
-        "openssl-provider-legacy=3.5.5-1ubuntu3.3" \
+        "openssl=3.5.5-1ubuntu3.4" \
+        "openssl-provider-legacy=3.5.5-1ubuntu3.4" \
         "passwd=1:4.17.4-2ubuntu3" \
         "tree=2.3.1-1" \
         "tzdata=2026c-0ubuntu0.26.04.1" \
@@ -520,9 +520,11 @@ RUN --network=none \
     assert_source backupsheep-oracle-mysql-client mysql-community 8.4.11; \
     assert_package libmariadb3 1:11.8.6-5ubuntu0.1; \
     assert_package libpq5 18.6-0ubuntu0.26.04.1; \
-    assert_package libssl3t64 3.5.5-1ubuntu3.3; \
+    assert_package libssl3t64 3.5.5-1ubuntu3.4; \
     assert_package mariadb-client-core 1:11.8.6-5ubuntu0.1; \
     assert_package openssh-client 1:10.2p1-2ubuntu3.5; \
+    assert_package openssl 3.5.5-1ubuntu3.4; \
+    assert_package openssl-provider-legacy 3.5.5-1ubuntu3.4; \
     assert_package tzdata 2026c-0ubuntu0.26.04.1; \
     test ! -e /usr/bin/pebble; \
     test ! -e /usr/bin/perl; \
