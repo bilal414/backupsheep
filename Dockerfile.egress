@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
+
+# A no-secret network-namespace guard for the stock Compose deployment. Application
+# services share this container's network namespace, while only this short bootstrap
+# receives NET_ADMIN. The entrypoint installs the reviewed nftables policy and then
+# permanently drops its UID, groups, privileges, and complete capability bounding set.
+FROM alpine:3.22.2@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
+
+LABEL org.opencontainers.image.title="BackupSheep egress guard" \
+      org.opencontainers.image.description="No-secret outbound network policy guard" \
+      org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
+
+# Pin each requested package. The signed Alpine repository resolves the dependency
+# closure; the release SBOM and provenance bind the resulting exact packages/digests.
+RUN apk add --no-cache \
+        iproute2-minimal=6.15.0-r0 \
+        nftables=1.1.3-r0 \
+        setpriv=2.41-r9 \
+    && addgroup -S -g 10020 backupsheep-egress \
+    && adduser -S -D -H -h /nonexistent -s /sbin/nologin \
+        -u 10020 -G backupsheep-egress backupsheep-egress \
+    && command -v ip >/dev/null \
+    && command -v nft >/dev/null \
+    && command -v setpriv >/dev/null \
+    && rm -rf /var/cache/apk/*
+
+COPY --link --chown=0:0 --chmod=0555 \
+    deploy/egress/entrypoint.sh /usr/local/bin/backupsheep-egress-guard
+COPY --link --chown=0:0 --chmod=0555 \
+    deploy/egress/healthcheck.sh /usr/local/bin/backupsheep-egress-healthcheck
+
+USER 0:0
+ENTRYPOINT ["/usr/local/bin/backupsheep-egress-guard"]
