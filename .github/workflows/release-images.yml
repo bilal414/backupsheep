@@ -25,7 +25,6 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
-      packages: write
     outputs:
       app_digest: ${{ steps.build-app.outputs.digest }}
       postgres_digest: ${{ steps.build-postgres.outputs.digest }}
@@ -34,7 +33,8 @@ jobs:
       APP_QUARANTINE: ghcr.io/bilal414/backupsheep-quarantine
       POSTGRES_QUARANTINE: ghcr.io/bilal414/backupsheep-postgres-quarantine
       EGRESS_QUARANTINE: ghcr.io/bilal414/backupsheep-egress-quarantine
-      ARTIFACT_DIR: release-artifacts
+      ARTIFACT_DIR: release-candidate/release-artifacts
+      LAYOUT_DIR: release-candidate/release-layouts
       TOOL_DIR: /tmp/backupsheep-release-tools
       DOCKER_BUILD_RECORD_UPLOAD: "false"
       DOCKER_BUILD_SUMMARY: "false"
@@ -63,7 +63,7 @@ jobs:
           git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main
           python3 -m json.tool deploy/release-policy.json >/dev/null
 
-      - name: Install hash-verified release tools before registry login
+      - name: Install hash-verified scanners without registry credentials
         shell: bash
         run: |
           set -euo pipefail
@@ -71,10 +71,8 @@ jobs:
           python3 scripts/install_release_tools.py \
             --policy deploy/release-policy.json \
             --destination "$TOOL_DIR" \
-            --tool oras \
             --tool syft \
             --tool trivy
-          "$TOOL_DIR/oras" version | grep -Eq '1\.3\.3'
           "$TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
           "$TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
 
@@ -93,13 +91,12 @@ jobs:
           install: true
           use: true
 
-      - name: Authenticate to quarantine registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-          logout: true
+      - name: Prepare private local OCI layouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          install -d -m 0700 "$LAYOUT_DIR"
 
       - name: Build application candidate from exact remote commit
         id: build-app
@@ -110,7 +107,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           pull: true
           no-cache: true
-          push: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/release-candidate/release-layouts/app,tar=false
           tags: ghcr.io/bilal414/backupsheep-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -128,7 +126,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           pull: true
           no-cache: true
-          push: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/release-candidate/release-layouts/postgres,tar=false
           tags: ghcr.io/bilal414/backupsheep-postgres-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -146,7 +145,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           pull: true
           no-cache: true
-          push: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/release-candidate/release-layouts/egress,tar=false
           tags: ghcr.io/bilal414/backupsheep-egress-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -174,19 +174,19 @@ jobs:
             --artifacts-dir "$ARTIFACT_DIR" \
             --image app \
             --digest "$APP_DIGEST" \
-            --oras "$TOOL_DIR/oras"
+            --oci-layout "$LAYOUT_DIR/app"
           python3 scripts/collect_release_evidence.py \
             --policy deploy/release-policy.json \
             --artifacts-dir "$ARTIFACT_DIR" \
             --image postgres \
             --digest "$POSTGRES_DIGEST" \
-            --oras "$TOOL_DIR/oras"
+            --oci-layout "$LAYOUT_DIR/postgres"
           python3 scripts/collect_release_evidence.py \
             --policy deploy/release-policy.json \
             --artifacts-dir "$ARTIFACT_DIR" \
             --image egress \
             --digest "$EGRESS_DIGEST" \
-            --oras "$TOOL_DIR/oras"
+            --oci-layout "$LAYOUT_DIR/egress"
 
       - name: Scan exact child digests and generate complete SBOMs
         shell: bash
@@ -194,16 +194,9 @@ jobs:
           set -euo pipefail
           umask 077
           while IFS=$'\t' read -r image platform digest; do
-            case "$image" in
-              app) repository="$APP_QUARANTINE" ;;
-              postgres) repository="$POSTGRES_QUARANTINE" ;;
-              egress) repository="$EGRESS_QUARANTINE" ;;
-              *) exit 1 ;;
-            esac
             [[ "$platform" == "linux/amd64" || "$platform" == "linux/arm64" ]]
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             platform_slug="${platform//\//-}"
-            reference="$repository@$digest"
 
             env -i \
               HOME="$HOME" \
@@ -223,20 +216,29 @@ jobs:
                 --format json \
                 --output "$ARTIFACT_DIR/scans/$image-$platform_slug.trivy.json" \
                 --platform "$platform" \
-                "$reference"
+                --input "$LAYOUT_DIR/$image"
 
             env -i \
               HOME="$HOME" \
               PATH="$TOOL_DIR:/usr/bin:/bin" \
               DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
               SYFT_CHECK_FOR_APP_UPDATE=false \
-              "$TOOL_DIR/syft" --config "$TOOL_DIR/empty-syft.yaml" scan "$reference" \
+              "$TOOL_DIR/syft" --config "$TOOL_DIR/empty-syft.yaml" scan "oci-dir:$LAYOUT_DIR/$image" \
                 --platform "$platform" \
                 --output "syft-json=$ARTIFACT_DIR/sbom/$image-$platform_slug.syft.json" \
                 --output "spdx-json=$ARTIFACT_DIR/sbom/$image-$platform_slug.spdx.json" \
                 --output "cyclonedx-json=$ARTIFACT_DIR/sbom/$image-$platform_slug.cdx.json"
+
+            python3 scripts/normalize_local_scan_evidence.py \
+              --policy deploy/release-policy.json \
+              --index "$ARTIFACT_DIR/oci/$image.index.json" \
+              --image "$image" \
+              --platform "$platform" \
+              --syft "$ARTIFACT_DIR/sbom/$image-$platform_slug.syft.json" \
+              --trivy "$ARTIFACT_DIR/scans/$image-$platform_slug.trivy.json"
           done < <(
             python3 - <<'PY'
+          import os
           import sys
           from pathlib import Path
 
@@ -248,7 +250,7 @@ jobs:
           images = json.loads(Path("deploy/release-policy.json").read_text())["images"]
           for image in images:
               for platform, digest in _platform_digests(
-                  Path("release-artifacts/oci") / f"{image}.index.json",
+                  Path(os.environ["ARTIFACT_DIR"]) / "oci" / f"{image}.index.json",
                   ["linux/amd64", "linux/arm64"],
               ).items():
                   print(image, platform, digest, sep="\t")
@@ -294,7 +296,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signed-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release-artifacts
+          path: release-candidate
           if-no-files-found: warn
           retention-days: 90
           compression-level: 9
@@ -313,7 +315,8 @@ jobs:
       id-token: write
       packages: write
     env:
-      ARTIFACT_DIR: release-artifacts
+      ARTIFACT_DIR: candidate-download/release-artifacts
+      LAYOUT_DIR: candidate-download/release-layouts
       PUBLICATION_DIR: release-publication
       TOOL_DIR: /tmp/backupsheep-release-tools
     steps:
@@ -340,13 +343,14 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signed-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release-artifacts
+          path: candidate-download
 
       - name: Revalidate candidate evidence before credentials
         shell: bash
         run: |
           set -euo pipefail
           chmod -R go-rwx "$ARTIFACT_DIR"
+          chmod -R go-rwx "$LAYOUT_DIR"
           cmp -s deploy/release-policy.json "$ARTIFACT_DIR/release-policy.json"
           python3 scripts/verify_release.py \
             --policy deploy/release-policy.json \
@@ -361,6 +365,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
           logout: true
+
+      - name: Push exact verified local layouts to quarantine after approval
+        shell: bash
+        env:
+          QUARANTINE_TAG: candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 scripts/push_quarantine_layouts.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --layouts-dir "$LAYOUT_DIR" \
+            --quarantine-tag "$QUARANTINE_TAG" \
+            --oras "$TOOL_DIR/oras"
 
       - name: Sign and attest quarantine digests
         shell: bash
@@ -399,10 +417,11 @@ jobs:
               done < <(
                 python3 - "$image" <<'PY'
           import json
+          import os
           import sys
           from pathlib import Path
 
-          image = json.loads(Path("release-artifacts/release-manifest.json").read_text())["images"][sys.argv[1]]
+          image = json.loads((Path(os.environ["ARTIFACT_DIR"]) / "release-manifest.json").read_text())["images"][sys.argv[1]]
           provenance = {record["platform"]: record["file"] for record in image["provenance"]}
           sboms = {(record["platform"], record["format"]): record["file"] for record in image["sboms"]}
           for platform, digest in image["platforms"].items():
@@ -419,11 +438,12 @@ jobs:
             done < <(
               python3 - "$role" <<'PY'
           import json
+          import os
           import sys
           from pathlib import Path
 
           role = sys.argv[1]
-          manifest = json.loads(Path("release-artifacts/release-manifest.json").read_text())
+          manifest = json.loads((Path(os.environ["ARTIFACT_DIR"]) / "release-manifest.json").read_text())
           for name, image in manifest["images"].items():
               print(name, image[f"{role}_repository"], image["digest"], sep="\t")
           PY
@@ -494,10 +514,11 @@ jobs:
             done < <(
               python3 - "$image" <<'PY'
           import json
+          import os
           import sys
           from pathlib import Path
 
-          image = json.loads(Path("release-artifacts/release-manifest.json").read_text())["images"][sys.argv[1]]
+          image = json.loads((Path(os.environ["ARTIFACT_DIR"]) / "release-manifest.json").read_text())["images"][sys.argv[1]]
           provenance = {record["platform"]: record["file"] for record in image["provenance"]}
           sboms = {(record["platform"], record["format"]): record["file"] for record in image["sboms"]}
           for platform, digest in image["platforms"].items():
@@ -507,9 +528,10 @@ jobs:
           done < <(
             python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
 
-          manifest = json.loads(Path("release-artifacts/release-manifest.json").read_text())
+          manifest = json.loads((Path(os.environ["ARTIFACT_DIR"]) / "release-manifest.json").read_text())
           for name, image in manifest["images"].items():
               print(name, image["official_repository"], image["digest"], sep="\t")
           PY

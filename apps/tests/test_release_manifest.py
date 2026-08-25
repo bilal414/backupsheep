@@ -18,8 +18,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import build_release_manifest as builder  # noqa: E402
+import collect_release_evidence as collector  # noqa: E402
 import install_release_tools as installer  # noqa: E402
+import normalize_local_scan_evidence as normalizer  # noqa: E402
 import promote_release_images as promoter  # noqa: E402
+import push_quarantine_layouts as quarantine_pusher  # noqa: E402
 import stage_release_images as stager  # noqa: E402
 import verify_release as verifier  # noqa: E402
 
@@ -504,16 +507,22 @@ class ReleasePromotionRecoveryTests(ReleaseFixtureMixin, TestCase):
                 output.write_bytes(payload)
                 return ""
             if arguments[0] == "cp":
-                _command, _source, destination = arguments
+                destination = arguments[-1]
                 copies.append(destination)
                 image_name = next(
                     name
                     for name, image in self.manifest["images"].items()
                     if destination.startswith(f"{image['official_repository']}:")
+                    or destination.startswith(f"{image['quarantine_repository']}:")
                 )
                 image = self.manifest["images"][image_name]
                 registry[destination] = indexes[image_name]
-                registry[image["official_reference"]] = indexes[image_name]
+                digest_reference = (
+                    image["official_reference"]
+                    if destination.startswith(f"{image['official_repository']}:")
+                    else image["quarantine_reference"]
+                )
+                registry[digest_reference] = indexes[image_name]
                 return ""
             raise AssertionError(arguments)
 
@@ -536,6 +545,158 @@ class ReleasePromotionRecoveryTests(ReleaseFixtureMixin, TestCase):
         with mock.patch.object(promoter, "_oras", side_effect=fake_oras):
             promoter.promote(self.policy, self.manifest, self.artifacts, "oras")
         self.assertEqual(copies, [])
+
+
+class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
+    _registry = ReleasePromotionRecoveryTests._registry
+
+    def test_layout_reader_rejects_links_and_unexpected_members(self):
+        layout = self.temporary_directory / "layout"
+        (layout / "blobs" / "sha256").mkdir(parents=True)
+        (layout / "index.json").write_text("{}")
+        (layout / "oci-layout").write_text("{}")
+        (layout / "blobs" / "sha256" / ("a" * 64)).symlink_to(layout / "index.json")
+        with self.assertRaisesRegex(verifier.ReleaseVerificationError, "unsafe member"):
+            collector._OCILayoutDirectory(layout)
+
+        archive = self.temporary_directory / "layout.tar"
+        with tarfile.open(archive, "w") as output:
+            link = tarfile.TarInfo("blobs/sha256/" + "b" * 64)
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../outside"
+            output.addfile(link)
+        with self.assertRaisesRegex(verifier.ReleaseVerificationError, "unsafe member"):
+            collector._OCILayoutArchive(archive)
+
+    def test_local_scanner_reports_are_bound_to_exact_child_manifest(self):
+        image = "egress"
+        platform = "linux/amd64"
+        child_digest = self.platform_digests[image][platform]
+        config_digest = "sha256:" + "c" * 64
+        layer_digest = "sha256:" + "d" * 64
+        manifest = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"digest": config_digest, "size": 123},
+            "layers": [{"digest": layer_digest, "size": 456}],
+        }
+        manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+        actual_child = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        index = json.loads((self.artifacts / "oci" / f"{image}.index.json").read_text())
+        descriptor = next(
+            item
+            for item in index["manifests"]
+            if item.get("platform") == {"os": "linux", "architecture": "amd64"}
+        )
+        descriptor["digest"] = actual_child
+        descriptor["size"] = len(manifest_bytes)
+        attestation = next(
+            item
+            for item in index["manifests"]
+            if item.get("annotations", {}).get("vnd.docker.reference.digest") == child_digest
+        )
+        attestation["annotations"]["vnd.docker.reference.digest"] = actual_child
+        index_path = self.temporary_directory / "index.json"
+        self._json(index_path, index)
+        syft_path = self.temporary_directory / "syft.json"
+        trivy_path = self.temporary_directory / "trivy.json"
+        self._json(
+            syft_path,
+            {
+                "source": {
+                    "type": "image",
+                    "metadata": {
+                        "userInput": "local-layout",
+                        "manifestDigest": actual_child,
+                        "imageID": config_digest,
+                        "manifest": base64.b64encode(manifest_bytes).decode(),
+                    },
+                }
+            },
+        )
+        self._json(
+            trivy_path,
+            {
+                "ArtifactName": "local-layout",
+                "Metadata": {
+                    "ImageID": config_digest,
+                    "Layers": [{"Digest": layer_digest}],
+                },
+            },
+        )
+        normalizer.normalize(
+            policy=self.policy,
+            index_path=index_path,
+            image_name=image,
+            platform=platform,
+            syft_path=syft_path,
+            trivy_path=trivy_path,
+        )
+        expected = f"{self.policy['images'][image]['quarantine_repository']}@{actual_child}"
+        self.assertEqual(json.loads(syft_path.read_text())["source"]["metadata"]["userInput"], expected)
+        self.assertEqual(json.loads(trivy_path.read_text())["ArtifactName"], expected)
+        self.assertNotEqual(actual_child, child_digest)
+
+        tampered = json.loads(trivy_path.read_text())
+        tampered["Metadata"]["Layers"][0]["Digest"] = "sha256:" + "e" * 64
+        self._json(trivy_path, tampered)
+        with self.assertRaisesRegex(verifier.ReleaseVerificationError, "layers do not match"):
+            normalizer.normalize(
+                policy=self.policy,
+                index_path=index_path,
+                image_name=image,
+                platform=platform,
+                syft_path=syft_path,
+                trivy_path=trivy_path,
+            )
+
+    def test_local_layouts_are_pushed_only_to_commit_bound_quarantine_tags(self):
+        layouts = self.temporary_directory / "layouts"
+        layouts.mkdir()
+        quarantine_tag = f"candidate-{self.commit}-123-1"
+        for image_name, image in self.manifest["images"].items():
+            layout = layouts / image_name
+            blob_directory = layout / "blobs" / "sha256"
+            blob_directory.mkdir(parents=True)
+            index_bytes = (self.artifacts / image["oci_index"]["file"]).read_bytes()
+            (blob_directory / image["digest"].removeprefix("sha256:")).write_bytes(index_bytes)
+            self._json(
+                layout / "index.json",
+                {
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.index.v1+json",
+                    "manifests": [
+                        {
+                            "mediaType": "application/vnd.oci.image.index.v1+json",
+                            "digest": image["digest"],
+                            "size": len(index_bytes),
+                            "annotations": {
+                                "org.opencontainers.image.ref.name": quarantine_tag,
+                                "io.containerd.image.name": (
+                                    f"{image['quarantine_repository']}:{quarantine_tag}"
+                                ),
+                            },
+                        }
+                    ],
+                },
+            )
+            self._json(layout / "oci-layout", {"imageLayoutVersion": "1.0.0"})
+
+        _registry, copies, fake_oras = self._registry(set())
+        with mock.patch.object(quarantine_pusher, "_oras", side_effect=fake_oras), mock.patch.object(
+            promoter, "_oras", side_effect=fake_oras
+        ):
+            quarantine_pusher.push(
+                policy=self.policy,
+                manifest=self.manifest,
+                artifacts_dir=self.artifacts,
+                layouts_dir=layouts,
+                quarantine_tag=quarantine_tag,
+                oras="oras",
+            )
+        self.assertEqual(len(copies), len(self.manifest["images"]))
+        self.assertTrue(all(destination.endswith(f":{quarantine_tag}") for destination in copies))
+        self.assertTrue(all("-quarantine:" in destination for destination in copies))
 
     def test_existing_mismatched_tag_fails_before_any_write(self):
         registry, copies, fake_oras = self._registry({"app"})
@@ -616,6 +777,17 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertNotIn("workflow_dispatch", self.workflow)
         build_job = self.workflow.split("  sign_promote:", 1)[0]
         self.assertNotIn("id-token: write", build_job)
+        self.assertNotIn("packages: write", build_job)
+        self.assertNotIn("docker/login-action", build_job)
+        self.assertEqual(build_job.count("push: false"), 3)
+        self.assertEqual(build_job.count("type=oci,dest="), 3)
+        self.assertEqual(build_job.count("tar=false"), 3)
+        self.assertIn("scripts/normalize_local_scan_evidence.py", build_job)
+        protected_job = self.workflow.split("  sign_promote:", 1)[1].split(
+            "  publish_evidence:", 1
+        )[0]
+        self.assertIn("environment: signed-release", protected_job)
+        self.assertIn("scripts/push_quarantine_layouts.py", protected_job)
         publish_job = self.workflow.split("  publish_evidence:", 1)[1]
         self.assertNotIn("packages: write", publish_job)
         self.assertNotIn("id-token: write", publish_job)
