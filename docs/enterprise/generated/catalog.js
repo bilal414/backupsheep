@@ -11,15 +11,15 @@ window.BACKUPSHEEP_DOC_CATALOG = {
     "generatedFrom": "Django root URL resolver on the checked-out branch",
     "configurationVariables": 289,
     "provenance": {
-      "sourceRevision": "66ab007f2eda",
-      "catalogSource": "working-tree",
-      "workingTreeApiChanges": true,
-      "includesWorkingTreeApiChanges": true,
+      "sourceRevision": "0e7614222b5f",
+      "catalogSource": "git-ref",
+      "workingTreeApiChanges": false,
+      "includesWorkingTreeApiChanges": false,
       "committedApi": {
-        "api_operations": 917,
+        "api_operations": 920,
         "health_operations": 1,
-        "total_operations": 918,
-        "unique_paths": 525
+        "total_operations": 921,
+        "unique_paths": 528
       }
     }
   },
