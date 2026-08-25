@@ -868,6 +868,7 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
     format_version = models.PositiveSmallIntegerField(default=1)
     algorithm = models.CharField(max_length=32, default="AES-256-GCM-SIV")
     chunk_size = models.PositiveIntegerField(default=4 * 1024 * 1024)
+    context_canonical_json = models.CharField(max_length=2048)
     context_sha256 = models.CharField(max_length=64)
     header_sha256 = models.CharField(max_length=64)
     plaintext_byte_count = models.PositiveBigIntegerField(default=0)
@@ -897,6 +898,29 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
                 | models.Q(sealed_at__isnull=False),
                 name="active_backup_envelope_is_sealed",
             ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    status__in=("pending", "active", "manual_review", "retired")
+                ),
+                name="backup_envelope_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(context_canonical_json__gt=""),
+                name="backup_envelope_context_present",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(status="active")
+                | models.Q(ciphertext_byte_count__gt=0),
+                name="active_backup_envelope_has_ciphertext",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(context_sha256__regex=r"^[0-9a-f]{64}$")
+                    & models.Q(header_sha256__regex=r"^[0-9a-f]{64}$")
+                    & models.Q(plaintext_sha256__regex=r"^[0-9a-f]{64}$")
+                ),
+                name="backup_envelope_digests_valid",
+            ),
         ]
         indexes = [
             models.Index(
@@ -919,15 +943,119 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
         for field in ("context_sha256", "header_sha256", "plaintext_sha256"):
             if not self._valid_sha256(getattr(self, field)):
                 errors[field] = "Must be a lowercase SHA-256 hexadecimal digest."
+        try:
+            context = self.get_artifact_context()
+        except ValidationError as error:
+            errors["context_canonical_json"] = error.messages
+        else:
+            if context.sha256 != self.context_sha256:
+                errors["context_sha256"] = (
+                    "The artifact context digest does not match its canonical context."
+                )
         if self.status == self.Status.ACTIVE and self.sealed_at is None:
             errors["sealed_at"] = "An active encryption envelope must be sealed."
+        if self.status == self.Status.ACTIVE and self.ciphertext_byte_count <= 0:
+            errors["ciphertext_byte_count"] = (
+                "An active encryption envelope must have ciphertext bytes."
+            )
         if errors:
             raise ValidationError(errors)
+
+    def set_artifact_context(self, context):
+        from backupsheep.artifact_crypto.context import ArtifactContext
+
+        if not isinstance(context, ArtifactContext):
+            raise ValidationError("An ArtifactContext instance is required.")
+        canonical = context.canonical_bytes().decode("ascii")
+        if len(canonical) > 2048:
+            raise ValidationError("The canonical artifact context is too large.")
+        self.context_canonical_json = canonical
+        self.context_sha256 = context.sha256
+
+    def get_artifact_context(self):
+        from backupsheep.artifact_crypto.context import ArtifactContext
+
+        try:
+            values = json.loads(self.context_canonical_json)
+            context = ArtifactContext.from_mapping(values)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValidationError("The canonical artifact context is invalid.") from error
+        if context.canonical_bytes().decode("ascii") != self.context_canonical_json:
+            raise ValidationError("The artifact context is not canonical JSON.")
+        return context
 
     def get_active_key_wrap(self):
         """Fail closed unless exactly one active key-wrap generation exists."""
 
+        if self.status != self.Status.ACTIVE or self.sealed_at is None:
+            raise ValidationError("The encryption envelope is not active and sealed.")
         return self.key_wraps.get(status=CoreBackupKeyWrap.Status.ACTIVE)
+
+    def validate_restore_state(self):
+        """Return immutable restore inputs only for a complete active envelope."""
+
+        self.full_clean()
+        context = self.get_artifact_context()
+        try:
+            key_wrap = self.get_active_key_wrap()
+        except (CoreBackupKeyWrap.DoesNotExist, CoreBackupKeyWrap.MultipleObjectsReturned):
+            raise ValidationError(
+                "The encryption envelope does not have exactly one active key wrap."
+            ) from None
+        key_wrap.full_clean()
+        return context, key_wrap
+
+    def activate_with_key_wrap(self, key_wrap, *, artifacts=(), activated_at=None):
+        """Atomically activate custody and publish one or more encrypted artifacts."""
+
+        if self.pk is None or key_wrap.pk is None:
+            raise ValidationError("The envelope and key wrap must be durable records.")
+        artifact_ids = [artifact.pk for artifact in artifacts]
+        if any(value is None for value in artifact_ids):
+            raise ValidationError("Published artifacts must be durable records.")
+        now = activated_at or timezone.now()
+        with transaction.atomic():
+            envelope = type(self).objects.select_for_update().get(pk=self.pk)
+            wrap = CoreBackupKeyWrap.objects.select_for_update().get(pk=key_wrap.pk)
+            if wrap.envelope_id != envelope.pk:
+                raise ValidationError("The key wrap belongs to a different envelope.")
+            if envelope.status not in {
+                self.Status.PENDING,
+                self.Status.MANUAL_REVIEW,
+            }:
+                raise ValidationError("Only a pending envelope can be activated.")
+            if wrap.status not in {
+                CoreBackupKeyWrap.Status.PENDING,
+                CoreBackupKeyWrap.Status.MANUAL_REVIEW,
+            }:
+                raise ValidationError("Only a pending key wrap can be activated.")
+            if envelope.sealed_at is None:
+                envelope.sealed_at = now
+            envelope.status = self.Status.ACTIVE
+            wrap.status = CoreBackupKeyWrap.Status.ACTIVE
+            wrap.activated_at = now
+            envelope.full_clean()
+            wrap.full_clean()
+            wrap.save(update_fields=["status", "activated_at", "modified"])
+            envelope.save(update_fields=["status", "sealed_at", "modified"])
+            for artifact_id in artifact_ids:
+                artifact = CoreBackupArtifact.objects.select_for_update().get(
+                    pk=artifact_id
+                )
+                artifact.artifact_format = CoreBackupArtifact.Format.BSE1
+                artifact.encryption_envelope = envelope
+                artifact.full_clean()
+                artifact.save(
+                    update_fields=[
+                        "artifact_format",
+                        "encryption_envelope",
+                        "modified",
+                    ]
+                )
+            envelope.validate_restore_state()
+        self.refresh_from_db()
+        key_wrap.refresh_from_db()
+        return self
 
 
 class CoreBackupKeyWrap(TimeStampedModel):
@@ -980,6 +1108,29 @@ class CoreBackupKeyWrap(TimeStampedModel):
                 condition=~models.Q(status="active")
                 | models.Q(activated_at__isnull=False),
                 name="active_backup_key_wrap_is_activated",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    status__in=("pending", "active", "manual_review", "retired")
+                ),
+                name="backup_key_wrap_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(provider__in=("aws-kms", "local-development")),
+                name="backup_key_wrap_provider_valid",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(status="retired")
+                | models.Q(retired_at__isnull=False),
+                name="retired_backup_key_wrap_has_witness",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(wrapping_key_id__gt=""),
+                name="backup_key_wrap_key_id_present",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(wrapped_key_sha256__regex=r"^[0-9a-f]{64}$"),
+                name="backup_key_wrap_digest_valid",
             ),
         ]
         indexes = [
@@ -1117,6 +1268,35 @@ class CoreBackupArtifact(TimeStampedModel):
                         )
                     }
                 )
+
+    def validate_encrypted_restore_state(self):
+        if (
+            self.artifact_format != self.Format.BSE1
+            or self.encryption_envelope_id is None
+        ):
+            raise ValidationError("The artifact is not a BSE1 encrypted artifact.")
+        self.full_clean()
+        return self.encryption_envelope.validate_restore_state()
+
+    def bind_encrypted_envelope(self, envelope):
+        """Attach an additional artifact only to a complete matching envelope."""
+
+        if self.pk is None or envelope.pk is None:
+            raise ValidationError("The artifact and envelope must be durable records.")
+        with transaction.atomic():
+            artifact = type(self).objects.select_for_update().get(pk=self.pk)
+            durable_envelope = CoreBackupEncryptionEnvelope.objects.select_for_update().get(
+                pk=envelope.pk
+            )
+            durable_envelope.validate_restore_state()
+            artifact.artifact_format = self.Format.BSE1
+            artifact.encryption_envelope = durable_envelope
+            artifact.full_clean()
+            artifact.save(
+                update_fields=["artifact_format", "encryption_envelope", "modified"]
+            )
+        self.refresh_from_db()
+        return self
 
 
 class CoreBackupRequest(TimeStampedModel):

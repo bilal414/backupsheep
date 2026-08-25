@@ -44,6 +44,10 @@ class KeyProvider(Protocol):
     name: str
     external: bool
 
+    @property
+    def enterprise_eligible(self) -> bool:
+        """Whether this exact provider configuration satisfies enterprise policy."""
+
     def generate_data_key(self, context: ArtifactContext) -> GeneratedDataKey:
         """Generate a fresh AES-256 key and return its provider-wrapped form."""
 

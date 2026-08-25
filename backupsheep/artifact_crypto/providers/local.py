@@ -29,6 +29,10 @@ class LocalDevelopmentKeyProvider:
     name = "local-development"
     external = False
 
+    @property
+    def enterprise_eligible(self) -> bool:
+        return False
+
     def __init__(self, wrapping_key: bytes | bytearray, *, key_id: str = "local-v1"):
         if len(wrapping_key) != 32:
             raise KeyProviderConfigurationError(
@@ -40,8 +44,16 @@ class LocalDevelopmentKeyProvider:
             )
         self._wrapping_key = bytearray(wrapping_key)
         self.key_id = str(key_id)
+        self._destroyed = False
+
+    def _require_live(self) -> None:
+        if self._destroyed:
+            raise KeyProviderConfigurationError(
+                "The local development key provider has been destroyed."
+            )
 
     def _context_key(self, context: ArtifactContext) -> bytearray:
+        self._require_live()
         derived = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
@@ -110,3 +122,4 @@ class LocalDevelopmentKeyProvider:
 
     def destroy(self) -> None:
         zeroize(self._wrapping_key)
+        self._destroyed = True

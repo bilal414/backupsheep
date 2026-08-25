@@ -14,13 +14,14 @@ passed.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import json
 import os
 import stat
 import struct
-import tempfile
+import secrets
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -112,6 +113,20 @@ class SealedArtifact:
     wrapped_data_key: WrappedDataKey
 
 
+@dataclass(slots=True)
+class _AnchoredPath:
+    """A basename and an already-open, non-symlinked parent directory."""
+
+    path: Path
+    parent_fd: int
+    name: str
+
+    def close(self) -> None:
+        if self.parent_fd >= 0:
+            os.close(self.parent_fd)
+            self.parent_fd = -1
+
+
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
         value,
@@ -153,15 +168,124 @@ def _read_exact(source: BinaryIO, length: int) -> bytes:
     return b"".join(chunks)
 
 
-def _open_regular_source(path: str | os.PathLike[str], *, encrypted: bool) -> BinaryIO:
+def _configuration_failure(encrypted: bool, message: str) -> None:
+    failure = ArtifactFormatError if encrypted else ArtifactConfigurationError
+    raise failure(message) from None
+
+
+def _absolute_lexical_path(path: str | os.PathLike[str]) -> Path:
+    if isinstance(path, bytes):
+        raise ArtifactConfigurationError("Artifact paths must be text paths.")
+    value = os.fspath(path)
+    if not value or "\x00" in value:
+        raise ArtifactConfigurationError("The artifact path is invalid.")
+    return Path(os.path.abspath(value))
+
+
+def _anchor_path(
+    path: str | os.PathLike[str],
+    *,
+    trusted_root: str | os.PathLike[str] | None,
+    encrypted: bool,
+    create_parent: bool = False,
+) -> _AnchoredPath:
+    """Resolve a path beneath an explicit root without following child symlinks.
+
+    Every component of the trusted root and every component below it is opened
+    relative to a directory descriptor with ``O_NOFOLLOW`` so a sibling worker
+    cannot redirect a backup through an ancestor-symlink race.
+    """
+
+    candidate = _absolute_lexical_path(path)
+    if trusted_root is None:
+        root = Path(candidate.anchor)
+        relative_parts = candidate.parts[1:]
+    else:
+        root = _absolute_lexical_path(trusted_root)
+        try:
+            relative_parts = candidate.relative_to(root).parts
+        except ValueError:
+            _configuration_failure(
+                encrypted, "The artifact path escapes its trusted filesystem root."
+            )
+    if not relative_parts or relative_parts[-1] in {"", ".", ".."}:
+        _configuration_failure(encrypted, "The artifact path has no file name.")
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    # Open the configured root one component at a time from the filesystem root.
+    # Opening a full pathname with O_NOFOLLOW protects only its final component;
+    # walking it this way also rejects a symbolic-link ancestor of the root.
+    try:
+        directory_fd = os.open(root.anchor, directory_flags)
+        for component in root.parts[1:]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+    except OSError as error:
+        try:
+            os.close(directory_fd)
+        except (NameError, OSError):
+            pass
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            _configuration_failure(
+                encrypted,
+                "Artifact trusted-root symbolic links are not allowed.",
+            )
+        _configuration_failure(
+            encrypted, "The artifact trusted root is not a secure directory."
+        )
+    try:
+        parent_parts = relative_parts[:-1]
+        for position, component in enumerate(parent_parts):
+            if component in {"", ".", ".."}:
+                _configuration_failure(
+                    encrypted, "The artifact path contains an unsafe component."
+                )
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                if not create_parent or position != len(parent_parts) - 1:
+                    raise
+                os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    _configuration_failure(
+                        encrypted,
+                        "Artifact path symbolic-link ancestors are not allowed.",
+                    )
+                raise
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return _AnchoredPath(candidate, directory_fd, relative_parts[-1])
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _open_regular_source(
+    path: str | os.PathLike[str],
+    *,
+    encrypted: bool,
+    trusted_root: str | os.PathLike[str] | None = None,
+) -> BinaryIO:
+    anchor = _anchor_path(path, trusted_root=trusted_root, encrypted=encrypted)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(anchor.name, flags, dir_fd=anchor.parent_fd)
     except OSError as error:
         if error.errno == errno.ELOOP:
-            failure = ArtifactFormatError if encrypted else ArtifactConfigurationError
-            raise failure("Artifact source symbolic links are not allowed.") from None
+            _configuration_failure(
+                encrypted, "Artifact source symbolic links are not allowed."
+            )
         raise
+    finally:
+        anchor.close()
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
@@ -378,46 +502,129 @@ def _read_header(source: BinaryIO, *, ciphertext_size: int) -> EnvelopeDescripto
     return descriptor
 
 
-def read_envelope_header(path: str | os.PathLike[str]) -> EnvelopeDescriptor:
+def read_envelope_header(
+    path: str | os.PathLike[str],
+    *,
+    trusted_source_root: str | os.PathLike[str] | None = None,
+) -> EnvelopeDescriptor:
     """Parse and structurally validate a header without claiming authenticity."""
 
-    with _open_regular_source(path, encrypted=True) as source:
+    with _open_regular_source(
+        path, encrypted=True, trusted_root=trusted_source_root
+    ) as source:
         source_stat = os.fstat(source.fileno())
         return _read_header(source, ciphertext_size=source_stat.st_size)
 
 
-def _staging_file(destination: Path) -> tuple[int, Path]:
-    destination.parent.mkdir(parents=False, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".bse-tmp", dir=destination.parent
-    )
-    os.fchmod(fd, 0o600)
-    return fd, Path(temporary_name)
+_AT_EMPTY_PATH = 0x1000
 
 
-def _publish(temporary: Path, destination: Path, *, overwrite: bool) -> None:
-    if overwrite:
-        os.replace(temporary, destination)
-    else:
+def _new_unnamed_staging_file(destination: _AnchoredPath) -> int:
+    """Create a plaintext-safe staging inode that has no directory name."""
+
+    common_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    temporary_flag = getattr(os, "O_TMPFILE", 0)
+    if temporary_flag:
         try:
-            os.link(temporary, destination, follow_symlinks=False)
-        except FileExistsError:
+            descriptor = os.open(
+                ".", common_flags | temporary_flag, 0o600, dir_fd=destination.parent_fd
+            )
+            os.fchmod(descriptor, 0o600)
+            return descriptor
+        except OSError as error:
+            if error.errno not in {
+                errno.EINVAL,
+                errno.EISDIR,
+                errno.EOPNOTSUPP,
+                errno.ENOSYS,
+            }:
+                raise
+
+    # An ordinary file that is unlinked after open cannot be linked back on all
+    # supported Linux filesystems. Fail closed instead of falling back to a
+    # discoverable partial-plaintext staging name.
+    raise ArtifactConfigurationError(
+        "The destination filesystem does not support secure anonymous artifact staging."
+    )
+
+
+def _link_unnamed_file(
+    descriptor: int, destination_directory_fd: int, destination_name: str
+) -> None:
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        linkat = libc.linkat
+    except (AttributeError, OSError):
+        raise ArtifactConfigurationError(
+            "This runtime cannot atomically publish anonymous artifact staging files."
+        ) from None
+    linkat.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    linkat.restype = ctypes.c_int
+    result = linkat(
+        descriptor,
+        b"",
+        destination_directory_fd,
+        os.fsencode(destination_name),
+        _AT_EMPTY_PATH,
+    )
+    if result != 0:
+        code = ctypes.get_errno()
+        if code == errno.EEXIST:
             raise ArtifactDestinationExistsError(
                 "The artifact destination already exists."
             ) from None
-        os.unlink(temporary)
-    directory_fd = os.open(
-        destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    )
+        raise OSError(code, os.strerror(code), destination_name)
+
+
+def _publish_unnamed_file(
+    descriptor: int, destination: _AnchoredPath, *, overwrite: bool
+) -> None:
+    os.fsync(descriptor)
+    if not overwrite:
+        _link_unnamed_file(descriptor, destination.parent_fd, destination.name)
+    else:
+        staging_name = ""
+        for _attempt in range(20):
+            staging_name = f".{destination.name}.{secrets.token_hex(16)}.bse-publish"
+            try:
+                _link_unnamed_file(descriptor, destination.parent_fd, staging_name)
+                break
+            except ArtifactDestinationExistsError:
+                continue
+        else:
+            raise ArtifactConfigurationError(
+                "A collision-free authenticated artifact publication name could not be created."
+            )
+        try:
+            os.replace(
+                staging_name,
+                destination.name,
+                src_dir_fd=destination.parent_fd,
+                dst_dir_fd=destination.parent_fd,
+            )
+        except BaseException:
+            try:
+                os.unlink(staging_name, dir_fd=destination.parent_fd)
+            except FileNotFoundError:
+                pass
+            raise
+    os.fsync(destination.parent_fd)
+
+
+def _check_destination(destination: _AnchoredPath, *, overwrite: bool) -> None:
+    if overwrite:
+        return
     try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
-
-
-def _check_destination(destination: Path, *, overwrite: bool) -> None:
-    if not overwrite and destination.exists():
-        raise ArtifactDestinationExistsError("The artifact destination already exists.")
+        os.stat(destination.name, dir_fd=destination.parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise ArtifactDestinationExistsError("The artifact destination already exists.")
 
 
 def _verify_expectation(
@@ -436,6 +643,91 @@ def _verify_expectation(
         )
 
 
+def _normalize_envelope_id(value: uuid.UUID | str | None) -> uuid.UUID:
+    if value is None:
+        return uuid.uuid4()
+    try:
+        parsed = uuid.UUID(str(value))
+    except (AttributeError, TypeError, ValueError):
+        raise ArtifactConfigurationError(
+            "The BSE1 envelope identifier is invalid."
+        ) from None
+    if str(parsed) != str(value):
+        raise ArtifactConfigurationError(
+            "The BSE1 envelope identifier must be a canonical UUID."
+        )
+    return parsed
+
+
+def _preflight_encrypt_request(
+    source_path: str | os.PathLike[str],
+    destination_path: str | os.PathLike[str],
+    *,
+    context: ArtifactContext,
+    envelope_id: uuid.UUID | str | None,
+    chunk_size: int,
+    overwrite: bool,
+    trusted_source_root: str | os.PathLike[str] | None,
+    trusted_destination_root: str | os.PathLike[str] | None,
+) -> uuid.UUID:
+    if not isinstance(context, ArtifactContext):
+        raise ArtifactConfigurationError(
+            "A validated ArtifactContext instance is required."
+        )
+    _validate_chunk_size(chunk_size)
+    normalized_id = _normalize_envelope_id(envelope_id)
+    with _open_regular_source(
+        source_path, encrypted=False, trusted_root=trusted_source_root
+    ):
+        pass
+    destination = _anchor_path(
+        destination_path,
+        trusted_root=trusted_destination_root,
+        encrypted=False,
+        create_parent=True,
+    )
+    try:
+        _check_destination(destination, overwrite=overwrite)
+    finally:
+        destination.close()
+    return normalized_id
+
+
+def _preflight_decrypt_request(
+    source_path: str | os.PathLike[str],
+    destination_path: str | os.PathLike[str],
+    *,
+    context: ArtifactContext,
+    expected: EnvelopeExpectation | None,
+    overwrite: bool,
+    trusted_source_root: str | os.PathLike[str] | None,
+    trusted_destination_root: str | os.PathLike[str] | None,
+) -> EnvelopeDescriptor:
+    if not isinstance(context, ArtifactContext):
+        raise ArtifactConfigurationError(
+            "A validated ArtifactContext instance is required."
+        )
+    descriptor = read_envelope_header(
+        source_path, trusted_source_root=trusted_source_root
+    )
+    _verify_expectation(descriptor, expected)
+    if descriptor.context_sha256 != context.sha256:
+        raise ArtifactContextMismatchError(
+            "The encrypted artifact context does not match this backup."
+        )
+    destination = _anchor_path(
+        destination_path,
+        trusted_root=trusted_destination_root,
+        encrypted=False,
+        create_parent=True,
+    )
+    try:
+        _check_destination(destination, overwrite=overwrite)
+    finally:
+        destination.close()
+    return descriptor
+
+
 def encrypt_file(
     source_path: str | os.PathLike[str],
     destination_path: str | os.PathLike[str],
@@ -445,23 +737,34 @@ def encrypt_file(
     envelope_id: uuid.UUID | str | None = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overwrite: bool = False,
+    trusted_source_root: str | os.PathLike[str] | None = None,
+    trusted_destination_root: str | os.PathLike[str] | None = None,
 ) -> EnvelopeDescriptor:
     """Seal one regular file and atomically publish a BSE1 artifact."""
 
-    chunk_size = _validate_chunk_size(chunk_size)
+    envelope_uuid = _preflight_encrypt_request(
+        source_path,
+        destination_path,
+        context=context,
+        envelope_id=envelope_id,
+        chunk_size=chunk_size,
+        overwrite=overwrite,
+        trusted_source_root=trusted_source_root,
+        trusted_destination_root=trusted_destination_root,
+    )
     cipher = _new_cipher(data_key)
+    destination = _anchor_path(
+        destination_path,
+        trusted_root=trusted_destination_root,
+        encrypted=False,
+        create_parent=True,
+    )
+    staging_fd: int | None = None
     try:
-        envelope_uuid = uuid.UUID(str(envelope_id)) if envelope_id else uuid.uuid4()
-    except (AttributeError, TypeError, ValueError):
-        raise ArtifactConfigurationError(
-            "The BSE1 envelope identifier is invalid."
-        ) from None
-    destination = Path(destination_path)
-    _check_destination(destination, overwrite=overwrite)
-
-    temporary: Path | None = None
-    try:
-        with _open_regular_source(source_path, encrypted=False) as source:
+        _check_destination(destination, overwrite=overwrite)
+        with _open_regular_source(
+            source_path, encrypted=False, trusted_root=trusted_source_root
+        ) as source:
             plaintext_size, plaintext_sha256 = _source_digest(source)
             source.seek(0)
             nonce_prefix = os.urandom(_NONCE_PREFIX_SIZE)
@@ -476,8 +779,8 @@ def encrypt_file(
             header_digest = hashlib.sha256(header).digest()
             descriptor = _parse_header(header, ciphertext_size=0)
 
-            fd, temporary = _staging_file(destination)
-            with os.fdopen(fd, "wb") as output:
+            staging_fd = _new_unnamed_staging_file(destination)
+            with os.fdopen(os.dup(staging_fd), "wb") as output:
                 _write_all(
                     output,
                     _PREAMBLE.pack(MAGIC, FORMAT_VERSION, 0, 0, len(header)),
@@ -530,16 +833,13 @@ def encrypt_file(
                 _write_all(output, terminal)
                 output.flush()
                 os.fsync(output.fileno())
-            ciphertext_size = temporary.stat().st_size
-            _publish(temporary, destination, overwrite=overwrite)
-            temporary = None
+            ciphertext_size = os.fstat(staging_fd).st_size
+            _publish_unnamed_file(staging_fd, destination, overwrite=overwrite)
             return replace(descriptor, ciphertext_size=ciphertext_size)
     finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        if staging_fd is not None:
+            os.close(staging_fd)
+        destination.close()
 
 
 def decrypt_file(
@@ -550,15 +850,33 @@ def decrypt_file(
     context: ArtifactContext,
     expected: EnvelopeExpectation | None = None,
     overwrite: bool = False,
+    trusted_source_root: str | os.PathLike[str] | None = None,
+    trusted_destination_root: str | os.PathLike[str] | None = None,
 ) -> EnvelopeDescriptor:
     """Authenticate, decrypt, and atomically publish one BSE1 artifact."""
 
+    _preflight_decrypt_request(
+        source_path,
+        destination_path,
+        context=context,
+        expected=expected,
+        overwrite=overwrite,
+        trusted_source_root=trusted_source_root,
+        trusted_destination_root=trusted_destination_root,
+    )
     cipher = _new_cipher(data_key)
-    destination = Path(destination_path)
-    _check_destination(destination, overwrite=overwrite)
-    temporary: Path | None = None
+    destination = _anchor_path(
+        destination_path,
+        trusted_root=trusted_destination_root,
+        encrypted=False,
+        create_parent=True,
+    )
+    staging_fd: int | None = None
     try:
-        with _open_regular_source(source_path, encrypted=True) as source:
+        _check_destination(destination, overwrite=overwrite)
+        with _open_regular_source(
+            source_path, encrypted=True, trusted_root=trusted_source_root
+        ) as source:
             source_stat = os.fstat(source.fileno())
             descriptor = _read_header(source, ciphertext_size=source_stat.st_size)
             _verify_expectation(descriptor, expected)
@@ -568,10 +886,10 @@ def decrypt_file(
                 )
             header_digest = bytes.fromhex(descriptor.header_sha256)
 
-            fd, temporary = _staging_file(destination)
+            staging_fd = _new_unnamed_staging_file(destination)
             digest = hashlib.sha256()
             plaintext_size = 0
-            with os.fdopen(fd, "wb") as output:
+            with os.fdopen(os.dup(staging_fd), "wb") as output:
                 for expected_index in range(descriptor.chunk_count):
                     record_type, index, length = _RECORD.unpack(
                         _read_exact(source, _RECORD.size)
@@ -653,15 +971,12 @@ def decrypt_file(
                     )
                 output.flush()
                 os.fsync(output.fileno())
-            _publish(temporary, destination, overwrite=overwrite)
-            temporary = None
+            _publish_unnamed_file(staging_fd, destination, overwrite=overwrite)
             return descriptor
     finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        if staging_fd is not None:
+            os.close(staging_fd)
+        destination.close()
 
 
 def seal_file(
@@ -674,9 +989,28 @@ def seal_file(
     envelope_id: uuid.UUID | str | None = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overwrite: bool = False,
+    trusted_source_root: str | os.PathLike[str] | None = None,
+    trusted_destination_root: str | os.PathLike[str] | None = None,
 ) -> SealedArtifact:
     """Generate a data key, seal the file, and return durable wrap metadata."""
 
+    if enterprise_mode and (
+        trusted_source_root is None or trusted_destination_root is None
+    ):
+        raise ArtifactConfigurationError(
+            "Enterprise artifact sealing requires explicit trusted source and "
+            "destination filesystem roots."
+        )
+    normalized_envelope_id = _preflight_encrypt_request(
+        source_path,
+        destination_path,
+        context=context,
+        envelope_id=envelope_id,
+        chunk_size=chunk_size,
+        overwrite=overwrite,
+        trusted_source_root=trusted_source_root,
+        trusted_destination_root=trusted_destination_root,
+    )
     ensure_provider_allowed(provider, enterprise_mode=enterprise_mode)
     generated = provider.generate_data_key(context)
     try:
@@ -685,9 +1019,11 @@ def seal_file(
             destination_path,
             data_key=generated.plaintext,
             context=context,
-            envelope_id=envelope_id,
+            envelope_id=normalized_envelope_id,
             chunk_size=chunk_size,
             overwrite=overwrite,
+            trusted_source_root=trusted_source_root,
+            trusted_destination_root=trusted_destination_root,
         )
         return SealedArtifact(descriptor, generated.wrapped)
     finally:
@@ -704,14 +1040,36 @@ def unseal_file(
     expected: EnvelopeExpectation | None = None,
     enterprise_mode: bool = False,
     overwrite: bool = False,
+    trusted_source_root: str | os.PathLike[str] | None = None,
+    trusted_destination_root: str | os.PathLike[str] | None = None,
 ) -> EnvelopeDescriptor:
     """Unwrap a data key and authenticate/decrypt one artifact."""
 
-    ensure_provider_allowed(provider, enterprise_mode=enterprise_mode)
+    if enterprise_mode and expected is None:
+        raise ArtifactConfigurationError(
+            "Enterprise artifact restore requires a durable envelope expectation."
+        )
+    if enterprise_mode and (
+        trusted_source_root is None or trusted_destination_root is None
+    ):
+        raise ArtifactConfigurationError(
+            "Enterprise artifact restore requires explicit trusted source and "
+            "destination filesystem roots."
+        )
     if wrapped_data_key.provider_name != provider.name:
         raise ArtifactConfigurationError(
             "The wrapped data key provider does not match the selected provider."
         )
+    _preflight_decrypt_request(
+        source_path,
+        destination_path,
+        context=context,
+        expected=expected,
+        overwrite=overwrite,
+        trusted_source_root=trusted_source_root,
+        trusted_destination_root=trusted_destination_root,
+    )
+    ensure_provider_allowed(provider, enterprise_mode=enterprise_mode)
     plaintext_key = provider.unwrap_data_key(wrapped_data_key, context)
     try:
         return decrypt_file(
@@ -721,6 +1079,8 @@ def unseal_file(
             context=context,
             expected=expected,
             overwrite=overwrite,
+            trusted_source_root=trusted_source_root,
+            trusted_destination_root=trusted_destination_root,
         )
     finally:
         zeroize(plaintext_key)

@@ -46,6 +46,8 @@ from backupsheep.artifact_crypto.providers.base import GeneratedDataKey
 CHUNK_SIZE = 64 * 1024
 DATA_KEY = bytes(range(32))
 ENVELOPE_ID = uuid.UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+KMS_SOURCE_ARN = "arn:aws:kms:us-east-1:123456789012:key/source-key"
+KMS_DESTINATION_ARN = "arn:aws:kms:us-east-1:123456789012:key/destination-key"
 
 
 def artifact_context(**overrides):
@@ -395,6 +397,126 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         with self.assertRaises(ArtifactConfigurationError):
             artifact_context(lane="shared")
 
+    def test_trusted_roots_reject_ancestor_symlinks_and_path_escape(self):
+        source_directory = self.root / "source-directory"
+        source_directory.mkdir()
+        source = source_directory / "source.zip"
+        source.write_bytes(b"source")
+        source_link = self.root / "source-link-directory"
+        source_link.symlink_to(source_directory, target_is_directory=True)
+
+        with self.assertRaises(ArtifactConfigurationError):
+            encrypt_file(
+                source_link / "source.zip",
+                self.root / "ancestor-source.bse",
+                data_key=DATA_KEY,
+                context=self.context,
+                chunk_size=CHUNK_SIZE,
+                trusted_source_root=self.root,
+                trusted_destination_root=self.root,
+            )
+
+        trusted_target = self.root / "trusted-target"
+        trusted_target.mkdir()
+        trusted_source = trusted_target / "source.zip"
+        trusted_source.write_bytes(b"source")
+        trusted_root_link = self.root / "trusted-root-link"
+        trusted_root_link.symlink_to(trusted_target, target_is_directory=True)
+        with self.assertRaises(ArtifactConfigurationError):
+            encrypt_file(
+                trusted_root_link / "source.zip",
+                self.root / "symlinked-root.bse",
+                data_key=DATA_KEY,
+                context=self.context,
+                chunk_size=CHUNK_SIZE,
+                trusted_source_root=trusted_root_link,
+                trusted_destination_root=self.root,
+            )
+
+        destination_directory = self.root / "destination-directory"
+        destination_directory.mkdir()
+        destination_link = self.root / "destination-link-directory"
+        destination_link.symlink_to(destination_directory, target_is_directory=True)
+        with self.assertRaises(ArtifactConfigurationError):
+            encrypt_file(
+                source,
+                destination_link / "artifact.bse",
+                data_key=DATA_KEY,
+                context=self.context,
+                chunk_size=CHUNK_SIZE,
+                trusted_source_root=self.root,
+                trusted_destination_root=self.root,
+            )
+
+        with self.assertRaises(ArtifactConfigurationError):
+            encrypt_file(
+                source,
+                self.root.parent / "escaped.bse",
+                data_key=DATA_KEY,
+                context=self.context,
+                chunk_size=CHUNK_SIZE,
+                trusted_source_root=self.root,
+                trusted_destination_root=self.root,
+            )
+
+    def test_failed_terminal_authentication_never_creates_named_plaintext_staging(self):
+        payload = b"private" * (4 * CHUNK_SIZE)
+        _source, encrypted, _descriptor = self._seal(payload)
+        damaged = bytearray(encrypted.read_bytes())
+        damaged[-1] ^= 1
+        encrypted.write_bytes(damaged)
+        restored = self.root / "never-published.zip"
+        observed_names = []
+        original_write = envelope_module._write_all
+
+        def observe_directory(destination, value):
+            original_write(destination, value)
+            observed_names.extend(path.name for path in self.root.iterdir())
+
+        with mock.patch.object(
+            envelope_module, "_write_all", side_effect=observe_directory
+        ):
+            with self.assertRaises(ArtifactIntegrityError):
+                decrypt_file(
+                    encrypted,
+                    restored,
+                    data_key=DATA_KEY,
+                    context=self.context,
+                    trusted_source_root=self.root,
+                    trusted_destination_root=self.root,
+                )
+
+        self.assertFalse(restored.exists())
+        self.assertFalse(
+            any("never-published" in name for name in observed_names), observed_names
+        )
+
+    def test_unsupported_anonymous_staging_fails_without_named_partial_file(self):
+        source = self._source(b"private")
+        destination = self.root / "unsupported-staging.bse"
+
+        with mock.patch.object(envelope_module.os, "O_TMPFILE", 0):
+            with self.assertRaises(ArtifactConfigurationError):
+                encrypt_file(
+                    source,
+                    destination,
+                    data_key=DATA_KEY,
+                    context=self.context,
+                    chunk_size=CHUNK_SIZE,
+                    trusted_source_root=self.root,
+                    trusted_destination_root=self.root,
+                )
+
+        self.assertFalse(destination.exists())
+        self.assertEqual(
+            [
+                path.name
+                for path in self.root.iterdir()
+                if "unsupported-staging" in path.name
+            ],
+            [],
+        )
+
 
 class KeyProviderTests(SimpleTestCase):
     def setUp(self):
@@ -424,6 +546,10 @@ class KeyProviderTests(SimpleTestCase):
         generated.destroy()
         self.assertEqual(generated.plaintext, bytearray(32))
 
+        provider.destroy()
+        with self.assertRaises(KeyProviderConfigurationError):
+            provider.generate_data_key(self.context)
+
     def test_seal_and_unseal_use_provider_and_zero_plaintext_key(self):
         source = self.root / "source.zip"
         encrypted = self.root / "source.bse"
@@ -433,6 +559,7 @@ class KeyProviderTests(SimpleTestCase):
         class CapturingProvider:
             name = "capture"
             external = True
+            enterprise_eligible = True
 
             def __init__(self):
                 self.generated = None
@@ -455,6 +582,8 @@ class KeyProviderTests(SimpleTestCase):
             context=self.context,
             enterprise_mode=True,
             chunk_size=CHUNK_SIZE,
+            trusted_source_root=self.root,
+            trusted_destination_root=self.root,
         )
         self.assertEqual(provider.generated.plaintext, bytearray(32))
 
@@ -466,6 +595,8 @@ class KeyProviderTests(SimpleTestCase):
             context=self.context,
             expected=sealed.envelope.expectation(),
             enterprise_mode=True,
+            trusted_source_root=self.root,
+            trusted_destination_root=self.root,
         )
         self.assertEqual(restored.read_bytes(), b"secret backup")
 
@@ -482,18 +613,23 @@ class KeyProviderTests(SimpleTestCase):
         client.generate_data_key.return_value = {
             "Plaintext": DATA_KEY,
             "CiphertextBlob": b"kms-wrapped-key",
-            "KeyId": "arn:aws:kms:us-east-1:123:key/source",
+            "KeyId": KMS_SOURCE_ARN,
         }
         client.decrypt.return_value = {
             "Plaintext": DATA_KEY,
-            "KeyId": "arn:aws:kms:us-east-1:123:key/source",
+            "KeyId": KMS_SOURCE_ARN,
         }
         client.re_encrypt.return_value = {
             "CiphertextBlob": b"rotated-key",
-            "KeyId": "arn:aws:kms:us-east-1:123:key/destination",
+            "KeyId": KMS_DESTINATION_ARN,
+            "SourceKeyId": KMS_SOURCE_ARN,
         }
         provider = AWSKMSKeyProvider(
-            AWSKMSConfig(key_id="alias/backupsheep", region_name="us-east-1"),
+            AWSKMSConfig(
+                key_id="alias/backupsheep",
+                region_name="us-east-1",
+                allowed_key_ids=(KMS_SOURCE_ARN, KMS_DESTINATION_ARN),
+            ),
             client=client,
         )
 
@@ -511,7 +647,7 @@ class KeyProviderTests(SimpleTestCase):
         )
         client.decrypt.assert_called_once_with(
             CiphertextBlob=b"kms-wrapped-key",
-            KeyId="arn:aws:kms:us-east-1:123:key/source",
+            KeyId=KMS_SOURCE_ARN,
             EncryptionAlgorithm="SYMMETRIC_DEFAULT",
             EncryptionContext=self.context.key_provider_context(),
         )
@@ -519,13 +655,13 @@ class KeyProviderTests(SimpleTestCase):
         rotated = provider.rewrap_data_key(
             generated.wrapped,
             self.context,
-            destination_key_id="alias/rotated",
+            destination_key_id=KMS_DESTINATION_ARN,
         )
         self.assertEqual(rotated.ciphertext, b"rotated-key")
         client.re_encrypt.assert_called_once_with(
             CiphertextBlob=b"kms-wrapped-key",
-            SourceKeyId="arn:aws:kms:us-east-1:123:key/source",
-            DestinationKeyId="alias/rotated",
+            SourceKeyId=KMS_SOURCE_ARN,
+            DestinationKeyId=KMS_DESTINATION_ARN,
             SourceEncryptionContext=self.context.key_provider_context(),
             DestinationEncryptionContext=self.context.key_provider_context(),
         )
@@ -569,4 +705,183 @@ class KeyProviderTests(SimpleTestCase):
                 key_id="key",
                 region_name="us-east-1",
                 endpoint_url="http://kms.example.test",
+            )
+
+    def test_enterprise_kms_policy_rejects_custom_and_string_boolean_endpoints(self):
+        with self.assertRaises(KeyProviderConfigurationError):
+            AWSKMSConfig(
+                key_id="key",
+                region_name="us-east-1",
+                endpoint_url="http://kms.example.test",
+                allow_insecure_endpoint="false",
+            )
+
+        custom_provider = AWSKMSKeyProvider(
+            AWSKMSConfig(
+                key_id="key",
+                region_name="us-east-1",
+                allowed_key_ids=(KMS_SOURCE_ARN,),
+                endpoint_url="https://kms.example.test",
+            ),
+            client=mock.Mock(),
+        )
+        with self.assertRaises(KeyProviderConfigurationError):
+            KeyProviderRegistry([custom_provider]).get(
+                "aws-kms", enterprise_mode=True
+            )
+
+        standard_provider = AWSKMSKeyProvider(
+            AWSKMSConfig(
+                key_id="alias/backupsheep",
+                region_name="us-east-1",
+                allowed_key_ids=(KMS_SOURCE_ARN,),
+            ),
+            client=mock.Mock(),
+        )
+        self.assertIs(
+            KeyProviderRegistry([standard_provider]).get(
+                "aws-kms", enterprise_mode=True
+            ),
+            standard_provider,
+        )
+
+    def test_aws_client_ignores_environment_and_shared_config_endpoints(self):
+        provider = AWSKMSKeyProvider(
+            AWSKMSConfig(
+                key_id="alias/backupsheep",
+                region_name="us-east-1",
+                allowed_key_ids=(KMS_SOURCE_ARN,),
+            )
+        )
+        client = mock.Mock()
+        with mock.patch("boto3.client", return_value=client) as create_client:
+            self.assertIs(provider.client, client)
+
+        configuration = create_client.call_args.kwargs["config"]
+        self.assertIs(configuration.ignore_configured_endpoint_urls, True)
+        self.assertIsNone(create_client.call_args.kwargs["endpoint_url"])
+
+    def test_kms_numeric_configuration_is_normalized_and_strict(self):
+        config = AWSKMSConfig(
+            key_id="key",
+            region_name="us-east-1",
+            connect_timeout_seconds="5",
+            read_timeout_seconds="30",
+            max_attempts="3",
+        )
+        self.assertIs(type(config.connect_timeout_seconds), int)
+        self.assertIs(type(config.read_timeout_seconds), int)
+        self.assertIs(type(config.max_attempts), int)
+        for field, value in (
+            ("connect_timeout_seconds", True),
+            ("read_timeout_seconds", 5.5),
+            ("max_attempts", "3.0"),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(KeyProviderConfigurationError):
+                    AWSKMSConfig(
+                        key_id="key",
+                        region_name="us-east-1",
+                        **{field: value},
+                    )
+
+    def test_kms_key_identity_is_pinned_for_generate_and_decrypt(self):
+        unapproved_arn = "arn:aws:kms:us-east-1:123456789012:key/unapproved"
+        client = mock.Mock()
+        client.generate_data_key.return_value = {
+            "Plaintext": DATA_KEY,
+            "CiphertextBlob": b"wrapped",
+            "KeyId": unapproved_arn,
+        }
+        provider = AWSKMSKeyProvider(
+            AWSKMSConfig(
+                key_id="alias/backupsheep",
+                region_name="us-east-1",
+                allowed_key_ids=(KMS_SOURCE_ARN,),
+            ),
+            client=client,
+        )
+        with self.assertRaises(KeyProviderIntegrityError):
+            provider.generate_data_key(self.context)
+
+        with self.assertRaises(KeyProviderIntegrityError):
+            provider.unwrap_data_key(
+                WrappedDataKey("aws-kms", unapproved_arn, b"wrapped"), self.context
+            )
+        client.decrypt.assert_not_called()
+
+        client.decrypt.return_value = {
+            "Plaintext": DATA_KEY,
+            "KeyId": KMS_DESTINATION_ARN,
+        }
+        with self.assertRaises(KeyProviderIntegrityError):
+            provider.unwrap_data_key(
+                WrappedDataKey("aws-kms", KMS_SOURCE_ARN, b"wrapped"), self.context
+            )
+
+    def test_local_filesystem_preflight_happens_before_remote_key_operations(self):
+        class CountingProvider:
+            name = "counting"
+            external = True
+            enterprise_eligible = True
+
+            def __init__(self):
+                self.generate_calls = 0
+                self.unwrap_calls = 0
+
+            def generate_data_key(self, _context):
+                self.generate_calls += 1
+                return GeneratedDataKey(
+                    bytearray(DATA_KEY), WrappedDataKey(self.name, "key", b"wrapped")
+                )
+
+            def unwrap_data_key(self, _wrapped, _context):
+                self.unwrap_calls += 1
+                return bytearray(DATA_KEY)
+
+        provider = CountingProvider()
+        with self.assertRaises(FileNotFoundError):
+            seal_file(
+                self.root / "missing.zip",
+                self.root / "missing.bse",
+                provider=provider,
+                context=self.context,
+                trusted_source_root=self.root,
+                trusted_destination_root=self.root,
+            )
+        self.assertEqual(provider.generate_calls, 0)
+
+        malformed = self.root / "malformed.bse"
+        malformed.write_bytes(b"not-an-envelope")
+        with self.assertRaises(UnsupportedArtifactFormatError):
+            unseal_file(
+                malformed,
+                self.root / "malformed.zip",
+                provider=provider,
+                wrapped_data_key=WrappedDataKey(provider.name, "key", b"wrapped"),
+                context=self.context,
+                trusted_source_root=self.root,
+                trusted_destination_root=self.root,
+            )
+        self.assertEqual(provider.unwrap_calls, 0)
+
+    def test_enterprise_restore_requires_witness_and_trusted_roots(self):
+        provider = AWSKMSKeyProvider(
+            AWSKMSConfig(
+                key_id="alias/backupsheep",
+                region_name="us-east-1",
+                allowed_key_ids=(KMS_SOURCE_ARN,),
+            ),
+            client=mock.Mock(),
+        )
+        with self.assertRaises(ArtifactConfigurationError):
+            unseal_file(
+                self.root / "missing.bse",
+                self.root / "missing.zip",
+                provider=provider,
+                wrapped_data_key=WrappedDataKey(
+                    "aws-kms", KMS_SOURCE_ARN, b"wrapped"
+                ),
+                context=self.context,
+                enterprise_mode=True,
             )
