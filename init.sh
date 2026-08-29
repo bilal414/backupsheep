@@ -320,8 +320,8 @@ artifact_keyring_is_read_only_mount() {
       matches++
       read_only = 0
       count = split($6, options, ",")
-      for (index = 1; index <= count; index++) {
-        if (options[index] == "ro") read_only = 1
+      for (option_index = 1; option_index <= count; option_index++) {
+        if (options[option_index] == "ro") read_only = 1
       }
       if (read_only) protected++
     }

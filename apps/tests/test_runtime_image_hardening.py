@@ -550,6 +550,11 @@ class RuntimeImageHardeningTests(TestCase):
         )
         self.assertIn("artifact_keyring_is_read_only_mount()", self.entrypoint)
         self.assertIn('matches == 1 && protected == 1', self.entrypoint)
+        self.assertIn(
+            "for (option_index = 1; option_index <= count; option_index++)",
+            self.entrypoint,
+        )
+        self.assertNotIn("for (index = 1; index <= count; index++)", self.entrypoint)
         self.assertIn("artifact_keyring_metadata_is_safe", self.entrypoint)
         self.assertIn("stat -c '%a:%h'", self.entrypoint)
         self.assertNotIn("stat -c '%u:%g:%a:%h' \"$artifact_keyring\"", self.entrypoint)
