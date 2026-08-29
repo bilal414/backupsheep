@@ -793,7 +793,7 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
             build_step,
         )
         self.assertIn(
-            "index:org.opencontainers.image.created="
+            "index-descriptor:org.opencontainers.image.created="
             + verifier.EXPECTED_INDEX_CREATED,
             build_step,
         )

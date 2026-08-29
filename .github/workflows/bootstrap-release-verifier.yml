@@ -166,7 +166,7 @@ jobs:
           # BuildKit otherwise injects the wall clock into the root descriptor.
           # Bind it to the reviewed upstream tag commit for an exact,
           # reproducible outer-layout contract.
-          annotations: index:org.opencontainers.image.created=2026-08-05T23:43:27Z
+          annotations: index-descriptor:org.opencontainers.image.created=2026-08-05T23:43:27Z
           provenance: false
           sbom: false
 
