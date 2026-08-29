@@ -551,6 +551,68 @@ class SecureComposeWrapperTests(TestCase):
         self.assertIn(message, result.stderr, arguments)
         return result
 
+    def test_root_override_requires_euid_zero_and_wrapper_ownership_guards(self):
+        source = self.wrapper.read_text(encoding="utf-8")
+        self.assertTrue(source.startswith("#!/bin/bash\n"))
+        self.assertLess(
+            source.index('if [[ "${1-}" == "--allow-root-install" ]]'),
+            source.index('script_path="${BASH_SOURCE[0]}"'),
+        )
+        self.assertIn(
+            'root_install_mode_allowed "$EUID" "$allow_root_install"', source
+        )
+        self.assertIn(
+            'validate_private_file "$script_path" "backupsheep-compose wrapper"',
+            source,
+        )
+        self.assertIn(
+            'validate_private_directory "$installation_parent"', source
+        )
+        self.assertIn("validate_privileged_runtime_environment", source)
+        self.assertIn(
+            "for variable in HOME DOCKER_CONFIG DOCKER_CERT_PATH", source
+        )
+        self.assertIn('"$(file_uid "$path")" == "$EUID"', source)
+        self.assertNotIn("SUDO_USER", source)
+        self.assertNotIn("SUDO_UID", source)
+
+        self.run_wrapper("config", "--quiet", check=True)
+        refused = self.run_wrapper(
+            "--allow-root-install", "config", "--quiet"
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(
+            "valid only when the effective invoking UID is 0", refused.stderr
+        )
+
+        self.wrapper.chmod(0o720)
+        writable = self.run_wrapper("config", "--quiet")
+        self.assertNotEqual(writable.returncode, 0)
+        self.assertIn(
+            "backupsheep-compose wrapper must not be writable by group",
+            writable.stderr,
+        )
+        self.wrapper.chmod(0o700)
+
+        hardlink = self.root / "backupsheep-compose-hardlink"
+        os.link(self.wrapper, hardlink)
+        linked = self.run_wrapper("config", "--quiet")
+        self.assertNotEqual(linked.returncode, 0)
+        self.assertIn(
+            "backupsheep-compose wrapper must not be hard-linked", linked.stderr
+        )
+        hardlink.unlink()
+
+        self.root.chmod(0o720)
+        unsafe_directory = self.run_wrapper("config", "--quiet")
+        self.assertNotEqual(unsafe_directory.returncode, 0)
+        self.assertIn(
+            "installation directory must not be writable by group",
+            unsafe_directory.stderr,
+        )
+        self.root.chmod(0o700)
+        self.run_wrapper("config", "--quiet", check=True)
+
     @staticmethod
     def labels(resource_type, logical_name, installation_id=INSTALLATION_ID):
         labels = {

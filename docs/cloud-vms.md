@@ -26,9 +26,9 @@ compressed archive. Use external object storage for a second, off-server copy.
 
 ## SSH installation
 
-Create and secure the VM according to your host policy. As the unprivileged user already
-authorized to use the intended Docker daemon, download the installer from the exact
-reviewed release commit:
+Create and secure the VM according to your host policy. In the default mode, use the
+unprivileged user already authorized for the intended Docker daemon and download the
+installer from the exact reviewed release commit:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
@@ -61,9 +61,28 @@ retrieving the onboarding token after the health check passes; it does not put t
 in install logs.
 For all options, run the script with `--help` or see [installation](installation.md).
 
+If host policy intentionally exposes the existing rootful Docker daemon only to root,
+do not change groups or daemon settings for BackupSheep. Use the reviewed
+[`--allow-root-install` mode](guides/installation.md#explicit-rootful-daemon-mode): copy
+the installer and credential inputs into a root-owned protected directory with
+`sudo install`, then run the root-owned installer explicitly with an installation path
+such as `/opt/backupsheep`. Effective UID 0 remains refused without that flag. The
+resulting checkout, configuration, secrets, approved override and mutation lock stay
+root-owned; no ownership is inferred from `SUDO_USER` and no `chown` is performed.
+
+Every later wrapper command for that installation must also run as UID 0 and put the
+approval flag first:
+
+```bash
+sudo -H /opt/backupsheep/backupsheep-compose --allow-root-install ps --all
+```
+
+This changes only the host-side installation identity used to reach Docker. It does not
+change the reviewed non-root identities or hardening inside the long-lived containers.
+
 ## Cloud-init / user data
 
-BackupSheep intentionally no longer provides unattended root cloud-init installation.
+BackupSheep intentionally does not provide unattended root cloud-init installation.
 The compatibility file at
 [deploy/cloud-init/backupsheep.yaml](../deploy/cloud-init/backupsheep.yaml) is inert.
 Provision Docker, users, networking and host security using your own reviewed image or
@@ -77,6 +96,9 @@ cd "$HOME/.local/share/backupsheep"
 ./backupsheep-compose ps --all
 cat .secrets/onboarding_token
 ```
+
+For an explicit root-owned installation, use `/opt/backupsheep` and the root-approved
+wrapper command shown above; read the token from the same root shell.
 
 ## Before public use
 

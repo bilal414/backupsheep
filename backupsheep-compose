@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Execute the reviewed BackupSheep Compose model without ambient interpolation.
 set -euo pipefail
 umask 077
@@ -11,6 +11,37 @@ die() {
     exit 64
 }
 
+root_install_mode_allowed() {
+    local effective_uid="$1"
+    local approved_override="$2"
+
+    [[ "$effective_uid" =~ ^[0-9]+$ ]] || return 1
+    if (( 10#$effective_uid == 0 )); then
+        [[ "$approved_override" == true ]]
+    else
+        [[ "$approved_override" == false ]]
+    fi
+}
+
+allow_root_install=false
+if [[ "${1-}" == "--allow-root-install" ]]; then
+    allow_root_install=true
+    shift
+    [[ "${1-}" != "--allow-root-install" ]] \
+        || die "--allow-root-install may be specified only once."
+fi
+if ! root_install_mode_allowed "$EUID" "$allow_root_install"; then
+    if (( EUID == 0 )); then
+        die "effective UID 0 is refused by default; put --allow-root-install first only for an intentionally root-owned installation."
+    fi
+    die "--allow-root-install is valid only when the effective invoking UID is 0; omit it for a non-root installation."
+fi
+if (( EUID == 0 )); then
+    # A privileged wrapper must not resolve Docker or file utilities through a
+    # user-writable command lookup path inherited from sudo or a login shell.
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+fi
+
 valid_compose_project_name() {
     local value="$1"
     local LC_ALL=C
@@ -21,6 +52,7 @@ script_path="${BASH_SOURCE[0]}"
 [[ -f "$script_path" && ! -L "$script_path" ]] \
     || die "the wrapper must be invoked as a regular, non-symlink file."
 root_dir="$(cd -- "$(dirname -- "$script_path")" && pwd -P)"
+installation_parent="$(dirname -- "$root_dir")"
 env_file="${root_dir}/.env"
 base_file="${root_dir}/docker-compose.yml"
 default_override="${root_dir}/docker-compose.override.yml"
@@ -115,7 +147,7 @@ validate_private_file() {
     [[ -f "$path" && ! -L "$path" ]] \
         || die "${label} must be a regular, non-symlink file."
     [[ "$(file_uid "$path")" == "$EUID" ]] \
-        || die "${label} must be owned by the invoking user."
+        || die "${label} must be owned by the effective invoking UID."
     [[ "$(file_links "$path")" == "1" ]] \
         || die "${label} must not be hard-linked."
     [[ "$(file_size "$path")" -le 1048576 ]] \
@@ -127,6 +159,42 @@ validate_private_file() {
         || die "${label} must not be writable by group or other users."
 }
 
+validate_private_directory() {
+    local path="$1"
+    local label="$2"
+    local mode=""
+
+    [[ -d "$path" && ! -L "$path" ]] \
+        || die "${label} must be a real, non-symlink directory."
+    [[ "$(file_uid "$path")" == "$EUID" ]] \
+        || die "${label} must be owned by the effective invoking UID."
+    mode="$(file_mode "$path")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] \
+        || die "could not validate permissions for ${label}."
+    (( (8#$mode & 8#022) == 0 )) \
+        || die "${label} must not be writable by group or other users."
+}
+
+validate_privileged_runtime_environment() {
+    local path=""
+    local variable=""
+
+    (( EUID == 0 )) || return 0
+    for variable in HOME DOCKER_CONFIG DOCKER_CERT_PATH; do
+        path="${!variable-}"
+        if [[ "$variable" != HOME && -z "$path" ]]; then
+            continue
+        fi
+        [[ "$path" == /* ]] \
+            || die "root-owned wrapper use requires ${variable} to be an absolute path; use a root login environment (for example sudo -H)."
+        validate_private_directory "$path" "privileged ${variable} directory"
+    done
+}
+
+validate_privileged_runtime_environment
+validate_private_directory "$installation_parent" "installation parent"
+validate_private_directory "$root_dir" "installation directory"
+validate_private_file "$script_path" "backupsheep-compose wrapper"
 validate_private_file "$env_file" ".env"
 validate_private_file "$base_file" "docker-compose.yml"
 [[ "$(file_mode "$env_file")" == "600" ]] \

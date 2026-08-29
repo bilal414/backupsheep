@@ -8,14 +8,17 @@ instructions are in the [verified installation guide](guides/installation.md).
 The BackupSheep installer manages only its application checkout, configuration, secret
 files, images, containers, networks and named volumes. It does **not** install Git or
 Docker, add package repositories, enable or restart services, edit Docker daemon
-configuration, open a firewall, change kernel settings, create host users, or require
-root. The host operator must provide and secure:
+configuration, open a firewall, change kernel settings, or create host users. The
+default mode is non-root; an explicit root-owned mode is available for a host that keeps
+its existing rootful Docker daemon behind `sudo`. The host operator must provide and
+secure:
 
 - Git and Bash;
 - Docker Engine 28.0.0 or newer;
 - Docker Compose 2.33.1 or newer;
-- access to the intended Docker daemon;
-- a user-owned installation path and sufficient CPU, memory and storage;
+- access to the intended Docker daemon through the chosen invoking identity;
+- an installation path owned by that same effective UID and sufficient CPU, memory and
+  storage;
 - host/network/TLS policy, monitoring, patching and recovery.
 
 ## Verified installer
@@ -48,9 +51,51 @@ chmod 700 install.sh
 The KMS credential inputs must be distinct canonical, user-owned mode-`0400`/`0600`
 files for separate database/files AWS identities with matching encryption-context policy.
 
-Run it as the same unprivileged user that is already authorized for the intended Docker
-daemon. The installer refuses root and `sudo`; it does not provision or reconfigure the
-host.
+By default, run it as the same unprivileged user that is already authorized for the
+intended Docker daemon. Root and `sudo` remain refused unless the operator supplies the
+explicit `--allow-root-install` flag. This does not provision or reconfigure the host.
+
+For an existing rootful daemon intentionally accessible only through root, first place
+the reviewed installer and credential inputs in a protected root-owned directory, then
+run the root-owned copy explicitly:
+
+```bash
+sudo install -d -o root -g root -m 0700 /root/backupsheep-install
+sudo install -o root -g root -m 0700 ./install.sh \
+  /root/backupsheep-install/install.sh
+sudo install -o root -g root -m 0600 "${KMS_DATABASE_CREDENTIALS}" \
+  /root/backupsheep-install/kms-database.credentials
+sudo install -o root -g root -m 0600 "${KMS_FILES_CREDENTIALS}" \
+  /root/backupsheep-install/kms-files.credentials
+sudo -H /root/backupsheep-install/install.sh \
+  --allow-root-install \
+  --ref "${COMMIT}" \
+  --install-dir /opt/backupsheep \
+  --project-name backupsheep \
+  --domain backups.example.com \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+  --artifact-kms-database-aws-credentials-file \
+    /root/backupsheep-install/kms-database.credentials \
+  --artifact-kms-files-aws-credentials-file \
+    /root/backupsheep-install/kms-files.credentials
+```
+
+Copy the two credentials into those exact root-owned mode-`0600` paths with
+`sudo install`, as shown in the full
+[verified installation guide](guides/installation.md#explicit-rootful-daemon-mode).
+The installer and wrapper never use `SUDO_USER` or `chown`: the checkout, configuration,
+secrets, override and mutation lock remain owned by the real effective invoker. Every
+later root-owned wrapper command must also run as UID 0 and begin with the approval flag:
+
+```bash
+sudo -H /opt/backupsheep/backupsheep-compose --allow-root-install ps --all
+```
+
+The flag changes only host-side installation ownership and Docker access. It does not
+change the reviewed non-root user, capability or filesystem configuration inside any
+long-lived container.
 
 The installer fetches that exact commit from the canonical HTTPS repository, verifies
 the checkout and its own bytes, creates protected file-backed secrets, explicitly builds

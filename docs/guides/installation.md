@@ -26,10 +26,12 @@ For the verified installer:
 - Docker Engine **28.0.0 or newer** and Docker Compose **2.33.1 or newer**. The installer
   fails closed on older or unparseable versions because the reviewed network model uses
   newer routing controls;
-- access to the intended Docker daemon as the invoking user. Docker access is a
-  root-equivalent security boundary on a traditional rootful engine; grant it according
-  to the host's own policy;
-- a user-owned, non-group-writable installation parent directory;
+- access to the intended Docker daemon either as the invoking non-root user or through
+  an explicit effective-UID-0 installation. Docker access is a root-equivalent security
+  boundary on a traditional rootful engine; choose the identity according to the host's
+  own policy rather than changing groups or daemon settings for BackupSheep;
+- an installation parent owned by that same effective invoking UID and not writable by
+  group or other users;
 - outbound HTTPS access to GitHub, registries and package sources used by the image build;
 - a supported CPU architecture: `x86_64` or `aarch64` (the Dockerfile installs the
   Oracle MySQL 8.4 client for those two architectures);
@@ -52,8 +54,8 @@ docker compose version
 ## Verified Docker installer
 
 Choose a reviewed release commit, download the installer from that exact immutable
-commit, inspect it, and run it as the same unprivileged user that is already authorized
-to use Docker:
+commit, inspect it, and by default run it as the same unprivileged user that is already
+authorized to use Docker:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
@@ -81,13 +83,12 @@ The two KMS credential inputs must be distinct canonical, user-owned
 mode-`0400`/`0600` files for separate database/files AWS identities with matching
 encryption-context policy.
 
-Do not use `sudo` and do not pipe a remote script into a shell. The installer refuses
-effective UID 0, including a root shell or `sudo`, because it must not create a
-root-owned application checkout or configuration. The invoking user must already have
-access to the intended Docker daemon. The installer accepts no branch, tag or
-abbreviated revision: it fetches the full commit from the canonical HTTPS repository and
-then verifies that its own bytes match `install.sh` in that checkout before invoking
-Docker. The default installation directory is
+Do not pipe a remote script into a shell. Without `--allow-root-install`, the installer
+still refuses effective UID 0, including a root shell or `sudo`. The invoking non-root
+user must already have access to the intended Docker daemon. The installer accepts no
+branch, tag or abbreviated revision: it fetches the full commit from the canonical HTTPS
+repository and then verifies that its own bytes match `install.sh` in that checkout
+before invoking Docker. The default non-root installation directory is
 `$XDG_DATA_HOME/backupsheep` or `$HOME/.local/share/backupsheep`; select another
 user-writable path explicitly when needed:
 
@@ -110,7 +111,8 @@ Supported options are:
 | --- | --- |
 | `--ref COMMIT` | Required full 40-character commit; mutable or abbreviated references are rejected |
 | `--domain HOST` | Configures the accepted/public hostname while the listener remains on server loopback; defaults to `localhost` |
-| `--install-dir PATH` | Uses an absolute, user-owned path other than `/` |
+| `--install-dir PATH` | Uses an absolute path other than `/`, owned by the same effective UID that runs the installer |
+| `--allow-root-install` | Explicitly permits effective UID 0 for a root-owned installation using an existing rootful daemon; defaults to `/opt/backupsheep` unless `--install-dir` is supplied |
 | `--project-name NAME` | Pins and persists the Compose project name; every rerun must match that protected witness, and ambient Compose variables are ignored |
 | `--adopt-legacy-project NAME` | One-time recovery for the exact stock four-volume layout left by an old `compose down`; see the guarded workflow below |
 | `--approved-compose-file PATH` | Accepts only the private regular `INSTALL_DIR/docker-compose.override.yml`, rendered after the base file and included in exact ownership history |
@@ -129,6 +131,62 @@ Supported options are:
 
 The script does not look up the server's public IP, configure DNS, open a firewall,
 issue a TLS certificate or install a reverse proxy.
+
+### Explicit rootful-daemon mode
+
+Use this mode only when the host policy intentionally keeps Docker access behind root or
+`sudo`. BackupSheep does not add the user to a Docker group, install rootless Docker, or
+edit the daemon. Root remains refused unless `--allow-root-install` is supplied.
+
+Never run a user-owned installer directly as root. After reviewing the exact downloaded
+file, copy it and the two credential inputs into a root-owned, mode-`0700` preparation
+directory without changing ownership of the originals:
+
+```bash
+sudo install -d -o root -g root -m 0700 /root/backupsheep-install
+sudo install -o root -g root -m 0700 ./install.sh \
+  /root/backupsheep-install/install.sh
+sudo install -o root -g root -m 0600 "${KMS_DATABASE_CREDENTIALS}" \
+  /root/backupsheep-install/kms-database.credentials
+sudo install -o root -g root -m 0600 "${KMS_FILES_CREDENTIALS}" \
+  /root/backupsheep-install/kms-files.credentials
+sudo -H /root/backupsheep-install/install.sh \
+  --allow-root-install \
+  --ref "${COMMIT}" \
+  --install-dir /opt/backupsheep \
+  --project-name backupsheep \
+  --domain backups.example.com \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+  --artifact-kms-database-aws-credentials-file \
+    /root/backupsheep-install/kms-database.credentials \
+  --artifact-kms-files-aws-credentials-file \
+    /root/backupsheep-install/kms-files.credentials
+```
+
+The source installer, its parent, the installation parent, checkout, `.env`, secrets and
+any approved Compose override must all be owned by the real effective invoker: UID 0 in
+this mode. The installer never derives ownership from `SUDO_USER`, never calls `chown`,
+and never hands the resulting files back to another account. Do not alternate root and
+non-root invocation modes for one installation. Use `sudo -H` so `HOME` resolves to a
+root-owned directory; any explicit `DOCKER_CONFIG` or `DOCKER_CERT_PATH` directory must
+also be absolute, root-owned, non-symlinked and not writable by group or other users.
+
+The wrapper repeats this boundary. For a root-owned installation, run it as effective
+UID 0 and put the explicit override first on every command:
+
+```bash
+sudo -H /opt/backupsheep/backupsheep-compose --allow-root-install config --quiet
+sudo -H /opt/backupsheep/backupsheep-compose --allow-root-install ps --all
+```
+
+The wrapper refuses root without the override, refuses the override for non-root users,
+and validates its own file, the installation directories, `.env`, Compose model and any
+approved override against the same owner/mode/link rules before Docker is called. This
+host-side mode does not change the Compose model: long-lived application, worker,
+scheduler, database and broker processes retain their reviewed non-root container users,
+capability drops and read-only filesystem boundaries.
 
 On a new installation the script:
 
@@ -279,6 +337,10 @@ cd "$HOME/.local/share/backupsheep"
 curl -fsS http://127.0.0.1:8000/healthz/
 ```
 
+For a root-owned installation, use `/opt/backupsheep` and invoke the wrapper as
+`sudo -H /opt/backupsheep/backupsheep-compose --allow-root-install`; the override must
+be the first wrapper argument.
+
 The last command should print `ok`. This proves that the web process can answer a
 request; it does not probe PostgreSQL, RabbitMQ or any provider. Complete the
 [first-run setup](first-run.md), then follow the [production guide](production.md)
@@ -362,6 +424,8 @@ volume.
 
 ```bash
 BS_COMPOSE=("$PWD/backupsheep-compose")
+# Root-owned installation only:
+# BS_COMPOSE=(sudo -H "$PWD/backupsheep-compose" --allow-root-install)
 # If and only if a reviewed pre-start override exists, add this active line:
 # BS_COMPOSE+=(--approved-compose-file "$PWD/docker-compose.override.yml")
 bs_compose() { "${BS_COMPOSE[@]}" "$@"; }

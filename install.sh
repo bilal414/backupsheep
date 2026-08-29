@@ -1,9 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # BackupSheep Docker installer.
 #
 # This script deliberately does not provision or reconfigure the host. The operator is
 # responsible for installing Git, Docker Engine and the Docker Compose plugin, granting
-# the invoking user access to the intended Docker daemon, and configuring host security.
+# the invoking identity access to the intended Docker daemon, and configuring host
+# security.
 #
 # Download this file from the same immutable commit passed with --ref. The installer
 # verifies that its own bytes match that commit before it builds or starts anything.
@@ -14,6 +15,11 @@ umask 077
 # Security grammars and byte-length checks must not inherit locale-specific
 # collation, where ranges such as [a-z] can also match uppercase/accented bytes.
 export LC_ALL=C
+# Even a help/refusal path must not resolve utilities through a caller-controlled
+# privileged PATH. The non-root command lookup behavior remains unchanged.
+if (( EUID == 0 )); then
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+fi
 
 readonly REPOSITORY_URL="https://github.com/bilal414/backupsheep.git"
 readonly APP_PORT="8000"
@@ -105,9 +111,11 @@ default_install_dir() {
 
 INSTALL_REF=""
 INSTALL_DIR="$(default_install_dir)"
+INSTALL_DIR_WAS_EXPLICIT=false
 PUBLIC_HOST="localhost"
 PROJECT_NAME="backupsheep"
 PROJECT_NAME_WAS_EXPLICIT=false
+ALLOW_ROOT_INSTALL=false
 ADOPT_LEGACY_PROJECT=""
 APPROVED_COMPOSE_FILE=""
 SKIP_START=false
@@ -173,7 +181,11 @@ Options:
   --domain HOST       Accepted/public hostname or IPv4 address (default: localhost).
                       The listener remains on 127.0.0.1:8000.
   --install-dir PATH  Installation directory (default: $XDG_DATA_HOME/backupsheep or
-                      $HOME/.local/share/backupsheep).
+                      $HOME/.local/share/backupsheep; root mode: /opt/backupsheep).
+  --allow-root-install
+                     Explicitly allow effective UID 0 to create and manage a root-owned
+                     installation for an existing rootful Docker daemon. Root remains
+                     refused without this flag; non-root callers cannot use it.
   --project-name NAME Fixed Compose project name (default: backupsheep).
   --adopt-legacy-project NAME
                      One-time, explicit adoption of the exact four-volume stock
@@ -233,8 +245,15 @@ Secure acquisition example (replace COMMIT with a reviewed release commit):
   chmod 700 install.sh
   ./install.sh --ref "${COMMIT}" --domain backups.example.com
 
-Do not pipe a remote script to a shell. Run this installer as the same unprivileged
-user that is already authorized to use the intended Docker daemon.
+Do not pipe a remote script to a shell. The default mode uses the same unprivileged
+identity already authorized for the intended Docker daemon. Rootful-daemon mode requires
+a root-owned installer in a protected directory and the explicit --allow-root-install
+flag; it never changes Docker groups, daemon settings, or container user identities.
+For that mode, first place this reviewed installer in a root-owned protected directory.
+The resulting root-owned backupsheep-compose wrapper must also run as UID 0 with
+--allow-root-install as its first argument on every invocation. Use a root login
+environment (for example sudo -H) so HOME and any Docker credential/TLS directories are
+also protected and root-owned.
 EOF
 }
 
@@ -405,7 +424,14 @@ parse_args() {
             --install-dir)
                 [[ $# -ge 2 ]] || die "--install-dir requires an absolute path"
                 INSTALL_DIR="$2"
+                INSTALL_DIR_WAS_EXPLICIT=true
                 shift 2
+                ;;
+            --allow-root-install)
+                [[ "$ALLOW_ROOT_INSTALL" != true ]] \
+                    || die "--allow-root-install may be specified only once"
+                ALLOW_ROOT_INSTALL=true
+                shift
                 ;;
             --project-name)
                 [[ $# -ge 2 ]] || die "--project-name requires a value"
@@ -522,11 +548,62 @@ parse_args() {
         fi
         PROJECT_NAME="$ADOPT_LEGACY_PROJECT"
     fi
+    apply_install_dir_default_for_mode "$EUID"
 }
 
-refuse_privileged_invocation() {
-    (( EUID != 0 )) \
-        || die "Do not run install.sh as root or through sudo. Use the same unprivileged user that is already authorized for the intended Docker daemon."
+apply_install_dir_default_for_mode() {
+    local effective_uid="$1"
+
+    [[ "$effective_uid" =~ ^[0-9]+$ ]] \
+        || die "Internal effective UID validation failed."
+    if (( 10#$effective_uid == 0 )) && [[ "$ALLOW_ROOT_INSTALL" == true \
+        && "$INSTALL_DIR_WAS_EXPLICIT" != true ]]; then
+        INSTALL_DIR="/opt/backupsheep"
+    fi
+}
+
+root_install_mode_allowed() {
+    local effective_uid="$1"
+    local approved_override="$2"
+
+    [[ "$effective_uid" =~ ^[0-9]+$ ]] || return 1
+    if (( 10#$effective_uid == 0 )); then
+        [[ "$approved_override" == true ]]
+    else
+        [[ "$approved_override" == false ]]
+    fi
+}
+
+validate_invocation_mode() {
+    if root_install_mode_allowed "$EUID" "$ALLOW_ROOT_INSTALL"; then
+        return
+    fi
+    if (( EUID == 0 )); then
+        die "Effective UID 0 is refused by default. Rerun with --allow-root-install only for an intentionally root-owned installation using an existing rootful Docker daemon."
+    fi
+    die "--allow-root-install is valid only when the effective invoking UID is 0. Omit it for the default non-root installation mode."
+}
+
+validate_privileged_runtime_environment() {
+    local path=""
+    local mode=""
+    local variable=""
+
+    (( EUID == 0 )) || return 0
+    for variable in HOME DOCKER_CONFIG DOCKER_CERT_PATH; do
+        path="${!variable-}"
+        if [[ "$variable" != HOME && -z "$path" ]]; then
+            continue
+        fi
+        [[ "$path" == /* && -d "$path" && ! -L "$path" \
+            && "$(file_uid "$path")" == "$EUID" ]] \
+            || die "Root installation requires ${variable} to be an absolute root-owned, non-symlink directory. Use a root login environment (for example sudo -H)."
+        mode="$(file_mode "$path")"
+        [[ "$mode" =~ ^[0-7]{3,4}$ ]] \
+            || die "Could not validate privileged ${variable} permissions."
+        (( (8#$mode & 8#022) == 0 )) \
+            || die "Root installation requires ${variable} not to be writable by group or other users."
+    done
 }
 
 require_commands() {
@@ -549,6 +626,8 @@ require_commands() {
 
 validate_installer_source() {
     local source_path="${BASH_SOURCE[0]}"
+    local source_parent=""
+    local source_parent_mode=""
     local source_owner=""
     local source_mode=""
     local source_links=""
@@ -561,13 +640,22 @@ validate_installer_source() {
     source_owner="$(file_uid "$SCRIPT_PATH")"
     source_mode="$(file_mode "$SCRIPT_PATH")"
     source_links="$(file_links "$SCRIPT_PATH")"
+    source_parent="$(dirname -- "$SCRIPT_PATH")"
+    source_parent_mode="$(file_mode "$source_parent")"
 
     [[ "$source_owner" == "$EUID" ]] \
-        || die "The installer must be owned by the invoking user."
+        || die "The installer must be owned by the effective invoking UID."
     (( (8#$source_mode & 8#022) == 0 )) \
         || die "The installer must not be writable by group or other users."
     [[ "$source_links" == "1" ]] \
         || die "The installer must not be hard-linked."
+    if (( EUID == 0 )); then
+        [[ -d "$source_parent" && ! -L "$source_parent" \
+            && "$(file_uid "$source_parent")" == "$EUID" ]] \
+            || die "A privileged installer parent directory must be root-owned and must not be a symlink."
+        (( (8#$source_parent_mode & 8#022) == 0 )) \
+            || die "A privileged installer parent directory must not be writable by group or other users."
+    fi
 }
 
 validate_ref() {
@@ -633,7 +721,7 @@ validate_install_dir() {
 
     if [[ ! -d "$parent_dir" ]]; then
         install -d -m 0700 -- "$parent_dir" \
-            || die "Cannot create installation parent directory ${parent_dir}. Choose a user-writable path."
+            || die "Cannot create installation parent directory ${parent_dir}. Choose a path writable by the effective invoking UID."
     fi
     [[ -d "$parent_dir" && ! -L "$parent_dir" ]] \
         || die "The installation parent must be a real directory, not a symlink."
@@ -641,7 +729,7 @@ validate_install_dir() {
     parent_owner="$(file_uid "$parent_dir")"
     parent_mode="$(file_mode "$parent_dir")"
     [[ "$parent_owner" == "$EUID" ]] \
-        || die "The installation parent must be owned by the invoking user: ${parent_dir}"
+        || die "The installation parent must be owned by the effective invoking UID: ${parent_dir}"
     (( (8#$parent_mode & 8#022) == 0 )) \
         || die "The installation parent must not be group- or world-writable: ${parent_dir}"
 
@@ -675,7 +763,7 @@ validate_approved_compose_file() {
     [[ "$approved_real" == "$expected_override" ]] \
         || die "--approved-compose-file accepts only ${expected_override}."
     [[ "$(file_uid "$approved_real")" == "$EUID" ]] \
-        || die "The approved Compose override must be owned by the invoking user."
+        || die "The approved Compose override must be owned by the effective invoking UID."
     [[ "$(file_links "$approved_real")" == "1" ]] \
         || die "The approved Compose override must not be hard-linked."
     mode="$(file_mode "$approved_real")"
@@ -693,7 +781,7 @@ validate_docker_access() {
     local compose_version=""
 
     "$DOCKER_BIN" info >/dev/null 2>&1 \
-        || die "The Docker daemon is unavailable to this user. Install/configure Docker on the host, then retry."
+        || die "The Docker daemon is unavailable to the effective invoking UID. Install/configure Docker on the host, then retry."
     engine_version="$("$DOCKER_BIN" version --format '{{.Server.Version}}' 2>/dev/null)" \
         || die "Could not read the Docker Engine server version from the selected daemon."
     if ! semver_at_least "$engine_version" "28.0.0"; then
@@ -753,7 +841,7 @@ validate_checkout_permissions() {
 
     unsafe_path="$(find "$INSTALL_DIR" -xdev ! -uid "$EUID" -print -quit)"
     [[ -z "$unsafe_path" ]] \
-        || die "Checkout content must be owned by the invoking user: ${unsafe_path}"
+        || die "Checkout content must be owned by the effective invoking UID: ${unsafe_path}"
 
     unsafe_path="$(find "$INSTALL_DIR" -xdev -type l -print -quit)"
     [[ -z "$unsafe_path" ]] \
@@ -909,7 +997,7 @@ validate_env_file() {
     env_links="$(file_links "$ENV_FILE")"
     env_size="$(file_size "$ENV_FILE")"
     [[ "$env_owner" == "$EUID" && "$env_mode" == "600" && "$env_links" == "1" ]] \
-        || die "${ENV_FILE} must be owned by the invoking user, mode 0600, and not hard-linked."
+        || die "${ENV_FILE} must be owned by the effective invoking UID, mode 0600, and not hard-linked."
     [[ "$env_size" -le 1048576 ]] || die "${ENV_FILE} is unexpectedly large."
     if IFS= read -r -d '' _nul_probe < "$ENV_FILE"; then
         die "${ENV_FILE} contains a NUL byte."
@@ -1011,7 +1099,7 @@ validate_secret_dir() {
     secret_owner="$(file_uid "$SECRETS_DIR")"
     secret_mode="$(file_mode "$SECRETS_DIR")"
     [[ "$secret_owner" == "$EUID" && "$secret_mode" == "700" ]] \
-        || die "${SECRETS_DIR} must be owned by the invoking user and mode 0700."
+        || die "${SECRETS_DIR} must be owned by the effective invoking UID and mode 0700."
 
     for entry in \
         "$SECRETS_DIR"/* \
@@ -1091,7 +1179,7 @@ validate_secret_file() {
     secret_links="$(file_links "$secret_path")"
     secret_size="$(file_size "$secret_path")"
     [[ "$secret_owner" == "$EUID" && "$secret_mode" == "444" && "$secret_links" == "1" ]] \
-        || die "${secret_path} must be owned by the invoking user, mode 0444, and not hard-linked."
+        || die "${secret_path} must be owned by the effective invoking UID, mode 0444, and not hard-linked."
     secret_name="$(basename -- "$secret_path")"
     if [[ "$secret_name" == "artifact_kms_database_aws_credentials" \
         || "$secret_name" == "artifact_kms_files_aws_credentials" ]]; then
@@ -1185,7 +1273,7 @@ configure_artifact_kms_credential() {
         [[ "$input_path" == "$supplied_path" ]] \
             || die "The ${lane} artifact KMS credentials input path must already be canonical."
         [[ "$(file_uid "$input_path")" == "$EUID" && "$(file_links "$input_path")" == "1" ]] \
-            || die "The ${lane} artifact KMS credentials input must be owned by the invoking user and not hard-linked."
+            || die "The ${lane} artifact KMS credentials input must be owned by the effective invoking UID and not hard-linked."
         input_mode="$(file_mode "$input_path")"
         [[ "$input_mode" == "400" || "$input_mode" == "600" ]] \
             || die "The ${lane} artifact KMS credentials input must have mode 0400 or 0600."
@@ -3585,8 +3673,13 @@ validate_rabbitmq_data_generation() {
 }
 
 show_failure_guidance() {
+    local wrapper_override=""
+
+    if [[ "$ALLOW_ROOT_INSTALL" == true ]]; then
+        wrapper_override=" --allow-root-install"
+    fi
     warn "Startup was left in place for evidence and recovery; no volumes or containers were deleted."
-    warn "Inspect locally with: cd $(printf '%q' "$INSTALL_DIR") && ./backupsheep-compose logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate db-seal preflight app"
+    warn "Inspect locally as the installation owner: cd $(printf '%q' "$INSTALL_DIR") && ./backupsheep-compose${wrapper_override} logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate db-seal preflight app"
 }
 
 wait_for_database_seal() {
@@ -4034,6 +4127,10 @@ print_next_steps() {
     printf '  cd %q && cat .secrets/onboarding_token\n' "$INSTALL_DIR"
     printf '\nInstallation directory: %s\n' "$INSTALL_DIR"
     printf 'Compose project: %s\n' "$PROJECT_NAME"
+    if [[ "$ALLOW_ROOT_INSTALL" == true ]]; then
+        printf 'This is a root-owned installation. Every wrapper invocation must run as effective UID 0 and begin with --allow-root-install.\n'
+        printf '  %q/backupsheep-compose --allow-root-install ps --all\n' "$INSTALL_DIR"
+    fi
     if [[ "$ENABLE_OPERATIONS" == true ]]; then
         printf 'Provider workers and the scheduler were explicitly enabled.\n'
     else
@@ -4043,8 +4140,9 @@ print_next_steps() {
 
 main() {
     parse_args "$@"
-    refuse_privileged_invocation
+    validate_invocation_mode
     require_commands
+    validate_privileged_runtime_environment
     validate_installer_source
     validate_ref
     validate_public_host

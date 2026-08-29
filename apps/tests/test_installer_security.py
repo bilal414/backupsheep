@@ -40,10 +40,94 @@ class InstallerSecurityContractTests(TestCase):
             with self.subTest(token=token):
                 self.assertNotIn(token, self.installer)
 
-        self.assertIn("The Docker daemon is unavailable to this user", self.installer)
+        self.assertIn(
+            "The Docker daemon is unavailable to the effective invoking UID",
+            self.installer,
+        )
         self.assertIn("no host settings were changed", self.installer)
-        self.assertIn("Do not run install.sh as root or through sudo", self.installer)
-        self.assertIn("refuse_privileged_invocation", self.installer)
+        self.assertIn("Effective UID 0 is refused by default", self.installer)
+        self.assertIn("validate_invocation_mode", self.installer)
+
+    def test_rootful_daemon_mode_is_explicit_root_owned_and_never_chowns(self):
+        wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
+        self.assertTrue(self.installer.startswith("#!/bin/bash\n"))
+        self.assertTrue(wrapper.startswith("#!/bin/bash\n"))
+        self.assertIn("--allow-root-install", self.installer)
+        self.assertIn('INSTALL_DIR="/opt/backupsheep"', self.installer)
+        self.assertIn(
+            'root_install_mode_allowed "$EUID" "$ALLOW_ROOT_INSTALL"',
+            self.installer,
+        )
+        self.assertIn('"$(file_uid "$SCRIPT_PATH")"', self.installer)
+        self.assertIn('"$(file_uid "$parent_dir")"', self.installer)
+        self.assertIn('find "$INSTALL_DIR" -xdev ! -uid "$EUID"', self.installer)
+        self.assertIn("validate_privileged_runtime_environment", self.installer)
+        self.assertIn(
+            "for variable in HOME DOCKER_CONFIG DOCKER_CERT_PATH",
+            self.installer,
+        )
+        self.assertNotIn("SUDO_USER", self.installer + wrapper)
+        self.assertNotIn("SUDO_UID", self.installer + wrapper)
+        self.assertNotRegex(self.installer, re.compile(r"(?m)^\s*chown(?:\s|$)"))
+        self.assertNotRegex(wrapper, re.compile(r"(?m)^\s*chown(?:\s|$)"))
+
+        command = r'''
+source "$1"
+root_install_mode_allowed 0 true
+! root_install_mode_allowed 0 false
+root_install_mode_allowed 501 false
+! root_install_mode_allowed 501 true
+! root_install_mode_allowed invalid true
+ALLOW_ROOT_INSTALL=true
+INSTALL_DIR_WAS_EXPLICIT=false
+INSTALL_DIR=/unprivileged/default
+apply_install_dir_default_for_mode 0
+[[ "$INSTALL_DIR" == /opt/backupsheep ]]
+INSTALL_DIR_WAS_EXPLICIT=true
+INSTALL_DIR=/srv/reviewed-backupsheep
+apply_install_dir_default_for_mode 0
+[[ "$INSTALL_DIR" == /srv/reviewed-backupsheep ]]
+ALLOW_ROOT_INSTALL=false
+validate_invocation_mode
+'''
+        subprocess.run(
+            ["bash", "-c", command, "installer-root-mode-test", str(INSTALLER)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        refused = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; ALLOW_ROOT_INSTALL=true; validate_invocation_mode',
+                "installer-root-mode-test",
+                str(INSTALLER),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(
+            "valid only when the effective invoking UID is 0", refused.stderr
+        )
+
+        duplicate = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; parse_args --allow-root-install --allow-root-install',
+                "installer-root-mode-test",
+                str(INSTALLER),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn("may be specified only once", duplicate.stderr)
 
     def test_installer_fails_closed_on_unsupported_docker_versions(self):
         self.assertIn('semver_at_least "$engine_version" "28.0.0"', self.installer)
@@ -83,6 +167,42 @@ semver_at_least 2.34.0-rc.1 2.33.1
         self.assertIn("must not be writable by group or other users", self.installer)
         self.assertIn("must not be hard-linked", self.installer)
         self.assertNotRegex(self.installer, re.compile(r"curl[^\n]*\|[^\n]*(ba)?sh"))
+
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-installer-source-"
+        ) as directory:
+            source = Path(directory) / "install.sh"
+            shutil.copyfile(INSTALLER, source)
+            source.chmod(0o700)
+            command = 'source "$1"; validate_installer_source'
+            subprocess.run(
+                ["bash", "-c", command, "installer-source-test", str(source)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            source.chmod(0o720)
+            writable = subprocess.run(
+                ["bash", "-c", command, "installer-source-test", str(source)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(writable.returncode, 0)
+            self.assertIn("must not be writable by group", writable.stderr)
+
+            source.chmod(0o700)
+            hardlink = Path(directory) / "install-hardlink.sh"
+            os.link(source, hardlink)
+            linked = subprocess.run(
+                ["bash", "-c", command, "installer-source-test", str(source)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(linked.returncode, 0)
+            self.assertIn("must not be hard-linked", linked.stderr)
 
     def test_installer_starts_only_the_core_without_explicit_operations_opt_in(self):
         self.assertIn(
