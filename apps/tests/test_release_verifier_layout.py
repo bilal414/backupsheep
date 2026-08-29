@@ -733,3 +733,25 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
             self.assertIn(f'parser.add_argument("{argument}"', source)
         self.assertIn("reviewed digest-locked; not signed or authenticated", source)
         self.assertNotIn("subprocess", source)
+
+    def test_bootstrap_removes_only_buildkits_empty_ingest_directory(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
+        ).read_text(encoding="utf-8")
+        scan_step = workflow.split(
+            "      - name: Scan both exact child images and validate the complete layout\n",
+            1,
+        )[1].split("      - name: Authenticate only after all local evidence passes\n", 1)[0]
+        self.assertIn(
+            'if [ -e "$LAYOUT_DIR/ingest" ] || [ -L "$LAYOUT_DIR/ingest" ]; then',
+            scan_step,
+        )
+        self.assertIn(
+            'test -z "$(find "$LAYOUT_DIR/ingest" -mindepth 1 -print -quit)"',
+            scan_step,
+        )
+        self.assertIn('rmdir -- "$LAYOUT_DIR/ingest"', scan_step)
+        self.assertLess(
+            scan_step.index('rmdir -- "$LAYOUT_DIR/ingest"'),
+            scan_step.index('"$TOOL_DIR/syft"'),
+        )

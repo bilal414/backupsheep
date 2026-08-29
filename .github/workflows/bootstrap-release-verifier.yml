@@ -175,6 +175,18 @@ jobs:
           export LC_ALL=C
           umask 077
           [[ "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          # BuildKit may leave its empty OCI ingestion staging directory in an
+          # otherwise complete export. Canonicalize only that exact empty
+          # directory; unexpected contents or a link fail before either scanner
+          # and before registry credentials exist.
+          if [ -e "$LAYOUT_DIR/ingest" ] || [ -L "$LAYOUT_DIR/ingest" ]; then
+            test -d "$LAYOUT_DIR/ingest"
+            test ! -L "$LAYOUT_DIR/ingest"
+            test -z "$(find "$LAYOUT_DIR/ingest" -mindepth 1 -print -quit)"
+            rmdir -- "$LAYOUT_DIR/ingest"
+          fi
+          test ! -e "$LAYOUT_DIR/ingest"
+          test ! -L "$LAYOUT_DIR/ingest"
           install -m 0600 deploy/trivy-db-lock.json "$EVIDENCE_DIR/trivy-db-lock.json"
           install -m 0600 "$TRIVY_DB_EVIDENCE" "$EVIDENCE_DIR/trivy-db-evidence.json"
 
