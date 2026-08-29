@@ -125,7 +125,9 @@ hostname matching are mandatory. System trust roots are used unless a private CA
 Stock production requires BSE1 chunked AES-256-GCM-SIV envelopes, enterprise mode, the
 `local-file` provider, and legacy restore disabled. The installer atomically generates
 independent database/files 256-bit keyrings under `.secrets`; Compose grants each only to
-its matching source worker. Storage receives ciphertext and no root key.
+its matching source worker. Storage receives ciphertext and no root key. This artifact
+encryption path requires no AWS account, AWS credentials, or AWS KMS; AWS is used only
+when an operator separately configures an optional AWS source or storage integration.
 
 When `DJANGO_SERVER=prod`, omitting `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE` defaults to
 `bse1`; a direct deployment does not silently write plaintext. `legacy-only` remains an

@@ -201,7 +201,9 @@ rather than a semicolon-separated failover URL.
 Stock production requires `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=bse1`, enterprise mode,
 the `local-file` provider, and legacy restore disabled. The installer creates separate
 database/files keyrings beneath `.secrets` and mounts each only into its matching source
-lane. Storage, web, cloud, logs and Beat receive neither keyring nor path.
+lane. Storage, web, cloud, logs and Beat receive neither keyring nor path. No AWS account,
+credentials, or KMS service is required for artifact encryption; AWS remains optional
+only for users who configure an AWS source or storage destination.
 
 The strict keyring contains one active 256-bit key and at most seven retained legacy keys.
 Wrapping authenticates the complete installation-bound artifact context, including the

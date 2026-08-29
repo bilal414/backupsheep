@@ -239,6 +239,10 @@ each file; storage and every other role receive neither. Back up both keyrings w
 database recovery set. See [Private staging and ciphertext handoff](../security/staging-isolation.md)
 before enabling operations or rotating a key wrap.
 
+The `local-file` artifact provider requires no AWS account, credentials, or KMS service.
+AWS credentials are needed only for optional AWS sources or storage destinations that an
+operator explicitly configures.
+
 Direct production deployments also default an omitted encryption mode to `bse1` when
 `DJANGO_SERVER=prod`. `legacy-only` must be selected explicitly for a bounded
 non-enterprise historical-restore transition; it is not a secure production default.
