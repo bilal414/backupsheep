@@ -306,12 +306,6 @@
       "test_id": "B310"
     },
     {
-      "fingerprint": "68946a320e294e25cfbf59664a229b0b7e4b02c7f45c485a268d1bc4a260304b",
-      "path": "scripts/publish_release_evidence.py",
-      "review": "fixed-github-api-requests",
-      "test_id": "B310"
-    },
-    {
       "fingerprint": "0ebc4e156bb45109384b225dcf8b8bf48ab357fc00cad063dea0e2bed3f50f3d",
       "path": "scripts/upcloud_live_ui_e2e.py",
       "review": "validated-harness-remote-commands",
