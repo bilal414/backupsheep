@@ -194,10 +194,14 @@ class DeploymentHardeningContractTests(TestCase):
             "FROM scratch",
             "USER 65532:65532",
             'ENTRYPOINT ["/ko-app/cosign"]',
+            "--chmod=a=r",
+            "--chmod=a=rx",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, dockerfile)
         self.assertIn("GOTOOLCHAIN=local", dockerfile)
+        self.assertNotIn("--chmod=0444", dockerfile)
+        self.assertNotIn("--chmod=0555", dockerfile)
         self.assertNotIn("apk upgrade", dockerfile)
 
     def test_postgres_logical_runtime_migration_is_deterministic_and_fail_closed(self):

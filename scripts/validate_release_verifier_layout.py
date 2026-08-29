@@ -120,6 +120,7 @@ EXPECTED_SYFT_SCHEMA = {
 }
 EXPECTED_TRIVY_VERSION = "0.74.0"
 EXPECTED_BUILD_TIMESTAMP = "2026-08-29T00:00:00Z"
+EXPECTED_LAYER_ANNOTATIONS = {"buildkit/rewritten-timestamp": "1787961600"}
 
 EXPECTED_HISTORY = (
     (
@@ -138,12 +139,12 @@ EXPECTED_HISTORY = (
         True,
     ),
     (
-        "COPY --chown=0:0 --chmod=0444 /etc/ssl/certs/ca-certificates.crt "
+        "COPY --chown=0:0 --chmod=a=r /etc/ssl/certs/ca-certificates.crt "
         "/etc/ssl/certs/ca-certificates.crt # buildkit",
         False,
     ),
     (
-        "COPY --chown=0:0 --chmod=0555 /out/cosign /ko-app/cosign # buildkit",
+        "COPY --chown=0:0 --chmod=a=rx /out/cosign /ko-app/cosign # buildkit",
         False,
     ),
     ("ENV HOME=/tmp", True),
@@ -865,9 +866,15 @@ def _validate_layout(
                 label=f"{platform_name} layer[{index}]",
                 media_type=OCI_LAYER,
                 maximum_size=MAX_LAYER_COMPRESSED_BYTES,
+                extra_keys={"annotations"},
             )
             for index, value in enumerate(layer_values)
         )
+        if any(
+            descriptor["annotations"] != EXPECTED_LAYER_ANNOTATIONS
+            for descriptor in layer_descriptors
+        ):
+            _fail(f"{platform_name} layers are not bound to the reproducible epoch")
         layer_results: list[tuple[str, int, RuntimeFile]] = []
         for position, (descriptor, expected_file, expected_mode) in enumerate(
             zip(
@@ -933,6 +940,161 @@ def _validate_layout(
         layout_snapshot.payload + b"\x00" + wrapper_snapshot.payload
     ).hexdigest()
     return images, layout_binding
+
+
+def _owned_private_directory(directory: Path, label: str) -> Path:
+    if not directory.is_absolute():
+        _fail(f"{label} must be absolute")
+    try:
+        resolved = directory.resolve(strict=True)
+        metadata = directory.lstat()
+    except OSError as exc:
+        raise ValidationError(f"cannot inspect {label}: {exc}") from exc
+    if (
+        resolved != directory
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        _fail(f"{label} must be an owner-private real directory")
+    return resolved
+
+
+def _validate_scan_layout(
+    scan_layout: Path,
+    *,
+    image: PlatformImage,
+    scan_tag: str,
+) -> str:
+    root, observed_blobs = _validate_layout_root(scan_layout)
+    marker, _ = _load_json(
+        root / "oci-layout", maximum=1024, label=f"{image.platform} scan marker"
+    )
+    if marker != {"imageLayoutVersion": "1.0.0"}:
+        _fail(f"{image.platform} scan layout marker is not exact")
+    wrapper, _ = _load_json(
+        root / "index.json",
+        maximum=MAX_CONTROL_BYTES,
+        label=f"{image.platform} scan index",
+    )
+    _exact_keys(
+        wrapper,
+        {"schemaVersion", "mediaType", "manifests"},
+        f"{image.platform} scan index",
+    )
+    if wrapper["schemaVersion"] != 2 or wrapper["mediaType"] != OCI_INDEX:
+        _fail(f"{image.platform} scan index has an unsupported schema or media type")
+    roots = _list(wrapper["manifests"], f"{image.platform} scan roots")
+    if len(roots) != 1:
+        _fail(f"{image.platform} scan layout must contain exactly one child")
+    descriptor = _descriptor(
+        roots[0],
+        label=f"{image.platform} scan descriptor",
+        media_type=OCI_MANIFEST,
+        maximum_size=MAX_CONTROL_BYTES,
+        extra_keys={"annotations", "platform"},
+    )
+    platform = _object(descriptor["platform"], f"{image.platform} scan platform")
+    _exact_keys(platform, {"architecture", "os"}, f"{image.platform} scan platform")
+    if platform != {"architecture": image.architecture, "os": "linux"}:
+        _fail(f"{image.platform} scan projection selected the wrong platform")
+    if descriptor["annotations"] != {"org.opencontainers.image.ref.name": scan_tag}:
+        _fail(f"{image.platform} scan projection has an unexpected reference")
+    if (
+        descriptor["digest"] != image.manifest_digest
+        or descriptor["size"] != len(image.manifest_bytes)
+    ):
+        _fail(f"{image.platform} scan projection selected the wrong manifest")
+
+    referenced: set[str] = set()
+    manifest = _blob_snapshot(
+        root,
+        descriptor,
+        maximum=MAX_CONTROL_BYTES,
+        label=f"{image.platform} projected manifest",
+        referenced=referenced,
+    )
+    if manifest.payload != image.manifest_bytes:
+        _fail(f"{image.platform} projected manifest bytes changed")
+    config_descriptor = {
+        "mediaType": OCI_CONFIG,
+        "digest": image.config_digest,
+        "size": len(image.config_bytes),
+    }
+    config = _blob_snapshot(
+        root,
+        config_descriptor,
+        maximum=MAX_CONTROL_BYTES,
+        label=f"{image.platform} projected config",
+        referenced=referenced,
+    )
+    if config.payload != image.config_bytes:
+        _fail(f"{image.platform} projected config bytes changed")
+    for position, layer_descriptor in enumerate(image.compressed_layers):
+        _blob_snapshot(
+            root,
+            layer_descriptor,
+            maximum=MAX_LAYER_COMPRESSED_BYTES,
+            label=f"{image.platform} projected layer[{position}]",
+            referenced=referenced,
+        )
+    if referenced != observed_blobs or len(referenced) != 4:
+        _fail(f"{image.platform} scan projection graph is not exact")
+    return str(root)
+
+
+def preflight_source(
+    *,
+    layout: Path,
+    index_digest: str,
+    repository: str,
+    tag: str,
+) -> tuple[dict[str, PlatformImage], str]:
+    if DIGEST_RE.fullmatch(index_digest) is None:
+        _fail("--index-digest must be a lowercase SHA-256 digest")
+    if REPOSITORY_RE.fullmatch(repository) is None or "@" in repository:
+        _fail("--repository is not a canonical lowercase OCI repository")
+    if TAG_RE.fullmatch(tag) is None:
+        _fail("--tag is not a valid OCI tag")
+    return _validate_layout(
+        layout=layout,
+        index_digest=index_digest,
+        repository=repository,
+        tag=tag,
+    )
+
+
+def preflight(
+    *,
+    layout: Path,
+    index_digest: str,
+    repository: str,
+    tag: str,
+    scan_layouts: dict[str, Path],
+) -> tuple[dict[str, PlatformImage], str, dict[str, str]]:
+    if set(scan_layouts) != set(EXPECTED_PLATFORMS):
+        _fail("scan projections must cover exactly linux/amd64 and linux/arm64")
+    images, layout_binding = preflight_source(
+        layout=layout,
+        index_digest=index_digest,
+        repository=repository,
+        tag=tag,
+    )
+    scan_root = _owned_private_directory(layout.parent / "scans", "scan root")
+    identities: dict[str, str] = {}
+    for platform in EXPECTED_PLATFORMS:
+        architecture = platform.split("/", 1)[1]
+        expected = scan_root / architecture
+        if scan_layouts[platform] != expected:
+            _fail(f"{platform} scan projection path is not canonical")
+        _owned_private_directory(expected, f"{platform} scan projection")
+        identities[platform] = _validate_scan_layout(
+            expected,
+            image=images[platform],
+            scan_tag=f"scan-{architecture}",
+        )
+    return images, layout_binding, identities
 
 
 def _canonical_inventory(inventory: dict[str, str]) -> tuple[str, bytes]:
@@ -1372,18 +1534,13 @@ def validate(
     index_digest: str,
     repository: str,
     tag: str,
+    scan_layouts: dict[str, Path],
     syft_paths: dict[str, Path],
     trivy_paths: dict[str, Path],
     trivy_db_lock: Path,
     trivy_db_evidence: Path,
     summary: Path,
 ) -> dict[str, Any]:
-    if DIGEST_RE.fullmatch(index_digest) is None:
-        _fail("--index-digest must be a lowercase SHA-256 digest")
-    if REPOSITORY_RE.fullmatch(repository) is None or "@" in repository:
-        _fail("--repository is not a canonical lowercase OCI repository")
-    if TAG_RE.fullmatch(tag) is None:
-        _fail("--tag is not a valid OCI tag")
     if set(syft_paths) != set(EXPECTED_PLATFORMS) or set(trivy_paths) != set(EXPECTED_PLATFORMS):
         _fail("scanner inputs must cover exactly linux/amd64 and linux/arm64")
     all_inputs = [*syft_paths.values(), *trivy_paths.values(), trivy_db_lock, trivy_db_evidence]
@@ -1394,16 +1551,15 @@ def validate(
     if summary_path.resolve(strict=False) in set(canonical_inputs):
         _fail("summary must not replace an input evidence file")
 
-    images, layout_binding = _validate_layout(
+    images, layout_binding, raw_identities = preflight(
         layout=layout,
         index_digest=index_digest,
         repository=repository,
         tag=tag,
+        scan_layouts=scan_layouts,
     )
-    # Syft 1.51.0 canonicalizes the command input ``oci-dir:/absolute/path``
-    # to the bare absolute path in source.name and metadata.userInput.
-    raw_syft_identity = str(layout)
-    raw_trivy_identity = str(layout)
+    # Syft 1.51.0 canonicalizes ``oci-dir:/absolute/path`` to the bare path.
+    # Trivy reports the same bare projected-layout input path.
     raw_reports: dict[str, tuple[ReportResult, ReportResult]] = {}
     for platform in EXPECTED_PLATFORMS:
         image = images[platform]
@@ -1411,13 +1567,13 @@ def validate(
         syft = _validate_syft(
             syft_paths[platform],
             image=image,
-            raw_identity=raw_syft_identity,
+            raw_identity=raw_identities[platform],
             immutable_identity=None,
         )
         trivy = _validate_trivy(
             trivy_paths[platform],
             image=image,
-            raw_identity=raw_trivy_identity,
+            raw_identity=raw_identities[platform],
             immutable_identity=None,
         )
         if syft.inventory != trivy.inventory:
@@ -1449,13 +1605,13 @@ def validate(
         syft = _validate_syft(
             syft_paths[platform],
             image=image,
-            raw_identity=raw_syft_identity,
+            raw_identity=raw_identities[platform],
             immutable_identity=immutable,
         )
         trivy = _validate_trivy(
             trivy_paths[platform],
             image=image,
-            raw_identity=raw_trivy_identity,
+            raw_identity=raw_identities[platform],
             immutable_identity=immutable,
         )
         if syft.inventory != trivy.inventory:
@@ -1517,6 +1673,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--index-digest", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--tag", required=True)
+    parser.add_argument("--scan-layout-amd64", type=Path, required=True)
+    parser.add_argument("--scan-layout-arm64", type=Path, required=True)
     parser.add_argument("--syft-amd64", type=Path, required=True)
     parser.add_argument("--trivy-amd64", type=Path, required=True)
     parser.add_argument("--syft-arm64", type=Path, required=True)
@@ -1531,6 +1689,10 @@ def main(argv: list[str] | None = None) -> int:
             index_digest=arguments.index_digest,
             repository=arguments.repository,
             tag=arguments.tag,
+            scan_layouts={
+                "linux/amd64": arguments.scan_layout_amd64,
+                "linux/arm64": arguments.scan_layout_arm64,
+            },
             syft_paths={
                 "linux/amd64": arguments.syft_amd64,
                 "linux/arm64": arguments.syft_arm64,

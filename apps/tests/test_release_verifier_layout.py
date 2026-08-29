@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import prepare_trivy_db as trivy_db  # noqa: E402
+import preflight_release_verifier_scan as scan_preflight  # noqa: E402
 import validate_release_verifier_layout as verifier  # noqa: E402
 
 
@@ -43,8 +45,10 @@ class VerifierFixture:
         self.summary = self.evidence / "summary.json"
         self.syft_paths: dict[str, Path] = {}
         self.trivy_paths: dict[str, Path] = {}
+        self.scan_layouts: dict[str, Path] = {}
         self.images: dict[str, dict] = {}
         self._build_layout()
+        self._build_scan_layouts()
         self._build_reports()
         self._build_database()
 
@@ -126,6 +130,7 @@ class VerifierFixture:
         )
         cert_descriptor = self._blob(cert_layer)
         cert_descriptor["mediaType"] = verifier.OCI_LAYER
+        cert_descriptor["annotations"] = verifier.EXPECTED_LAYER_ANNOTATIONS
 
         child_descriptors = []
         for architecture in ("amd64", "arm64"):
@@ -136,6 +141,7 @@ class VerifierFixture:
             )
             binary_descriptor = self._blob(binary_layer)
             binary_descriptor["mediaType"] = verifier.OCI_LAYER
+            binary_descriptor["annotations"] = verifier.EXPECTED_LAYER_ANNOTATIONS
             config = {
                 "architecture": architecture,
                 "config": {
@@ -213,6 +219,54 @@ class VerifierFixture:
                 "manifests": [index_descriptor],
             },
         )
+
+    def _build_scan_layouts(self) -> None:
+        scan_root = self.root / "scans"
+        scan_root.mkdir(mode=0o700)
+        for platform in verifier.EXPECTED_PLATFORMS:
+            architecture = platform.split("/", 1)[1]
+            image = self.images[platform]
+            scan_layout = scan_root / architecture
+            scan_blobs = scan_layout / "blobs" / "sha256"
+            scan_blobs.mkdir(parents=True, mode=0o700)
+            scan_layout.chmod(0o700)
+            self._json(
+                scan_layout / "oci-layout", {"imageLayoutVersion": "1.0.0"}
+            )
+            self._json(
+                scan_layout / "index.json",
+                {
+                    "schemaVersion": 2,
+                    "mediaType": verifier.OCI_INDEX,
+                    "manifests": [
+                        {
+                            "mediaType": verifier.OCI_MANIFEST,
+                            "digest": image["manifest_digest"],
+                            "size": len(image["manifest_bytes"]),
+                            "annotations": {
+                                "org.opencontainers.image.ref.name": (
+                                    f"scan-{architecture}"
+                                )
+                            },
+                            "platform": {
+                                "architecture": architecture,
+                                "os": "linux",
+                            },
+                        }
+                    ],
+                },
+            )
+            digests = {
+                image["manifest_digest"],
+                image["config_digest"],
+                *(layer["digest"] for layer in image["manifest"]["layers"]),
+            }
+            for value in digests:
+                shutil.copyfile(
+                    self.blobs / value.removeprefix("sha256:"),
+                    scan_blobs / value.removeprefix("sha256:"),
+                )
+            self.scan_layouts[platform] = scan_layout
 
     @staticmethod
     def _syft_artifact(
@@ -344,11 +398,11 @@ class VerifierFixture:
                 "schema": verifier.EXPECTED_SYFT_SCHEMA,
                 "source": {
                     "id": image["manifest_digest"].removeprefix("sha256:"),
-                    "name": str(self.layout),
+                    "name": str(self.scan_layouts[platform]),
                     "version": image["manifest_digest"],
                     "type": "image",
                     "metadata": {
-                        "userInput": str(self.layout),
+                        "userInput": str(self.scan_layouts[platform]),
                         "imageID": image["config_digest"],
                         "manifestDigest": image["manifest_digest"],
                         "mediaType": verifier.OCI_MANIFEST,
@@ -415,7 +469,7 @@ class VerifierFixture:
             trivy = {
                 "SchemaVersion": 2,
                 "CreatedAt": "2026-08-29T15:02:00Z",
-                "ArtifactName": str(self.layout),
+                "ArtifactName": str(self.scan_layouts[platform]),
                 "ArtifactType": "container_image",
                 "ArtifactID": image["config_digest"],
                 "Metadata": {
@@ -506,6 +560,7 @@ class VerifierFixture:
             index_digest=self.index_digest,
             repository=self.repository,
             tag=self.tag,
+            scan_layouts=self.scan_layouts,
             syft_paths=self.syft_paths,
             trivy_paths=self.trivy_paths,
             trivy_db_lock=self.lock_path,
@@ -553,6 +608,64 @@ class ReleaseVerifierLayoutTests(TestCase):
                 self.fixture.report(platform, "trivy")["ArtifactName"], immutable
             )
         self.assertEqual(self.fixture.summary.stat().st_mode & 0o777, 0o600)
+
+    def test_scan_preflight_binds_two_distinct_single_platform_projections(self):
+        images, layout_binding, identities = verifier.preflight(
+            layout=self.fixture.layout,
+            index_digest=self.fixture.index_digest,
+            repository=self.fixture.repository,
+            tag=self.fixture.tag,
+            scan_layouts=self.fixture.scan_layouts,
+        )
+        self.assertEqual(set(images), set(verifier.EXPECTED_PLATFORMS))
+        self.assertEqual(len(layout_binding), 64)
+        self.assertEqual(
+            identities,
+            {
+                platform: str(self.fixture.scan_layouts[platform])
+                for platform in verifier.EXPECTED_PLATFORMS
+            },
+        )
+        self.assertNotEqual(
+            images["linux/amd64"].manifest_digest,
+            images["linux/arm64"].manifest_digest,
+        )
+        self.assertNotEqual(identities["linux/amd64"], identities["linux/arm64"])
+
+    def test_scan_projection_paths_cannot_be_swapped_or_redirected(self):
+        self.fixture.scan_layouts = {
+            "linux/amd64": self.fixture.scan_layouts["linux/arm64"],
+            "linux/arm64": self.fixture.scan_layouts["linux/amd64"],
+        }
+        self.assert_rejected("path is not canonical")
+
+        self.fixture = VerifierFixture(self.root / "second")
+        amd64 = self.fixture.scan_layouts["linux/amd64"]
+        redirected = amd64.with_name("amd64-real")
+        amd64.replace(redirected)
+        amd64.symlink_to(redirected, target_is_directory=True)
+        self.assert_rejected("owner-private real directory")
+
+    def test_scan_projection_permissions_and_graph_tampering_fail_closed(self):
+        amd64 = self.fixture.scan_layouts["linux/amd64"]
+        amd64.chmod(0o755)
+        self.assert_rejected("owner-private real directory")
+
+        self.fixture = VerifierFixture(self.root / "second")
+        amd64 = self.fixture.scan_layouts["linux/amd64"]
+        (amd64 / "blobs" / "sha256" / ("f" * 64)).write_bytes(b"extra")
+        self.assert_rejected("graph is not exact")
+
+        self.fixture = VerifierFixture(self.root / "third")
+        image = self.fixture.images["linux/arm64"]
+        config = (
+            self.fixture.scan_layouts["linux/arm64"]
+            / "blobs"
+            / "sha256"
+            / image["config_digest"].removeprefix("sha256:")
+        )
+        config.write_bytes(config.read_bytes() + b" ")
+        self.assert_rejected("bytes do not match")
 
     def test_pre_normalized_syft_input_is_rejected_without_mutating_trivy(self):
         platform = "linux/amd64"
@@ -746,6 +859,16 @@ class ReleaseVerifierLayoutTests(TestCase):
 
 
 class ReleaseVerifierValidatorCLIContractTests(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
+        self.fixture = VerifierFixture(self.root)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+        super().tearDown()
+
     def test_cli_exposes_the_bootstrap_workflow_interface(self):
         source = (ROOT / "scripts" / "validate_release_verifier_layout.py").read_text()
         for argument in (
@@ -753,6 +876,8 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
             "--index-digest",
             "--repository",
             "--tag",
+            "--scan-layout-amd64",
+            "--scan-layout-arm64",
             "--syft-amd64",
             "--trivy-amd64",
             "--syft-arm64",
@@ -764,6 +889,102 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
             self.assertIn(f'parser.add_argument("{argument}"', source)
         self.assertIn("reviewed digest-locked; not signed or authenticated", source)
         self.assertNotIn("subprocess", source)
+
+        preflight = (
+            ROOT / "scripts" / "preflight_release_verifier_scan.py"
+        ).read_text(encoding="utf-8")
+        for argument in (
+            "--layout",
+            "--index-digest",
+            "--repository",
+            "--tag",
+            "--source-only",
+            "--scan-layout-amd64",
+            "--scan-layout-arm64",
+        ):
+            self.assertIn(f'parser.add_argument("{argument}"', preflight)
+        self.assertNotIn("subprocess", preflight)
+
+    def test_source_only_cli_validates_before_projection_and_rejects_mixed_modes(self):
+        base = [
+            "--layout",
+            str(self.fixture.layout),
+            "--index-digest",
+            self.fixture.index_digest,
+            "--repository",
+            self.fixture.repository,
+            "--tag",
+            self.fixture.tag,
+        ]
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            status = scan_preflight.main(["--source-only", *base])
+        self.assertEqual(status, 0)
+        evidence = json.loads(output.getvalue())
+        self.assertEqual(evidence["index_digest"], self.fixture.index_digest)
+        for platform in verifier.EXPECTED_PLATFORMS:
+            self.assertNotIn("scan_identity", evidence["platforms"][platform])
+
+        errors = io.StringIO()
+        with mock.patch("sys.stderr", errors):
+            status = scan_preflight.main(
+                [
+                    "--source-only",
+                    *base,
+                    "--scan-layout-amd64",
+                    str(self.fixture.scan_layouts["linux/amd64"]),
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("cannot be combined", errors.getvalue())
+
+    def test_bootstrap_scans_only_validated_single_platform_projections(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
+        ).read_text(encoding="utf-8")
+        scan_step = workflow.split(
+            "      - name: Scan both exact child images and validate the complete layout\n",
+            1,
+        )[1].split("      - name: Authenticate only after all local evidence passes\n", 1)[0]
+        for expected in (
+            "python3 scripts/preflight_release_verifier_scan.py",
+            "--source-only",
+            'test ! -e "$SCAN_ROOT"',
+            'test ! -L "$SCAN_ROOT"',
+            'test ! -e "$scan_layout"',
+            'test ! -L "$scan_layout"',
+            '"$TOOL_DIR/oras" cp',
+            "--from-oci-layout",
+            "--to-oci-layout",
+            '--platform "$platform"',
+            '--concurrency 1',
+            '--no-tty',
+            '"$LAYOUT_DIR:$CANDIDATE_TAG"',
+            '"$scan_layout:scan-$architecture"',
+            "python3 scripts/preflight_release_verifier_scan.py",
+            '--scan-layout-amd64 "$SCAN_ROOT/amd64"',
+            '--scan-layout-arm64 "$SCAN_ROOT/arm64"',
+            'scan "oci-dir:$scan_layout"',
+            '--input "$scan_layout"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, scan_step)
+        self.assertLess(
+            scan_step.index("--source-only"),
+            scan_step.index('"$TOOL_DIR/oras" cp'),
+        )
+        self.assertLess(
+            scan_step.rindex("python3 scripts/preflight_release_verifier_scan.py"),
+            scan_step.index('"$TOOL_DIR/syft"'),
+        )
+        syft_invocation = scan_step.split('"$TOOL_DIR/syft"', 1)[1].split(
+            "trivy_status=0", 1
+        )[0]
+        trivy_invocation = scan_step.split('"$TOOL_DIR/trivy"', 1)[1].split(
+            "trivy_status=$?", 1
+        )[0]
+        self.assertNotIn("--platform", syft_invocation)
+        self.assertNotIn("--platform", trivy_invocation)
 
     def test_bootstrap_removes_only_buildkits_empty_ingest_directory(self):
         workflow = (

@@ -12,6 +12,7 @@ on:
       - deploy/release-policy.json
       - deploy/trivy-db-lock.json
       - scripts/install_release_tools.py
+      - scripts/preflight_release_verifier_scan.py
       - scripts/prepare_trivy_db.py
       - scripts/promote_release_images.py
       - scripts/publish_stable_release_verifier.py
@@ -53,6 +54,7 @@ jobs:
       TRIVY_DB_EVIDENCE: /tmp/backupsheep-release-verifier-trivy-db.json
       TRIVY_HOME: /tmp/backupsheep-release-verifier-trivy-home
       RELEASE_DOCKER_CONFIG: /tmp/backupsheep-release-verifier-docker
+      SCAN_ROOT: ${{ github.workspace }}/release-verifier-bootstrap/scans
     steps:
       - name: Check out the exact bootstrap source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -86,6 +88,7 @@ jobs:
           done
           python3 -m py_compile \
             scripts/prepare_trivy_db.py \
+            scripts/preflight_release_verifier_scan.py \
             scripts/publish_stable_release_verifier.py \
             scripts/validate_release_verifier_layout.py
 
@@ -197,8 +200,50 @@ jobs:
           install -m 0600 deploy/trivy-db-lock.json "$EVIDENCE_DIR/trivy-db-lock.json"
           install -m 0600 "$TRIVY_DB_EVIDENCE" "$EVIDENCE_DIR/trivy-db-evidence.json"
 
+          python3 scripts/preflight_release_verifier_scan.py \
+            --source-only \
+            --layout "$LAYOUT_DIR" \
+            --index-digest "$INDEX_DIGEST" \
+            --repository "$QUARANTINE_REPOSITORY" \
+            --tag "$CANDIDATE_TAG" \
+            > "$EVIDENCE_DIR/release-verifier-source-preflight.json"
+
+          test ! -e "$SCAN_ROOT"
+          test ! -L "$SCAN_ROOT"
+          install -d -m 0700 "$SCAN_ROOT"
+          test "$(stat -c '%a:%u' "$SCAN_ROOT")" = "700:$(id -u)"
           for architecture in amd64 arm64; do
             platform="linux/$architecture"
+            scan_layout="$SCAN_ROOT/$architecture"
+            test ! -e "$scan_layout"
+            test ! -L "$scan_layout"
+            env -i \
+              HOME="$TRIVY_HOME" \
+              LC_ALL=C \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              "$TOOL_DIR/oras" cp \
+                --from-oci-layout \
+                --to-oci-layout \
+                --platform "$platform" \
+                --concurrency 1 \
+                --no-tty \
+                "$LAYOUT_DIR:$CANDIDATE_TAG" \
+                "$scan_layout:scan-$architecture"
+            test "$(stat -c '%a:%u' "$scan_layout")" = "700:$(id -u)"
+          done
+
+          python3 scripts/preflight_release_verifier_scan.py \
+            --layout "$LAYOUT_DIR" \
+            --index-digest "$INDEX_DIGEST" \
+            --repository "$QUARANTINE_REPOSITORY" \
+            --tag "$CANDIDATE_TAG" \
+            --scan-layout-amd64 "$SCAN_ROOT/amd64" \
+            --scan-layout-arm64 "$SCAN_ROOT/arm64" \
+            > "$EVIDENCE_DIR/release-verifier-scan-preflight.json"
+
+          for architecture in amd64 arm64; do
+            platform="linux/$architecture"
+            scan_layout="$SCAN_ROOT/$architecture"
             syft_report="$EVIDENCE_DIR/release-verifier-linux-$architecture.syft.json"
             trivy_report="$EVIDENCE_DIR/release-verifier-linux-$architecture.trivy.json"
 
@@ -209,8 +254,7 @@ jobs:
               SYFT_CHECK_FOR_APP_UPDATE=false \
               "$TOOL_DIR/syft" \
                 --config "$TOOL_DIR/empty-syft.yaml" \
-                scan "oci-dir:$LAYOUT_DIR" \
-                --platform "$platform" \
+                scan "oci-dir:$scan_layout" \
                 --output "syft-json=$syft_report"
 
             trivy_status=0
@@ -222,8 +266,7 @@ jobs:
               "$TOOL_DIR/trivy" \
                 --cache-dir "$TRIVY_CACHE_DIR" \
                 --config "$TOOL_DIR/empty-trivy.yaml" image \
-                --input "$LAYOUT_DIR" \
-                --platform "$platform" \
+                --input "$scan_layout" \
                 --ignorefile "$TOOL_DIR/empty-trivy.ignore" \
                 --skip-db-update \
                 --skip-java-db-update \
@@ -253,6 +296,8 @@ jobs:
             --index-digest "$INDEX_DIGEST" \
             --repository "$QUARANTINE_REPOSITORY" \
             --tag "$CANDIDATE_TAG" \
+            --scan-layout-amd64 "$SCAN_ROOT/amd64" \
+            --scan-layout-arm64 "$SCAN_ROOT/arm64" \
             --syft-amd64 "$EVIDENCE_DIR/release-verifier-linux-amd64.syft.json" \
             --trivy-amd64 "$EVIDENCE_DIR/release-verifier-linux-amd64.trivy.json" \
             --syft-arm64 "$EVIDENCE_DIR/release-verifier-linux-arm64.syft.json" \

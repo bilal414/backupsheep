@@ -56,9 +56,9 @@ LABEL org.opencontainers.image.title="BackupSheep release verifier" \
       com.backupsheep.release-verifier.go-version="go1.26.6" \
       com.backupsheep.release-verifier.module-graph-sha256="894396e4119d1620852793d03419a7130f4c62881ae5e11301b36c2a775aa6f2"
 
-COPY --link --from=verifier-builder --chown=0:0 --chmod=0444 \
+COPY --link --from=verifier-builder --chown=0:0 --chmod=a=r \
     /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --link --from=verifier-builder --chown=0:0 --chmod=0555 \
+COPY --link --from=verifier-builder --chown=0:0 --chmod=a=rx \
     /out/cosign /ko-app/cosign
 
 ENV HOME=/tmp
