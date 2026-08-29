@@ -733,6 +733,8 @@ ONBOARDING_INSTALL_TOKEN_FILE = os.path.join(BASE_DIR, "_storage", "install_toke
 
 LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/healthz/',
+    r'/.well-known/security.txt',
+    r'/security.txt',
     r'/login',
     r'/reset',
     r'/django-admin/',

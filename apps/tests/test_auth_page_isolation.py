@@ -84,6 +84,22 @@ class AuthPageIsolationTests(BaseTestCase):
         )
         self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
 
+    def test_security_txt_is_public_and_contains_no_instance_details(self):
+        for path in ("/.well-known/security.txt", "/security.txt"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200, response.content)
+                self.assertEqual(
+                    response.headers["Content-Type"], "text/plain; charset=utf-8"
+                )
+                document = response.content.decode()
+                self.assertIn(
+                    "Contact: https://github.com/bilal414/backupsheep/security/advisories/new",
+                    document,
+                )
+                self.assertIn("Expires: 2027-08-28T23:59:59Z", document)
+                self.assertNotIn(settings.SECRET_KEY, document)
+
     def test_login_reset_and_invite_pages_are_third_party_isolated(self):
         invite = CoreInvite.objects.create(
             added_by=self.member,

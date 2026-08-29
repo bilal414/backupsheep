@@ -27,8 +27,29 @@ def healthz(_request):
     return HttpResponse("ok", content_type="text/plain")
 
 
+def security_txt(_request):
+    """Publish the project's private vulnerability-reporting channel.
+
+    Keep this response static and free of deployment details.  It must remain
+    reachable before onboarding and without an authenticated console session.
+    """
+
+    body = "\n".join(
+        (
+            "Contact: https://github.com/bilal414/backupsheep/security/advisories/new",
+            "Expires: 2027-08-28T23:59:59Z",
+            "Preferred-Languages: en",
+            "Policy: https://github.com/bilal414/backupsheep/security/policy",
+            "",
+        )
+    )
+    return HttpResponse(body, content_type="text/plain; charset=utf-8")
+
+
 urlpatterns = [
     path("healthz/", healthz, name="healthz"),
+    path(".well-known/security.txt", security_txt, name="security-txt"),
+    path("security.txt", security_txt, name="security-txt-legacy"),
     path("", include("apps.console.urls")),
     path("", include("apps.api.urls")),
 ]
