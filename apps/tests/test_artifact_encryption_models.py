@@ -90,8 +90,8 @@ class ArtifactEncryptionModelTests(BaseTestCase):
         values = {
             "envelope": envelope,
             "generation": 1,
-            "provider": CoreBackupKeyWrap.Provider.AWS_KMS,
-            "wrapping_key_id": "arn:aws:kms:us-east-1:123456789012:key/example",
+            "provider": CoreBackupKeyWrap.Provider.LOCAL_FILE,
+            "wrapping_key_id": "lfk-11111111111111111111111111111111",
             "wrapped_data_key": wrapped,
             "wrapped_key_sha256": hashlib.sha256(wrapped).hexdigest(),
             "status": CoreBackupKeyWrap.Status.PENDING,
@@ -176,7 +176,7 @@ class ArtifactEncryptionModelTests(BaseTestCase):
         envelope = self._envelope(execution, backup)
         key_wrap = CoreBackupKeyWrap(
             envelope=envelope,
-            provider=CoreBackupKeyWrap.Provider.AWS_KMS,
+            provider=CoreBackupKeyWrap.Provider.LOCAL_FILE,
             wrapping_key_id="key",
             wrapped_data_key=b"wrapped",
             wrapped_key_sha256="0" * 64,

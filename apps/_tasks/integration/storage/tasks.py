@@ -80,12 +80,18 @@ from apps._tasks.artifact_encryption import (
     materialize_local_restore_ciphertext_handoff,
     storage_upload_artifact,
 )
+from apps._tasks.artifact_deletion import (
+    DELETION_ORIGIN_KEY,
+    build_deletion_origin,
+    validate_deletion_origin,
+)
 from apps._tasks.integration.storage.lease import (
     DurableStorageUploadLease,
     StorageCleanupNotEligible,
     StorageUploadAlreadyComplete,
     StorageUploadLeaseBusy,
     StorageUploadLeaseLost,
+    StorageUploadTerminalState,
 )
 from apps._tasks.integration.storage.s3_verified import (
     S3MultipartCleanupNotEligible,
@@ -527,13 +533,43 @@ def _claim_storage_point_delete(model_key, point_id, owner):
         if point is None:
             return None, "missing"
         if point.status == point.Status.DELETE_COMPLETED:
+            metadata = dict(point.metadata or {})
+            metadata.pop(DELETION_ORIGIN_KEY, None)
+            metadata.pop("_deletion_claim", None)
+            point.metadata = metadata
+            point.upload_lease_owner = ""
+            point.upload_lease_token = None
+            point.upload_lease_expires_at = None
+            point.upload_heartbeat_at = None
+            point.save(
+                update_fields=[
+                    "metadata",
+                    "upload_lease_owner",
+                    "upload_lease_token",
+                    "upload_lease_expires_at",
+                    "upload_heartbeat_at",
+                    "modified",
+                ]
+            )
             return None, "deleted"
         if _lease_is_live(point.upload_lease_expires_at, now):
             return None, "busy"
 
         metadata = dict(point.metadata or {})
-        prior_claim = dict(metadata.get("_deletion_claim") or {})
-        previous_status = prior_claim.get("previous_status", int(point.status))
+        validated_origin = validate_deletion_origin(point)
+        if validated_origin is not None:
+            _custody, previous_status = validated_origin
+        else:
+            if DELETION_ORIGIN_KEY in metadata or point.status in {
+                point.Status.DELETE_REQUESTED,
+                point.Status.DELETE_FAILED,
+            }:
+                return None, "invalid_origin"
+            previous_status = int(point.status)
+            metadata[DELETION_ORIGIN_KEY] = build_deletion_origin(
+                point,
+                previous_status,
+            )
         metadata["_deletion_claim"] = {
             "owner": owner,
             "token": str(token),
@@ -591,18 +627,22 @@ def _delete_one_storage_point(model_key, point_id, owner):
         ):
             return "busy"
         metadata = dict(current.metadata or {})
-        claim = dict(metadata.pop("_deletion_claim", {}) or {})
+        metadata.pop("_deletion_claim", None)
         protected = bool(metadata.get("deletion_protection"))
         if deleted:
+            metadata.pop(DELETION_ORIGIN_KEY, None)
             current.status = current.Status.DELETE_COMPLETED
             outcome = "deleted"
         elif protected:
-            try:
-                previous_status = int(claim.get("previous_status"))
-            except (TypeError, ValueError):
-                previous_status = int(current.Status.UPLOAD_COMPLETE)
-            current.status = previous_status
-            outcome = "protected"
+            validated_origin = validate_deletion_origin(current)
+            if validated_origin is None:
+                current.status = current.Status.DELETE_FAILED
+                outcome = "pending"
+            else:
+                _custody, previous_status = validated_origin
+                metadata.pop(DELETION_ORIGIN_KEY, None)
+                current.status = previous_status
+                outcome = "protected"
         else:
             if current.status == current.Status.DELETE_REQUESTED:
                 current.status = current.Status.DELETE_FAILED
@@ -1264,6 +1304,8 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
             # would be unsafe. The durable recovery sweep will republish the
             # idempotent finalizer if the broker is temporarily unavailable.
             capture_exception(finalizer_error)
+        return
+    except StorageUploadTerminalState:
         return
     except StorageUploadLeaseBusy as error:
         raise self.retry(

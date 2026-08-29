@@ -17,6 +17,7 @@ from django.utils import timezone
 
 from apps._tasks.artifact_encryption import (
     ArtifactPipelineError,
+    _configured_provider,
     cleanup_terminal_restore_ciphertext_handoff,
     cleanup_terminal_source_ciphertext,
     ensure_destination_ciphertext_ledger,
@@ -42,6 +43,7 @@ from apps.console.storage.models import CoreStorage, CoreStorageLocal, CoreStora
 from apps.console.utils.models import UtilBackup
 from apps.management.commands.docker_preflight import (
     _assert_artifact_encryption_boundary,
+    _assert_artifact_keyring_database_state,
 )
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -207,7 +209,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         patches = self._source_boundary()
         with patches[0], patches[1], patches[2] as publisher, patches[3], mock.patch(
             "apps._tasks.artifact_encryption.seal_file",
-            side_effect=RuntimeError("kms unavailable"),
+            side_effect=RuntimeError("key provider unavailable"),
         ):
             with self.assertRaises(RuntimeError):
                 seal_or_validate_source_artifact(
@@ -691,34 +693,160 @@ def stat_mode(path):
 
 
 class ArtifactPreflightPolicyTests(BaseTestCase):
-    def test_docker_preflight_requires_external_kms_bse1_without_legacy(self):
+    def test_local_file_provider_requires_sealed_installation_witness(self):
+        witness = hashlib.sha256(
+            (
+                "BackupSheep/artifact-key-provider/v1|"
+                f"{INSTALLATION_ID}|local-file|generation=1"
+            ).encode("ascii")
+        ).hexdigest()
+        provider = mock.Mock()
+        settings_values = {
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER": "local-file",
+            "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH": "/exact/keyring",
+            "BACKUPSHEEP_INSTALLATION_ID": INSTALLATION_ID,
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION": "",
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS": "",
+        }
+        with mock.patch.dict(
+            os.environ,
+            {"BACKUPSHEEP_RUNTIME_ROLE": "files"},
+        ), mock.patch(
+            "apps._tasks.artifact_encryption.LocalFileKeyProvider",
+            return_value=provider,
+        ) as provider_class:
+            with override_settings(**settings_values):
+                with self.assertRaisesRegex(ArtifactPipelineError, "not sealed"):
+                    with _configured_provider():
+                        pass
+            provider_class.assert_not_called()
+
+            sealed_values = {
+                **settings_values,
+                "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION": "1",
+                "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS": witness,
+            }
+            with override_settings(**sealed_values):
+                with _configured_provider() as configured:
+                    self.assertIs(configured, provider)
+        provider.destroy.assert_called_once_with()
+
+    def test_docker_preflight_requires_local_file_bse1_without_legacy(self):
+        installation_id = "a" * 64
+        witness = hashlib.sha256(
+            (
+                "BackupSheep/artifact-key-provider/v1|"
+                f"{installation_id}|local-file|generation=1"
+            ).encode("ascii")
+        ).hexdigest()
         runtime = SimpleNamespace(
             BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="legacy-only",
             BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
             BACKUPSHEEP_ARTIFACT_KEY_PROVIDER="local-development",
             BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
-            BACKUPSHEEP_ARTIFACT_KMS_KEY_ID="",
-            BACKUPSHEEP_ARTIFACT_KMS_REGION="",
-            BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS=(),
-            BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL=None,
-            BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS=5,
-            BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS=30,
-            BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS=3,
-            BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT=False,
+            BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH="",
+            BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION="",
+            BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS="",
+            BACKUPSHEEP_INSTALLATION_ID=installation_id,
         )
         with self.assertRaises(CommandError):
             _assert_artifact_encryption_boundary(
                 environment={}, runtime_settings=runtime
             )
 
-        key_arn = "arn:aws:kms:us-east-1:123456789012:key/1234abcd"
         runtime.BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE = "bse1"
         runtime.BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE = True
-        runtime.BACKUPSHEEP_ARTIFACT_KEY_PROVIDER = "aws-kms"
+        runtime.BACKUPSHEEP_ARTIFACT_KEY_PROVIDER = "local-file"
         runtime.BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE = False
-        runtime.BACKUPSHEEP_ARTIFACT_KMS_KEY_ID = key_arn
-        runtime.BACKUPSHEEP_ARTIFACT_KMS_REGION = "us-east-1"
-        runtime.BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS = (key_arn,)
+        runtime.BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION = "1"
+        runtime.BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS = witness
         _assert_artifact_encryption_boundary(
-            environment={}, runtime_settings=runtime
+            environment={"BACKUPSHEEP_RUNTIME_ROLE": "app"},
+            runtime_settings=runtime,
+        )
+
+    def test_docker_preflight_accepts_only_the_exact_source_lane_keyring(self):
+        installation_id = "a" * 64
+        witness = hashlib.sha256(
+            (
+                "BackupSheep/artifact-key-provider/v1|"
+                f"{installation_id}|local-file|generation=1"
+            ).encode("ascii")
+        ).hexdigest()
+        expected = "/run/secrets/artifact_local_file_database_keyring"
+        runtime = SimpleNamespace(
+            BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="bse1",
+            BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=True,
+            BACKUPSHEEP_ARTIFACT_KEY_PROVIDER="local-file",
+            BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=False,
+            BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH=expected,
+            BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION="1",
+            BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS=witness,
+            BACKUPSHEEP_INSTALLATION_ID=installation_id,
+        )
+
+        def exists(path):
+            return str(path) == expected
+
+        with mock.patch.object(Path, "exists", autospec=True, side_effect=exists), mock.patch.object(
+            Path,
+            "is_symlink",
+            autospec=True,
+            return_value=False,
+        ):
+            _assert_artifact_encryption_boundary(
+                environment={"BACKUPSHEEP_RUNTIME_ROLE": "database"},
+                runtime_settings=runtime,
+            )
+            runtime.BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH = (
+                "/run/secrets/artifact_local_file_files_keyring"
+            )
+            with self.assertRaisesRegex(CommandError, "exact lane"):
+                _assert_artifact_encryption_boundary(
+                    environment={"BACKUPSHEEP_RUNTIME_ROLE": "database"},
+                    runtime_settings=runtime,
+                )
+
+    def test_source_preflight_rejects_stale_keyring_missing_database_wrap_key(self):
+        cursor = mock.Mock()
+        cursor.fetchall.return_value = [
+            ("lfk-22222222222222222222222222222222",)
+        ]
+        runtime = SimpleNamespace(
+            BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH=(
+                "/run/secrets/artifact_local_file_database_keyring"
+            ),
+            BACKUPSHEEP_INSTALLATION_ID="a" * 64,
+        )
+        provider = mock.Mock()
+        provider.key_ids = ("lfk-11111111111111111111111111111111",)
+        with mock.patch(
+            "backupsheep.artifact_crypto.providers.LocalFileKeyProvider",
+            return_value=provider,
+        ):
+            with self.assertRaisesRegex(CommandError, "database-referenced"):
+                _assert_artifact_keyring_database_state(
+                    cursor=cursor,
+                    environment={"BACKUPSHEEP_RUNTIME_ROLE": "database"},
+                    runtime_settings=runtime,
+                )
+        provider.destroy.assert_called_once_with()
+
+        cursor.fetchall.return_value = [
+            ("lfk-11111111111111111111111111111111",)
+        ]
+        provider.reset_mock()
+        with mock.patch(
+            "backupsheep.artifact_crypto.providers.LocalFileKeyProvider",
+            return_value=provider,
+        ):
+            _assert_artifact_keyring_database_state(
+                cursor=cursor,
+                environment={"BACKUPSHEEP_RUNTIME_ROLE": "database"},
+                runtime_settings=runtime,
+            )
+        provider.destroy.assert_called_once_with()
+        cursor.execute.assert_called_with(
+            mock.ANY,
+            ["local-file", "retired"],
         )

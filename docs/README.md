@@ -80,13 +80,10 @@ drift can be detected during documentation validation.
 
 ## Deployment-specific guides
 
-The original focused guides remain useful for their specific platform:
+Use the verified VM or split-process installation paths:
 
 - [DigitalOcean Droplet](digitalocean-droplet.md)
 - [General cloud VMs](cloud-vms.md)
-- [Render](render.md)
-- [Heroku](heroku.md)
-- [Railway](railway.md)
 - [Scaling workers](scaling.md)
 - [AWS S3, DynamoDB, and RDS](aws-s3-dynamodb-rds-backups.md)
 - [Lightsail bucket replication and database restore](lightsail-bucket-replication-and-database-restore.md)

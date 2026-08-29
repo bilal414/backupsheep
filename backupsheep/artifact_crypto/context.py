@@ -16,6 +16,8 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
 _MODEL_LABEL = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 _LANES = frozenset({"database", "files"})
 _PURPOSE = "backup-artifact-v1"
+_PROVIDER_POLICY_DOMAIN = "BackupSheep/artifact-key-provider/v1"
+_PROVIDER_POLICY_GENERATIONS = frozenset({"1", "1-pending-empty"})
 
 
 def _require_identifier(label: str, value: object) -> str:
@@ -27,13 +29,34 @@ def _require_identifier(label: str, value: object) -> str:
     return candidate
 
 
+def artifact_provider_policy_witness(installation_id: str, generation: str) -> str:
+    """Return the non-secret installation/provider/generation drift witness."""
+
+    installation_id = str(installation_id or "")
+    generation = str(generation or "")
+    if not _INSTALLATION_ID.fullmatch(installation_id):
+        raise ArtifactConfigurationError(
+            "Artifact provider policy requires a 64-character installation ID."
+        )
+    if generation not in _PROVIDER_POLICY_GENERATIONS:
+        raise ArtifactConfigurationError(
+            "Artifact provider policy generation is unsupported."
+        )
+    return hashlib.sha256(
+        (
+            f"{_PROVIDER_POLICY_DOMAIN}|{installation_id}|local-file|"
+            f"generation={generation}"
+        ).encode("ascii")
+    ).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactContext:
     """Identity that an artifact and its wrapped data key are bound to.
 
-    Every value is intentionally non-secret because AWS KMS records encryption
-    context in CloudTrail.  The canonical JSON digest is stored in the BSE1
-    header; the same individual fields are supplied to the key provider.
+    Every value is intentionally non-secret. The canonical JSON digest is stored
+    in the BSE1 header, and the same identity is authenticated by the wrapping
+    provider so a data key cannot cross installations, backups, or lanes.
     """
 
     installation_id: str
@@ -100,7 +123,7 @@ class ArtifactContext:
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
     def key_provider_context(self) -> dict[str, str]:
-        """Return the exact string map used as KMS encryption context."""
+        """Return the exact string map available to wrapping providers."""
 
         values = self.as_mapping()
         return {

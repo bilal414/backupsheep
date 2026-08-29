@@ -108,7 +108,7 @@ identity volumes are not removed by ordinary `down`; never add `--volumes`.
   requires at least one tuple. IPv4 entries use `CIDR:port` (for example,
   `203.0.113.10/32:443`); IPv6 entries use `[CIDR]:port` (for example,
   `[2001:db8::10/128]:443`). Select it explicitly for a role that needs a reviewed
-  provider, source, storage, or KMS endpoint.
+  provider, source, or storage endpoint.
 - `public` is an explicit risk opt-in. It permits ordinary public destinations while
   denying metadata, reserved, private, discovered-gateway, and well-known NAT64
   destinations by default. Exact TCP endpoint tuples are evaluated first as explicit
@@ -145,7 +145,7 @@ without contacting the upstream resolver. The complete canonical policy is cappe
 66 unique names, including non-literal PostgreSQL/RabbitMQ names; list every required
 CNAME target separately.
 
-DNS permission and network permission are independent. Each resolved provider/KMS
+DNS permission and network permission are independent. Each resolved provider or storage
 endpoint still needs the minimum reviewed IPv4/IPv6 CIDR-and-TCP-port tuple for that
 role. Conversely, an allowed tuple grants arbitrary TCP traffic to every address and
 the selected port in that CIDR. This is transport-level defense in depth, not a

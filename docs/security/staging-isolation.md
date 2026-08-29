@@ -81,53 +81,47 @@ canonical fence marker. Symlinks, hard links, unexpected names, unsafe modes,
 cross-installation/root reuse, lane/root mismatches and partial/unpublished
 ciphertext all fail closed.
 
-## KMS credential and encryption-context boundary
+## Local-file root-key boundary
 
-The installer requires two different canonical AWS credential inputs and stores
-them as `artifact_kms_database_aws_credentials` and
-`artifact_kms_files_aws_credentials`. Compose mounts only the database secret into
-the database worker and only the files secret into the files worker. Web, cloud,
-storage, logs, Beat, migration and preflight receive neither secret, and the image
-entrypoint rejects a wrong-lane or unexpected credential mount. The installer also
-rejects identical files and identical AWS access-key IDs. This is a container
-boundary, not proof of the upstream IAM principal's permissions.
+The installer generates two independent 256-bit root keys in strict versioned
+keyrings named `artifact_local_file_database_keyring` and
+`artifact_local_file_files_keyring`. Compose mounts only the matching keyring into
+each database/files source worker. Web, cloud, storage, logs, Beat, migration and
+preflight receive neither a keyring nor a keyring path. The image entrypoint rejects
+wrong-lane mounts, links, unexpected ownership or mode, and any keyring visible to a
+non-source role.
 
-Operators must use two AWS principals and enforce the same lane separation in both
-their identity policies and the KMS key policy. Each allow statement for
-`kms:GenerateDataKey`, `kms:Decrypt`, `kms:ReEncryptFrom` and `kms:ReEncryptTo` must
-at least require these exact encryption-context conditions (substitute the stable
-installation ID and one lane):
+Each keyring is bound to one installation ID and one lane, and contains one active key ID
+followed by at most seven retained legacy key IDs. AES-256-GCM-SIV wraps authenticate the complete canonical
+artifact context and the wrapping key ID. A database keyring therefore cannot unwrap
+a files artifact, and changing the installation, account, node, backup, model, lane,
+purpose, key ID, nonce, or ciphertext fails authentication.
 
-```json
-{
-  "StringEquals": {
-    "kms:EncryptionContext:bse:installation-id": "<64-hex-installation-id>",
-    "kms:EncryptionContext:bse:lane": "database",
-    "kms:EncryptionContext:bse:purpose": "backup-artifact-v1"
-  },
-  "ForAllValues:StringEquals": {
-    "kms:EncryptionContextKeys": [
-      "bse:account-id", "bse:backup-id", "bse:backup-model",
-      "bse:context-sha256", "bse:installation-id", "bse:lane",
-      "bse:node-id", "bse:purpose"
-    ]
-  }
-}
-```
+Keyring creation is no-clobber and atomic. Installer reruns validate and preserve the
+exact bytes; a missing keyring in an existing installation is treated as key loss and
+is never silently regenerated. Keep protected, encrypted, independently access-audited
+copies of both keyrings with the PostgreSQL recovery set. Losing one keyring makes every
+BSE1 artifact in that lane whose required key is absent cryptographically unrecoverable.
 
-The files principal uses the same condition with `bse:lane` equal to `files`.
-Do not grant either principal an unconditional KMS cryptographic action through a
-second identity policy, key-policy statement, grant, role, instance profile or
-container credential endpoint. Validate both allowed-lane and denied-cross-lane
-calls before enabling operations.
+Rotation is lane-scoped and deliberately two-phase:
 
-Key-wrap rotation is lane-scoped. Run the read-only plan and then `--apply` inside
-the matching worker with `--lane database` or `--lane files`; the command filters
-and revalidates every durable artifact context before KMS use. Rotate both lanes
-separately. Keep the old KMS key enabled and in the allowlist until each lane reports
-`remaining_source=0`, then wait through the maximum in-flight backup/restore retry
-and retention grace before disabling it. Key deletion remains an operator-controlled
-AWS action and is never performed by BackupSheep.
+1. use the reviewed Compose wrapper to bring the entire operations profile down and
+   remove its worker containers, then run `install.sh --rotate-artifact-keyring
+   database` or `files`; stopped, paused, and restarting containers are also refused
+   because they retain the old bind-mounted inode. Rotation atomically prepends a
+   random active key while retaining every prior key;
+2. run `rotate_artifact_key_wraps` first as a read-only plan and then with `--apply`
+   inside the matching source role, using the old key ID, exact lane, and installation-ID
+   witness until it reports `remaining_source=0`;
+3. retain the legacy key through the maximum in-flight backup/restore retry and retention
+   grace. BackupSheep provides no automatic eviction operation. A separately reviewed
+   prune may occur only after database evidence proves no non-retired wrap references it;
+   pending and manual-review generations must be reconciled or explicitly retired first.
+
+The keyring is capped at eight entries and another rotation refuses rather than evicting
+recovery material. The non-Docker `scripts/manage_artifact_keyring.py` tool provides the
+same create, inspect, and rotate rules for owner-controlled mode-`0700` directories and
+mode-`0400` keyrings; it prints IDs and counts, never root key material.
 
 ## Restore ciphertext handoff
 

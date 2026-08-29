@@ -2,8 +2,8 @@
 
 BackupSheep reads configuration when each process starts. Compose passes non-secret and
 optional integration settings from `.env` to each application service. The stock stack
-mounts Django, per-lane PostgreSQL/RabbitMQ, task-signing, onboarding and source-lane KMS
-material from separate files in `.secrets`, and each role receives only its exact grant.
+mounts Django, per-lane PostgreSQL/RabbitMQ, task-signing, onboarding and source-lane
+artifact keyrings from separate files in `.secrets`, and each role receives only its exact grant.
 Changing either configuration source requires recreating the affected containers.
 
 ## Configuration precedence
@@ -25,7 +25,7 @@ contract.
 For normal Compose deployments, copy `.env_sample` wholesale and retain optional blank
 keys. Keep `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
 `ONBOARDING_INSTALL_TOKEN` blank. Let the exact installer create the protected per-lane
-database, broker, signing, onboarding and KMS files plus the two optional lane-specific
+database, broker, signing, onboarding and artifact-keyring files plus the two optional lane-specific
 managed-key files exactly as shown in the
 [installation guide](installation.md#manual-docker-compose-installation). Keep legacy
 `SSH_MANAGED_PRIVATE_KEY_PATH` and `SSH_MANAGED_PUBLIC_KEY` blank: each eligible worker
@@ -196,23 +196,19 @@ Do not put `ssl_*` overrides in the broker URL; they are rejected so certificate
 cannot be disabled. Use one certificate-valid broker/load-balancer hostname in production
 rather than a semicolon-separated failover URL.
 
-## Artifact encryption and AWS KMS
+## Artifact encryption and local-file keys
 
 Stock production requires `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=bse1`, enterprise mode,
-AWS KMS and legacy restore disabled. The installer requires one resolved symmetric key
-ARN, its region, an ARN allowlist containing every key still needed for restore/rotation,
-and two distinct canonical AWS credential files. It stores each credential file beneath
-`.secrets` and mounts it only into the matching database or files source lane. Storage,
-web, cloud, logs and Beat receive no KMS identity.
+the `local-file` provider, and legacy restore disabled. The installer creates separate
+database/files keyrings beneath `.secrets` and mounts each only into its matching source
+lane. Storage, web, cloud, logs and Beat receive neither keyring nor path.
 
-Use two AWS principals. Their identity policies and the KMS key policy must condition
-cryptographic actions on the exact installation-bound encryption context and
-`bse:lane=database` or `bse:lane=files`; do not grant an unconditional alternate path
-through an instance profile, role, grant or container credential endpoint. Prove both
-same-lane success and cross-lane denial before enabling operations. Enterprise mode also
-rejects a custom KMS endpoint, an insecure endpoint and the local-development provider.
-See [Private staging and ciphertext handoff](../security/staging-isolation.md) for the
-exact context and key-wrap rotation procedure.
+The strict keyring contains one active 256-bit key and at most seven retained legacy keys.
+Wrapping authenticates the complete installation-bound artifact context, including the
+lane. Reruns preserve exact keyring bytes, and existing-install key loss is never hidden by
+regeneration. Enterprise mode rejects the environment-backed local-development provider.
+See [Private staging and ciphertext handoff](../security/staging-isolation.md) for backup,
+rotation, recovery, and non-Docker procedures.
 
 ## Container egress policy
 

@@ -9,6 +9,9 @@
 # Download this file from the same immutable commit passed with --ref. The installer
 # verifies that its own bytes match that commit before it builds or starts anything.
 
+# Never permit inherited shell tracing to disclose generated root keys or any
+# other installation secret. Debugging must use the installer's bounded logs.
+set +x
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
@@ -80,10 +83,15 @@ readonly -a SECRET_NAMES=(
     onboarding_token
     ssh_managed_database_private_key
     ssh_managed_files_private_key
+    artifact_local_file_database_keyring
+    artifact_local_file_files_keyring
+)
+readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password db_password ssh_managed_private_key)
+readonly -a LEGACY_ARTIFACT_PROVIDER_SECRET_NAMES=(
     artifact_kms_database_aws_credentials
     artifact_kms_files_aws_credentials
 )
-readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password db_password ssh_managed_private_key)
+readonly ARTIFACT_PROVIDER_ROLLBACK_NAME="artifact_provider_transition_rollback"
 readonly -a DATABASE_LANES=(app preflight beat cloud database files storage logs)
 readonly -a RABBITMQ_ROLES=(bootstrap app preflight beat cloud database files storage logs)
 readonly -a CELERY_SIGNING_LANES=(app beat cloud database files storage logs)
@@ -126,11 +134,9 @@ ROTATE_CELERY_SIGNING_KEYS=false
 MIGRATE_STAGING_LAYOUT=false
 MIGRATE_EGRESS_POLICY=false
 MIGRATE_POSTGRES_RUNTIME=false
-ARTIFACT_KMS_KEY_ID=""
-ARTIFACT_KMS_REGION=""
-ARTIFACT_KMS_ALLOWED_KEY_ARNS=""
-ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE=""
-ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE=""
+MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=false
+ARTIFACT_LOCAL_FILE_ROTATE_LANE=""
+ARTIFACT_LOCAL_FILE_ROTATE_EXPECTED_KEY_ID=""
 INSTALL_WAS_PRESENT=false
 ENV_WAS_PRESENT=false
 ENV_FILE=""
@@ -222,19 +228,21 @@ Options:
                      One-time stop-the-world logical migration from the exact retained
                      Debian/UID-999 `pgdata` volume into the distinct Alpine/UID-70/ICU
                      storage generation. The old volume remains detached for rollback.
-  --artifact-kms-key-id ARN
-                     Resolved symmetric AWS KMS key ARN used for new BSE1 data keys.
-  --artifact-kms-region REGION
-                     AWS region containing every allowlisted artifact key.
-  --artifact-kms-allowed-key-arns ARNS
-                     Comma-separated resolved KMS key ARNs accepted for restore and
-                     key-wrap rotation; include the active key.
-  --artifact-kms-database-aws-credentials-file PATH
-                     Private canonical [default] AWS credentials for the database
-                     lane. IAM must restrict KMS context bse:lane=database.
-  --artifact-kms-files-aws-credentials-file PATH
-                     Separate private credentials for the files lane. IAM must
-                     restrict KMS context bse:lane=files. Neither enters .env.
+  --migrate-artifact-key-provider-empty
+                     One-time fail-closed transition from a blank, local-development,
+                     or historical provider only when the current migration proves zero
+                     data-key wraps, plaintext artifact ledgers, and historical database/
+                     files backup or storage-point rows. Operations remain disabled and
+                     the old policy, credentials, and archive data stay in the encrypted
+                     rollback set through deployment acceptance.
+  --rotate-artifact-keyring LANE
+                     Atomically add a new active 256-bit key to the existing database
+                     or files keyring while retaining every legacy key for recovery.
+                     Requires --expected-artifact-active-key-id as a stale/replay
+                     witness. The matching source worker must be stopped.
+  --expected-artifact-active-key-id ID
+                     Exact current lfk-... active ID required for keyring rotation.
+                     A repeated or stale rotation command fails without mutation.
   --skip-start        Create and validate the installation, but do not build or start it.
   -h, --help          Show this help.
 
@@ -302,6 +310,11 @@ file_size() {
     stat -c '%s' -- "$1" 2>/dev/null || stat -f '%z' -- "$1"
 }
 
+file_identity() {
+    stat -c '%d:%i:%s:%h:%u:%a' -- "$1" 2>/dev/null \
+        || stat -f '%d:%i:%z:%l:%u:%Lp' -- "$1"
+}
+
 release_mutation_lock() {
     local release_failed=false
 
@@ -367,6 +380,25 @@ atomic_move_new() {
     [[ -e "$source_path" && ! -e "$destination_path" && ! -L "$destination_path" ]] \
         || return 1
     mv -- "$source_path" "$destination_path"
+}
+
+atomic_publish_new_file() {
+    local source_path="$1"
+    local destination_path="$2"
+
+    [[ -f "$source_path" && ! -L "$source_path" \
+        && ! -e "$destination_path" && ! -L "$destination_path" ]] \
+        || return 1
+    # link(2) is an atomic no-clobber publication. The installer creates these
+    # temporary files beside their destination, so both names are guaranteed to
+    # be on one filesystem. A concurrent creator wins or loses cleanly; it can
+    # never be overwritten by this publication.
+    ln -- "$source_path" "$destination_path" 2>/dev/null || return 1
+    if rm -f -- "$source_path"; then
+        return 0
+    fi
+    rm -f -- "$destination_path" 2>/dev/null || true
+    return 1
 }
 
 semver_at_least() {
@@ -489,39 +521,24 @@ parse_args() {
                 MIGRATE_POSTGRES_RUNTIME=true
                 shift
                 ;;
-            --artifact-kms-key-id)
-                [[ $# -ge 2 ]] || die "--artifact-kms-key-id requires a resolved key ARN"
-                [[ -z "$ARTIFACT_KMS_KEY_ID" ]] \
-                    || die "--artifact-kms-key-id may be specified only once"
-                ARTIFACT_KMS_KEY_ID="$2"
+            --migrate-artifact-key-provider-empty)
+                [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" != true ]] \
+                    || die "--migrate-artifact-key-provider-empty may be specified only once"
+                MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true
+                shift
+                ;;
+            --rotate-artifact-keyring)
+                [[ $# -ge 2 ]] || die "--rotate-artifact-keyring requires database or files"
+                [[ -z "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" ]] \
+                    || die "--rotate-artifact-keyring may be specified only once"
+                ARTIFACT_LOCAL_FILE_ROTATE_LANE="$2"
                 shift 2
                 ;;
-            --artifact-kms-region)
-                [[ $# -ge 2 ]] || die "--artifact-kms-region requires a value"
-                [[ -z "$ARTIFACT_KMS_REGION" ]] \
-                    || die "--artifact-kms-region may be specified only once"
-                ARTIFACT_KMS_REGION="$2"
-                shift 2
-                ;;
-            --artifact-kms-allowed-key-arns)
-                [[ $# -ge 2 ]] || die "--artifact-kms-allowed-key-arns requires a value"
-                [[ -z "$ARTIFACT_KMS_ALLOWED_KEY_ARNS" ]] \
-                    || die "--artifact-kms-allowed-key-arns may be specified only once"
-                ARTIFACT_KMS_ALLOWED_KEY_ARNS="$2"
-                shift 2
-                ;;
-            --artifact-kms-database-aws-credentials-file)
-                [[ $# -ge 2 ]] || die "--artifact-kms-database-aws-credentials-file requires a path"
-                [[ -z "$ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE" ]] \
-                    || die "--artifact-kms-database-aws-credentials-file may be specified only once"
-                ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE="$2"
-                shift 2
-                ;;
-            --artifact-kms-files-aws-credentials-file)
-                [[ $# -ge 2 ]] || die "--artifact-kms-files-aws-credentials-file requires a path"
-                [[ -z "$ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE" ]] \
-                    || die "--artifact-kms-files-aws-credentials-file may be specified only once"
-                ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE="$2"
+            --expected-artifact-active-key-id)
+                [[ $# -ge 2 ]] || die "--expected-artifact-active-key-id requires an lfk-... key ID"
+                [[ -z "$ARTIFACT_LOCAL_FILE_ROTATE_EXPECTED_KEY_ID" ]] \
+                    || die "--expected-artifact-active-key-id may be specified only once"
+                ARTIFACT_LOCAL_FILE_ROTATE_EXPECTED_KEY_ID="$2"
                 shift 2
                 ;;
             --skip-start)
@@ -542,6 +559,22 @@ parse_args() {
         || die "--skip-start and --enable-operations cannot be used together"
     [[ "$ROTATE_CELERY_SIGNING_KEYS" != true || "$ENABLE_OPERATIONS" != true ]] \
         || die "--rotate-celery-signing-keys and --enable-operations cannot be used together"
+    [[ -z "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" || "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" == database \
+        || "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" == files ]] \
+        || die "--rotate-artifact-keyring requires database or files"
+    [[ -z "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" || "$ENABLE_OPERATIONS" != true ]] \
+        || die "--rotate-artifact-keyring and --enable-operations cannot be used together"
+    [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" != true || "$ENABLE_OPERATIONS" != true ]] \
+        || die "--migrate-artifact-key-provider-empty and --enable-operations cannot be used together"
+    [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" != true || -z "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" ]] \
+        || die "artifact-provider migration and artifact-keyring rotation cannot run together"
+    if [[ -n "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" ]]; then
+        [[ "$ARTIFACT_LOCAL_FILE_ROTATE_EXPECTED_KEY_ID" =~ ^lfk-[0-9a-f]{32}$ ]] \
+            || die "--rotate-artifact-keyring requires --expected-artifact-active-key-id with the exact current lfk-... ID"
+    else
+        [[ -z "$ARTIFACT_LOCAL_FILE_ROTATE_EXPECTED_KEY_ID" ]] \
+            || die "--expected-artifact-active-key-id requires --rotate-artifact-keyring"
+    fi
     if [[ -n "$ADOPT_LEGACY_PROJECT" ]]; then
         if [[ "$PROJECT_NAME_WAS_EXPLICIT" == true && "$PROJECT_NAME" != "$ADOPT_LEGACY_PROJECT" ]]; then
             die "--project-name and --adopt-legacy-project must name the same project"
@@ -610,7 +643,7 @@ require_commands() {
     local command_name=""
     local -a required=(
         awk basename chmod cmp cp dirname docker env find git grep install mkdir mktemp mv od
-        realpath rm rmdir sed ssh-keygen stat tr
+        ln realpath rm rmdir sed ssh-keygen stat sync tr
     )
 
     for command_name in "${required[@]}"; do
@@ -1111,7 +1144,9 @@ validate_secret_dir() {
         for expected in \
             "${SECRET_NAMES[@]}" \
             "${LEGACY_SECRET_NAMES[@]}" \
-            "${CELERY_ROTATION_SECRET_NAMES[@]}"; do
+            "${LEGACY_ARTIFACT_PROVIDER_SECRET_NAMES[@]}" \
+            "${CELERY_ROTATION_SECRET_NAMES[@]}" \
+            "$ARTIFACT_PROVIDER_ROLLBACK_NAME"; do
             if [[ "$base" == "$expected" ]]; then
                 allowed=true
                 break
@@ -1122,44 +1157,65 @@ validate_secret_dir() {
     done
 }
 
-validate_artifact_kms_credentials_content() {
-    local credential_file="$1"
-    local credential_size=""
+validate_artifact_keyring_content() {
+    local keyring_file="$1"
+    local expected_lane="$2"
+    local keyring_size=""
+    local final_byte=""
+    local active_key_id=""
+    local key_id=""
+    local key_hex=""
+    local keyring_line=""
+    local seen_ids=","
+    local seen_material=","
+    local installation_id=""
+    local index=0
+    local -a lines=()
 
-    credential_size="$(file_size "$credential_file")"
-    [[ "$credential_size" -gt 0 && "$credential_size" -le 16384 ]] \
-        || die "The artifact KMS credentials file must be between 1 byte and 16 KiB."
-    ! od -An -v -tx1 "$credential_file" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)' \
-        || die "The artifact KMS credentials file contains a NUL byte."
-    ! grep -q $'\r' "$credential_file" \
-        || die "The artifact KMS credentials file contains carriage returns."
-    awk '
-        NR == 1 { if ($0 != "[default]") exit 1; next }
-        NR == 2 {
-            prefix = "aws_access_key_id = "
-            if (index($0, prefix) != 1) exit 1
-            value = substr($0, length(prefix) + 1)
-            if (value !~ /^[A-Z0-9]+$/ || length(value) < 16 || length(value) > 128) exit 1
-            next
-        }
-        NR == 3 {
-            prefix = "aws_secret_access_key = "
-            if (index($0, prefix) != 1) exit 1
-            value = substr($0, length(prefix) + 1)
-            if (value !~ /^[A-Za-z0-9\/+\=]+$/ || length(value) < 32 || length(value) > 256) exit 1
-            next
-        }
-        NR == 4 {
-            prefix = "aws_session_token = "
-            if (index($0, prefix) != 1) exit 1
-            value = substr($0, length(prefix) + 1)
-            if (value !~ /^[A-Za-z0-9\/+\=_.:-]+$/ || length(value) < 16 || length(value) > 4096) exit 1
-            next
-        }
-        NR > 4 { exit 1 }
-        END { if (NR != 3 && NR != 4) exit 1 }
-    ' "$credential_file" \
-        || die "The artifact KMS credentials file must contain only a canonical [default] access key, secret key, and optional session token."
+    [[ "$expected_lane" == database || "$expected_lane" == files ]] \
+        || die "Internal artifact keyring lane is invalid."
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    [[ "$installation_id" =~ ^[0-9a-f]{64}$ ]] \
+        || die "The artifact keyring requires the stable installation identity."
+    keyring_size="$(file_size "$keyring_file")"
+    [[ "$keyring_size" -gt 0 && "$keyring_size" -le 2048 ]] \
+        || die "The ${expected_lane} artifact keyring size is invalid."
+    ! od -An -v -tx1 "$keyring_file" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)' \
+        || die "The ${expected_lane} artifact keyring contains a NUL byte."
+    ! grep -q $'\r' "$keyring_file" \
+        || die "The ${expected_lane} artifact keyring contains carriage returns."
+    final_byte="$(tail -c 1 "$keyring_file" | od -An -tu1 | tr -d '[:space:]')"
+    [[ "$final_byte" == 10 ]] \
+        || die "The ${expected_lane} artifact keyring must end in one newline."
+    while IFS= read -r keyring_line; do
+        lines+=("$keyring_line")
+    done < "$keyring_file"
+    [[ "${#lines[@]}" -ge 5 && "${#lines[@]}" -le 12 ]] \
+        || die "The ${expected_lane} artifact keyring must contain one to eight keys."
+    [[ "${lines[0]}" == BACKUPSHEEP-ARTIFACT-KEYRING-V1 \
+        && "${lines[1]}" == "installation=${installation_id}" \
+        && "${lines[2]}" == "lane=${expected_lane}" \
+        && "${lines[3]}" =~ ^active=(lfk-[0-9a-f]{32})$ ]] \
+        || die "The ${expected_lane} artifact keyring header is invalid."
+    active_key_id="${BASH_REMATCH[1]}"
+    index=4
+    while [[ "$index" -lt "${#lines[@]}" ]]; do
+        [[ "${lines[$index]}" =~ ^key=(lfk-[0-9a-f]{32}):([0-9a-f]{64})$ ]] \
+            || die "The ${expected_lane} artifact keyring contains an invalid key entry."
+        key_id="${BASH_REMATCH[1]}"
+        key_hex="${BASH_REMATCH[2]}"
+        [[ "$seen_ids" != *",${key_id},"* && "$seen_material" != *",${key_hex},"* ]] \
+            || die "The ${expected_lane} artifact keyring contains a duplicate key."
+        seen_ids="${seen_ids}${key_id},"
+        seen_material="${seen_material}${key_hex},"
+        if [[ "$index" -eq 4 ]]; then
+            [[ "$key_id" == "$active_key_id" ]] \
+                || die "The ${expected_lane} active artifact key must be first."
+        fi
+        index=$((index + 1))
+    done
+    key_hex="$(printf '%064d' 0)"
+    unset key_hex
 }
 
 validate_secret_file() {
@@ -1181,9 +1237,12 @@ validate_secret_file() {
     [[ "$secret_owner" == "$EUID" && "$secret_mode" == "444" && "$secret_links" == "1" ]] \
         || die "${secret_path} must be owned by the effective invoking UID, mode 0444, and not hard-linked."
     secret_name="$(basename -- "$secret_path")"
-    if [[ "$secret_name" == "artifact_kms_database_aws_credentials" \
-        || "$secret_name" == "artifact_kms_files_aws_credentials" ]]; then
-        validate_artifact_kms_credentials_content "$secret_path"
+    if [[ "$secret_name" == "artifact_local_file_database_keyring" ]]; then
+        validate_artifact_keyring_content "$secret_path" database
+        return
+    fi
+    if [[ "$secret_name" == "artifact_local_file_files_keyring" ]]; then
+        validate_artifact_keyring_content "$secret_path" files
         return
     fi
     if [[ "$secret_name" == ssh_managed_*_private_key ]]; then
@@ -1252,75 +1311,314 @@ validate_secret_file() {
         || die "${secret_name} is shorter than its minimum secure length (${minimum_length} characters)."
 }
 
-configure_artifact_kms_credential() {
+artifact_keyring_path() {
     local lane="$1"
-    local supplied_path="$2"
-    local destination="${SECRETS_DIR}/artifact_kms_${lane}_aws_credentials"
-    local option="--artifact-kms-${lane}-aws-credentials-file"
-    local input_path=""
-    local input_mode=""
-    local temporary=""
-
     [[ "$lane" == database || "$lane" == files ]] \
-        || die "Internal artifact KMS credential lane is invalid."
-    if [[ -n "$supplied_path" ]]; then
-        [[ "$supplied_path" == /* ]] \
-            || die "${option} must be an absolute path."
-        [[ -f "$supplied_path" && ! -L "$supplied_path" ]] \
-            || die "The ${lane} artifact KMS credentials input must be a regular, non-symlink file."
-        input_path="$(realpath -- "$supplied_path")" \
-            || die "Could not resolve the ${lane} artifact KMS credentials input."
-        [[ "$input_path" == "$supplied_path" ]] \
-            || die "The ${lane} artifact KMS credentials input path must already be canonical."
-        [[ "$(file_uid "$input_path")" == "$EUID" && "$(file_links "$input_path")" == "1" ]] \
-            || die "The ${lane} artifact KMS credentials input must be owned by the effective invoking UID and not hard-linked."
-        input_mode="$(file_mode "$input_path")"
-        [[ "$input_mode" == "400" || "$input_mode" == "600" ]] \
-            || die "The ${lane} artifact KMS credentials input must have mode 0400 or 0600."
-        validate_artifact_kms_credentials_content "$input_path"
-    fi
+        || die "Internal artifact keyring lane is invalid."
+    printf '%s/artifact_local_file_%s_keyring' "$SECRETS_DIR" "$lane"
+}
 
-    if [[ -e "$destination" || -L "$destination" ]]; then
-        validate_secret_file "$destination"
-        if [[ -n "$input_path" ]]; then
-            cmp -s -- "$input_path" "$destination" \
-                || die "The supplied ${lane} artifact KMS credentials differ from the installed secret; rotate them through a separately reviewed credential procedure."
+artifact_provider_rollback_path() {
+    printf '%s/%s' "$SECRETS_DIR" "$ARTIFACT_PROVIDER_ROLLBACK_NAME"
+}
+
+validate_artifact_provider_rollback() {
+    local path="${1:-}"
+    local size=""
+    local installation_id=""
+
+    [[ -n "$path" ]] || path="$(artifact_provider_rollback_path)"
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    [[ "$installation_id" =~ ^[0-9a-f]{64}$ ]] \
+        || die "The artifact-provider rollback requires the stable installation identity."
+    [[ -f "$path" && ! -L "$path" \
+        && "$(file_uid "$path")" == "$EUID" \
+        && "$(file_mode "$path")" == 400 \
+        && "$(file_links "$path")" == 1 ]] \
+        || die "The artifact-provider transition rollback must be an owner-only mode-0400 single-link file."
+    size="$(file_size "$path")"
+    [[ "$size" -ge 1 && "$size" -le 32768 ]] \
+        || die "The artifact-provider transition rollback has an invalid size."
+    ! od -An -v -tx1 "$path" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)' \
+        || die "The artifact-provider transition rollback contains a NUL byte."
+    ! grep -q $'\r' "$path" \
+        || die "The artifact-provider transition rollback contains a carriage return."
+    awk -v installation_id="$installation_id" '
+        NR == 1 {
+            if ($0 != "BACKUPSHEEP-ARTIFACT-PROVIDER-ROLLBACK-V1") exit 1
+            next
+        }
+        NR == 2 {
+            if ($0 != "installation=" installation_id) exit 1
+            next
+        }
+        length($0) > 8192 { exit 1 }
+        $0 !~ /^BACKUPSHEEP_ARTIFACT_[A-Z0-9_]+=/ &&
+            $0 !~ /^AWS_ENDPOINT_URL_KMS=/ { exit 1 }
+        {
+            key = $0
+            sub(/=.*/, "", key)
+            if (seen[key]++) exit 1
+        }
+        END { if (NR < 2) exit 1 }
+    ' "$path" \
+        || die "The artifact-provider transition rollback is malformed."
+}
+
+validate_legacy_artifact_provider_secret_state() {
+    local legacy_secret=""
+    local rollback_path=""
+    local found=false
+
+    rollback_path="$(artifact_provider_rollback_path)"
+    for legacy_secret in "${LEGACY_ARTIFACT_PROVIDER_SECRET_NAMES[@]}"; do
+        legacy_secret="${SECRETS_DIR}/${legacy_secret}"
+        if [[ -e "$legacy_secret" || -L "$legacy_secret" ]]; then
+            found=true
         fi
+    done
+    [[ "$found" == false ]] && return
+    [[ -e "$rollback_path" || -L "$rollback_path" ]] \
+        || die "A retired artifact-provider credential exists without its protected transition rollback; inspect and remove or recover it explicitly."
+    validate_artifact_provider_rollback "$rollback_path"
+}
+
+preserve_artifact_provider_rollback() {
+    local path=""
+    local temporary=""
+    local installation_id=""
+    local existing_digest=""
+    local expected_digest=""
+
+    path="$(artifact_provider_rollback_path)"
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    if ! awk '
+        /^[[:space:]]*AWS_ENDPOINT_URL_KMS/ &&
+            $0 !~ /^AWS_ENDPOINT_URL_KMS=/ { exit 1 }
+    ' "$ENV_FILE"; then
+        die "The legacy AWS_ENDPOINT_URL_KMS setting is malformed; preserve and review it manually."
+    fi
+    if [[ -e "$path" || -L "$path" ]]; then
+        validate_artifact_provider_rollback
+    fi
+    temporary="$(mktemp "${SECRETS_DIR}/.artifact-provider-rollback.XXXXXXXX")"
+    if ! {
+        printf '%s\n' BACKUPSHEEP-ARTIFACT-PROVIDER-ROLLBACK-V1
+        printf 'installation=%s\n' "$installation_id"
+        awk '
+            /^BACKUPSHEEP_ARTIFACT_[A-Z0-9_]+=/ ||
+            /^AWS_ENDPOINT_URL_KMS=/
+        ' "$ENV_FILE"
+    } > "$temporary"; then
+        rm -f -- "$temporary"
+        die "Could not preserve the existing artifact-provider policy for rollback."
+    fi
+    chmod 0400 "$temporary"
+    # Validate the unpublished bytes under the same strict grammar. Temporarily
+    # address the candidate directly rather than exposing any value in logs.
+    [[ "$(file_size "$temporary")" -ge 1 && "$(file_size "$temporary")" -le 32768 ]] \
+        || { rm -f -- "$temporary"; die "The existing artifact-provider policy is not bounded for rollback."; }
+    ! od -An -v -tx1 "$temporary" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)' \
+        || { rm -f -- "$temporary"; die "The existing artifact-provider policy cannot be preserved safely."; }
+    ! grep -q $'\r' "$temporary" \
+        || { rm -f -- "$temporary"; die "The existing artifact-provider policy cannot be preserved safely."; }
+    awk -v installation_id="$installation_id" '
+        NR == 1 {
+            if ($0 != "BACKUPSHEEP-ARTIFACT-PROVIDER-ROLLBACK-V1") exit 1
+            next
+        }
+        NR == 2 {
+            if ($0 != "installation=" installation_id) exit 1
+            next
+        }
+        length($0) > 8192 { exit 1 }
+        $0 !~ /^BACKUPSHEEP_ARTIFACT_[A-Z0-9_]+=/ &&
+            $0 !~ /^AWS_ENDPOINT_URL_KMS=/ { exit 1 }
+        { key = $0; sub(/=.*/, "", key); if (seen[key]++) exit 1 }
+        END { if (NR < 2) exit 1 }
+    ' "$temporary" \
+        || { rm -f -- "$temporary"; die "The existing artifact-provider policy cannot be preserved safely."; }
+    validate_artifact_provider_rollback "$temporary"
+    if [[ -e "$path" ]]; then
+        existing_digest="$(sha256_file "$path")"
+        expected_digest="$(sha256_file "$temporary")"
+        if [[ "$existing_digest" != "$expected_digest" ]] \
+            || ! cmp -s -- "$path" "$temporary"; then
+            rm -f -- "$temporary"
+            die "The existing artifact-provider rollback does not exactly match the current legacy policy."
+        fi
+        rm -f -- "$temporary"
         return
     fi
-    [[ -n "$input_path" ]] \
-        || die "A fresh or migrating stock install requires ${option}."
-    temporary="$(mktemp "${SECRETS_DIR}/.artifact-kms-${lane}-credentials.XXXXXXXX")"
-    if ! cp -- "$input_path" "$temporary"; then
+    sync || { rm -f -- "$temporary"; die "Could not durably flush the artifact-provider rollback."; }
+    if ! atomic_publish_new_file "$temporary" "$path"; then
         rm -f -- "$temporary"
-        die "Could not copy the artifact KMS credentials into protected storage."
+        die "Could not atomically preserve the artifact-provider rollback."
+    fi
+    sync || die "The artifact-provider rollback was published but its directory update was not durably flushed."
+    validate_artifact_provider_rollback
+}
+
+write_artifact_keyring() {
+    local lane="$1"
+    local destination=""
+    local temporary=""
+    local key_id=""
+    local key_hex=""
+    local installation_id=""
+
+    destination="$(artifact_keyring_path "$lane")"
+    [[ ! -e "$destination" && ! -L "$destination" ]] \
+        || die "Refusing to overwrite the existing ${lane} artifact keyring."
+    key_id="lfk-$(random_hex 16)"
+    key_hex="$(random_hex 32)"
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    temporary="$(mktemp "${SECRETS_DIR}/.artifact-keyring-${lane}.XXXXXXXX")"
+    if ! {
+        printf '%s\n' BACKUPSHEEP-ARTIFACT-KEYRING-V1
+        printf 'installation=%s\n' "$installation_id"
+        printf 'lane=%s\n' "$lane"
+        printf 'active=%s\n' "$key_id"
+        printf 'key=%s:%s\n' "$key_id" "$key_hex"
+    } > "$temporary"; then
+        rm -f -- "$temporary"
+        die "Could not write the ${lane} artifact keyring."
     fi
     chmod 0444 "$temporary"
-    if ! atomic_move_new "$temporary" "$destination"; then
+    validate_artifact_keyring_content "$temporary" "$lane"
+    sync || { rm -f -- "$temporary"; die "Could not durably flush the new ${lane} artifact keyring."; }
+    if ! atomic_publish_new_file "$temporary" "$destination"; then
         rm -f -- "$temporary"
-        die "Could not atomically publish the artifact KMS credentials."
+        die "Could not atomically publish the ${lane} artifact keyring."
     fi
+    sync || die "The ${lane} artifact keyring was published but its directory update could not be durably flushed; stop and inspect protected storage before continuing."
+    key_hex="$(printf '%064d' 0)"
+    unset key_hex
     validate_secret_file "$destination"
 }
 
-configure_artifact_kms_credentials() {
-    local database_destination="${SECRETS_DIR}/artifact_kms_database_aws_credentials"
-    local files_destination="${SECRETS_DIR}/artifact_kms_files_aws_credentials"
-    local database_access_key=""
-    local files_access_key=""
+assert_artifact_keyring_worker_stopped() {
+    local lane="$1"
+    local running=""
 
-    configure_artifact_kms_credential \
-        database "$ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE"
-    configure_artifact_kms_credential \
-        files "$ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE"
-    if cmp -s -- "$database_destination" "$files_destination"; then
-        die "Database and files artifact KMS credential secrets must be distinct."
+    running="$(
+        "$DOCKER_BIN" ps \
+            --all \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+            --filter "label=com.docker.compose.service=worker-${lane}" \
+            --format '{{.ID}}'
+    )" || die "Could not inspect the ${lane} worker before artifact-key rotation."
+    [[ -z "$running" ]] \
+        || die "Remove every owned worker-${lane} container before rotating its artifact keyring; stopped, paused, and restarting containers retain the old bind-mounted keyring inode."
+}
+
+rotate_artifact_keyring() {
+    local lane="$1"
+    local destination=""
+    local temporary=""
+    local original_identity=""
+    local current_identity=""
+    local original_digest=""
+    local current_digest=""
+    local key_count=0
+    local current_active_key_id=""
+    local key_id=""
+    local key_hex=""
+    local installation_id=""
+
+    destination="$(artifact_keyring_path "$lane")"
+    validate_secret_file "$destination"
+    assert_artifact_keyring_worker_stopped "$lane"
+    current_active_key_id="$(awk -F= 'NR == 4 && $1 == "active" { print $2 }' "$destination")"
+    [[ "$current_active_key_id" == "$ARTIFACT_LOCAL_FILE_ROTATE_EXPECTED_KEY_ID" ]] \
+        || die "The ${lane} artifact keyring active ID does not match the supplied witness; refusing stale or repeated rotation."
+    key_count="$(awk -F= '$1 == "key" { count++ } END { print count + 0 }' "$destination")"
+    [[ "$key_count" -ge 1 && "$key_count" -lt 8 ]] \
+        || die "The ${lane} artifact keyring is full; no legacy key was evicted. Rewrap every active reference and complete a separately reviewed prune before another rotation."
+    original_identity="$(file_identity "$destination")"
+    original_digest="$(sha256_file "$destination")"
+    key_id="lfk-$(random_hex 16)"
+    key_hex="$(random_hex 32)"
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    temporary="$(mktemp "${SECRETS_DIR}/.artifact-keyring-${lane}-rotation.XXXXXXXX")"
+    if ! {
+        printf '%s\n' BACKUPSHEEP-ARTIFACT-KEYRING-V1
+        printf 'installation=%s\n' "$installation_id"
+        printf 'lane=%s\n' "$lane"
+        printf 'active=%s\n' "$key_id"
+        printf 'key=%s:%s\n' "$key_id" "$key_hex"
+        tail -n +5 -- "$destination"
+    } > "$temporary"; then
+        rm -f -- "$temporary"
+        die "Could not prepare the ${lane} artifact keyring rotation."
     fi
-    database_access_key="$(awk -F ' = ' '$1 == "aws_access_key_id" { print $2; exit }' "$database_destination")"
-    files_access_key="$(awk -F ' = ' '$1 == "aws_access_key_id" { print $2; exit }' "$files_destination")"
-    [[ -n "$database_access_key" && -n "$files_access_key" \
-        && "$database_access_key" != "$files_access_key" ]] \
-        || die "Database and files artifact KMS credentials must use different AWS access-key identities."
+    chmod 0444 "$temporary"
+    validate_artifact_keyring_content "$temporary" "$lane"
+    sync || { rm -f -- "$temporary"; die "Could not durably flush the rotated ${lane} artifact keyring."; }
+    validate_secret_file "$destination"
+    current_identity="$(file_identity "$destination")"
+    current_digest="$(sha256_file "$destination")"
+    [[ "$current_identity" == "$original_identity" && "$current_digest" == "$original_digest" ]] \
+        || { rm -f -- "$temporary"; die "The ${lane} artifact keyring changed concurrently; refusing rotation."; }
+    mv -f -- "$temporary" "$destination" \
+        || { rm -f -- "$temporary"; die "Could not atomically activate the ${lane} artifact keyring rotation."; }
+    sync || die "The rotated ${lane} artifact keyring was activated but its directory update could not be durably flushed; keep its prior keys and stop before creating new backups."
+    key_hex="$(printf '%064d' 0)"
+    unset key_hex
+    validate_secret_file "$destination"
+    log "Rotated the ${lane} artifact keyring to active key ID ${key_id}; every prior key remains available for recovery"
+}
+
+validate_distinct_artifact_keyrings() {
+    local database_keyring=""
+    local files_keyring=""
+
+    database_keyring="$(artifact_keyring_path database)"
+    files_keyring="$(artifact_keyring_path files)"
+    if ! awk -F '[=:]' '
+        NR == FNR && $1 == "key" { ids[$2] = 1; material[$3] = 1; next }
+        $1 == "key" && (ids[$2] || material[$3]) { exit 1 }
+    ' "$database_keyring" "$files_keyring"; then
+        die "Database and files artifact keyrings share a key identity or root key."
+    fi
+}
+
+configure_artifact_keyrings() {
+    local allow_rotation="${1:-false}"
+    local lane=""
+    local destination=""
+    local database_generation=""
+    local artifact_generation=""
+    local allow_create=false
+
+    database_generation="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
+    artifact_generation="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION)"
+    for lane in database files; do
+        destination="$(artifact_keyring_path "$lane")"
+        if [[ -e "$destination" || -L "$destination" ]]; then
+            validate_secret_file "$destination"
+            continue
+        fi
+        allow_create=false
+        if [[ "$ENV_WAS_PRESENT" != true || "$database_generation" == 3-pending-fresh ]]; then
+            allow_create=true
+        elif [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true \
+            && "$artifact_generation" == 1-pending-empty ]]; then
+            allow_create=true
+        fi
+        [[ "$allow_create" == true ]] \
+            || die "The existing installation is missing its ${lane} artifact keyring; refusing to generate replacement root keys. Restore the protected keyring backup."
+        write_artifact_keyring "$lane"
+    done
+    validate_distinct_artifact_keyrings
+    [[ "$allow_rotation" == true || "$allow_rotation" == false ]] \
+        || die "Internal artifact keyring rotation mode is invalid."
+    if [[ "$allow_rotation" == true && -n "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" ]]; then
+        [[ "$ENV_WAS_PRESENT" == true && "$database_generation" == 3 ]] \
+            || die "--rotate-artifact-keyring is valid only for a completed existing installation."
+        rotate_artifact_keyring "$ARTIFACT_LOCAL_FILE_ROTATE_LANE"
+        validate_distinct_artifact_keyrings
+    fi
 }
 
 write_empty_optional_secret_file() {
@@ -2242,6 +2540,24 @@ sha256_text() {
     printf '%s' "$digest"
 }
 
+sha256_file() {
+    local path="$1"
+    local digest=""
+
+    if command_exists sha256sum; then
+        digest="$(sha256sum -- "$path" | awk '{ print $1 }')"
+    elif command_exists shasum; then
+        digest="$(shasum -a 256 -- "$path" | awk '{ print $1 }')"
+    elif command_exists openssl; then
+        digest="$(openssl dgst -sha256 -- "$path" | awk '{ print $NF }')"
+    else
+        die "A SHA-256 implementation (sha256sum, shasum, or openssl) is required."
+    fi
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+        || die "The host SHA-256 implementation returned an invalid file digest."
+    printf '%s' "$digest"
+}
+
 configure_postgres_storage_generation() {
     local installation_id=""
     local state=""
@@ -2399,93 +2715,218 @@ configure_staging_layout_witness() {
     done
 }
 
-validate_artifact_kms_configuration() {
-    local key_arn="$1"
-    local region="$2"
-    local allowlist="$3"
-    local item=""
-    local seen=","
-    local found_active=false
-    local count=0
-    local old_ifs="$IFS"
-    local -a artifact_kms_items=()
+configure_artifact_key_policy() {
+    local existing_provider=""
+    local generation=""
+    local witness=""
+    local expected_witness=""
+    local installation_id=""
+    local rollback_path=""
+    local rollback_digest=""
+    local recorded_rollback_digest=""
 
-    [[ "$region" =~ ^[a-z0-9-]{3,32}$ ]] \
-        || die "The artifact KMS region is malformed."
-    [[ "$key_arn" =~ ^arn:[a-z0-9-]+:kms:([a-z0-9-]+):[0-9]{12}:key/[A-Za-z0-9-]+$ \
-        && "${BASH_REMATCH[1]}" == "$region" ]] \
-        || die "The artifact KMS key ID must be a resolved key ARN in the configured region."
-    [[ -n "$allowlist" && "${#allowlist}" -le 8192 && "$allowlist" != *[[:space:]]* ]] \
-        || die "The artifact KMS allowlist must be a bounded comma-separated ARN list without whitespace."
-    IFS=',' read -r -a artifact_kms_items <<< "$allowlist"
-    IFS="$old_ifs"
-    for item in "${artifact_kms_items[@]}"; do
-        count=$((count + 1))
-        [[ "$count" -le 32 && -n "$item" ]] \
-            || die "The artifact KMS allowlist contains too many or empty entries."
-        [[ "$item" =~ ^arn:[a-z0-9-]+:kms:([a-z0-9-]+):[0-9]{12}:key/[A-Za-z0-9-]+$ \
-            && "${BASH_REMATCH[1]}" == "$region" ]] \
-            || die "Every artifact KMS allowlist entry must be a resolved key ARN in the configured region."
-        [[ "$seen" != *",${item},"* ]] \
-            || die "The artifact KMS allowlist contains a duplicate ARN."
-        seen="${seen}${item},"
-        [[ "$item" != "$key_arn" ]] || found_active=true
-    done
-    [[ "$found_active" == true ]] \
-        || die "The artifact KMS allowlist must contain the active key ARN."
+    existing_provider="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER)"
+    generation="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION)"
+    witness="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS)"
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    rollback_path="$(artifact_provider_rollback_path)"
+    if [[ "$ENV_WAS_PRESENT" != true ]]; then
+        [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" != true ]] \
+            || die "--migrate-artifact-key-provider-empty is valid only for an existing installation."
+        generation=1
+    elif [[ "$existing_provider" == local-file ]]; then
+        case "$generation" in
+            1)
+                if [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true ]]; then
+                    [[ -e "$rollback_path" && ! -L "$rollback_path" ]] \
+                        || die "The artifact key provider is already generation 1; rerun without --migrate-artifact-key-provider-empty."
+                    validate_artifact_provider_rollback
+                elif [[ -e "$rollback_path" || -L "$rollback_path" ]]; then
+                    die "Artifact-provider transition cleanup is pending; rerun once with --migrate-artifact-key-provider-empty."
+                fi
+                ;;
+            1-pending-empty)
+                [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true ]] \
+                    || die "Artifact key-provider migration is pending; rerun with --migrate-artifact-key-provider-empty while operations remain disabled."
+                validate_artifact_provider_rollback
+                ;;
+            '')
+                [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" != true ]] \
+                    || die "The installed local-file provider does not need the legacy empty-provider migration flag."
+                generation=1
+                ;;
+            *) die "The artifact key-provider generation is unsupported." ;;
+        esac
+    elif [[ -z "$existing_provider" || "$existing_provider" == local-development \
+        || "$existing_provider" == aws-kms ]]; then
+        [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true ]] \
+            || die "This existing installation needs the explicit --migrate-artifact-key-provider-empty transition. It succeeds only if the current migration proves zero data-key wraps, plaintext artifact ledgers, and historical database/files backup or storage-point rows."
+        [[ -z "$generation" && -z "$witness" ]] \
+            || die "The legacy artifact provider has unexpected generation metadata."
+        preserve_artifact_provider_rollback
+        generation=1-pending-empty
+    else
+        die "The existing installation uses an unsupported artifact key provider. Automatic cryptographic conversion would destroy restore access; recover or rewrap those artifacts under an explicitly reviewed migration before upgrading."
+    fi
+
+    expected_witness="$(sha256_text "BackupSheep/artifact-key-provider/v1|${installation_id}|local-file|generation=${generation}")"
+    if [[ -n "$witness" && "$witness" != "$expected_witness" ]]; then
+        die "The artifact key-provider witness does not match this installation and generation."
+    fi
+    if [[ "$generation" == 1-pending-empty ]]; then
+        validate_artifact_provider_rollback
+        rollback_digest="$(sha256_file "$rollback_path")"
+        recorded_rollback_digest="$(read_env_value BACKUPSHEEP_ARTIFACT_PROVIDER_ROLLBACK_SHA256)"
+        [[ -z "$recorded_rollback_digest" || "$recorded_rollback_digest" == "$rollback_digest" ]] \
+            || die "The artifact-provider transition rollback changed during a pending migration."
+    fi
+    write_artifact_key_policy "$generation" "$expected_witness"
+    configure_artifact_keyrings true
 }
 
-configure_artifact_kms_policy() {
-    local key_arn="$ARTIFACT_KMS_KEY_ID"
-    local region="$ARTIFACT_KMS_REGION"
-    local allowlist="$ARTIFACT_KMS_ALLOWED_KEY_ARNS"
-    local ambient_key=""
-    local ambient_value=""
+write_artifact_key_policy() {
+    local generation="$1"
+    local witness="$2"
+    local temporary=""
+    local chunk_size=""
+    local rollback_digest=""
 
-    [[ -n "$key_arn" ]] || key_arn="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_KEY_ID)"
-    [[ -n "$region" ]] || region="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_REGION)"
-    [[ -n "$allowlist" ]] || allowlist="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS)"
-    [[ -n "$key_arn" && -n "$region" && -n "$allowlist" ]] \
-        || die "Stock enterprise installs require the artifact KMS key ARN, region, and resolved ARN allowlist options."
-    validate_artifact_kms_configuration "$key_arn" "$region" "$allowlist"
+    [[ "$generation" == 1 || "$generation" == 1-pending-empty ]] \
+        || die "Internal artifact key-provider generation is invalid."
+    [[ "$witness" =~ ^[0-9a-f]{64}$ ]] \
+        || die "Internal artifact key-provider witness is invalid."
+    chunk_size="$(read_env_value BACKUPSHEEP_ARTIFACT_CHUNK_SIZE)"
+    if [[ -n "$chunk_size" ]]; then
+        [[ "$chunk_size" =~ ^[0-9]{1,9}$ ]] \
+            && (( 10#$chunk_size >= 65536 && 10#$chunk_size <= 67108864 )) \
+            || die "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE must be between 65536 and 67108864."
+    fi
+    if [[ "$generation" == 1-pending-empty ]]; then
+        validate_artifact_provider_rollback
+        rollback_digest="$(sha256_file "$(artifact_provider_rollback_path)")"
+    fi
+    temporary="$(mktemp "${INSTALL_DIR}/.env-artifact-policy.XXXXXXXX")"
+    if ! awk '
+        $0 !~ /^BACKUPSHEEP_ARTIFACT_[A-Z0-9_]*=/ &&
+        $0 !~ /^AWS_ENDPOINT_URL_KMS=/
+    ' "$ENV_FILE" > "$temporary"; then
+        rm -f -- "$temporary"
+        die "Could not prepare the artifact key-provider policy."
+    fi
+    if ! {
+        printf "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE='bse1'\n"
+        printf "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE='true'\n"
+        printf "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE='false'\n"
+        printf "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'\n"
+        printf "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION='%s'\n" "$generation"
+        printf "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS='%s'\n" "$witness"
+        if [[ -n "$rollback_digest" ]]; then
+            printf "BACKUPSHEEP_ARTIFACT_PROVIDER_ROLLBACK_SHA256='%s'\n" "$rollback_digest"
+        fi
+        printf "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH=''\n"
+        printf "BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY=''\n"
+        printf "BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID='local-v1'\n"
+        if [[ -n "$chunk_size" ]]; then
+            printf "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE='%s'\n" "$chunk_size"
+        fi
+    } >> "$temporary"; then
+        rm -f -- "$temporary"
+        die "Could not write the artifact key-provider policy."
+    fi
+    chmod 0600 "$temporary"
+    mv -f -- "$temporary" "$ENV_FILE" \
+        || { rm -f -- "$temporary"; die "Could not atomically publish the artifact key-provider policy."; }
+}
 
-    set_env_value BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE bse1
-    set_env_value BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE true
-    set_env_value BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE false
-    set_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER aws-kms
-    set_env_value BACKUPSHEEP_ARTIFACT_KMS_KEY_ID "$key_arn"
-    set_env_value BACKUPSHEEP_ARTIFACT_KMS_REGION "$region"
-    set_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS "$allowlist"
-    set_env_value BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL ""
-    set_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT false
-    for ambient_key in \
-        AWS_ACCESS_KEY_ID \
-        AWS_SECRET_ACCESS_KEY \
-        AWS_SESSION_TOKEN \
-        AWS_SECURITY_TOKEN \
-        AWS_PROFILE \
-        AWS_DEFAULT_PROFILE \
-        AWS_CONFIG_FILE \
-        AWS_SHARED_CREDENTIALS_FILE \
-        AWS_WEB_IDENTITY_TOKEN_FILE \
-        AWS_ROLE_ARN \
-        AWS_ROLE_SESSION_NAME \
-        AWS_CONTAINER_CREDENTIALS_FULL_URI \
-        AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
-        AWS_CONTAINER_AUTHORIZATION_TOKEN \
-        AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE \
-        AWS_ENDPOINT_URL \
-        AWS_ENDPOINT_URL_KMS \
-        AWS_CA_BUNDLE \
-        AWS_METADATA_SERVICE_ENDPOINT \
-        AWS_METADATA_SERVICE_ENDPOINT_MODE \
-        BOTO_CONFIG; do
-        ambient_value="$(read_env_value "$ambient_key")"
-        [[ -z "$ambient_value" ]] \
-            || die "${ambient_key} must not carry ambient AWS credentials or endpoint policy in .env; use the reviewed artifact KMS credential-file option."
-        set_env_value "$ambient_key" ""
+seal_artifact_key_provider_migration() {
+    local generation=""
+    local witness=""
+    local expected_witness=""
+    local installation_id=""
+    local rollback_path=""
+
+    generation="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION)"
+    witness="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS)"
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    rollback_path="$(artifact_provider_rollback_path)"
+    expected_witness="$(sha256_text "BackupSheep/artifact-key-provider/v1|${installation_id}|local-file|generation=${generation}")"
+    [[ "$witness" == "$expected_witness" ]] \
+        || die "The artifact key-provider witness changed before completion."
+    case "$generation" in
+        1)
+            if [[ ! -e "$rollback_path" && ! -L "$rollback_path" ]]; then
+                return
+            fi
+            [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true ]] \
+                || die "Artifact-provider transition cleanup requires its explicit flag."
+            validate_artifact_provider_rollback
+            ;;
+        1-pending-empty)
+            [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true ]] \
+                || die "Artifact key-provider migration cannot seal without its explicit flag."
+            validate_artifact_provider_rollback
+            ;;
+        *) die "Cannot seal unsupported artifact key-provider generation ${generation}." ;;
+    esac
+
+    # The migrate service has exited successfully before this function is called.
+    # The current migrate one-shot proves that no prior-provider wrap or legacy
+    # plaintext artifact record exists. Publish the final deployment witness so the
+    # new processes can boot, but retain the prior policy and credentials until the
+    # rendered model, security preflight, and healthy web process all succeed.
+    generation=1
+    witness="$(sha256_text "BackupSheep/artifact-key-provider/v1|${installation_id}|local-file|generation=${generation}")"
+    write_artifact_key_policy "$generation" "$witness"
+}
+
+complete_artifact_key_provider_migration() {
+    local generation=""
+    local witness=""
+    local expected_witness=""
+    local installation_id=""
+    local legacy_secret=""
+    local rollback_path=""
+
+    generation="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION)"
+    witness="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS)"
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    rollback_path="$(artifact_provider_rollback_path)"
+    expected_witness="$(sha256_text "BackupSheep/artifact-key-provider/v1|${installation_id}|local-file|generation=1")"
+    [[ "$generation" == 1 && "$witness" == "$expected_witness" ]] \
+        || die "Artifact key-provider cleanup requires the sealed generation-1 witness."
+    if [[ ! -e "$rollback_path" && ! -L "$rollback_path" ]]; then
+        return
+    fi
+    [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true ]] \
+        || die "Artifact-provider transition cleanup requires its explicit flag."
+    validate_artifact_provider_rollback
+
+    # This runs only after the current image passed model validation, authenticated
+    # database preflight, and the web/guard pair became healthy. Until that point
+    # the exact prior provider policy and credentials remain available for rollback.
+    # Validate the complete historical credential set before deleting any member;
+    # a malformed second lane must never cause partial retirement of the first.
+    for legacy_secret in "${LEGACY_ARTIFACT_PROVIDER_SECRET_NAMES[@]}"; do
+        legacy_secret="${SECRETS_DIR}/${legacy_secret}"
+        if [[ -e "$legacy_secret" || -L "$legacy_secret" ]]; then
+            [[ -f "$legacy_secret" && ! -L "$legacy_secret" \
+                && "$(file_uid "$legacy_secret")" == "$EUID" \
+                && "$(file_mode "$legacy_secret")" == 444 \
+                && "$(file_links "$legacy_secret")" == 1 ]] \
+                || die "A retired artifact-provider credential has unsafe metadata; preserve the rollback and stop."
+        fi
     done
-    configure_artifact_kms_credentials
+    for legacy_secret in "${LEGACY_ARTIFACT_PROVIDER_SECRET_NAMES[@]}"; do
+        legacy_secret="${SECRETS_DIR}/${legacy_secret}"
+        if [[ -e "$legacy_secret" ]]; then
+            rm -f -- "$legacy_secret" \
+                || die "Could not retire a historical artifact-provider credential after deployment acceptance."
+        fi
+    done
+    validate_artifact_provider_rollback
+    rm -f -- "$rollback_path" \
+        || die "Could not retire the artifact-provider transition rollback after deployment acceptance."
+    sync || die "Artifact-provider transition cleanup was not durably flushed; inspect protected storage before continuing."
 }
 
 adopt_legacy_compose_down_project() {
@@ -2855,6 +3296,8 @@ create_or_migrate_configuration() {
         validate_env_file
         log "Preserving and validating existing configuration"
     else
+        [[ -z "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" ]] \
+            || die "--rotate-artifact-keyring is valid only after a completed installation exists."
         log "Creating a protected production configuration"
         cp -- "$INSTALL_DIR/.env_sample" "$ENV_FILE"
         chmod 0600 "$ENV_FILE"
@@ -2887,7 +3330,7 @@ create_or_migrate_configuration() {
     ensure_compose_project_name
     configure_postgres_storage_generation
     configure_egress_policy_generation
-    configure_artifact_kms_policy
+    configure_artifact_key_policy
 
     if [[ "$ENV_WAS_PRESENT" == true ]]; then
         reject_connection_url_overrides
@@ -2930,11 +3373,13 @@ validate_runtime_configuration() {
     local postgres_storage_intent=""
     local postgres_storage_witness=""
     local expected_postgres_storage_witness=""
+    local artifact_provider_generation=""
+    local artifact_provider_witness=""
+    local expected_artifact_provider_witness=""
+    local artifact_provider_rollback=""
+    local artifact_provider_rollback_digest=""
     local managed_database_public=""
     local managed_files_public=""
-    local kms_key_arn=""
-    local kms_region=""
-    local kms_allowlist=""
     local -a database_role_variables=(DB_BOOTSTRAP_USER DB_MIGRATOR_USER)
 
     for lane in "${DATABASE_LANES[@]}"; do
@@ -3052,16 +3497,39 @@ validate_runtime_configuration() {
         || die "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE must be true."
     [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE)" == "false" ]] \
         || die "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE must be false."
-    [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER)" == "aws-kms" ]] \
-        || die "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER must be aws-kms."
-    [[ -z "$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL)" ]] \
-        || die "Stock enterprise installs forbid an artifact KMS endpoint override."
-    [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT)" == "false" ]] \
-        || die "Stock enterprise installs forbid insecure artifact KMS endpoints."
-    kms_key_arn="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_KEY_ID)"
-    kms_region="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_REGION)"
-    kms_allowlist="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS)"
-    validate_artifact_kms_configuration "$kms_key_arn" "$kms_region" "$kms_allowlist"
+    [[ "$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER)" == "local-file" ]] \
+        || die "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER must be local-file."
+    artifact_provider_generation="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION)"
+    artifact_provider_witness="$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS)"
+    if [[ "$artifact_provider_generation" != 1 ]]; then
+        [[ "$artifact_provider_generation" == 1-pending-empty \
+            && "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true ]] \
+            || die "The artifact key-provider generation is not deployable."
+    fi
+    expected_artifact_provider_witness="$(sha256_text "BackupSheep/artifact-key-provider/v1|${installation_id}|local-file|generation=${artifact_provider_generation}")"
+    [[ "$artifact_provider_witness" == "$expected_artifact_provider_witness" ]] \
+        || die "The artifact key-provider witness does not match this installation and generation."
+    artifact_provider_rollback="$(artifact_provider_rollback_path)"
+    artifact_provider_rollback_digest="$(read_env_value BACKUPSHEEP_ARTIFACT_PROVIDER_ROLLBACK_SHA256)"
+    if [[ "$artifact_provider_generation" == 1-pending-empty ]]; then
+        validate_artifact_provider_rollback
+        [[ "$artifact_provider_rollback_digest" == "$(sha256_file "$artifact_provider_rollback")" ]] \
+            || die "The pending artifact-provider rollback does not match its protected digest."
+    else
+        [[ -z "$artifact_provider_rollback_digest" ]] \
+            || die "A sealed artifact-provider policy must not retain a rollback digest."
+        if [[ -e "$artifact_provider_rollback" || -L "$artifact_provider_rollback" ]]; then
+            [[ "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == true ]] \
+                || die "Artifact-provider transition cleanup requires its explicit flag."
+            validate_artifact_provider_rollback
+        fi
+    fi
+    validate_legacy_artifact_provider_secret_state
+    [[ -z "$(read_env_value BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH)" ]] \
+        || die "The shared .env must not expose an artifact keyring path."
+    [[ -z "$(read_env_value BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY)" ]] \
+        || die "The shared .env must not contain artifact root key material."
+    configure_artifact_keyrings false
 
     [[ "$(read_env_value SSH_MANAGED_LANE_ISOLATION_REQUIRED)" == "true" ]] \
         || die "SSH_MANAGED_LANE_ISOLATION_REQUIRED must be true."
@@ -3923,6 +4391,7 @@ start_core() {
         die "Database identity transition startup failed."
     fi
     wait_for_database_seal
+    seal_artifact_key_provider_migration
     complete_database_identity_generation
     complete_postgres_storage_generation
     validate_runtime_configuration
@@ -4173,6 +4642,7 @@ main() {
     if [[ "$ENABLE_OPERATIONS" == true ]]; then
         start_operations
     fi
+    complete_artifact_key_provider_migration
     print_next_steps
 }
 

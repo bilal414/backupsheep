@@ -583,7 +583,7 @@ These belong in a separately authorized hosted-control-plane effort:
 - **H1:** managed-cell capability and readiness endpoints;
 - **H2:** dedicated-cell infrastructure;
 - **H3:** idempotent provisioner/control plane;
-- **H4:** identity, credentials, KMS, and support access;
+- **H4:** identity, scoped credentials, lane-separated key custody, and support access;
 - **H5:** signed releases and upgrade controller;
 - **H6:** metadata backup and disaster recovery;
 - **H7:** observability, incident response, and support operations;

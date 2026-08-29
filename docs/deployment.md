@@ -21,8 +21,8 @@ Before exposing the instance:
 - [ ] Preserve the installer's distinct **database and RabbitMQ bootstrap/lane secret
       files**; never collapse them into one credential or publish either service port.
       Keep direct stock `.env` password keys blank.
-- [ ] Configure the required BSE1 AWS KMS key/allowlist and two distinct lane credential
-      files. Prove both allowed-lane and denied-cross-lane KMS calls before operations.
+- [ ] Preserve and independently back up the two BSE1 local-file keyrings. Prove
+      same-lane restore and denied cross-lane unwrap before operations.
 - [ ] Preserve the stock integration-credential lane matrix: web receives all families
       needed for setup/OAuth callbacks; cloud only DigitalOcean/OVH; files only Basecamp;
       storage only Dropbox/pCloud/Microsoft/Google; logs only
@@ -187,7 +187,8 @@ Your BackupSheep PostgreSQL database holds your connections, schedules, and (enc
 credentials. Back it up independently (e.g. `pg_dump` of the `db` volume) and store the
 complete `.secrets` directory safely — you need the *same* Django key to decrypt restored
 email credentials, matching database/broker credentials to recover the stack, and both
-source-lane KMS identities plus live allowlisted keys to restore BSE1 artifacts.
+source-lane artifact keyrings to restore BSE1 artifacts. Loss of a lane keyring is
+irrecoverable for any artifact whose wrapping key is absent.
 
 ## Email
 

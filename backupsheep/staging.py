@@ -621,7 +621,7 @@ def _validate_bse1_descriptor(
     descriptor: int, fence: CiphertextFence | RestoreCiphertextFence
 ) -> None:
     # Lazy import keeps the filesystem policy usable during image/bootstrap checks
-    # without initializing optional KMS clients.
+    # without initializing the artifact-crypto implementation.
     from backupsheep.artifact_crypto import read_envelope_header_from_descriptor
 
     envelope = read_envelope_header_from_descriptor(descriptor)

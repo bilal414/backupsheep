@@ -17,8 +17,9 @@ stock installation requires the explicit one-time installer flag:
   --migrate-postgres-runtime
 ```
 
-Supply the same KMS and other deployment arguments used for the installation. Do
-not edit the storage-generation variables or rename Docker volumes by hand.
+Supply the same deployment arguments used for the installation. The installer preserves
+the protected local artifact keyrings. Do not edit the storage-generation variables or
+rename Docker volumes by hand.
 
 ## Fail-closed source contract
 

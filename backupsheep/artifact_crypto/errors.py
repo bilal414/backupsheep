@@ -1,8 +1,8 @@
 """Typed, operator-safe failures for encrypted backup artifacts.
 
-Exceptions in this module deliberately carry stable messages.  Provider SDK
-errors can include request identifiers, account details, endpoint names, or
-other deployment metadata and must never become backup logs or API responses.
+Exceptions in this module deliberately carry stable messages. Provider and
+filesystem errors can include sensitive paths or deployment metadata and must
+never become backup logs or API responses.
 """
 
 
@@ -43,7 +43,7 @@ class ArtifactDestinationExistsError(ArtifactCryptoError):
 
 
 class KeyProviderError(ArtifactCryptoError):
-    """Base class for a sanitized external key-provider failure."""
+    """Base class for a sanitized key-provider failure."""
 
 
 class KeyProviderConfigurationError(KeyProviderError):
@@ -51,11 +51,11 @@ class KeyProviderConfigurationError(KeyProviderError):
 
 
 class KeyProviderUnavailableError(KeyProviderError):
-    """The external key provider could not complete the operation."""
+    """The key provider could not complete the operation."""
 
 
 class KeyProviderAccessDeniedError(KeyProviderError):
-    """The external key provider denied the operation."""
+    """The key provider denied the operation."""
 
 
 class KeyProviderNotFoundError(KeyProviderError):

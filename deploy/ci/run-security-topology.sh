@@ -64,6 +64,11 @@ done
 command -v docker >/dev/null 2>&1 || fail "Docker is unavailable."
 command -v openssl >/dev/null 2>&1 || fail "OpenSSL is unavailable."
 command -v ssh-keygen >/dev/null 2>&1 || fail "ssh-keygen is unavailable."
+[[ "$(id -u)" != "0" ]] \
+    || fail "the rootful/non-root file-secret topology must run as a non-root host user."
+if docker info --format '{{json .SecurityOptions}}' | grep -q 'name=rootless'; then
+    fail "the file-secret topology requires a rootful Docker daemon."
+fi
 
 for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE"; do
     docker image inspect "$image" >/dev/null 2>&1 \
@@ -103,6 +108,18 @@ secret_dir="${runtime_root}/secrets"
 environment_file="${runtime_root}/topology.env"
 rendered_config="${runtime_root}/compose.json"
 installation_id="$(openssl rand -hex 32)"
+artifact_database_key_id="lfk-$(openssl rand -hex 16)"
+artifact_database_key_hex="$(openssl rand -hex 32)"
+artifact_files_key_id="lfk-$(openssl rand -hex 16)"
+artifact_files_key_hex="$(openssl rand -hex 32)"
+[[ "$artifact_database_key_id" != "$artifact_files_key_id" \
+    && "$artifact_database_key_hex" != "$artifact_files_key_hex" ]] \
+    || fail "OpenSSL generated duplicate artifact lane keys."
+artifact_provider_generation=1
+artifact_provider_witness="$(
+    printf '%s' "BackupSheep/artifact-key-provider/v1|${installation_id}|local-file|generation=${artifact_provider_generation}" \
+        | sha256sum | awk '{print $1}'
+)"
 staging_intent='new-empty-v3'
 staging_witness="$(printf '%s' "BackupSheep/staging-layout/v3|${installation_id}|${staging_intent}" | sha256sum | awk '{print $1}')"
 postgres_storage_intent='new-empty-v1'
@@ -125,8 +142,9 @@ cleanup() {
     if [[ "$status" -ne 0 && "$stack_created" == true ]]; then
         compose logs --no-color --tail 200 \
             db rabbitmq rabbitmq-provision staging-provision \
-            app-egress-guard cloud-egress-guard db-provision migrate db-seal \
-            preflight app worker-cloud >&2 2>/dev/null || true
+            app-egress-guard cloud-egress-guard database-egress-guard \
+            files-egress-guard db-provision migrate db-seal preflight app \
+            worker-cloud worker-database worker-files >&2 2>/dev/null || true
     fi
     if [[ "$stack_created" == true ]]; then
         compose down --volumes --remove-orphans --timeout 30 >/dev/null 2>&1 || true
@@ -260,15 +278,19 @@ for public_file in "$secret_dir"/*.pub; do
     rm -- "$public_file"
 done
 printf '%s\n' \
-    '[default]' \
-    'aws_access_key_id = disabled' \
-    'aws_secret_access_key = disabled' \
-    > "${secret_dir}/artifact_kms_database_aws_credentials"
+    'BACKUPSHEEP-ARTIFACT-KEYRING-V1' \
+    "installation=${installation_id}" \
+    'lane=database' \
+    "active=${artifact_database_key_id}" \
+    "key=${artifact_database_key_id}:${artifact_database_key_hex}" \
+    > "${secret_dir}/artifact_local_file_database_keyring"
 printf '%s\n' \
-    '[default]' \
-    'aws_access_key_id = disabled' \
-    'aws_secret_access_key = disabled' \
-    > "${secret_dir}/artifact_kms_files_aws_credentials"
+    'BACKUPSHEEP-ARTIFACT-KEYRING-V1' \
+    "installation=${installation_id}" \
+    'lane=files' \
+    "active=${artifact_files_key_id}" \
+    "key=${artifact_files_key_id}:${artifact_files_key_hex}" \
+    > "${secret_dir}/artifact_local_file_files_keyring"
 chmod 0444 "$secret_dir"/*
 
 cat > "$environment_file" <<EOF
@@ -316,13 +338,12 @@ BACKUPSHEEP_RABBITMQ_DATA_GENERATION=4.3
 BACKUPSHEEP_CELERY_SECURITY_GENERATION=3
 BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION=1
 BACKUPSHEEP_EGRESS_POLICY_GENERATION=2
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION=${artifact_provider_generation}
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS=${artifact_provider_witness}
 CELERY_CLOUD_CONCURRENCY=1
 CELERY_CLOUD_PREFETCH_MULTIPLIER=1
 SSH_MANAGED_DATABASE_PUBLIC_KEY=${database_public_key}
 SSH_MANAGED_FILES_PUBLIC_KEY=${files_public_key}
-BACKUPSHEEP_ARTIFACT_KMS_KEY_ID=arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001
-BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS=arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001
-BACKUPSHEEP_ARTIFACT_KMS_REGION=us-east-1
 EOF
 chmod 0600 "$environment_file"
 
@@ -338,6 +359,8 @@ expected_images = {
     "db": sys.argv[3],
     "app-egress-guard": sys.argv[4],
     "cloud-egress-guard": sys.argv[4],
+    "database-egress-guard": sys.argv[4],
+    "files-egress-guard": sys.argv[4],
     "staging-provision": sys.argv[2],
     "db-provision": sys.argv[2],
     "migrate": sys.argv[2],
@@ -345,6 +368,8 @@ expected_images = {
     "preflight": sys.argv[2],
     "app": sys.argv[2],
     "worker-cloud": sys.argv[2],
+    "worker-database": sys.argv[2],
+    "worker-files": sys.argv[2],
 }
 for service, expected in expected_images.items():
     actual = services[service].get("image")
@@ -359,7 +384,12 @@ expected_rabbitmq = (
 for service in ("rabbitmq-volume-init", "rabbitmq", "rabbitmq-provision"):
     if services[service].get("image") != expected_rabbitmq:
         raise SystemExit(f"{service} does not use the reviewed RabbitMQ digest")
-for service in ("app-egress-guard", "cloud-egress-guard"):
+for service in (
+    "app-egress-guard",
+    "cloud-egress-guard",
+    "database-egress-guard",
+    "files-egress-guard",
+):
     environment = services[service].get("environment", {})
     if environment.get("BACKUPSHEEP_EGRESS_POLICY_GENERATION") != "2":
         raise SystemExit(f"{service} does not render egress policy generation 2")
@@ -380,10 +410,47 @@ for service in ("app-egress-guard", "cloud-egress-guard"):
     ):
         if environment.get(variable):
             raise SystemExit(f"{service} unexpectedly renders {variable}")
-for service in ("app", "worker-cloud"):
+for service in ("app", "worker-cloud", "worker-database", "worker-files"):
     health_test = services[service].get("healthcheck", {}).get("test")
     if health_test != ["CMD", "/usr/local/bin/backupsheep-egress-workload-healthcheck"]:
         raise SystemExit(f"{service} does not use the stock database/broker healthcheck")
+source_workers = {
+    "worker-database": (
+        "database",
+        "/run/secrets/artifact_local_file_database_keyring",
+        "artifact_local_file_database_keyring",
+    ),
+    "worker-files": (
+        "files",
+        "/run/secrets/artifact_local_file_files_keyring",
+        "artifact_local_file_files_keyring",
+    ),
+}
+for service, (lane, keyring_path, keyring_secret) in source_workers.items():
+    definition = services[service]
+    environment = definition.get("environment", {})
+    if environment.get("BACKUPSHEEP_RUNTIME_ROLE") != lane:
+        raise SystemExit(f"{service} does not render its exact source runtime role")
+    if environment.get("BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH") != keyring_path:
+        raise SystemExit(f"{service} does not render its exact lane keyring path")
+    secrets = {
+        item.get("source", item.get("target")) if isinstance(item, dict) else item
+        for item in definition.get("secrets", [])
+    }
+    if keyring_secret not in secrets:
+        raise SystemExit(f"{service} does not mount its lane keyring secret")
+    opposite = (
+        "artifact_local_file_files_keyring"
+        if lane == "database"
+        else "artifact_local_file_database_keyring"
+    )
+    if opposite in secrets:
+        raise SystemExit(f"{service} mounts the opposite lane keyring")
+for service in ("app", "worker-cloud", "preflight"):
+    if services[service].get("environment", {}).get(
+        "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH"
+    ):
+        raise SystemExit(f"{service} unexpectedly receives an artifact keyring path")
 database = services["db"]
 if database.get("user") != "70:70":
     raise SystemExit("database does not render as Alpine postgres UID/GID 70")
@@ -402,7 +469,7 @@ if not any(
 for service, definition in services.items():
     if definition.get("ports"):
         raise SystemExit(f"{service} unexpectedly publishes a host port")
-for service in ("app", "worker-cloud", "preflight"):
+for service in ("app", "worker-cloud", "worker-database", "worker-files", "preflight"):
     environment = services[service].get("environment", {})
     for forbidden in ("DJANGO_SECRET_KEY", "DB_PASSWORD", "RABBITMQ_PASSWORD"):
         if environment.get(forbidden):
@@ -417,6 +484,8 @@ for service in (
     "preflight",
     "app",
     "worker-cloud",
+    "worker-database",
+    "worker-files",
 ):
     for mount in services[service].get("volumes", []):
         if isinstance(mount, dict) and mount.get("type") == "bind":
@@ -427,7 +496,7 @@ PY
 
 stack_created=true
 compose --profile operations up --detach --no-build --wait --wait-timeout 420 \
-    app worker-cloud
+    app worker-cloud worker-database worker-files
 
 assert_runtime_image() {
     local service="$1"
@@ -463,11 +532,12 @@ docker exec "$db_container" /usr/local/bin/backupsheep-postgres-storage-witness 
 docker exec "$db_container" grep -qx 'status=complete' \
     /var/lib/postgresql/.backupsheep-storage-witness-v1 \
     || fail "fresh PostgreSQL storage completion witness is absent."
-for service in app-egress-guard cloud-egress-guard; do
+for service in app-egress-guard cloud-egress-guard database-egress-guard files-egress-guard; do
     assert_runtime_image "$service" "$TEST_EGRESS_IMAGE"
     assert_guard_healthy "$service"
 done
-for service in staging-provision db-provision migrate db-seal preflight app worker-cloud; do
+for service in staging-provision db-provision migrate db-seal preflight app \
+    worker-cloud worker-database worker-files; do
     assert_runtime_image "$service" "$TEST_APP_IMAGE"
 done
 
@@ -499,6 +569,32 @@ assert_healthy() {
 }
 assert_healthy app
 assert_healthy worker-cloud
+assert_healthy worker-database
+assert_healthy worker-files
+
+assert_lane_keyring_secret() {
+    local service="$1" lane="$2"
+    local container host_path host_uid inside_metadata mounts
+    container="$(compose ps --all --quiet "$service")"
+    host_path="${secret_dir}/artifact_local_file_${lane}_keyring"
+    host_uid="$(stat -c '%u' "$host_path")"
+    [[ "$host_uid" == "$(id -u)" && "$host_uid" != "0" ]] \
+        || fail "${lane} keyring does not exercise a non-root host-owned Compose secret."
+    inside_metadata="$(docker exec "$container" stat -c '%u:%a:%h' \
+        "/run/secrets/artifact_local_file_${lane}_keyring")"
+    [[ "$inside_metadata" == "${host_uid}:444:1" ]] \
+        || fail "${service} did not retain the safe non-root file-secret metadata (${inside_metadata})."
+    mounts="$(docker inspect --format '{{range .Mounts}}{{println .Destination .RW}}{{end}}' "$container")"
+    grep -qx "/run/secrets/artifact_local_file_${lane}_keyring false" <<<"$mounts" \
+        || fail "${service} keyring is not an exact read-only file-secret mount."
+    if grep -q "/run/secrets/artifact_local_file_\(database\|files\)_keyring" <<<"$mounts" \
+        && grep -vqx "/run/secrets/artifact_local_file_${lane}_keyring false" \
+            < <(grep "/run/secrets/artifact_local_file_\(database\|files\)_keyring" <<<"$mounts"); then
+        fail "${service} received an opposite-lane artifact keyring."
+    fi
+}
+assert_lane_keyring_secret worker-database database
+assert_lane_keyring_secret worker-files files
 
 assert_worker_restart_clears_stale_readiness() {
     local service="worker-cloud"
@@ -561,6 +657,8 @@ assert_guard_renews_kernel_lease() {
 
 assert_guard_renews_kernel_lease app-egress-guard
 assert_guard_renews_kernel_lease cloud-egress-guard
+assert_guard_renews_kernel_lease database-egress-guard
+assert_guard_renews_kernel_lease files-egress-guard
 
 # A successfully reconciled RabbitMQ node contains every dedicated identity; the
 # provisioner also authenticated their stored hashes, permissions and queue bounds.
@@ -691,10 +789,12 @@ print(
 
 assert_pair_fails_closed_and_recovers app-egress-guard app
 assert_pair_fails_closed_and_recovers cloud-egress-guard worker-cloud
+assert_pair_fails_closed_and_recovers database-egress-guard worker-database
+assert_pair_fails_closed_and_recovers files-egress-guard worker-files
 
 printf '%s\n' \
     'BackupSheep CI topology gate passed: generation-3 database provisioning/sealing,' \
     'authenticated RabbitMQ reconciliation, real entrypoint preflight, and healthy' \
-    'web plus cloud-worker processes were proven without publishing a host port;' \
-    'both restart=no guard-loss attacks expired exact kernel peer access, made the' \
-    'paired workloads unhealthy, and recovered only through exact paired recreation.'
+    'web plus cloud/database/files workers were proven without publishing a host port;' \
+    'all four restart=no guard-loss attacks expired exact kernel peer access, made' \
+    'the paired workloads unhealthy, and recovered only through paired recreation.'

@@ -9,17 +9,17 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "unique_paths": 510
     },
     "generatedFrom": "Django root URL resolver on the checked-out branch",
-    "configurationVariables": 287,
+    "configurationVariables": 284,
     "provenance": {
-      "sourceRevision": "93689eae6d0e",
-      "catalogSource": "working-tree",
-      "workingTreeApiChanges": true,
-      "includesWorkingTreeApiChanges": true,
+      "sourceRevision": "5c40ac81c6a0",
+      "catalogSource": "git-ref",
+      "workingTreeApiChanges": false,
+      "includesWorkingTreeApiChanges": false,
       "committedApi": {
-        "api_operations": 920,
+        "api_operations": 890,
         "health_operations": 1,
-        "total_operations": 921,
-        "unique_paths": 528
+        "total_operations": 891,
+        "unique_paths": 510
       }
     }
   },
@@ -14369,7 +14369,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "bse1",
       "sensitive": false,
       "required": false,
-      "description": "Enterprise artifact custody. The key must be a resolved symmetric AWS KMS key ARN; every key still needed for restore/rotation must remain in the comma-separated ARN allowlist. AWS credentials are never stored here: install.sh requires separate reviewed `[default]` credentials for database and files, writes distinct secrets, and Compose mounts each secret only into its matching lane. IAM/key policy must condition KMS use on the exact `bse:lane` encryption-context value.",
+      "description": "Enterprise artifact custody. install.sh creates independent database and files keyrings under the protected .secrets directory. Compose mounts each keyring only into its matching source/restore worker; no root key or keyring path belongs here. Back up both keyrings separately from backup ciphertext: losing either keyring makes that lane's BSE1 artifacts cryptographically unrecoverable. install.sh seals the generation/witness pair. A direct production deployment must derive generation 1 with scripts/manage_artifact_keyring.py policy-witness before importing Django settings.",
       "source": ".env_sample"
     },
     {
@@ -14384,82 +14384,37 @@ window.BACKUPSHEEP_DOC_CATALOG = {
     {
       "name": "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER",
       "category": "Advanced and integration settings",
-      "default": "aws-kms",
+      "default": "local-file",
       "sensitive": false,
       "required": false,
       "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KEY_PROVIDER.",
       "source": ".env_sample"
     },
     {
-      "name": "BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS",
+      "name": "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION",
       "category": "Advanced and integration settings",
       "default": "Not set",
       "sensitive": false,
       "required": false,
-      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS.",
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION.",
       "source": ".env_sample"
     },
     {
-      "name": "BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT",
-      "category": "Advanced and integration settings",
-      "default": "false",
-      "sensitive": false,
-      "required": false,
-      "description": "Service endpoint override for Backupsheep; keep the documented HTTPS provider host unless a regional endpoint is required.",
-      "source": ".env_sample"
-    },
-    {
-      "name": "BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS",
-      "category": "Advanced and integration settings",
-      "default": "5",
-      "sensitive": false,
-      "required": false,
-      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS.",
-      "source": ".env_sample"
-    },
-    {
-      "name": "BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL",
+      "name": "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS",
       "category": "Advanced and integration settings",
       "default": "Not set",
       "sensitive": false,
       "required": false,
-      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL.",
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS.",
       "source": ".env_sample"
     },
     {
-      "name": "BACKUPSHEEP_ARTIFACT_KMS_KEY_ID",
+      "name": "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH",
       "category": "Advanced and integration settings",
       "default": "Not set",
       "sensitive": false,
       "required": false,
-      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_KEY_ID.",
-      "source": ".env_sample"
-    },
-    {
-      "name": "BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS",
-      "category": "Advanced and integration settings",
-      "default": "3",
-      "sensitive": false,
-      "required": false,
-      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS.",
-      "source": ".env_sample"
-    },
-    {
-      "name": "BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS",
-      "category": "Advanced and integration settings",
-      "default": "20",
-      "sensitive": false,
-      "required": false,
-      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS.",
-      "source": ".env_sample"
-    },
-    {
-      "name": "BACKUPSHEEP_ARTIFACT_KMS_REGION",
-      "category": "Advanced and integration settings",
-      "default": "Not set",
-      "sensitive": false,
-      "required": false,
-      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_KMS_REGION.",
+      "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH.",
       "source": ".env_sample"
     },
     {
@@ -14497,6 +14452,15 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "required": false,
       "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_BIND_PORT.",
       "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_CELERY_LANE",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Test/support setting read by the application but not included in the normal operator sample. Do not enable it in production without reviewing the implementation.",
+      "source": "backupsheep/settings.py"
     },
     {
       "name": "BACKUPSHEEP_CELERY_SECURITY_GENERATION",
@@ -14621,7 +14585,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "2",
       "sensitive": false,
       "required": false,
-      "description": "Stock `deny` mode permits only the exact internal PostgreSQL/RabbitMQ peers and blocks all outward traffic. Before enabling a role that needs an external source, provider, storage or KMS endpoint, select `allowlist` and supply the smallest exact CIDR:TCP-port tuples plus every provider/KMS DNS name and CNAME target. This network control is defense in depth, not a resource-aware exfiltration boundary: enterprise operations require dedicated/private endpoints or a controlled resource-aware proxy. `public` is an explicit compatibility risk opt-in; it is never the stock default.",
+      "description": "Stock `deny` mode permits only the exact internal PostgreSQL/RabbitMQ peers and blocks all outward traffic. Before enabling a role that needs an external source, provider or storage endpoint, select `allowlist` and supply the smallest exact CIDR:TCP-port tuples plus every provider DNS name and CNAME target. This network control is defense in depth, not a resource-aware exfiltration boundary: enterprise operations require dedicated/private endpoints or a controlled resource-aware proxy. `public` is an explicit compatibility risk opt-in; it is never the stock default.",
       "source": ".env_sample"
     },
     {
@@ -14821,6 +14785,15 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "required": false,
       "description": "Advanced advanced and integration settings control read at process start. Review its implementation references, unit, and restart scope before changing BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES.",
       "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RUNTIME_ROLE",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Test/support setting read by the application but not included in the normal operator sample. Do not enable it in production without reviewing the implementation.",
+      "source": "backupsheep/settings.py"
     },
     {
       "name": "BACKUPSHEEP_SECRETS",

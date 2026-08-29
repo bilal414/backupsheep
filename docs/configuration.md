@@ -3,14 +3,14 @@
 Configuration is resolved at boot. Stock Compose reads non-secret and optional
 integration values from `.env`, then blanks known integration credential families and
 restores only each role's exact family, while Django, per-lane database/broker/signing,
-onboarding, database/files KMS and optional managed-SSH-key values come from separate
+onboarding, database/files artifact keyrings, and optional managed-SSH-key values come from separate
 read-only files under `.secrets`. Prefer the exact-ref installer; for a reviewed manual
 pause follow the [installer-staged Compose setup](guides/installation.md#manual-docker-compose-installation).
 
-**How keys are read.** `.env_sample` also supplies the non-secret defaults when a platform
-injects environment variables without mounting a `.env` file (such as Render or Railway).
-A real `.env` and then process environment override those defaults. File-backed values
-then override the allowlisted direct secrets. For a stock manual install, keep
+**How keys are read.** `.env_sample` also supplies the non-secret defaults when a reviewed
+process manager injects environment variables without mounting a `.env` file. A real
+`.env` and then process environment override those defaults. File-backed values then
+override the allowlisted direct secrets. For a stock manual install, keep
 `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
 `ONBOARDING_INSTALL_TOKEN` blank in `.env`; Compose sets fixed `/run/secrets/...` pointers
 and grants each role only the files it needs.
@@ -87,17 +87,16 @@ durable sweeps.
 
 ## Task queue (Celery / RabbitMQ)
 
-BackupSheep supports RabbitMQ only. Use either a complete AMQP URL or the connection
-fragments supplied by hosted-platform templates. When `RABBITMQ_HOST` is set, the fragment
-variables take precedence and BackupSheep URL-encodes the username, password, and virtual
-host before constructing the AMQP URL. The Heroku template's RabbitMQ-specific CloudAMQP
-plan supplies `CLOUDAMQP_URL`; it takes precedence over the Compose default URL when no
-fragments are present.
+BackupSheep supports RabbitMQ only. Use either a complete AMQP URL or reviewed connection
+fragments. When `RABBITMQ_HOST` is set, the fragment variables take precedence and
+BackupSheep URL-encodes the username, password, and virtual host before constructing the
+AMQP URL. `CLOUDAMQP_URL` remains a generic managed-RabbitMQ compatibility input and takes
+precedence over the Compose default URL when no fragments are present.
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|
 | `CELERY_BROKER_URL` | optional | blank | Full managed/external RabbitMQ AMQP URL (`amqp://` or `amqps://`). |
-| `CLOUDAMQP_URL` | optional | unset | RabbitMQ AMQP URL injected by the Heroku CloudAMQP add-on. |
+| `CLOUDAMQP_URL` | optional | unset | Compatibility input for a managed RabbitMQ AMQP URL. |
 | `RABBITMQ_HOST` | Compose | `rabbitmq` | RabbitMQ hostname for fragment-based configuration. |
 | `RABBITMQ_PORT` | optional | `5672` | RabbitMQ AMQP port for fragment-based configuration. |
 | `RABBITMQ_SCHEME` | optional | `amqp` | Use `amqps` for any broker outside the stock Compose/loopback boundary. |
@@ -121,19 +120,23 @@ Production allows plaintext AMQP only on loopback or the exact stock `rabbitmq` 
 service. External and multi-host brokers must use `amqps`; certificate validation and
 hostname matching are mandatory. System trust roots are used unless a private CA is set.
 
-## Artifact encryption and KMS
+## Artifact encryption and local-file keys
 
-Stock production requires BSE1 chunked AES-256-GCM-SIV envelopes, enterprise mode,
-AWS KMS and legacy restore disabled. The exact installer requires a resolved symmetric
-KMS key ARN, its region, an ARN allowlist containing every key still required for
-restore/rotation, and two distinct canonical private AWS credential files. Only the
-matching database/files source lane receives each resulting secret; storage receives
-ciphertext and no KMS identity.
+Stock production requires BSE1 chunked AES-256-GCM-SIV envelopes, enterprise mode, the
+`local-file` provider, and legacy restore disabled. The installer atomically generates
+independent database/files 256-bit keyrings under `.secrets`; Compose grants each only to
+its matching source worker. Storage receives ciphertext and no root key.
 
-IAM and key policy must restrict cryptographic actions by the complete encryption-context
-key set and exact `bse:lane` value. Prove same-lane success and cross-lane denial before
-enabling operations. Enterprise mode rejects custom/insecure KMS endpoints and the local
-development key provider. See [Private staging and ciphertext handoff](security/staging-isolation.md).
+When `DJANGO_SERVER=prod`, omitting `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE` defaults to
+`bse1`; a direct deployment does not silently write plaintext. `legacy-only` remains an
+explicit non-enterprise upgrade compatibility setting and must never be treated as a
+hardened production default.
+
+Back up both keyrings with the PostgreSQL recovery set. Reruns preserve their exact bytes,
+and a missing keyring in an existing installation fails closed rather than generating a
+replacement. Enterprise mode rejects the environment-backed local-development provider.
+See [Private staging and ciphertext handoff](security/staging-isolation.md) for rotation,
+legacy-key retention, loss consequences, and non-Docker operation.
 
 ## Container egress
 
@@ -221,7 +224,8 @@ and Cloudflare R2). Optional; backup *run* logs are kept on local disk regardles
 
 The **Local Storage** provider keeps BSE1 ciphertext archives on this server (no external
 bucket). It needs no destination credential, but source-lane artifact encryption still
-uses the required external-KMS policy. Only the storage worker may access the archive root.
+uses its required local-file root-key ring. Only the storage worker may access the archive
+root, and it receives no artifact keyring.
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|

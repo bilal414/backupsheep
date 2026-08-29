@@ -84,27 +84,17 @@ RLS. Before starting:
 ## Stage the transition
 
 Run the verified installer with the explicit database migration flag and all normal
-installation/KMS arguments. `--skip-start` is useful for a change-review pause:
+installation arguments. `--skip-start` is useful for a change-review pause:
 
 ```bash
 TARGET_COMMIT='<40-character-reviewed-release-commit>'
 CURRENT_DOMAIN='<existing-public-hostname>'
-KMS_KEY_ARN='<resolved-symmetric-kms-key-arn>'
-KMS_REGION='<aws-region>'
-KMS_ALLOWED_KEY_ARNS="${KMS_KEY_ARN}"
-KMS_DATABASE_CREDENTIALS='<canonical-private-database-lane-credentials-file>'
-KMS_FILES_CREDENTIALS='<different-canonical-private-files-lane-credentials-file>'
 ./install.sh \
   --ref "${TARGET_COMMIT}" \
   --install-dir "$PWD" \
   --project-name backupsheep \
   --domain "${CURRENT_DOMAIN}" \
   --migrate-database-identities \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_ALLOWED_KEY_ARNS}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --skip-start
 ```
 
@@ -134,11 +124,6 @@ existing-install transition remains pending:
   --install-dir "$PWD" \
   --project-name backupsheep \
   --domain "${CURRENT_DOMAIN}" \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_ALLOWED_KEY_ARNS}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --migrate-database-identities
 ```
 

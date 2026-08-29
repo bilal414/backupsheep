@@ -1,7 +1,7 @@
 """Fail-closed BSE1 integration for source, storage, and restore workers.
 
 Plaintext ZIPs exist only in a source/restore lane's private work volume.  A
-source validates the ZIP before asking KMS for a data key, publishes one BSE1
+source validates the ZIP before generating a wrapped data key, publishes one BSE1
 envelope through the ciphertext fence, and then activates its database ledger
 in one transaction.  Storage workers materialize only those ciphertext bytes.
 Restore authenticates the full envelope into anonymous private staging before a
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import os
 import stat
 import uuid
@@ -32,12 +33,12 @@ from apps.console.backup.models import (
     CoreBackupKeyWrap,
 )
 from backupsheep.artifact_crypto import (
-    AWSKMSConfig,
-    AWSKMSKeyProvider,
     ArtifactContext,
     EnvelopeExpectation,
     LocalDevelopmentKeyProvider,
+    LocalFileKeyProvider,
     WrappedDataKey,
+    artifact_provider_policy_witness,
     open_artifact_source,
     read_envelope_header,
     seal_file,
@@ -181,43 +182,42 @@ def _configured_provider():
     provider_name = str(
         getattr(settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER", "")
     )
-    if provider_name == "aws-kms":
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id=getattr(settings, "BACKUPSHEEP_ARTIFACT_KMS_KEY_ID", ""),
-                region_name=getattr(
-                    settings, "BACKUPSHEEP_ARTIFACT_KMS_REGION", ""
-                ),
-                allowed_key_ids=tuple(
+    if provider_name == "local-file":
+        runtime_role = str(os.environ.get("BACKUPSHEEP_RUNTIME_ROLE", ""))
+        if runtime_role not in {"database", "files"}:
+            raise ArtifactPipelineError(
+                "The local-file artifact provider is restricted to a source lane."
+            )
+        installation_id = _installation_id()
+        generation = str(
+            getattr(settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION", "")
+        )
+        witness = str(
+            getattr(settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS", "")
+        )
+        if generation != "1" or not hmac.compare_digest(
+            witness,
+            artifact_provider_policy_witness(installation_id, "1"),
+        ):
+            raise ArtifactPipelineError(
+                "The local-file artifact provider generation is not sealed to this installation."
+            )
+        try:
+            provider = LocalFileKeyProvider(
+                str(
                     getattr(
                         settings,
-                        "BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS",
-                        (),
+                        "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH",
+                        "",
                     )
                 ),
-                endpoint_url=getattr(
-                    settings, "BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL", None
-                ),
-                connect_timeout_seconds=getattr(
-                    settings,
-                    "BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS",
-                    5,
-                ),
-                read_timeout_seconds=getattr(
-                    settings,
-                    "BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS",
-                    30,
-                ),
-                max_attempts=getattr(
-                    settings, "BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS", 3
-                ),
-                allow_insecure_endpoint=getattr(
-                    settings,
-                    "BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT",
-                    False,
-                ),
+                lane=runtime_role,
+                installation_id=installation_id,
             )
-        )
+        except Exception as error:
+            raise ArtifactPipelineError(
+                "The lane-scoped artifact keyring is invalid."
+            ) from error
     elif provider_name == "local-development":
         if _enterprise_mode() or str(getattr(settings, "DJANGO_SERVER", "")) == "prod":
             raise ArtifactPipelineError(
@@ -575,7 +575,7 @@ def seal_or_validate_source_artifact(backup, archive_path, *, zip_verifier):
         raise ArtifactPipelineError(
             "The local backup archive is not a private regular file."
         )
-    # The cheapest validation runs before any KMS operation.
+    # The cheapest validation runs before opening lane root-key material.
     zip_verifier(str(archive))
     plaintext_size, plaintext_sha256 = _file_identity(archive)
     context = _artifact_context(backup)
@@ -584,7 +584,7 @@ def seal_or_validate_source_artifact(backup, archive_path, *, zip_verifier):
     )
     chunk_count = (plaintext_size + chunk_size - 1) // chunk_size
     # Reserve the full plaintext payload plus a conservative maximum header and
-    # per-record framing before KMS can generate a key or sealing can consume IO.
+    # per-record framing before the provider can generate a key or sealing can consume IO.
     require_transfer_capacity(
         required_bytes=plaintext_size + (64 * 1024) + (chunk_count * 64) + 128,
         required_inodes=3,

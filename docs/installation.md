@@ -28,10 +28,6 @@ mutable remote script into a privileged shell:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
-KMS_KEY_ARN='arn:aws:kms:us-east-1:123456789012:key/<reviewed-key-id>'
-KMS_REGION='us-east-1'
-KMS_DATABASE_CREDENTIALS='/absolute/protected/kms-database.credentials'
-KMS_FILES_CREDENTIALS='/absolute/protected/kms-files.credentials'
 curl -fSLo install.sh \
   "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
 less install.sh
@@ -40,51 +36,36 @@ chmod 700 install.sh
   --ref "${COMMIT}" \
   --install-dir "$HOME/.local/share/backupsheep" \
   --project-name backupsheep \
-  --domain backups.example.com \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
+  --domain backups.example.com
 ```
 
-The KMS credential inputs must be distinct canonical, user-owned mode-`0400`/`0600`
-files for separate database/files AWS identities with matching encryption-context policy.
+The installer generates independent database/files artifact keyrings locally; no external
+key service or host credential is required. Back up both keyrings before enabling work.
 
 By default, run it as the same unprivileged user that is already authorized for the
 intended Docker daemon. Root and `sudo` remain refused unless the operator supplies the
 explicit `--allow-root-install` flag. This does not provision or reconfigure the host.
 
 For an existing rootful daemon intentionally accessible only through root, first place
-the reviewed installer and credential inputs in a protected root-owned directory, then
-run the root-owned copy explicitly:
+the reviewed installer in a protected root-owned directory, then run the root-owned copy
+explicitly:
 
 ```bash
 sudo install -d -o root -g root -m 0700 /root/backupsheep-install
 sudo install -o root -g root -m 0700 ./install.sh \
   /root/backupsheep-install/install.sh
-sudo install -o root -g root -m 0600 "${KMS_DATABASE_CREDENTIALS}" \
-  /root/backupsheep-install/kms-database.credentials
-sudo install -o root -g root -m 0600 "${KMS_FILES_CREDENTIALS}" \
-  /root/backupsheep-install/kms-files.credentials
 sudo -H /root/backupsheep-install/install.sh \
   --allow-root-install \
   --ref "${COMMIT}" \
   --install-dir /opt/backupsheep \
   --project-name backupsheep \
-  --domain backups.example.com \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
-  --artifact-kms-database-aws-credentials-file \
-    /root/backupsheep-install/kms-database.credentials \
-  --artifact-kms-files-aws-credentials-file \
-    /root/backupsheep-install/kms-files.credentials
+  --domain backups.example.com
 ```
 
-Copy the two credentials into those exact root-owned mode-`0600` paths with
-`sudo install`, as shown in the full
-[verified installation guide](guides/installation.md#explicit-rootful-daemon-mode).
+The installer creates both lane keyrings inside its protected root-owned secret
+directory and never places root-key material in arguments or environment variables.
+Back up their exact bytes with PostgreSQL before enabling operations, as shown in the
+full [verified installation guide](guides/installation.md#explicit-rootful-daemon-mode).
 The installer and wrapper never use `SUDO_USER` or `chown`: the checkout, configuration,
 secrets, override and mutation lock remain owned by the real effective invoker. Every
 later root-owned wrapper command must also run as UID 0 and begin with the approval flag:
@@ -154,11 +135,6 @@ credentials and durable recovery/queue state before explicitly enabling operatio
   --install-dir "$HOME/.local/share/backupsheep" \
   --project-name backupsheep \
   --domain backups.example.com \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --enable-operations
 ```
 
@@ -170,7 +146,7 @@ automatic rollback.
 
 The installer writes `.env` as mode `0600` and `.secrets` as a mode `0700` directory.
 The Django key, database bootstrap/migrator/per-lane passwords, RabbitMQ
-bootstrap/per-lane passwords, task-signing material, KMS lane credentials and onboarding
+bootstrap/per-lane passwords, task-signing material, artifact lane keyrings and onboarding
 token are separate mode-`0444` files inside it. Directory traversal protection keeps them
 private on the host while Docker mounts each individual file read-only only in its granted
 role. Their direct `.env` keys remain blank, so values do not appear in Compose-expanded

@@ -326,21 +326,15 @@ x-app-secret-environment: &app-secret-environment
   SSH_MANAGED_DATABASE_PUBLIC_KEY: "${SSH_MANAGED_DATABASE_PUBLIC_KEY:-}"
   SSH_MANAGED_FILES_PUBLIC_KEY: "${SSH_MANAGED_FILES_PUBLIC_KEY:-}"
   SSH_MANAGED_LANE_ISOLATION_REQUIRED: "true"
-  # Stock enterprise custody is BSE1-only. Key identifiers and the decrypt allowlist
-  # are non-secret configuration. Database/files receive distinct credentials whose
-  # IAM policies must condition KMS access on their exact bse:lane context.
+  # Stock enterprise custody is BSE1-only. Database and files receive distinct
+  # bounded local-file keyrings; no other role receives root wrapping material.
   BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE: bse1
   BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE: "true"
   BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE: "false"
-  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER: aws-kms
-  BACKUPSHEEP_ARTIFACT_KMS_KEY_ID: "${BACKUPSHEEP_ARTIFACT_KMS_KEY_ID:?BACKUPSHEEP_ARTIFACT_KMS_KEY_ID is required}"
-  BACKUPSHEEP_ARTIFACT_KMS_REGION: "${BACKUPSHEEP_ARTIFACT_KMS_REGION:?BACKUPSHEEP_ARTIFACT_KMS_REGION is required}"
-  BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS: "${BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS:?BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS is required}"
-  BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL: ""
-  BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT: "false"
-  BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS: "${BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS:-5}"
-  BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS: "${BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS:-20}"
-  BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS: "${BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS:-3}"
+  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER: local-file
+  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION: "${BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION:-}"
+  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS: "${BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS:-}"
+  BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH: ""
   BACKUPSHEEP_PLAINTEXT_ROOT: /code/_storage
   BACKUPSHEEP_DATABASE_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/transfer/database
   BACKUPSHEEP_FILES_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/transfer/files
@@ -351,8 +345,9 @@ x-app-secret-environment: &app-secret-environment
   BACKUPSHEEP_TRANSFER_MIN_FREE_INODES: "${BACKUPSHEEP_TRANSFER_MIN_FREE_INODES:-1024}"
   BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES: "${BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES:-536870912}"
   BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES: "${BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES:-1024}"
-  # Empty every ambient AWS credential/role/metadata/endpoint source. Each source
-  # lane overrides only AWS_SHARED_CREDENTIALS_FILE below.
+  # Empty every ambient AWS SDK credential, role, metadata, and endpoint source.
+  # Provider integrations use their own scoped credentials stored by BackupSheep;
+  # no container inherits a shared SDK credential path.
   AWS_ACCESS_KEY_ID: ""
   AWS_SECRET_ACCESS_KEY: ""
   AWS_SESSION_TOKEN: ""
@@ -372,7 +367,6 @@ x-app-secret-environment: &app-secret-environment
   AWS_CONTAINER_AUTHORIZATION_TOKEN: ""
   AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: ""
   AWS_ENDPOINT_URL: ""
-  AWS_ENDPOINT_URL_KMS: ""
   AWS_EC2_METADATA_DISABLED: "true"
   AWS_EC2_METADATA_V1_DISABLED: "true"
   AWS_IGNORE_CONFIGURED_ENDPOINT_URLS: "true"
@@ -842,7 +836,7 @@ services:
       - django_secret_key
       - db_migrator_password
       - rabbitmq_preflight_password
-    command: ["python", "manage.py", "migrate", "--noinput"]
+    command: ["python", "manage.py", "migrate_and_verify_artifact_provider"]
     mem_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
     cpus: "${MIGRATE_CPU_LIMIT:-2.0}"
     depends_on:
@@ -1226,7 +1220,7 @@ services:
       BACKUPSHEEP_DATABASE_LANE: database
       DB_USER: "${DB_DATABASE_USER:-backupsheep_database}"
       DB_PASSWORD_FILE: /run/secrets/db_database_password
-      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_database_aws_credentials
+      BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH: /run/secrets/artifact_local_file_database_keyring
       BACKUPSHEEP_CELERY_LANE: database
       RABBITMQ_USER: backupsheep_database
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_database_password
@@ -1238,7 +1232,7 @@ services:
       - celery_signing_database_private_key
       - celery_trusted_public_keys
       - ssh_managed_database_private_key
-      - artifact_kms_database_aws_credentials
+      - artifact_local_file_database_keyring
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
@@ -1319,7 +1313,7 @@ services:
       BACKUPSHEEP_DATABASE_LANE: files
       DB_USER: "${DB_FILES_USER:-backupsheep_files}"
       DB_PASSWORD_FILE: /run/secrets/db_files_password
-      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_files_aws_credentials
+      BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH: /run/secrets/artifact_local_file_files_keyring
       BACKUPSHEEP_CELERY_LANE: files
       RABBITMQ_USER: backupsheep_files
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_files_password
@@ -1333,7 +1327,7 @@ services:
       - celery_signing_files_private_key
       - celery_trusted_public_keys
       - ssh_managed_files_private_key
-      - artifact_kms_files_aws_credentials
+      - artifact_local_file_files_keyring
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
@@ -1752,7 +1746,7 @@ secrets:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_database_private_key
   ssh_managed_files_private_key:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_files_private_key
-  artifact_kms_database_aws_credentials:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_kms_database_aws_credentials
-  artifact_kms_files_aws_credentials:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_kms_files_aws_credentials
+  artifact_local_file_database_keyring:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_local_file_database_keyring
+  artifact_local_file_files_keyring:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_local_file_files_keyring

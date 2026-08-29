@@ -654,6 +654,28 @@ raise SystemExit(99)
             "preflight:\n        condition: service_completed_successfully", app
         )
 
+    def test_migrate_one_shot_rechecks_artifact_provider_rows_every_run(self):
+        migrate = self.service_block("migrate")
+        self.assertIn(
+            'command: ["python", "manage.py", "migrate_and_verify_artifact_provider"]',
+            migrate,
+        )
+        self.assertNotIn('command: ["python", "manage.py", "migrate"]', migrate)
+
+    def test_manual_production_install_uses_fresh_artifact_provider_proof(self):
+        guide = (ROOT / "docs" / "guides" / "installation.md").read_text(
+            encoding="utf-8"
+        )
+        manual = guide.split("## Manual process installation (advanced)", 1)[1]
+        migration_command = (
+            "BACKUPSHEEP_RUNTIME_ROLE=migration "
+            "\\\n  python manage.py migrate_and_verify_artifact_provider"
+        )
+        self.assertIn(migration_command, manual)
+        self.assertNotIn("python manage.py migrate --noinput", manual)
+        self.assertIn("Generation `1-pending-empty`", manual)
+        self.assertIn("rollback transaction are installer-owned", manual)
+
     def test_installation_secrets_are_files_not_inspectable_environment_values(self):
         secrets = self.compose.split("\nsecrets:\n", 1)[1]
         for name in (
@@ -680,8 +702,8 @@ raise SystemExit(99)
             "onboarding_token",
             "ssh_managed_database_private_key",
             "ssh_managed_files_private_key",
-            "artifact_kms_database_aws_credentials",
-            "artifact_kms_files_aws_credentials",
+            "artifact_local_file_database_keyring",
+            "artifact_local_file_files_keyring",
         ):
             with self.subTest(secret=name):
                 self.assertIn(
@@ -1451,18 +1473,44 @@ raise SystemExit(99)
         self.assertNotIn("--user 0:0", guide)
         self.assertNotIn("chown -R 10001:10001 /code/_storage /backups", guide)
 
-    def test_all_supported_paas_manifests_use_crash_safe_scheduler(self):
-        expected = "backupsheep.scheduler:BackupDatabaseScheduler"
-        for relative in (
+    def test_unsupported_one_click_paas_templates_are_not_shipped_or_advertised(self):
+        retired_paths = (
+            "app.json",
             "heroku.yml",
             "render.yaml",
+            "startup.sh",
+            "deploy/railway/web.railway.json",
+            "deploy/railway/worker.railway.json",
             "deploy/railway/beat.railway.json",
+        )
+        for relative in retired_paths:
+            with self.subTest(path=relative):
+                self.assertFalse((ROOT / relative).exists())
+
+        for relative in ("docs/render.md", "docs/heroku.md", "docs/railway.md"):
+            with self.subTest(tombstone=relative):
+                tombstone = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("does not support or ship", tombstone)
+                self.assertIn("split-role manual process contract", tombstone)
+
+        advertised_surfaces = "\n".join(
+            (ROOT / relative).read_text(encoding="utf-8")
+            for relative in (
+                "README.md",
+                "docs/README.md",
+                ".github/workflows/supply-chain-security.yml",
+            )
+        )
+        for retired_reference in (
+            "render.com/deploy",
+            "heroku.com/deploy",
+            "docs/render.md",
+            "docs/heroku.md",
+            "docs/railway.md",
+            "deploy/railway/",
         ):
-            with self.subTest(manifest=relative):
-                self.assertIn(
-                    expected,
-                    (ROOT / relative).read_text(encoding="utf-8"),
-                )
+            with self.subTest(reference=retired_reference):
+                self.assertNotIn(retired_reference, advertised_surfaces)
 
     def test_onboarding_token_is_not_printed_by_installer(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")

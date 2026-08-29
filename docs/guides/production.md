@@ -23,8 +23,8 @@ Before making an instance reachable from the internet:
       files; never collapse them into one runtime login;
 - [ ] preserve the distinct RabbitMQ bootstrap/per-lane passwords, queue ACLs and signed
       task keys; never replace them with one shared broker identity;
-- [ ] configure BSE1 with a resolved allowlisted AWS KMS key and two different
-      database/files credential identities; prove same-lane success and cross-lane denial;
+- [ ] preserve and independently back up both installer-generated local-file artifact
+      keyrings; prove same-lane restore and cross-lane denial before enabling operations;
 - [ ] for existing broker data, prove the live RabbitMQ generation and complete the
       documented 3.13 -> 4.2 -> 4.3/Khepri gate; never invent the installer-owned
       `BACKUPSHEEP_RABBITMQ_DATA_GENERATION` witness (the proof requires exactly one

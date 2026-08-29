@@ -547,10 +547,6 @@ def bs_decrypt(ciphertext, key):
         return None
 
 
-def bs_encryption_convert(ciphertext, encryption_key):
-    return bs_encrypt(kms_decrypt(ciphertext), encryption_key)
-
-
 def s3_upload_files(single_file, bucket_name, access_key, secret_key, region_name, endpoint_url):
     try:
         session = boto3.Session(

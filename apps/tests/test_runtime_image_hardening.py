@@ -524,13 +524,18 @@ class RuntimeImageHardeningTests(TestCase):
             self.entrypoint,
         )
         self.assertIn(
-            "database_kms_credentials='/run/secrets/artifact_kms_database_aws_credentials'",
+            "database_artifact_keyring='/run/secrets/artifact_local_file_database_keyring'",
             self.entrypoint,
         )
         self.assertIn(
-            "files_kms_credentials='/run/secrets/artifact_kms_files_aws_credentials'",
+            "files_artifact_keyring='/run/secrets/artifact_local_file_files_keyring'",
             self.entrypoint,
         )
+        self.assertIn("artifact_keyring_is_read_only_mount()", self.entrypoint)
+        self.assertIn('matches == 1 && protected == 1', self.entrypoint)
+        self.assertIn("artifact_keyring_metadata_is_safe", self.entrypoint)
+        self.assertIn("stat -c '%a:%h'", self.entrypoint)
+        self.assertNotIn("stat -c '%u:%g:%a:%h' \"$artifact_keyring\"", self.entrypoint)
         self.assertIn(
             "AWS instance-metadata credentials must be disabled",
             self.entrypoint,
@@ -540,7 +545,7 @@ class RuntimeImageHardeningTests(TestCase):
             self.entrypoint,
         )
         self.assertIn(
-            "$runtime_role must not mount an artifact-KMS credential secret",
+            "$runtime_role must not mount an artifact keyring",
             self.entrypoint,
         )
         self.assertIn("prepare_private_dir /run/backupsheep", self.entrypoint)
@@ -554,6 +559,10 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertIn("Docker init and a private PID namespace", self.entrypoint)
         self.assertIn("the Docker control socket must not be mounted", self.entrypoint)
         self.assertIn("python /code/manage.py docker_preflight", self.entrypoint)
+        self.assertIn(
+            "migrate|migrate_and_verify_artifact_provider|docker_preflight",
+            self.entrypoint,
+        )
         self.assertIn(
             "[ \"$3\" = 'backupsheep.database_identity' ]",
             self.entrypoint,

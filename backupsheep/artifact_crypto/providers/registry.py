@@ -9,13 +9,9 @@ from .base import KeyProvider
 
 
 def ensure_provider_allowed(provider: KeyProvider, *, enterprise_mode: bool) -> None:
-    if enterprise_mode and (
-        provider.external is not True
-        or getattr(provider, "enterprise_eligible", False) is not True
-    ):
+    if enterprise_mode and getattr(provider, "enterprise_eligible", False) is not True:
         raise KeyProviderConfigurationError(
-            "Enterprise mode requires a pinned external key-management provider "
-            "using its standard authenticated endpoint."
+            "Enterprise mode requires an explicitly production-eligible key provider."
         )
 
 

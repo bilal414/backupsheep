@@ -37,9 +37,6 @@ jobs:
       BACKUPSHEEP_EGRESS_POLICY_GENERATION: "2"
       BACKUPSHEEP_STAGING_LAYOUT_INTENT: "new-empty-v3"
       BACKUPSHEEP_STAGING_LAYOUT_WITNESS: "421e9ec501ca8cdcf91e0dcbc9c25b462a5f3569bc1a3ec214e8a8b19ffb571f"
-      BACKUPSHEEP_ARTIFACT_KMS_KEY_ID: "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001"
-      BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS: "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001"
-      BACKUPSHEEP_ARTIFACT_KMS_REGION: "us-east-1"
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -85,9 +82,9 @@ jobs:
           sed -i "s/^DJANGO_SECRET_KEY=.*/DJANGO_SECRET_KEY='ci-only-not-a-secret'/" .env
           sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD='ci-only-not-a-secret'/" .env
           sed -i "s/^RABBITMQ_PASSWORD=.*/RABBITMQ_PASSWORD='ci-only-not-a-secret'/" .env
-          bash -n install.sh init.sh startup.sh deploy/postgres/migrate-runtime.sh deploy/staging/provision-volumes.sh deploy/staging/test-provision-volumes.sh deploy/staging/test-cross-uid.sh
+          bash -n install.sh init.sh deploy/postgres/migrate-runtime.sh deploy/staging/provision-volumes.sh deploy/staging/test-provision-volumes.sh deploy/staging/test-cross-uid.sh
           sh -n deploy/postgres/entrypoint.sh deploy/postgres/storage-witness.sh
-          node -e 'for (const f of ["package.json", "package-lock.json", "app.json", "deploy/railway/web.railway.json", "deploy/railway/worker.railway.json", "deploy/railway/beat.railway.json"]) JSON.parse(require("fs").readFileSync(f, "utf8"))'
+          node -e 'for (const f of ["package.json", "package-lock.json"]) JSON.parse(require("fs").readFileSync(f, "utf8"))'
           docker compose config --quiet
           docker build --check .
           python -m unittest apps.tests.test_deployment_hardening -v
@@ -836,18 +833,14 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/LICENSE,target=/code/LICENSE,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/README.md,target=/code/README.md,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/SECURITY.md,target=/code/SECURITY.md,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/app.json,target=/code/app.json,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/backupsheep-compose,target=/code/backupsheep-compose,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/docker-compose.yml,target=/code/docker-compose.yml,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/heroku.yml,target=/code/heroku.yml,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/init.sh,target=/code/init.sh,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/install.sh,target=/code/install.sh,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/package-lock.json,target=/code/package-lock.json,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/package.json,target=/code/package.json,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/render.yaml,target=/code/render.yaml,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/requirements.lock,target=/code/requirements.lock,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/requirements.txt,target=/code/requirements.txt,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/startup.sh,target=/code/startup.sh,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/tailwind.config.js,target=/code/tailwind.config.js,readonly" \
             --workdir /code \
             --env PYTHONPATH=/code \
@@ -1037,10 +1030,9 @@ jobs:
             --env BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=bse1 \
             --env BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=true \
             --env BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=false \
-            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER=aws-kms \
-            --env BACKUPSHEEP_ARTIFACT_KMS_KEY_ID=arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001 \
-            --env BACKUPSHEEP_ARTIFACT_KMS_REGION=us-east-1 \
-            --env BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS=arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001 \
+            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER=local-file \
+            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION=1 \
+            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS=7be66c9e49880f4d40748ec3b4823d351333e4b6c855171d9647d24cef25ef18 \
             --env AWS_EC2_METADATA_DISABLED=true \
             --env AWS_EC2_METADATA_V1_DISABLED=true \
             --env AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true \

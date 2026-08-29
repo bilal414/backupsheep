@@ -13,6 +13,8 @@ from django.db import close_old_connections, transaction
 from django.utils import timezone
 from sentry_sdk import capture_exception
 
+from apps._tasks.artifact_deletion import DELETION_ORIGIN_KEY
+
 
 class StorageUploadAlreadyComplete(RuntimeError):
     pass
@@ -25,6 +27,14 @@ class StorageUploadLeaseBusy(RuntimeError):
 
 
 class StorageUploadLeaseLost(RuntimeError):
+    pass
+
+
+class StorageUploadDeletePending(RuntimeError):
+    pass
+
+
+class StorageUploadTerminalState(RuntimeError):
     pass
 
 
@@ -73,6 +83,40 @@ class DurableStorageUploadLease:
             point = self.model.objects.select_for_update().get(pk=self.point_id)
             if point.status == point.Status.UPLOAD_COMPLETE:
                 raise StorageUploadAlreadyComplete()
+            metadata = dict(point.metadata or {})
+            if self.purpose == "upload" and (
+                point.status
+                in {
+                    point.Status.DELETE_REQUESTED,
+                    point.Status.DELETE_FAILED,
+                    point.Status.DELETE_COMPLETED,
+                }
+                or DELETION_ORIGIN_KEY in metadata
+            ):
+                raise StorageUploadDeletePending(
+                    "A deletion-owned storage point cannot start an upload."
+                )
+            if self.purpose == "upload":
+                terminal_names = (
+                    "UPLOAD_FAILED",
+                    "UPLOAD_FAILED_STORAGE_LIMIT",
+                    "UPLOAD_FAILED_FILE_NOT_FOUND",
+                    "UPLOAD_TIME_LIMIT_REACHED",
+                    "STORAGE_VALIDATION_FAILED",
+                    "CANCELLED",
+                )
+                terminal_statuses = {
+                    value
+                    for value in (
+                        getattr(point.Status, name, None)
+                        for name in terminal_names
+                    )
+                    if value is not None
+                }
+                if point.status in terminal_statuses:
+                    raise StorageUploadTerminalState(
+                        "A terminal storage point requires an explicit retry transition."
+                    )
             if self.purpose == "multipart_cleanup":
                 terminal_names = (
                     "UPLOAD_FAILED",
@@ -104,7 +148,6 @@ class DurableStorageUploadLease:
                 ).total_seconds()
                 raise StorageUploadLeaseBusy(min(retry_after, 60))
 
-            metadata = dict(point.metadata or {})
             execution_key = (
                 "_multipart_cleanup_execution"
                 if self.purpose == "multipart_cleanup"

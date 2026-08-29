@@ -13,7 +13,7 @@ or other process values are merged into that object. The stock installer and sec
 Compose wrapper reject this alternate source and stock Compose pins it blank.
 
 Compose supplies non-secret and optional integration values from `.env` to application
-roles. Its required installation secrets, separate database/files KMS credentials and
+roles. Its required installation secrets, separate database/files artifact keyrings, and
 optional lane-specific managed SSH identities are file-backed under `.secrets`; see below. After
 editing configuration on an existing installation, validate and recreate the web/guard
 pair:
@@ -202,6 +202,7 @@ options may instead be supplied in the `DATABASE_URL` query string.
 | `BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION` | blank sample / installer-owned positive integer | Active public-registry/key generation; increments after every reviewed rotation |
 | `BACKUPSHEEP_CELERY_SECURITY_REQUIRED` | `true` in stock Compose | Requires signed lane-bound task envelopes; do not disable in stock Docker |
 | `BACKUPSHEEP_CELERY_LANE` | service-owned | Fixed app, Beat, preflight, or worker identity used for credential/key selection |
+| `BACKUPSHEEP_RUNTIME_ROLE` | service-owned | Exact runtime/staging identity (`web`, `migration`, `preflight`, `beat`, `cloud`, `database`, `files`, `storage`, or `logs`); production BSE1 source roles require the matching Celery lane |
 | `CELERY_TASK_REPLAY_RETENTION_SECONDS` | `1209600` | Retains terminal replay identities for 14 days; cannot be shorter than the seven-day signed lifetime plus clock skew |
 | `CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE` | `1000` | Bounded terminal replay rows deleted by one logs-lane cleanup run (`1`-`10000`) |
 | `RABBITMQ_VHOST` | `backupsheep` | Dedicated virtual host; components are URL encoded |
@@ -216,32 +217,31 @@ TLS query-string overrides are rejected. Production accepts one broker URL; put 
 high availability behind one certificate-valid load-balancer/DNS endpoint instead of a
 semicolon failover list whose members could cross transport trust boundaries.
 
-## Artifact encryption and KMS
+## Artifact encryption and local-file keys
 
 | Variable | Stock value/default | Meaning |
 | --- | --- | --- |
 | `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE` | `bse1` | Requires the versioned chunked AES-256-GCM-SIV envelope; stock production does not write legacy plaintext artifacts |
-| `BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE` | `true` | Enforces BSE1, standard-endpoint AWS KMS and legacy-restore denial |
+| `BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE` | `true` | Enforces BSE1, lane-scoped local-file keys and legacy-restore denial |
 | `BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE` | `false` | Must remain false in enterprise mode; an old non-BSE1 object fails closed |
-| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER` | `aws-kms` | Stock production key provider. `local-development` is rejected in production/enterprise mode |
+| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER` | `local-file` | Sole stock production provider. `local-development` is rejected in production/enterprise mode |
+| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION` | blank sample; production requires sealed `1` | Provider-policy generation. The installer owns it for Docker. A fresh direct deployment derives generation `1` with the reviewed lifecycle command; `1-pending-empty` disables long-lived roles and is reserved for the installer's stopped-operations adoption proof. Never edit it to bypass a transition |
+| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS` | blank sample; production requires SHA-256 witness | Installation-ID, provider and generation-bound policy witness. Settings and preflight recompute it and fail closed on drift. Docker uses the installer-owned value; fresh direct deployments use `manage_artifact_keyring.py policy-witness`. Never copy it between installations or synthesize it to bypass a pending transition |
 | `BACKUPSHEEP_ARTIFACT_CHUNK_SIZE` | `4194304` | Authenticated-record plaintext bytes; accepted range is 64 KiB through 64 MiB |
-| `BACKUPSHEEP_ARTIFACT_KMS_KEY_ID` | installer-required | Resolved symmetric KMS key ARN used for new data-key wraps; aliases are not accepted by the installer |
-| `BACKUPSHEEP_ARTIFACT_KMS_REGION` | installer-required | AWS region containing every allowlisted artifact key |
-| `BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS` | installer-required | Comma-separated resolved ARNs accepted for restore and key-wrap rotation; include the active key |
-| `BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL` | blank | Custom endpoint; enterprise mode requires blank |
-| `BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT` | `false` | Insecure endpoint opt-in; enterprise mode requires false |
-| `BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS` | `5` | KMS connect timeout, maximum 60 seconds |
-| `BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS` | `20` from `.env_sample` | KMS read timeout, maximum 120 seconds |
-| `BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS` | `3` | Bounded KMS client attempts, maximum 5 |
+| `BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH` | blank globally; exact `/run/secrets/...` in a source worker | Never set in shared `.env`; Compose injects only the matching database/files path |
+| `BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY` | blank | Development-only compatibility setting; forbidden with `local-file` and never stores a production root key |
+| `BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID` | `local-v1` | Development-only compatibility ID; the production active ID comes from the keyring |
 
-AWS credentials never belong in `.env`. The installer requires two different canonical
-user-owned source files and stores them as
-`.secrets/artifact_kms_database_aws_credentials` and
-`.secrets/artifact_kms_files_aws_credentials`. Only the matching source worker receives
-each file; storage and every other role receive neither. IAM identity policy and the KMS
-key policy must restrict actions by the exact `bse:lane` and complete encryption-context
-key set. See [Private staging and ciphertext handoff](../security/staging-isolation.md)
+The installer stores the production keyrings as
+`.secrets/artifact_local_file_database_keyring` and
+`.secrets/artifact_local_file_files_keyring`. Only the matching source worker receives
+each file; storage and every other role receive neither. Back up both keyrings with the
+database recovery set. See [Private staging and ciphertext handoff](../security/staging-isolation.md)
 before enabling operations or rotating a key wrap.
+
+Direct production deployments also default an omitted encryption mode to `bse1` when
+`DJANGO_SERVER=prod`. `legacy-only` must be selected explicitly for a bounded
+non-enterprise historical-restore transition; it is not a secure production default.
 
 ## Per-role egress guards
 
@@ -300,7 +300,7 @@ stores `django_secret_key`, `db_bootstrap_password`, `db_migrator_password`,
 the eight `db_<lane>_password` files, `rabbitmq_bootstrap_password`, the eight
 `rabbitmq_<lane>_password` files, seven lane signing keys,
 `celery_trusted_public_keys`, `onboarding_token`, and the two required lane-specific
-artifact-KMS credential files as separate owner-owned, non-linked, mode-`0444` files. It
+artifact local-file keyrings as separate owner-owned, non-linked, mode-`0444` files. It
 also creates empty optional `ssh_managed_database_private_key` and
 `ssh_managed_files_private_key` files with the same ownership/link/mode rules. The private
 parent prevents host directory traversal while Docker bind-mounts each file read-only only

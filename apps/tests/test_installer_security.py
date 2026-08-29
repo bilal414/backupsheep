@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -128,6 +129,75 @@ validate_invocation_mode
         )
         self.assertNotEqual(duplicate.returncode, 0)
         self.assertIn("may be specified only once", duplicate.stderr)
+
+    def test_root_install_docs_use_generated_lane_keyrings_without_kms_flags(self):
+        obsolete_kms_contracts = (
+            "--artifact-kms-",
+            "KMS_DATABASE_CREDENTIALS",
+            "KMS_FILES_CREDENTIALS",
+            "KMS_KEY_ARN",
+            "KMS_REGION",
+        )
+        for relative_path in ("docs/installation.md", "docs/guides/installation.md"):
+            document = (ROOT / relative_path).read_text(encoding="utf-8")
+            with self.subTest(path=relative_path):
+                self.assertIn("--allow-root-install", document)
+                self.assertIn("keyrings", document)
+                for obsolete_contract in obsolete_kms_contracts:
+                    self.assertNotIn(obsolete_contract, document)
+
+    def test_installer_disables_inherited_xtrace_before_handling_secrets(self):
+        self.assertIn("set +x", self.installer)
+        self.assertLess(self.installer.index("set +x"), self.installer.index("set -Eeuo pipefail"))
+        self.assertLess(self.installer.index("set +x"), self.installer.index("random_hex()"))
+
+    def test_artifact_keyring_creation_uses_atomic_no_clobber_publication(self):
+        command = r'''
+source "$1"
+root="$2"
+source_path="${root}/source"
+destination_path="${root}/destination"
+printf 'new-keyring\n' > "$source_path"
+printf 'concurrent-owner\n' > "$destination_path"
+! atomic_publish_new_file "$source_path" "$destination_path"
+[[ "$(cat "$destination_path")" == concurrent-owner ]]
+[[ "$(cat "$source_path")" == new-keyring ]]
+'''
+        with tempfile.TemporaryDirectory(prefix="backupsheep-publish-test-") as root:
+            subprocess.run(
+                ["bash", "-c", command, "installer-test", str(INSTALLER), root],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        keyring_writer = self.installer.split("write_artifact_keyring() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertIn("atomic_publish_new_file", keyring_writer)
+        self.assertNotIn("atomic_move_new", keyring_writer)
+
+    def test_artifact_rotation_arguments_are_paired_and_fail_closed(self):
+        cases = (
+            (["--rotate-artifact-keyring", "database"], "requires --expected-artifact"),
+            (
+                [
+                    "--expected-artifact-active-key-id",
+                    "lfk-11111111111111111111111111111111",
+                ],
+                "requires --rotate-artifact-keyring",
+            ),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                command = 'source "$1"; shift; parse_args "$@"'
+                result = subprocess.run(
+                    ["bash", "-c", command, "installer-test", str(INSTALLER), *arguments],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
 
     def test_installer_fails_closed_on_unsupported_docker_versions(self):
         self.assertIn('semver_at_least "$engine_version" "28.0.0"', self.installer)
@@ -281,6 +351,27 @@ refuse_egress_oneoffs_before_topology_removal
                     f"egress-backed Compose one-off for {service} still exists",
                     result.stderr,
                 )
+
+    def test_artifact_rotation_refuses_any_retained_worker_container(self):
+        command = r'''
+source "$1"
+PROJECT_NAME=backupsheep
+DOCKER_BIN=mock_docker
+mock_docker() {
+    [[ "$1" == ps ]] || return 91
+    printf 'paused-worker-container\n'
+}
+assert_artifact_keyring_worker_stopped database
+'''
+        result = subprocess.run(
+            ["bash", "-c", command, "installer-test", str(INSTALLER)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stopped, paused, and restarting containers", result.stderr)
+        self.assertIn("--all", self.installer)
 
     def test_installer_mutation_lock_is_shared_portable_and_stale_fail_closed(self):
         wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
@@ -446,27 +537,47 @@ class InstallerSecretMigrationTests(TestCase):
         ) + "\n"
         self.env_file.write_text(content, encoding="utf-8")
         os.chmod(self.env_file, 0o600)
-        self.database_kms_credentials = self.temp_dir / "database-kms.ini"
-        self.files_kms_credentials = self.temp_dir / "files-kms.ini"
-        self.database_kms_credentials.write_text(
-            "[default]\n"
-            "aws_access_key_id = AKIADATABASE00001\n"
-            f"aws_secret_access_key = {'d' * 40}\n",
-            encoding="utf-8",
-        )
-        self.files_kms_credentials.write_text(
-            "[default]\n"
-            "aws_access_key_id = AKIAFILES00000001\n"
-            f"aws_secret_access_key = {'f' * 40}\n",
-            encoding="utf-8",
-        )
-        os.chmod(self.database_kms_credentials, 0o600)
-        os.chmod(self.files_kms_credentials, 0o600)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
 
     def run_installer_functions(self, body, *, check=True):
+        if (
+            "create_or_migrate_configuration" in body
+            or "configure_artifact_key_policy" in body
+        ):
+            configured = self.env_file.read_text(encoding="utf-8")
+            match = re.search(
+                r"^BACKUPSHEEP_INSTALLATION_ID='([0-9a-f]{64})'$",
+                configured,
+                re.MULTILINE,
+            )
+            if match is None:
+                configured = configured.replace(
+                    "BACKUPSHEEP_INSTALLATION_ID=''",
+                    f"BACKUPSHEEP_INSTALLATION_ID='{'a' * 64}'",
+                    1,
+                )
+                self.env_file.write_text(configured, encoding="utf-8")
+                self.env_file.chmod(0o600)
+                installation_id = "a" * 64
+            else:
+                installation_id = match.group(1)
+            secret_dir = self.temp_dir / ".secrets"
+            secret_dir.mkdir(mode=0o700, exist_ok=True)
+            for lane, marker in (("database", "1"), ("files", "2")):
+                key_id = f"lfk-{marker * 32}"
+                keyring = secret_dir / f"artifact_local_file_{lane}_keyring"
+                if not keyring.exists():
+                    keyring.write_text(
+                        "BACKUPSHEEP-ARTIFACT-KEYRING-V1\n"
+                        f"installation={installation_id}\n"
+                        f"lane={lane}\n"
+                        f"active={key_id}\n"
+                        f"key={key_id}:{marker * 64}\n",
+                        encoding="ascii",
+                    )
+                    keyring.chmod(0o444)
         command = f"""
 source "$1"
 INSTALL_DIR="$2"
@@ -474,11 +585,6 @@ INSTALL_REF="$3"
 PUBLIC_HOST=localhost
 APP_DOMAIN=localhost:8000
 INSTALL_WAS_PRESENT=true
-ARTIFACT_KMS_KEY_ID='arn:aws:kms:us-east-1:123456789012:key/11111111-2222-4333-8444-555555555555'
-ARTIFACT_KMS_REGION='us-east-1'
-ARTIFACT_KMS_ALLOWED_KEY_ARNS="$ARTIFACT_KMS_KEY_ID"
-ARTIFACT_KMS_DATABASE_AWS_CREDENTIALS_FILE="$2/database-kms.ini"
-ARTIFACT_KMS_FILES_AWS_CREDENTIALS_FILE="$2/files-kms.ini"
 ENV_FILE="$2/.env"
 DOCKER_BIN=mock_docker
 mock_docker() {{
@@ -573,11 +679,11 @@ fi
             "BACKUPSHEEP_STAGING_LAYOUT_INTENT='migrate-empty-legacy-v3'",
             migrated_env,
         )
-        database_kms = secret_dir / "artifact_kms_database_aws_credentials"
-        files_kms = secret_dir / "artifact_kms_files_aws_credentials"
-        self.assertEqual(stat.S_IMODE(database_kms.stat().st_mode), 0o444)
-        self.assertEqual(stat.S_IMODE(files_kms.stat().st_mode), 0o444)
-        self.assertNotEqual(database_kms.read_bytes(), files_kms.read_bytes())
+        database_keyring = secret_dir / "artifact_local_file_database_keyring"
+        files_keyring = secret_dir / "artifact_local_file_files_keyring"
+        self.assertEqual(stat.S_IMODE(database_keyring.stat().st_mode), 0o444)
+        self.assertEqual(stat.S_IMODE(files_keyring.stat().st_mode), 0o444)
+        self.assertNotEqual(database_keyring.read_bytes(), files_keyring.read_bytes())
         self.assertFalse((secret_dir / "ssh_managed_private_key").exists())
         for lane in ("database", "files"):
             managed_key = secret_dir / f"ssh_managed_{lane}_private_key"
@@ -746,22 +852,549 @@ fi
         self.assertEqual(candidate_registry["version"], 2)
         self.assertEqual(candidate_registry["generation"], 2)
 
-    def test_kms_lane_credentials_require_distinct_access_key_identities(self):
-        self.files_kms_credentials.write_text(
-            "[default]\n"
-            "aws_access_key_id = AKIADATABASE00001\n"
-            f"aws_secret_access_key = {'f' * 40}\n",
-            encoding="utf-8",
-        )
-        os.chmod(self.files_kms_credentials, 0o600)
+    def test_artifact_lane_keyrings_require_distinct_ids_and_material(self):
+        secret_dir = self.temp_dir / ".secrets"
+        secret_dir.mkdir(mode=0o700)
+        key_id = "lfk-11111111111111111111111111111111"
+        for lane in ("database", "files"):
+            path = secret_dir / f"artifact_local_file_{lane}_keyring"
+            path.write_text(
+                "BACKUPSHEEP-ARTIFACT-KEYRING-V1\n"
+                f"installation={'a' * 64}\n"
+                f"lane={lane}\n"
+                f"active={key_id}\n"
+                f"key={key_id}:{'1' * 64}\n",
+                encoding="ascii",
+            )
+            path.chmod(0o444)
         result = self.run_installer_functions(
-            "MIGRATE_DATABASE_IDENTITIES=true\n"
-            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
-            "create_or_migrate_configuration",
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "validate_distinct_artifact_keyrings",
             check=False,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("different AWS access-key identities", result.stderr)
+        self.assertIn("share a key identity or root key", result.stderr)
+
+    def test_installer_keyring_parser_requires_active_key_first(self):
+        self.env_file.write_text(
+            self.env_file.read_text(encoding="utf-8").replace(
+                "BACKUPSHEEP_INSTALLATION_ID=''",
+                f"BACKUPSHEEP_INSTALLATION_ID='{'a' * 64}'",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.env_file.chmod(0o600)
+        secret_dir = self.temp_dir / ".secrets"
+        secret_dir.mkdir(mode=0o700)
+        keyring = secret_dir / "artifact_local_file_database_keyring"
+        keyring.write_text(
+            "BACKUPSHEEP-ARTIFACT-KEYRING-V1\n"
+            f"installation={'a' * 64}\n"
+            "lane=database\n"
+            "active=lfk-22222222222222222222222222222222\n"
+            f"key=lfk-11111111111111111111111111111111:{'1' * 64}\n"
+            f"key=lfk-22222222222222222222222222222222:{'2' * 64}\n",
+            encoding="ascii",
+        )
+        keyring.chmod(0o444)
+
+        result = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'validate_artifact_keyring_content '
+            '"$INSTALL_DIR/.secrets/artifact_local_file_database_keyring" database',
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("active artifact key must be first", result.stderr)
+
+    def test_fresh_artifact_keyrings_are_random_distinct_and_rerun_exact(self):
+        shutil.copyfile(SAMPLE_ENV, self.env_file)
+        os.chmod(self.env_file, 0o600)
+        secret_dir = self.temp_dir / ".secrets"
+        secret_dir.mkdir(mode=0o700)
+        body = (
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=false\n"
+            f"set_env_value BACKUPSHEEP_INSTALLATION_ID {'a' * 64}\n"
+            "set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION 3-pending-fresh\n"
+            "configure_artifact_keyrings false\n"
+            "validate_secret_dir"
+        )
+        self.run_installer_functions(body)
+
+        before = {}
+        identities = set()
+        material = set()
+        for lane in ("database", "files"):
+            path = secret_dir / f"artifact_local_file_{lane}_keyring"
+            before[lane] = path.read_bytes()
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444)
+            self.assertEqual(path.stat().st_nlink, 1)
+            lines = path.read_text(encoding="ascii").splitlines()
+            self.assertEqual(
+                lines[:3],
+                [
+                    "BACKUPSHEEP-ARTIFACT-KEYRING-V1",
+                    f"installation={'a' * 64}",
+                    f"lane={lane}",
+                ],
+            )
+            self.assertRegex(lines[3], r"^active=lfk-[0-9a-f]{32}$")
+            key_id, key_hex = lines[4].removeprefix("key=").split(":", 1)
+            self.assertEqual(lines[3], f"active={key_id}")
+            self.assertRegex(key_hex, r"^[0-9a-f]{64}$")
+            identities.add(key_id)
+            material.add(key_hex)
+        self.assertEqual(len(identities), 2)
+        self.assertEqual(len(material), 2)
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "configure_artifact_keyrings false\n"
+            "validate_secret_dir"
+        )
+        self.assertEqual(
+            before,
+            {
+                lane: (secret_dir / f"artifact_local_file_{lane}_keyring").read_bytes()
+                for lane in ("database", "files")
+            },
+        )
+
+    def test_legacy_artifact_provider_transition_is_explicit_current_and_lossless(self):
+        installation_id = "a" * 64
+        configured = self.env_file.read_text(encoding="utf-8")
+        configured = configured.replace(
+            "BACKUPSHEEP_INSTALLATION_ID=''",
+            f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+            1,
+        ).replace(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'",
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='aws-kms'",
+            1,
+        )
+        configured += (
+            "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE='8388608'\n"
+            "AWS_ENDPOINT_URL_KMS='https://retired.example.invalid'\n"
+        )
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+
+        refused = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=false\n"
+            "configure_artifact_key_policy",
+            check=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--migrate-artifact-key-provider-empty", refused.stderr)
+        self.assertIn(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='aws-kms'",
+            self.env_file.read_text(encoding="utf-8"),
+        )
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+            "configure_artifact_key_policy"
+        )
+        pending = self.env_file.read_text(encoding="utf-8")
+        expected_pending = hashlib.sha256(
+            (
+                "BackupSheep/artifact-key-provider/v1|"
+                f"{installation_id}|local-file|generation=1-pending-empty"
+            ).encode("ascii")
+        ).hexdigest()
+        self.assertIn("BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'", pending)
+        self.assertIn(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION='1-pending-empty'",
+            pending,
+        )
+        self.assertIn(
+            f"BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS='{expected_pending}'",
+            pending,
+        )
+        self.assertEqual(pending.count("BACKUPSHEEP_ARTIFACT_CHUNK_SIZE="), 1)
+        self.assertIn("BACKUPSHEEP_ARTIFACT_CHUNK_SIZE='8388608'", pending)
+        self.assertNotIn("AWS_ENDPOINT_URL_KMS", pending)
+        rollback_path = self.temp_dir / ".secrets" / "artifact_provider_transition_rollback"
+        self.assertTrue(rollback_path.is_file())
+        self.assertEqual(stat.S_IMODE(rollback_path.stat().st_mode), 0o400)
+        self.assertIn(
+            b"AWS_ENDPOINT_URL_KMS='https://retired.example.invalid'",
+            rollback_path.read_bytes(),
+        )
+
+        legacy_names = (
+            "artifact_kms_database_aws_credentials",
+            "artifact_kms_files_aws_credentials",
+        )
+        secret_dir = self.temp_dir / ".secrets"
+        for name in legacy_names:
+            path = secret_dir / name
+            path.write_text("retained-rollback-evidence\n", encoding="ascii")
+            path.chmod(0o444)
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+            "seal_artifact_key_provider_migration"
+        )
+        sealed = self.env_file.read_text(encoding="utf-8")
+        expected_final = hashlib.sha256(
+            (
+                "BackupSheep/artifact-key-provider/v1|"
+                f"{installation_id}|local-file|generation=1"
+            ).encode("ascii")
+        ).hexdigest()
+        self.assertIn(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION='1'",
+            sealed,
+        )
+        self.assertIn(
+            f"BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS='{expected_final}'",
+            sealed,
+        )
+        self.assertIn("BACKUPSHEEP_ARTIFACT_CHUNK_SIZE='8388608'", sealed)
+        for name in legacy_names:
+            self.assertTrue((secret_dir / name).exists())
+        self.assertTrue(rollback_path.exists())
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+            "complete_artifact_key_provider_migration"
+        )
+        for name in legacy_names:
+            self.assertFalse((secret_dir / name).exists())
+        self.assertFalse(rollback_path.exists())
+
+    def test_local_development_transition_preserves_root_without_logging_it(self):
+        installation_id = "c" * 64
+        root_key = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
+        configured = self.env_file.read_text(encoding="utf-8")
+        configured = configured.replace(
+            "BACKUPSHEEP_INSTALLATION_ID=''",
+            f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+            1,
+        ).replace(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'",
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-development'",
+            1,
+        )
+        configured += (
+            f"BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY='{root_key}'\n"
+            "BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID='legacy-local-key'\n"
+        )
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+        body = (
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+            "configure_artifact_key_policy"
+        )
+
+        first = self.run_installer_functions(body)
+        self.assertNotIn(root_key, first.stdout + first.stderr)
+        rollback = self.temp_dir / ".secrets" / "artifact_provider_transition_rollback"
+        original = rollback.read_bytes()
+        self.assertIn(root_key.encode("ascii"), original)
+        self.assertEqual(stat.S_IMODE(rollback.stat().st_mode), 0o400)
+        pending = self.env_file.read_text(encoding="utf-8")
+        self.assertNotIn(root_key, pending)
+        self.assertRegex(
+            pending,
+            r"BACKUPSHEEP_ARTIFACT_PROVIDER_ROLLBACK_SHA256='[0-9a-f]{64}'",
+        )
+
+        resumed = self.run_installer_functions(body)
+        self.assertNotIn(root_key, resumed.stdout + resumed.stderr)
+        self.assertEqual(rollback.read_bytes(), original)
+
+    def test_legacy_kms_endpoint_rollback_rejects_duplicate_or_malformed_keys(self):
+        installation_id = "8" * 64
+        base = self.env_file.read_text(encoding="utf-8").replace(
+            "BACKUPSHEEP_INSTALLATION_ID=''",
+            f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+            1,
+        ).replace(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'",
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='aws-kms'",
+            1,
+        )
+        cases = (
+            (
+                "duplicate",
+                "AWS_ENDPOINT_URL_KMS='https://one.invalid'\n"
+                "AWS_ENDPOINT_URL_KMS='https://two.invalid'\n",
+                "cannot be preserved safely",
+            ),
+            (
+                "malformed",
+                " AWS_ENDPOINT_URL_KMS='https://space.invalid'\n",
+                "is malformed",
+            ),
+        )
+        for name, endpoint_lines, expected_error in cases:
+            with self.subTest(name=name):
+                rollback = (
+                    self.temp_dir
+                    / ".secrets"
+                    / "artifact_provider_transition_rollback"
+                )
+                rollback.unlink(missing_ok=True)
+                self.env_file.write_text(base + endpoint_lines, encoding="utf-8")
+                self.env_file.chmod(0o600)
+                before = self.env_file.read_bytes()
+
+                result = self.run_installer_functions(
+                    'ENV_FILE="$INSTALL_DIR/.env"\n'
+                    'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+                    "ENV_WAS_PRESENT=true\n"
+                    "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+                    "configure_artifact_key_policy",
+                    check=False,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
+                self.assertEqual(self.env_file.read_bytes(), before)
+                self.assertFalse(rollback.exists())
+
+    def test_blank_legacy_artifact_provider_can_only_enter_pending_empty_state(self):
+        installation_id = "b" * 64
+        configured = self.env_file.read_text(encoding="utf-8")
+        configured = configured.replace(
+            "BACKUPSHEEP_INSTALLATION_ID=''",
+            f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+            1,
+        ).replace(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'",
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER=''",
+            1,
+        )
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+            "configure_artifact_key_policy"
+        )
+        pending = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'", pending)
+        self.assertIn(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION='1-pending-empty'",
+            pending,
+        )
+
+    def test_pre_feature_env_with_no_artifact_lines_has_exact_empty_rollback(self):
+        configured = "\n".join(
+            line
+            for line in self.env_file.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("BACKUPSHEEP_ARTIFACT_")
+        ) + "\n"
+        configured = configured.replace(
+            "BACKUPSHEEP_INSTALLATION_ID=''",
+            f"BACKUPSHEEP_INSTALLATION_ID='{'d' * 64}'",
+            1,
+        )
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+            "configure_artifact_key_policy"
+        )
+        rollback = self.temp_dir / ".secrets" / "artifact_provider_transition_rollback"
+        self.assertEqual(
+            rollback.read_text(encoding="ascii"),
+            "BACKUPSHEEP-ARTIFACT-PROVIDER-ROLLBACK-V1\n"
+            f"installation={'d' * 64}\n",
+        )
+
+    def test_stale_valid_artifact_provider_rollback_does_not_replace_current_policy(self):
+        installation_id = "e" * 64
+        configured = self.env_file.read_text(encoding="utf-8").replace(
+            "BACKUPSHEEP_INSTALLATION_ID=''",
+            f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+            1,
+        ).replace(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'",
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-development'",
+            1,
+        )
+        configured += "BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID='current-key'\n"
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+        (self.temp_dir / ".secrets").mkdir(mode=0o700)
+        rollback = self.temp_dir / ".secrets" / "artifact_provider_transition_rollback"
+        rollback.write_text(
+            "BACKUPSHEEP-ARTIFACT-PROVIDER-ROLLBACK-V1\n"
+            f"installation={installation_id}\n"
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-development'\n"
+            "BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID='stale-key'\n",
+            encoding="ascii",
+        )
+        rollback.chmod(0o400)
+        before = self.env_file.read_bytes()
+
+        result = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+            "configure_artifact_key_policy",
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not exactly match", result.stderr)
+        self.assertEqual(self.env_file.read_bytes(), before)
+
+    def test_foreign_installation_artifact_provider_rollback_is_refused_unchanged(self):
+        installation_id = "f" * 64
+        configured = self.env_file.read_text(encoding="utf-8").replace(
+            "BACKUPSHEEP_INSTALLATION_ID=''",
+            f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+            1,
+        ).replace(
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='local-file'",
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER=''",
+            1,
+        )
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+        (self.temp_dir / ".secrets").mkdir(mode=0o700)
+        rollback = self.temp_dir / ".secrets" / "artifact_provider_transition_rollback"
+        rollback.write_text(
+            "BACKUPSHEEP-ARTIFACT-PROVIDER-ROLLBACK-V1\n"
+            f"installation={'0' * 64}\n",
+            encoding="ascii",
+        )
+        rollback.chmod(0o400)
+        before = self.env_file.read_bytes()
+
+        result = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY=true\n"
+            "configure_artifact_key_policy",
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rollback is malformed", result.stderr)
+        self.assertEqual(self.env_file.read_bytes(), before)
+
+    def test_artifact_provider_completion_follows_fresh_database_proof(self):
+        installer = INSTALLER.read_text(encoding="utf-8")
+        start_core = installer.split("start_core() {", 1)[1].split("\n}", 1)[0]
+        main = installer.split("main() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(
+            start_core.index("wait_for_database_seal"),
+            start_core.index("seal_artifact_key_provider_migration"),
+        )
+        self.assertLess(
+            start_core.index("seal_artifact_key_provider_migration"),
+            start_core.index("validate_runtime_configuration"),
+        )
+        self.assertNotIn("complete_artifact_key_provider_migration", start_core)
+        self.assertLess(main.index("start_core"), main.index("complete_artifact_key_provider_migration"))
+        self.assertLess(main.index("start_operations"), main.index("complete_artifact_key_provider_migration"))
+
+    def test_stale_legacy_artifact_credential_requires_transition_rollback(self):
+        installation_id = "9" * 64
+        configured = self.env_file.read_text(encoding="utf-8").replace(
+            "BACKUPSHEEP_INSTALLATION_ID=''",
+            f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+            1,
+        )
+        self.env_file.write_text(configured, encoding="utf-8")
+        self.env_file.chmod(0o600)
+        secret_dir = self.temp_dir / ".secrets"
+        secret_dir.mkdir(mode=0o700)
+        credentials = []
+        for name in (
+            "artifact_kms_database_aws_credentials",
+            "artifact_kms_files_aws_credentials",
+        ):
+            credential = secret_dir / name
+            credential.write_text("retired-credential\n", encoding="ascii")
+            credential.chmod(0o444)
+            credentials.append(credential)
+
+        result = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "validate_legacy_artifact_provider_secret_state",
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("without its protected transition rollback", result.stderr)
+        self.assertTrue(all(credential.exists() for credential in credentials))
+
+    def test_artifact_keyring_rotation_requires_exact_witness_and_is_replay_safe(self):
+        shutil.copyfile(SAMPLE_ENV, self.env_file)
+        os.chmod(self.env_file, 0o600)
+        secret_dir = self.temp_dir / ".secrets"
+        secret_dir.mkdir(mode=0o700)
+        self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=false\n"
+            f"set_env_value BACKUPSHEEP_INSTALLATION_ID {'a' * 64}\n"
+            "set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION 3-pending-fresh\n"
+            "configure_artifact_keyrings false\n"
+            "set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION 3"
+        )
+        database = secret_dir / "artifact_local_file_database_keyring"
+        files = secret_dir / "artifact_local_file_files_keyring"
+        old_database = database.read_bytes()
+        old_files = files.read_bytes()
+        expected = database.read_text(encoding="ascii").splitlines()[3].split("=", 1)[1]
+        rotate_body = (
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            "ENV_WAS_PRESENT=true\n"
+            "PROJECT_NAME=backupsheep\n"
+            "ARTIFACT_LOCAL_FILE_ROTATE_LANE=database\n"
+            f"ARTIFACT_LOCAL_FILE_ROTATE_EXPECTED_KEY_ID={expected}\n"
+            "mock_docker() { [[ \"$1\" == ps ]] && return 0; return 64; }\n"
+            "configure_artifact_keyrings true"
+        )
+        self.run_installer_functions(rotate_body)
+
+        rotated = database.read_bytes()
+        lines = rotated.decode("ascii").splitlines()
+        self.assertNotEqual(rotated, old_database)
+        self.assertEqual(sum(line.startswith("key=") for line in lines), 2)
+        self.assertEqual(lines[5], old_database.decode("ascii").splitlines()[4])
+        self.assertEqual(files.read_bytes(), old_files)
+
+        replay = self.run_installer_functions(rotate_body, check=False)
+        self.assertNotEqual(replay.returncode, 0)
+        self.assertIn("refusing stale or repeated rotation", replay.stderr)
+        self.assertEqual(database.read_bytes(), rotated)
+        self.assertEqual(files.read_bytes(), old_files)
 
     def test_ambiguous_partial_database_secret_transition_fails_closed(self):
         secret_dir = self.temp_dir / ".secrets"

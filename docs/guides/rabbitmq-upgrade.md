@@ -35,29 +35,20 @@ provider work, make the complete encrypted rollback set and empty or separately 
 the ambiguous legacy `backup_workdir`. Then run the installer from the exact reviewed
 target checkout once. This is a coordinated pending-state bootstrap, not a broker upgrade.
 It proves the exact project/resources, creates and re-inspects the installation sentinel,
-records the explicit staging-v3 migration intent, imports two distinct KMS identities and
-stages database generation 3 plus RabbitMQ identity generation 2/task-auth generation 3.
+records the explicit staging-v3 migration intent, creates or validates the two distinct
+local artifact keyrings, then stages database generation 3 plus RabbitMQ identity
+generation 2/task-auth generation 3.
 It must stop at the blank-data-generation/3.13 gate without building or starting 4.3:
 
 ```bash
 TARGET_COMMIT="$(git rev-parse HEAD)"
 test "${#TARGET_COMMIT}" = 40
 CURRENT_DOMAIN='<existing-public-hostname>'
-KMS_KEY_ARN='<resolved-symmetric-kms-key-arn>'
-KMS_REGION='<aws-region>'
-KMS_ALLOWED_KEY_ARNS="${KMS_KEY_ARN}"
-KMS_DATABASE_CREDENTIALS='<canonical-private-database-lane-credentials-file>'
-KMS_FILES_CREDENTIALS='<different-canonical-private-files-lane-credentials-file>'
 BASE_INSTALL_ARGS=(
   --ref "${TARGET_COMMIT}"
   --install-dir "$PWD"
   --project-name backupsheep
   --domain "${CURRENT_DOMAIN}"
-  --artifact-kms-key-id "${KMS_KEY_ARN}"
-  --artifact-kms-region "${KMS_REGION}"
-  --artifact-kms-allowed-key-arns "${KMS_ALLOWED_KEY_ARNS}"
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}"
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
 )
 # If and only if this installation has the reviewed deployment override:
 # BASE_INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")
@@ -71,7 +62,7 @@ BOOTSTRAP_ARGS=(
 ```
 
 The documented 3.13 refusal is expected **only after** the installation/resource proof,
-empty-legacy staging-v3 gate, KMS credential/policy validation, and pending database/
+empty-legacy staging-v3 gate, local artifact-keyring validation, and pending database/
 broker/task identity gates all pass. Preserve the mutated `.env` and `.secrets` together
 with their pre-change rollback; do not hand-edit a pending marker. Do not continue for an
 earlier or different failure. If an old `compose down` removed all containers and networks,

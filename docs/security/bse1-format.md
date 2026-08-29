@@ -85,9 +85,13 @@ complete backup.
 
 `ArtifactContext` canonical JSON contains exactly `account_id`, `backup_id`,
 `backup_model`, `installation_id`, `lane`, `node_id`, and `purpose`. Its values
-are non-secret because AWS KMS records encryption context in CloudTrail. The
-same persisted context deterministically supplies the KMS encryption-context
-map. Restore must match the BSE1 header against the durable envelope UUID,
+are non-secret. The same persisted context is authenticated when the random data
+key is wrapped by the lane-specific local-file root key using AES-256-GCM-SIV and
+a fresh random 96-bit nonce. GCM-SIV preserves authentication even under an
+accidental nonce collision during the lifetime of a retained root key. The versioned
+`BSLW1` database-wrap payload names this exact GCM-SIV contract; it is not AES-GCM.
+Restore must match the
+BSE1 header against the durable envelope UUID,
 header SHA-256, plaintext size, plaintext SHA-256, active wrapped-key generation,
 and canonical context before publishing plaintext.
 
@@ -99,8 +103,37 @@ partial-plaintext fallback.
 
 ## Deterministic interoperability vector
 
-The normative byte vector is
+The normative BSE1 byte vector is
 [`apps/tests/fixtures/bse1-v1-vector.json`](../../apps/tests/fixtures/bse1-v1-vector.json).
 It fixes the key, context, UUID, nonce prefix, plaintext, canonical header,
 header digest, and complete 463-byte envelope. Implementations must reproduce
 `envelope_hex` exactly and decrypt it to `plaintext_hex`.
+
+The independent BSLW1 root-key wrapping vector is
+[`apps/tests/fixtures/bslw1-v1-vector.json`](../../apps/tests/fixtures/bslw1-v1-vector.json).
+It freezes the 256-bit lane root key, 256-bit data key, 96-bit nonce, installation/lane
+context, wrapping-key ID, canonical context JSON, and complete 65-byte database payload.
+Implementations must reproduce `payload_hex` exactly with AES-256-GCM-SIV and unwrap it
+to `data_key_hex`; changing its AAD domain, field ordering, or `BSLW1` framing is a
+breaking recovery-format change.
+
+The byte-level BSLW1 layout is exactly:
+
+```text
+offset  length  value
+0       5       ASCII "BSLW1"
+5       12      random AES-GCM-SIV nonce
+17      48      AES-256-GCM-SIV ciphertext || 16-byte tag for the 32-byte data key
+```
+
+The authenticated associated data has no length prefixes and is exactly this
+concatenation (the two `NUL` values are single `0x00` bytes):
+
+```text
+ASCII "BackupSheep/BSE1/local-file-wrap/v1" || NUL ||
+ASCII wrapping_key_id || NUL || ArtifactContext canonical JSON bytes
+```
+
+The provider name and wrapping-key ID remain separate database columns; the ID is both
+authenticated in the AAD and used to select the retained lane root key. The vector's
+`aad_hex` freezes the complete associated-data encoding for independent implementations.

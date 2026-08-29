@@ -3,22 +3,22 @@
 import hashlib
 import json
 import os
+import stat
 import struct
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from botocore.exceptions import ClientError
 from django.test import SimpleTestCase
 
 from backupsheep.artifact_crypto import (
-    AWSKMSConfig,
-    AWSKMSKeyProvider,
     ArtifactContext,
     EnvelopeExpectation,
     KeyProviderRegistry,
     LocalDevelopmentKeyProvider,
+    LocalFileKeyProvider,
     WrappedDataKey,
     decrypt_file,
     encrypt_file,
@@ -27,6 +27,7 @@ from backupsheep.artifact_crypto import (
     unseal_file,
 )
 from backupsheep.artifact_crypto import envelope as envelope_module
+from backupsheep.artifact_crypto.providers import local_file as local_file_module
 from backupsheep.artifact_crypto.errors import (
     ArtifactConfigurationError,
     ArtifactContextMismatchError,
@@ -35,19 +36,20 @@ from backupsheep.artifact_crypto.errors import (
     ArtifactIntegrityError,
     ArtifactSourceChangedError,
     ArtifactTruncatedError,
-    KeyProviderAccessDeniedError,
     KeyProviderConfigurationError,
     KeyProviderIntegrityError,
-    KeyProviderResponseError,
+    KeyProviderNotFoundError,
     UnsupportedArtifactFormatError,
 )
 from backupsheep.artifact_crypto.providers.base import GeneratedDataKey
+from backupsheep.artifact_crypto.providers.local_file import canonical_keyring_bytes
 
 CHUNK_SIZE = 64 * 1024
 DATA_KEY = bytes(range(32))
 ENVELOPE_ID = uuid.UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
-KMS_SOURCE_ARN = "arn:aws:kms:us-east-1:123456789012:key/source-key"
-KMS_DESTINATION_ARN = "arn:aws:kms:us-east-1:123456789012:key/destination-key"
+LOCAL_KEY_V1 = "lfk-11111111111111111111111111111111"
+LOCAL_KEY_V2 = "lfk-22222222222222222222222222222222"
+INSTALLATION_ID = "a" * 64
 
 
 def artifact_context(**overrides):
@@ -660,216 +662,379 @@ class KeyProviderTests(SimpleTestCase):
         with self.assertRaises(KeyProviderConfigurationError):
             registry.register(provider)
 
-    def test_aws_generate_decrypt_and_reencrypt_bind_exact_context(self):
-        client = mock.Mock()
-        client.generate_data_key.return_value = {
-            "Plaintext": DATA_KEY,
-            "CiphertextBlob": b"kms-wrapped-key",
-            "KeyId": KMS_SOURCE_ARN,
-        }
-        client.decrypt.return_value = {
-            "Plaintext": DATA_KEY,
-            "KeyId": KMS_SOURCE_ARN,
-        }
-        client.re_encrypt.return_value = {
-            "CiphertextBlob": b"rotated-key",
-            "KeyId": KMS_DESTINATION_ARN,
-            "SourceKeyId": KMS_SOURCE_ARN,
-        }
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id="alias/backupsheep",
-                region_name="us-east-1",
-                allowed_key_ids=(KMS_SOURCE_ARN, KMS_DESTINATION_ARN),
-            ),
-            client=client,
+    def _write_keyring(
+        self,
+        lane="database",
+        *,
+        active=LOCAL_KEY_V1,
+        keys=None,
+        installation_id=INSTALLATION_ID,
+    ):
+        path = self.root / f"{lane}.keyring"
+        entries = keys or [(active, "11" * 32)]
+        path.write_bytes(
+            canonical_keyring_bytes(
+                installation_id=installation_id,
+                lane=lane,
+                active_key_id=active,
+                keys=entries,
+            )
         )
+        path.chmod(0o400)
+        return path
 
-        generated = provider.generate_data_key(self.context)
-        client.generate_data_key.assert_called_once_with(
-            KeyId="alias/backupsheep",
-            KeySpec="AES_256",
-            EncryptionContext=self.context.key_provider_context(),
-        )
-        self.assertEqual(bytes(generated.plaintext), DATA_KEY)
-        self.assertEqual(generated.wrapped.ciphertext, b"kms-wrapped-key")
-
+    def test_normative_bslw1_vector_encrypts_and_decrypts_exact_bytes(self):
+        vector_path = Path(__file__).with_name("fixtures") / "bslw1-v1-vector.json"
+        vector = json.loads(vector_path.read_text(encoding="utf-8"))
+        context = ArtifactContext.from_mapping(vector["context"])
         self.assertEqual(
-            bytes(provider.unwrap_data_key(generated.wrapped, self.context)), DATA_KEY
+            context.canonical_bytes().decode("ascii"),
+            vector["context_canonical_json"],
         )
-        client.decrypt.assert_called_once_with(
-            CiphertextBlob=b"kms-wrapped-key",
-            KeyId=KMS_SOURCE_ARN,
-            EncryptionAlgorithm="SYMMETRIC_DEFAULT",
-            EncryptionContext=self.context.key_provider_context(),
+        self.assertEqual(context.sha256, vector["context_sha256"])
+        keyring = self._write_keyring(
+            lane=context.lane,
+            active=vector["key_id"],
+            keys=[(vector["key_id"], vector["root_key_hex"])],
+            installation_id=context.installation_id,
         )
-
-        rotated = provider.rewrap_data_key(
-            generated.wrapped,
-            self.context,
-            destination_key_id=KMS_DESTINATION_ARN,
+        provider = LocalFileKeyProvider(
+            keyring,
+            lane=context.lane,
+            installation_id=context.installation_id,
         )
-        self.assertEqual(rotated.ciphertext, b"rotated-key")
-        client.re_encrypt.assert_called_once_with(
-            CiphertextBlob=b"kms-wrapped-key",
-            SourceKeyId=KMS_SOURCE_ARN,
-            DestinationKeyId=KMS_DESTINATION_ARN,
-            SourceEncryptionContext=self.context.key_provider_context(),
-            DestinationEncryptionContext=self.context.key_provider_context(),
+        self.assertEqual(
+            provider._aad(context, vector["key_id"]),
+            bytes.fromhex(vector["aad_hex"]),
         )
-
-    def test_aws_errors_are_typed_sanitized_and_not_chained(self):
-        client = mock.Mock()
-        client.generate_data_key.side_effect = ClientError(
-            {
-                "Error": {
-                    "Code": "AccessDeniedException",
-                    "Message": "secret account and request details",
-                }
-            },
-            "GenerateDataKey",
+        with mock.patch.object(
+            local_file_module.os,
+            "urandom",
+            side_effect=[
+                bytes.fromhex(vector["data_key_hex"]),
+                bytes.fromhex(vector["nonce_hex"]),
+            ],
+        ):
+            generated = provider.generate_data_key(context)
+        self.assertEqual(bytes(generated.plaintext), bytes.fromhex(vector["data_key_hex"]))
+        self.assertEqual(
+            generated.wrapped.ciphertext,
+            bytes.fromhex(vector["payload_hex"]),
         )
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(key_id="alias/backupsheep", region_name="us-east-1"),
-            client=client,
+        frozen = WrappedDataKey(
+            vector["provider"],
+            vector["key_id"],
+            bytes.fromhex(vector["payload_hex"]),
         )
-
-        with self.assertRaises(KeyProviderAccessDeniedError) as raised:
-            provider.generate_data_key(self.context)
-
-        self.assertNotIn("secret", str(raised.exception))
-        self.assertIsNone(raised.exception.__cause__)
-
-    def test_aws_invalid_response_and_endpoint_fail_closed(self):
-        client = mock.Mock()
-        client.generate_data_key.return_value = {
-            "Plaintext": b"short",
-            "CiphertextBlob": b"wrapped",
-            "KeyId": "key",
-        }
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(key_id="key", region_name="us-east-1"), client=client
+        self.assertEqual(
+            bytes(provider.unwrap_data_key(frozen, context)),
+            bytes.fromhex(vector["data_key_hex"]),
         )
-        with self.assertRaises(KeyProviderResponseError):
-            provider.generate_data_key(self.context)
-        with self.assertRaises(KeyProviderConfigurationError):
-            AWSKMSConfig(
-                key_id="key",
-                region_name="us-east-1",
-                endpoint_url="http://kms.example.test",
-            )
+        self.assertEqual(local_file_module.WRAP_ALGORITHM, vector["algorithm"])
+        generated.destroy()
+        provider.destroy()
 
-    def test_enterprise_kms_policy_rejects_custom_and_string_boolean_endpoints(self):
-        with self.assertRaises(KeyProviderConfigurationError):
-            AWSKMSConfig(
-                key_id="key",
-                region_name="us-east-1",
-                endpoint_url="http://kms.example.test",
-                allow_insecure_endpoint="false",
-            )
-
-        custom_provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id="key",
-                region_name="us-east-1",
-                allowed_key_ids=(KMS_SOURCE_ARN,),
-                endpoint_url="https://kms.example.test",
-            ),
-            client=mock.Mock(),
+    def test_local_file_wrap_is_context_bound_and_enterprise_eligible(self):
+        provider = LocalFileKeyProvider(
+            self._write_keyring(),
+            lane="database",
+            installation_id=INSTALLATION_ID,
         )
-        with self.assertRaises(KeyProviderConfigurationError):
-            KeyProviderRegistry([custom_provider]).get(
-                "aws-kms", enterprise_mode=True
-            )
+        generated = provider.generate_data_key(self.context)
+        plaintext = bytes(generated.plaintext)
 
-        standard_provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id="alias/backupsheep",
-                region_name="us-east-1",
-                allowed_key_ids=(KMS_SOURCE_ARN,),
-            ),
-            client=mock.Mock(),
+        self.assertEqual(generated.wrapped.provider_name, "local-file")
+        self.assertEqual(generated.wrapped.wrapping_key_id, LOCAL_KEY_V1)
+        self.assertEqual(
+            bytes(provider.unwrap_data_key(generated.wrapped, self.context)), plaintext
         )
         self.assertIs(
-            KeyProviderRegistry([standard_provider]).get(
-                "aws-kms", enterprise_mode=True
-            ),
-            standard_provider,
+            KeyProviderRegistry([provider]).get("local-file", enterprise_mode=True),
+            provider,
         )
-
-    def test_aws_client_ignores_environment_and_shared_config_endpoints(self):
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id="alias/backupsheep",
-                region_name="us-east-1",
-                allowed_key_ids=(KMS_SOURCE_ARN,),
+        with self.assertRaises(KeyProviderIntegrityError):
+            provider.unwrap_data_key(
+                generated.wrapped,
+                artifact_context(node_id="other-node"),
             )
-        )
-        client = mock.Mock()
-        with mock.patch("boto3.client", return_value=client) as create_client:
-            self.assertIs(provider.client, client)
+        with self.assertRaises(KeyProviderConfigurationError):
+            provider.unwrap_data_key(
+                generated.wrapped,
+                artifact_context(lane="files"),
+            )
+        with self.assertRaises(KeyProviderConfigurationError):
+            provider.unwrap_data_key(
+                generated.wrapped,
+                artifact_context(installation_id="b" * 64),
+            )
+        generated.destroy()
+        provider.destroy()
 
-        configuration = create_client.call_args.kwargs["config"]
-        self.assertIs(configuration.ignore_configured_endpoint_urls, True)
-        self.assertIsNone(create_client.call_args.kwargs["endpoint_url"])
-
-    def test_kms_numeric_configuration_is_normalized_and_strict(self):
-        config = AWSKMSConfig(
-            key_id="key",
-            region_name="us-east-1",
-            connect_timeout_seconds="5",
-            read_timeout_seconds="30",
-            max_attempts="3",
+    def test_local_file_gcm_siv_wrap_survives_forced_nonce_reuse(self):
+        provider = LocalFileKeyProvider(
+            self._write_keyring(),
+            lane="database",
+            installation_id=INSTALLATION_ID,
         )
-        self.assertIs(type(config.connect_timeout_seconds), int)
-        self.assertIs(type(config.read_timeout_seconds), int)
-        self.assertIs(type(config.max_attempts), int)
-        for field, value in (
-            ("connect_timeout_seconds", True),
-            ("read_timeout_seconds", 5.5),
-            ("max_attempts", "3.0"),
+        nonce = b"n" * 12
+        with mock.patch.object(
+            local_file_module.os,
+            "urandom",
+            side_effect=[b"a" * 32, nonce, b"b" * 32, nonce],
         ):
-            with self.subTest(field=field, value=value):
+            first = provider.generate_data_key(self.context)
+            second = provider.generate_data_key(self.context)
+
+        self.assertEqual(local_file_module.WRAP_ALGORITHM, "AES-256-GCM-SIV")
+        self.assertEqual(first.wrapped.ciphertext[5:17], nonce)
+        self.assertEqual(second.wrapped.ciphertext[5:17], nonce)
+        self.assertNotEqual(first.wrapped.ciphertext, second.wrapped.ciphertext)
+        self.assertEqual(
+            bytes(provider.unwrap_data_key(first.wrapped, self.context)),
+            b"a" * 32,
+        )
+        self.assertEqual(
+            bytes(provider.unwrap_data_key(second.wrapped, self.context)),
+            b"b" * 32,
+        )
+        first.destroy()
+        second.destroy()
+        provider.destroy()
+
+    def test_local_file_tamper_and_unknown_legacy_key_fail_closed(self):
+        provider = LocalFileKeyProvider(
+            self._write_keyring(),
+            lane="database",
+            installation_id=INSTALLATION_ID,
+        )
+        generated = provider.generate_data_key(self.context)
+        tampered = bytearray(generated.wrapped.ciphertext)
+        tampered[-1] ^= 1
+
+        with self.assertRaises(KeyProviderIntegrityError):
+            provider.unwrap_data_key(
+                WrappedDataKey(
+                    "local-file",
+                    generated.wrapped.wrapping_key_id,
+                    bytes(tampered),
+                ),
+                self.context,
+            )
+        with self.assertRaises(KeyProviderNotFoundError):
+            provider.unwrap_data_key(
+                WrappedDataKey(
+                    "local-file",
+                    "lfk-99999999999999999999999999999999",
+                    generated.wrapped.ciphertext,
+                ),
+                self.context,
+            )
+        generated.destroy()
+        provider.destroy()
+
+    def test_local_file_rejects_relative_unsafe_and_linked_paths(self):
+        with self.assertRaises(KeyProviderConfigurationError):
+            LocalFileKeyProvider(
+                "database.keyring",
+                lane="database",
+                installation_id=INSTALLATION_ID,
+            )
+
+        path = self._write_keyring()
+        path.chmod(0o600)
+        with self.assertRaises(KeyProviderConfigurationError):
+            LocalFileKeyProvider(
+                path,
+                lane="database",
+                installation_id=INSTALLATION_ID,
+            )
+        path.chmod(0o400)
+
+        symlink = self.root / "linked.keyring"
+        symlink.symlink_to(path)
+        with self.assertRaises(KeyProviderConfigurationError):
+            LocalFileKeyProvider(
+                symlink,
+                lane="database",
+                installation_id=INSTALLATION_ID,
+            )
+
+        hardlink = self.root / "hardlinked.keyring"
+        os.link(path, hardlink)
+        with self.assertRaises(KeyProviderConfigurationError):
+            LocalFileKeyProvider(
+                path,
+                lane="database",
+                installation_id=INSTALLATION_ID,
+            )
+
+    def test_local_file_rejects_keyring_in_unprotected_parent(self):
+        path = self._write_keyring()
+        self.root.chmod(0o755)
+        try:
+            with self.assertRaises(KeyProviderConfigurationError):
+                LocalFileKeyProvider(
+                    path,
+                    lane="database",
+                    installation_id=INSTALLATION_ID,
+                )
+        finally:
+            self.root.chmod(0o700)
+
+    def test_local_file_accepts_rootful_compose_secret_with_host_uid(self):
+        provider = object.__new__(LocalFileKeyProvider)
+        provider.path = Path(
+            "/run/secrets/artifact_local_file_database_keyring"
+        )
+        provider.lane = "database"
+        file_metadata = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o444,
+            st_nlink=1,
+            st_uid=501,
+        )
+        parent_metadata = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o755,
+            st_uid=0,
+        )
+        with mock.patch.object(os, "stat", return_value=parent_metadata):
+            self.assertTrue(provider._secure_metadata(file_metadata))
+
+        provider.path = Path("/tmp/copied-database.keyring")
+        with mock.patch.object(os, "stat", return_value=parent_metadata):
+            self.assertFalse(provider._secure_metadata(file_metadata))
+
+    def test_local_file_rejects_wrong_lane_and_noncanonical_content(self):
+        path = self._write_keyring(lane="files")
+        with self.assertRaises(KeyProviderConfigurationError):
+            LocalFileKeyProvider(
+                path,
+                lane="database",
+                installation_id=INSTALLATION_ID,
+            )
+
+        cases = (
+            canonical_keyring_bytes(
+                installation_id=INSTALLATION_ID,
+                lane="database",
+                active_key_id=LOCAL_KEY_V1,
+                keys=[(LOCAL_KEY_V1, "11" * 32)],
+            )
+            + b"\n",
+            canonical_keyring_bytes(
+                installation_id=INSTALLATION_ID,
+                lane="database",
+                active_key_id=LOCAL_KEY_V2,
+                keys=[(LOCAL_KEY_V1, "11" * 32), (LOCAL_KEY_V2, "22" * 32)],
+            ),
+            canonical_keyring_bytes(
+                installation_id=INSTALLATION_ID,
+                lane="database",
+                active_key_id=LOCAL_KEY_V1,
+                keys=[(LOCAL_KEY_V1, "11" * 32), (LOCAL_KEY_V2, "11" * 32)],
+            ),
+        )
+        for position, content in enumerate(cases):
+            with self.subTest(position=position):
+                malformed = self.root / f"malformed-{position}.keyring"
+                malformed.write_bytes(content)
+                malformed.chmod(0o400)
                 with self.assertRaises(KeyProviderConfigurationError):
-                    AWSKMSConfig(
-                        key_id="key",
-                        region_name="us-east-1",
-                        **{field: value},
+                    LocalFileKeyProvider(
+                        malformed,
+                        lane="database",
+                        installation_id=INSTALLATION_ID,
                     )
 
-    def test_kms_key_identity_is_pinned_for_generate_and_decrypt(self):
-        unapproved_arn = "arn:aws:kms:us-east-1:123456789012:key/unapproved"
-        client = mock.Mock()
-        client.generate_data_key.return_value = {
-            "Plaintext": DATA_KEY,
-            "CiphertextBlob": b"wrapped",
-            "KeyId": unapproved_arn,
-        }
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id="alias/backupsheep",
-                region_name="us-east-1",
-                allowed_key_ids=(KMS_SOURCE_ARN,),
-            ),
-            client=client,
+    def test_local_file_rejects_a_foreign_installation_keyring(self):
+        path = self._write_keyring()
+
+        with self.assertRaisesRegex(
+            KeyProviderConfigurationError,
+            "different installation",
+        ):
+            LocalFileKeyProvider(
+                path,
+                lane="database",
+                installation_id="b" * 64,
+            )
+
+    def test_local_file_active_and_legacy_keys_support_safe_rotation(self):
+        path = self._write_keyring()
+        original = LocalFileKeyProvider(
+            path,
+            lane="database",
+            installation_id=INSTALLATION_ID,
         )
-        with self.assertRaises(KeyProviderIntegrityError):
-            provider.generate_data_key(self.context)
+        generated = original.generate_data_key(self.context)
+        plaintext = bytes(generated.plaintext)
+        original.destroy()
 
-        with self.assertRaises(KeyProviderIntegrityError):
-            provider.unwrap_data_key(
-                WrappedDataKey("aws-kms", unapproved_arn, b"wrapped"), self.context
+        path.chmod(0o600)
+        path.write_bytes(
+            canonical_keyring_bytes(
+                installation_id=INSTALLATION_ID,
+                lane="database",
+                active_key_id=LOCAL_KEY_V2,
+                keys=[(LOCAL_KEY_V2, "22" * 32), (LOCAL_KEY_V1, "11" * 32)],
             )
-        client.decrypt.assert_not_called()
+        )
+        path.chmod(0o400)
+        rotated = LocalFileKeyProvider(
+            path,
+            lane="database",
+            installation_id=INSTALLATION_ID,
+        )
+        self.assertEqual(rotated.key_ids, (LOCAL_KEY_V2, LOCAL_KEY_V1))
+        self.assertEqual(
+            bytes(rotated.unwrap_data_key(generated.wrapped, self.context)), plaintext
+        )
+        rewrapped = rotated.rewrap_data_key(
+            generated.wrapped,
+            self.context,
+            destination_key_id=LOCAL_KEY_V2,
+        )
+        self.assertEqual(rewrapped.wrapping_key_id, LOCAL_KEY_V2)
+        self.assertEqual(
+            bytes(rotated.unwrap_data_key(rewrapped, self.context)), plaintext
+        )
+        generated.destroy()
+        rotated.destroy()
 
-        client.decrypt.return_value = {
-            "Plaintext": DATA_KEY,
-            "KeyId": KMS_DESTINATION_ARN,
-        }
-        with self.assertRaises(KeyProviderIntegrityError):
-            provider.unwrap_data_key(
-                WrappedDataKey("aws-kms", KMS_SOURCE_ARN, b"wrapped"), self.context
+    def test_local_file_keyring_is_bounded_to_eight_unique_keys(self):
+        keys = [
+            (f"lfk-{index:032x}", f"{index + 1:064x}")
+            for index in range(9)
+        ]
+        path = self._write_keyring(active=keys[0][0], keys=keys)
+        with self.assertRaises(KeyProviderConfigurationError):
+            LocalFileKeyProvider(
+                path,
+                lane="database",
+                installation_id=INSTALLATION_ID,
             )
+
+    def test_local_file_rejects_wrong_provider_key_id_and_ciphertext_shape(self):
+        provider = LocalFileKeyProvider(
+            self._write_keyring(),
+            lane="database",
+            installation_id=INSTALLATION_ID,
+        )
+        generated = provider.generate_data_key(self.context)
+        cases = (
+            WrappedDataKey(
+                "local-development",
+                generated.wrapped.wrapping_key_id,
+                generated.wrapped.ciphertext,
+            ),
+            WrappedDataKey("local-file", "bad-key-id", generated.wrapped.ciphertext),
+            WrappedDataKey("local-file", LOCAL_KEY_V1, b"too-short"),
+        )
+        for wrapped in cases:
+            with self.subTest(wrapped=wrapped):
+                with self.assertRaises(KeyProviderConfigurationError):
+                    provider.unwrap_data_key(wrapped, self.context)
+        generated.destroy()
+        provider.destroy()
 
     def test_local_filesystem_preflight_happens_before_remote_key_operations(self):
         class CountingProvider:
@@ -918,13 +1083,10 @@ class KeyProviderTests(SimpleTestCase):
         self.assertEqual(provider.unwrap_calls, 0)
 
     def test_enterprise_restore_requires_witness_and_trusted_roots(self):
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id="alias/backupsheep",
-                region_name="us-east-1",
-                allowed_key_ids=(KMS_SOURCE_ARN,),
-            ),
-            client=mock.Mock(),
+        provider = LocalFileKeyProvider(
+            self._write_keyring(),
+            lane="database",
+            installation_id=INSTALLATION_ID,
         )
         with self.assertRaises(ArtifactConfigurationError):
             unseal_file(
@@ -932,7 +1094,7 @@ class KeyProviderTests(SimpleTestCase):
                 self.root / "missing.zip",
                 provider=provider,
                 wrapped_data_key=WrappedDataKey(
-                    "aws-kms", KMS_SOURCE_ARN, b"wrapped"
+                    "local-file", LOCAL_KEY_V1, b"wrapped"
                 ),
                 context=self.context,
                 enterprise_mode=True,

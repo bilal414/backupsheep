@@ -32,10 +32,6 @@ installer from the exact reviewed release commit:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
-KMS_KEY_ARN='arn:aws:kms:us-east-1:123456789012:key/<reviewed-key-id>'
-KMS_REGION='us-east-1'
-KMS_DATABASE_CREDENTIALS='/absolute/protected/kms-database.credentials'
-KMS_FILES_CREDENTIALS='/absolute/protected/kms-files.credentials'
 curl -fSLo install.sh \
   "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
 less install.sh
@@ -44,17 +40,11 @@ chmod 700 install.sh
   --ref "${COMMIT}" \
   --install-dir "$HOME/.local/share/backupsheep" \
   --project-name backupsheep \
-  --domain backups.example.com \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
+  --domain backups.example.com
 ```
 
-The two credential inputs must be distinct, canonical, user-owned mode-`0400`/`0600`
-files for separate AWS identities whose IAM/KMS policies enforce the matching database or
-files encryption context.
+The installer creates two independent local artifact keyrings and mounts each only in its
+matching database/files worker. Protect off-host copies with the database recovery set.
 
 The installer prints an SSH-tunnel command and an explicit trusted-shell command for
 retrieving the onboarding token after the health check passes; it does not put the token

@@ -97,6 +97,20 @@ def _stop_legacy_backup_container(container_name):
         return
 
 
+def _cancel_storage_point_uploads(storage_points):
+    """Cancel deliveries without overwriting durable provider-boundary evidence."""
+
+    for storage_point in storage_points:
+        with transaction.atomic():
+            current = storage_point.__class__.objects.select_for_update().get(
+                pk=storage_point.pk
+            )
+            task_id = current.celery_task_id
+            current.status = current.Status.CANCELLED
+            current.save(update_fields=["status", "modified"])
+        app.control.revoke(task_id, terminate=True)
+
+
 class StoragePointLeaseLostError(RuntimeError):
     """A stale storage worker attempted to persist after losing its fence."""
 
@@ -849,7 +863,7 @@ class CoreBackupExecution(TimeStampedModel):
 class CoreBackupEncryptionEnvelope(TimeStampedModel):
     """Durable identity and authenticated-header witness for one backup.
 
-    Wrapped data keys are separate generation records so a KMS rotation never
+    Wrapped data keys are separate generation records so a root-key rotation never
     requires rewriting a potentially multi-terabyte backup object.
     """
 
@@ -1059,10 +1073,10 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
 
 
 class CoreBackupKeyWrap(TimeStampedModel):
-    """One externally wrapped generation of a backup's random data key."""
+    """One authenticated wrapping generation of a backup's random data key."""
 
     class Provider(models.TextChoices):
-        AWS_KMS = "aws-kms", "AWS KMS"
+        LOCAL_FILE = "local-file", "Local file"
         LOCAL_DEVELOPMENT = "local-development", "Local development"
 
     class Status(models.TextChoices):
@@ -1116,7 +1130,7 @@ class CoreBackupKeyWrap(TimeStampedModel):
                 name="backup_key_wrap_status_valid",
             ),
             models.CheckConstraint(
-                condition=models.Q(provider__in=("aws-kms", "local-development")),
+                condition=models.Q(provider__in=("local-file", "local-development")),
                 name="backup_key_wrap_provider_valid",
             ),
             models.CheckConstraint(
@@ -5083,20 +5097,12 @@ class CoreWebsiteBackup(UtilBackup):
         """
         First cancel the storage point uploads
         """
-        for stored_website_backup in self.stored_website_backups.all():
-            try:
-                stored_website_backup.status = (
-                    CoreWebsiteBackupStoragePoints.Status.CANCELLED
-                )
-                stored_website_backup.save()
-                app.control.revoke(stored_website_backup.celery_task_id, terminate=True)
-            except IntegrityError:
-                stored_website_backup.delete()
+        _cancel_storage_point_uploads(self.stored_website_backups.all())
         """
         Set backup status to cancelled
         """
         self.status = self.Status.CANCELLED
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
         """
         Delete files
@@ -5109,7 +5115,6 @@ class CoreWebsiteBackup(UtilBackup):
         Reset the node status
         """
         self.website.node.backup_complete_reset()
-        self.save()
 
         """
         Stop docker container if any
@@ -6612,16 +6617,13 @@ class CoreBasecampBackup(UtilBackup):
         """
         First cancel the storage point uploads
         """
-        for stored_basecamp_backup in self.stored_basecamp_backups.all():
-            stored_basecamp_backup.status = CoreBasecampBackupStoragePoints.Status.CANCELLED
-            stored_basecamp_backup.save()
-            app.control.revoke(stored_basecamp_backup.celery_task_id, terminate=True)
+        _cancel_storage_point_uploads(self.stored_basecamp_backups.all())
 
         """
         Set backup status to cancelled
         """
         self.status = self.Status.CANCELLED
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
         """
         Delete files
@@ -6634,7 +6636,6 @@ class CoreBasecampBackup(UtilBackup):
         Reset the node status
         """
         self.basecamp.node.backup_complete_reset()
-        self.save()
 
         """
         Stop main docker container if any
@@ -6759,18 +6760,13 @@ class CoreDatabaseBackup(UtilBackup):
         """
         First cancel the storage point uploads
         """
-        for stored_database_backup in self.stored_database_backups.all():
-            stored_database_backup.status = (
-                CoreDatabaseBackupStoragePoints.Status.CANCELLED
-            )
-            stored_database_backup.save()
-            app.control.revoke(stored_database_backup.celery_task_id, terminate=True)
+        _cancel_storage_point_uploads(self.stored_database_backups.all())
 
         """
         Set backup status to cancelled
         """
         self.status = self.Status.CANCELLED
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
         """
         Delete files
@@ -6783,7 +6779,6 @@ class CoreDatabaseBackup(UtilBackup):
         Reset the node status
         """
         self.database.node.backup_complete_reset()
-        self.save()
 
 
 class CoreDatabaseBackupStoragePoints(BaseBackupStoragePoints):

@@ -148,32 +148,13 @@ includes the exact verified-install commands. Unattended root cloud-init install
 intentionally disabled; host provisioning remains the operator's responsibility. This is
 the preferred path for durable local archives and independently scalable worker pools.
 
-### Render
+### Managed one-click platforms
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/bilal414/backupsheep/tree/main)
-
-The Render Blueprint deploys the web console, one all-queue Celery worker, Beat, managed
-PostgreSQL, and a private RabbitMQ service with persistent storage. Enter a private
-onboarding token during setup, then use external object storage for backups—**Local
-Storage** is not suitable for this PaaS deployment. See the [Render guide](docs/render.md)
-for its sizing and worker limitations.
-
-### Heroku
-
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/bilal414/backupsheep/tree/main)
-
-The Heroku button provisions PostgreSQL, CloudAMQP's **RabbitMQ** Little Lemur plan, and
-separate web, worker, and Beat processes. Enter an onboarding token and the app's public
-hostname during setup; use external object storage for backup archives. See the
-[Heroku guide](docs/heroku.md) for its limits and production sizing.
-
-### Railway
-
-Railway requires a published multi-service template before it can issue a Deploy on Railway
-button. The repository includes the versioned service configurations and exact template
-publication steps in the [Railway guide](docs/railway.md). It provisions web, worker, Beat,
-PostgreSQL, and a private RabbitMQ service in one project; use external object storage for
-backup archives.
+BackupSheep does not ship Render, Heroku, or Railway one-click templates. Their
+monolithic worker and shared-environment models cannot satisfy the production lane,
+file-keyring, filesystem, and identity boundaries. Use the verified Docker installer on
+a VM, or the documented split-process non-Docker deployment contract; do not adapt an old
+one-click manifest for production.
 
 ### Manual Docker Compose install
 
