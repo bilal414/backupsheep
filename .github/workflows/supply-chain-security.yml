@@ -48,10 +48,9 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
-          cache: pip
 
       - name: Audit Python dependency resolution
         run: |
@@ -142,7 +141,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 
@@ -476,7 +475,7 @@ jobs:
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
       - name: Retain zero-sensitive final-SHA source-scan evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-source-evidence-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/backupsheep-source-scan-evidence/summary.json
@@ -663,7 +662,7 @@ jobs:
 
       - name: Retain exact-image SBOM and vulnerability evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-image-evidence-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/backupsheep-ci-image-evidence
