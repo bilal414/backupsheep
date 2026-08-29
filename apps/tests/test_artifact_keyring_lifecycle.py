@@ -4,6 +4,7 @@ import fcntl
 import io
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -31,6 +32,88 @@ class ArtifactKeyringLifecycleTests(SimpleTestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def _interrupt_lifecycle(
+        self,
+        path: Path,
+        *,
+        operation: str,
+        phase: str,
+        expected_active_key_id: str = "",
+    ) -> subprocess.CompletedProcess[str]:
+        program = r'''
+import os
+import signal
+import sys
+from pathlib import Path
+
+from scripts import manage_artifact_keyring as lifecycle
+
+path = Path(sys.argv[1])
+operation = sys.argv[2]
+phase = sys.argv[3]
+expected_active_key_id = sys.argv[4]
+
+if phase == "after-write":
+    original_write = lifecycle._write_temporary
+    def write_then_kill(*args, **kwargs):
+        original_write(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGKILL)
+    lifecycle._write_temporary = write_then_kill
+elif phase == "after-link":
+    original_link = os.link
+    def link_then_kill(*args, **kwargs):
+        original_link(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGKILL)
+    os.link = link_then_kill
+elif phase == "after-unlink":
+    original_unlink = Path.unlink
+    def unlink_then_kill(subject, *args, **kwargs):
+        result = original_unlink(subject, *args, **kwargs)
+        if subject != path:
+            os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    Path.unlink = unlink_then_kill
+elif phase == "after-replace":
+    original_replace = os.replace
+    def replace_then_kill(*args, **kwargs):
+        original_replace(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGKILL)
+    os.replace = replace_then_kill
+else:
+    raise AssertionError("unknown interruption phase")
+
+if operation == "create":
+    lifecycle.create(path, "database", "a" * 64)
+elif operation == "rotate":
+    lifecycle.rotate(
+        path,
+        "database",
+        "a" * 64,
+        expected_active_key_id,
+    )
+else:
+    raise AssertionError("unknown lifecycle operation")
+'''
+        repository_root = Path(lifecycle.__file__).resolve().parents[1]
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                program,
+                str(path),
+                operation,
+                phase,
+                expected_active_key_id,
+            ],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+        return result
+
     def test_create_is_no_clobber_and_rerun_preserves_exact_bytes(self):
         outcome = lifecycle.create(self.path, "database", INSTALLATION_ID)
         original = self.path.read_bytes()
@@ -42,6 +125,161 @@ class ArtifactKeyringLifecycleTests(SimpleTestCase):
         with self.assertRaises(lifecycle.KeyringLifecycleError):
             lifecycle.create(self.path, "database", INSTALLATION_ID)
         self.assertEqual(self.path.read_bytes(), original)
+
+    def test_create_sigkill_publication_boundaries_converge_without_key_residue(self):
+        for phase in ("after-write", "after-link"):
+            with self.subTest(phase=phase):
+                case_root = self.root / phase
+                case_root.mkdir(mode=0o700)
+                path = case_root / "database.keyring"
+                self._interrupt_lifecycle(path, operation="create", phase=phase)
+
+                outcome = lifecycle.create(path, "database", INSTALLATION_ID)
+
+                self.assertEqual(outcome["key_count"], 1)
+                self.assertEqual(path.stat().st_nlink, 1)
+                self.assertEqual(
+                    list(case_root.glob(".database.keyring.*.tmp")),
+                    [],
+                )
+
+        case_root = self.root / "after-unlink"
+        case_root.mkdir(mode=0o700)
+        path = case_root / "database.keyring"
+        self._interrupt_lifecycle(path, operation="create", phase="after-unlink")
+
+        inspected = lifecycle.inspect(path, "database", INSTALLATION_ID)
+
+        self.assertEqual(inspected["key_count"], 1)
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(list(case_root.glob(".database.keyring.*.tmp")), [])
+        with self.assertRaisesRegex(
+            lifecycle.KeyringLifecycleError,
+            "refusing to overwrite",
+        ):
+            lifecycle.create(path, "database", INSTALLATION_ID)
+
+    def test_rotation_sigkill_boundaries_are_single_step_and_residue_free(self):
+        before_replace_root = self.root / "rotation-before-replace"
+        before_replace_root.mkdir(mode=0o700)
+        before_replace_path = before_replace_root / "database.keyring"
+        created = lifecycle.create(
+            before_replace_path,
+            "database",
+            INSTALLATION_ID,
+        )
+        original_active = str(created["active_key_id"])
+        self._interrupt_lifecycle(
+            before_replace_path,
+            operation="rotate",
+            phase="after-write",
+            expected_active_key_id=original_active,
+        )
+        self.assertEqual(
+            lifecycle.inspect(
+                before_replace_path,
+                "database",
+                INSTALLATION_ID,
+            )["active_key_id"],
+            original_active,
+        )
+
+        rotated = lifecycle.rotate(
+            before_replace_path,
+            "database",
+            INSTALLATION_ID,
+            original_active,
+        )
+
+        self.assertNotEqual(rotated["active_key_id"], original_active)
+        self.assertEqual(rotated["key_count"], 2)
+        self.assertEqual(
+            list(before_replace_root.glob(".database.keyring.*.tmp")),
+            [],
+        )
+
+        after_replace_root = self.root / "rotation-after-replace"
+        after_replace_root.mkdir(mode=0o700)
+        after_replace_path = after_replace_root / "database.keyring"
+        created = lifecycle.create(after_replace_path, "database", INSTALLATION_ID)
+        original_active = str(created["active_key_id"])
+        self._interrupt_lifecycle(
+            after_replace_path,
+            operation="rotate",
+            phase="after-replace",
+            expected_active_key_id=original_active,
+        )
+
+        inspected = lifecycle.inspect(
+            after_replace_path,
+            "database",
+            INSTALLATION_ID,
+        )
+        self.assertNotEqual(inspected["active_key_id"], original_active)
+        self.assertEqual(inspected["key_count"], 2)
+        self.assertEqual(
+            list(after_replace_root.glob(".database.keyring.*.tmp")),
+            [],
+        )
+        with self.assertRaisesRegex(
+            lifecycle.KeyringLifecycleError,
+            "expected active key ID does not match",
+        ):
+            lifecycle.rotate(
+                after_replace_path,
+                "database",
+                INSTALLATION_ID,
+                original_active,
+            )
+
+    def test_residue_recovery_refuses_unrelated_hard_link(self):
+        created = lifecycle.create(self.path, "database", INSTALLATION_ID)
+        candidate = self.root / f".{self.path.name}.{'0' * 24}.tmp"
+        candidate.write_bytes(b"untrusted residue")
+        candidate.chmod(0o400)
+        decoy = self.root / "unrelated-hard-link"
+        os.link(candidate, decoy)
+
+        with self.assertRaisesRegex(
+            lifecycle.KeyringLifecycleError,
+            "unsafe or ambiguous identity",
+        ):
+            lifecycle.rotate(
+                self.path,
+                "database",
+                INSTALLATION_ID,
+                str(created["active_key_id"]),
+            )
+
+        self.assertTrue(candidate.is_file())
+        self.assertTrue(decoy.is_file())
+        self.assertEqual(candidate.stat().st_nlink, 2)
+
+    def test_linked_recovery_preserves_foreign_lane_residue_for_review(self):
+        key_id = "lfk-11111111111111111111111111111111"
+        candidate = self.root / f".{self.path.name}.{'1' * 24}.tmp"
+        candidate.write_bytes(
+            canonical_keyring_bytes(
+                installation_id=INSTALLATION_ID,
+                lane="files",
+                active_key_id=key_id,
+                keys=[(key_id, "22" * 32)],
+            )
+        )
+        candidate.chmod(0o400)
+        os.link(candidate, self.path)
+        original = candidate.read_bytes()
+
+        with self.assertRaisesRegex(
+            lifecycle.KeyringLifecycleError,
+            "failed strict validation",
+        ):
+            lifecycle.create(self.path, "database", INSTALLATION_ID)
+
+        self.assertEqual(candidate.read_bytes(), original)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(candidate.stat().st_ino, self.path.stat().st_ino)
+        self.assertEqual(candidate.stat().st_nlink, 2)
 
     def test_rotate_prepends_new_active_and_retains_every_legacy_key(self):
         created = lifecycle.create(self.path, "database", INSTALLATION_ID)

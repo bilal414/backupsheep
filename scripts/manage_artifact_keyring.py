@@ -63,6 +63,7 @@ from backupsheep.artifact_crypto.context import (  # noqa: E402
 from backupsheep.artifact_crypto.providers.base import zeroize  # noqa: E402
 from backupsheep.artifact_crypto.providers.local_file import (  # noqa: E402
     KEYRING_VERSION,
+    MAX_KEYRING_BYTES,
     MAX_KEYRING_KEYS,
     LocalFileKeyProvider,
     canonical_keyring_bytes,
@@ -72,6 +73,11 @@ from backupsheep.artifact_crypto.providers.local_file import (  # noqa: E402
 
 class KeyringLifecycleError(RuntimeError):
     pass
+
+
+_MAX_TEMPORARY_RESIDUES = 64
+_TEMPORARY_TOKEN_LENGTH = 24
+_LOWER_HEXADECIMAL = frozenset("0123456789abcdef")
 
 
 def _path(value: str) -> Path:
@@ -124,11 +130,242 @@ def _temporary_path(path: Path) -> Path:
     return path.parent / f".{path.name}.{secrets.token_hex(12)}.tmp"
 
 
+def _temporary_residue_names(path: Path, parent: int) -> list[str]:
+    """Return only names that this tool can generate for this destination."""
+
+    prefix = f".{path.name}."
+    suffix = ".tmp"
+    try:
+        entries = os.listdir(parent)
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "the keyring parent could not be inspected for interrupted operations"
+        ) from error
+    residues = []
+    for name in entries:
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        token = name[len(prefix) : -len(suffix)]
+        if len(token) != _TEMPORARY_TOKEN_LENGTH or any(
+            character not in _LOWER_HEXADECIMAL for character in token
+        ):
+            continue
+        residues.append(name)
+    if len(residues) > _MAX_TEMPORARY_RESIDUES:
+        raise KeyringLifecycleError(
+            "too many interrupted keyring operation residues exist"
+        )
+    return sorted(residues)
+
+
+def _stat_at(parent: int, name: str) -> os.stat_result:
+    try:
+        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "an interrupted keyring operation residue changed concurrently"
+        ) from error
+
+
+def _metadata_identity(metadata: os.stat_result) -> tuple[object, ...]:
+    return tuple(
+        getattr(metadata, field)
+        for field in (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_nlink",
+        )
+    )
+
+
+def _safe_unpublished_residue(metadata: os.stat_result) -> bool:
+    # A kill may land after O_EXCL creation but before fchmod(2). The requested
+    # creation mode is already no broader than 0400, so mode 0000 is also a safe
+    # unpublished state to remove from the owner-only parent.
+    return bool(
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == os.geteuid()
+        and stat.S_IMODE(metadata.st_mode) in {0o000, 0o400}
+        and metadata.st_nlink == 1
+        and 0 <= metadata.st_size <= MAX_KEYRING_BYTES
+    )
+
+
+def _safe_linked_publication(
+    residue: os.stat_result,
+    destination: os.stat_result,
+) -> bool:
+    return bool(
+        stat.S_ISREG(residue.st_mode)
+        and stat.S_ISREG(destination.st_mode)
+        and residue.st_uid == os.geteuid()
+        and destination.st_uid == os.geteuid()
+        and stat.S_IMODE(residue.st_mode) == 0o400
+        and stat.S_IMODE(destination.st_mode) == 0o400
+        and residue.st_nlink == destination.st_nlink == 2
+        and residue.st_dev == destination.st_dev
+        and residue.st_ino == destination.st_ino
+        and residue.st_size == destination.st_size
+        and 1 <= residue.st_size <= MAX_KEYRING_BYTES
+    )
+
+
+def _reconcile_linked_publication(
+    path: Path,
+    residue_name: str,
+    parent: int,
+    lane: str,
+    installation_id: str,
+    expected: os.stat_result,
+) -> None:
+    """Drop one attested second name, then strictly validate its destination."""
+
+    if _metadata_identity(_stat_at(parent, residue_name)) != _metadata_identity(
+        expected
+    ):
+        raise KeyringLifecycleError(
+            "the linked keyring publication residue changed concurrently"
+        )
+    try:
+        os.unlink(residue_name, dir_fd=parent)
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "the linked keyring publication residue could not be removed"
+        ) from error
+
+    provider = None
+    try:
+        surviving = _stat_at(parent, path.name)
+        if not (
+            stat.S_ISREG(surviving.st_mode)
+            and surviving.st_uid == os.geteuid()
+            and stat.S_IMODE(surviving.st_mode) == 0o400
+            and surviving.st_nlink == 1
+            and surviving.st_dev == expected.st_dev
+            and surviving.st_ino == expected.st_ino
+            and surviving.st_size == expected.st_size
+        ):
+            raise KeyringLifecycleError(
+                "the recovered keyring destination changed identity"
+            )
+        provider = _validate(path, lane, installation_id)
+    except BaseException:
+        # Preserve an invalid or interrupted state for operator inspection rather
+        # than silently blessing or destroying it. Re-create the exact second
+        # name only when the destination is still the inode we just attested.
+        try:
+            surviving = _stat_at(parent, path.name)
+            if (
+                stat.S_ISREG(surviving.st_mode)
+                and surviving.st_uid == os.geteuid()
+                and stat.S_IMODE(surviving.st_mode) == 0o400
+                and surviving.st_nlink == 1
+                and surviving.st_dev == expected.st_dev
+                and surviving.st_ino == expected.st_ino
+            ):
+                os.link(
+                    path.name,
+                    residue_name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                    follow_symlinks=False,
+                )
+                os.fsync(parent)
+        except OSError:
+            pass
+        raise
+    finally:
+        if provider is not None:
+            provider.destroy()
+
+
+def _reconcile_temporary_residues(
+    path: Path,
+    parent: int,
+    lane: str,
+    installation_id: str,
+) -> bool:
+    """Converge safe SIGKILL residues while refusing ambiguous hard links."""
+
+    names = _temporary_residue_names(path, parent)
+    if not names:
+        return False
+
+    snapshots = {name: _stat_at(parent, name) for name in names}
+    linked_name = None
+    destination = None
+    try:
+        destination = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "the keyring destination could not be inspected during recovery"
+        ) from error
+
+    for name, metadata in snapshots.items():
+        if _safe_unpublished_residue(metadata):
+            continue
+        if (
+            destination is not None
+            and _safe_linked_publication(metadata, destination)
+            and linked_name is None
+        ):
+            linked_name = name
+            continue
+        raise KeyringLifecycleError(
+            "an interrupted keyring operation residue has an unsafe or ambiguous identity"
+        )
+
+    changed = False
+    for name, metadata in snapshots.items():
+        if name == linked_name:
+            continue
+        if _metadata_identity(_stat_at(parent, name)) != _metadata_identity(metadata):
+            raise KeyringLifecycleError(
+                "an interrupted keyring operation residue changed concurrently"
+            )
+        try:
+            os.unlink(name, dir_fd=parent)
+        except OSError as error:
+            raise KeyringLifecycleError(
+                "an unpublished keyring operation residue could not be removed"
+            ) from error
+        changed = True
+
+    recovered_publication = linked_name is not None
+    if linked_name is not None:
+        _reconcile_linked_publication(
+            path,
+            linked_name,
+            parent,
+            lane,
+            installation_id,
+            snapshots[linked_name],
+        )
+        changed = True
+    if changed:
+        try:
+            os.fsync(parent)
+        except OSError as error:
+            raise KeyringLifecycleError(
+                "interrupted keyring operation recovery could not be durably flushed"
+            ) from error
+    return recovered_publication
+
+
 def _write_temporary(path: Path, content: bytes, *, mode: int) -> Path:
     temporary = _temporary_path(path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(temporary, flags, mode)
     try:
+        os.fchmod(descriptor, mode)
         written = 0
         while written < len(content):
             count = os.write(descriptor, content[written:])
@@ -141,7 +378,6 @@ def _write_temporary(path: Path, content: bytes, *, mode: int) -> Path:
         temporary.unlink(missing_ok=True)
         raise
     os.close(descriptor)
-    os.chmod(temporary, mode, follow_symlinks=False)
     return temporary
 
 
@@ -214,6 +450,23 @@ def create(path: Path, lane: str, installation_id: str) -> dict[str, object]:
     temporary = None
     published = False
     try:
+        recovered_publication = _reconcile_temporary_residues(
+            path,
+            parent,
+            lane,
+            installation_id,
+        )
+        if recovered_publication:
+            provider = _validate(path, lane, installation_id)
+            try:
+                return {
+                    "active_key_id": provider.active_key_id,
+                    "key_count": len(provider.key_ids),
+                    "lane": lane,
+                    "version": KEYRING_VERSION,
+                }
+            finally:
+                provider.destroy()
         if path.exists() or path.is_symlink():
             raise KeyringLifecycleError("refusing to overwrite an existing keyring path")
         key_id, key = _new_key()
@@ -277,6 +530,12 @@ def rotate(
     temporary = None
     provider = None
     try:
+        _reconcile_temporary_residues(
+            path,
+            parent,
+            lane,
+            installation_id,
+        )
         original = _rotation_file_witness(path)
         provider = _validate(path, lane, installation_id)
         if _rotation_file_witness(path) != original:
