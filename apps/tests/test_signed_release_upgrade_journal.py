@@ -4,9 +4,11 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import TestCase
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -339,6 +341,165 @@ class SignedReleaseUpgradeJournalTests(TestCase):
             source["verifier"]["linux_amd64_config"],
         )
         self.assertEqual(self.source_verification.read_bytes(), canonical(receipt))
+
+    def test_shell_stage_contract_accepts_only_exact_target_authorized_source(self):
+        receipt = upgrade.build_authorized_predecessor_verification(
+            source_evidence=self.source_evidence,
+            target_evidence=self.target_evidence,
+            daemon_os="linux",
+            daemon_architecture="amd64",
+            daemon_identity_sha256=digest("daemon"),
+        )
+        receipt_path = self.install / ".authorization-candidate.json"
+        receipt_path.write_bytes(canonical(receipt))
+        receipt_path.chmod(0o600)
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        command = r'''
+source "$1"
+INSTALL_DIR="$2"
+RUNTIME_JSON_PARSER="$3"
+SOURCE_EVIDENCE_DIR="$4"
+TARGET_EVIDENCE_DIR="$5"
+SOURCE_RELEASE_TAG=v1.0.0
+SOURCE_RELEASE_COMMIT=1111111111111111111111111111111111111111
+DAEMON_OS=linux
+DAEMON_ARCH=amd64
+DAEMON_IDENTITY_SHA256="$6"
+receipt="$(<"$7")"
+validate_authorized_source_receipt "$receipt"
+RELEASE_TAG="$SOURCE_RELEASE_TAG"
+SOURCE_COMMIT="$SOURCE_RELEASE_COMMIT"
+INSTALLATION_PATH_DIGEST=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+activate_authorized_source_verifier_contract "$receipt"
+[[ "$VERIFIER_PURPOSE" == authorized-predecessor ]]
+[[ "$ACTIVE_VERIFIER_IMAGE" == "$8" ]]
+[[ "$ACTIVE_VERIFIER_AMD64_IMAGE_ID" == "$9" ]]
+[[ "$VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256" == "${10}" ]]
+[[ "$VERIFIER_NAME" == *-s-* ]]
+'''
+        arguments = [
+            "bash",
+            "-c",
+            command,
+            "signed-stage-contract",
+            str(consumer),
+            str(self.install),
+            str(ROOT / "deploy/runtime/compose-json.awk"),
+            str(self.source_evidence),
+            str(self.target_evidence),
+            digest("daemon"),
+            str(receipt_path),
+            receipt["verifier_reference"],
+            receipt["verifier_config_digest"],
+            receipt["authorizing_target_descriptor_sha256"],
+        ]
+        accepted = subprocess.run(arguments, check=False, capture_output=True, text=True)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+        for key, replacement in (
+            ("source_release_tag", "v9.9.9"),
+            ("source_commit", "f" * 40),
+            ("daemon_identity_sha256", digest("other-daemon")),
+            ("authorizing_target_descriptor_sha256", digest("other-target")),
+            ("source_trusted_root_sha256", digest("other-root")),
+            ("verifier_reference", f"ghcr.io/bilal414/backupsheep-release-verifier@{digest('other-verifier')}"),
+            ("verifier_runtime_contract_version", 2),
+        ):
+            with self.subTest(key=key):
+                tampered = dict(receipt)
+                tampered[key] = replacement
+                receipt_path.write_bytes(canonical(tampered))
+                refused = subprocess.run(
+                    arguments, check=False, capture_output=True, text=True
+                )
+                self.assertNotEqual(refused.returncode, 0)
+
+    def test_authorized_source_receipt_publication_is_no_clobber_and_retryable(self):
+        receipt = upgrade.build_authorized_predecessor_verification(
+            source_evidence=self.source_evidence,
+            target_evidence=self.target_evidence,
+            daemon_os="linux",
+            daemon_architecture="amd64",
+            daemon_identity_sha256=digest("daemon"),
+        )
+        payload = canonical(receipt).decode("ascii").rstrip("\n")
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        command = r'''
+source "$1"
+INSTALL_DIR="$2"
+SOURCE_VERIFICATION_PATH="$3"
+durable_sync() { :; }
+publish_authorized_source_receipt "$4"
+'''
+        call = [
+            "bash",
+            "-c",
+            command,
+            "signed-source-receipt-publish",
+            str(consumer),
+            str(self.install),
+            str(self.source_verification),
+            payload,
+        ]
+        self.source_verification.unlink()
+        candidate = Path(f"{self.source_verification}.new")
+        candidate.write_text(payload + "\n", encoding="ascii")
+        candidate.chmod(0o600)
+        resumed = subprocess.run(call, check=False, capture_output=True, text=True)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertFalse(candidate.exists())
+        self.assertEqual(self.source_verification.read_text(encoding="ascii"), payload + "\n")
+        replay = subprocess.run(call, check=False, capture_output=True, text=True)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+
+        os.link(self.source_verification, candidate)
+        linked_retry = subprocess.run(
+            call, check=False, capture_output=True, text=True
+        )
+        self.assertEqual(linked_retry.returncode, 0, linked_retry.stderr)
+        self.assertFalse(candidate.exists())
+        self.assertEqual(self.source_verification.stat().st_nlink, 1)
+
+        self.source_verification.write_text("tampered\n", encoding="ascii")
+        self.source_verification.chmod(0o600)
+        refused = subprocess.run(call, check=False, capture_output=True, text=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("conflicts", refused.stderr)
+
+    def test_release_state_parses_the_same_bytes_it_hashes(self):
+        manifest_path = self.target_evidence / "release-manifest.json"
+        original_manifest = manifest_path.read_bytes()
+        tampered_manifest = json.loads(original_manifest)
+        tampered_manifest["transition"]["accepted_predecessors"] = []
+        tampered_bytes = json.dumps(tampered_manifest, indent=2).encode("ascii") + b"\n"
+        original_read = upgrade._read_regular
+        reads: dict[str, int] = {}
+
+        def swap_after_read(path: Path, *args, **kwargs):
+            payload = original_read(path, *args, **kwargs)
+            reads[path.name] = reads.get(path.name, 0) + 1
+            if path == manifest_path:
+                manifest_path.write_bytes(tampered_bytes)
+                manifest_path.chmod(0o600)
+            return payload
+
+        with mock.patch.object(upgrade, "_read_regular", side_effect=swap_after_read):
+            state = upgrade.build_release_state(
+                self.target_evidence, "linux/amd64"
+            )
+        self.assertEqual(reads["release-manifest.json"], 1)
+        self.assertEqual(len(state["accepted_predecessors"]), 1)
+        self.assertEqual(
+            state["manifest_sha256"], upgrade._sha256_bytes(original_manifest)
+        )
+
+    def test_regular_reader_refuses_fifo_without_blocking(self):
+        fifo = self.install / "untrusted-input"
+        os.mkfifo(fifo, 0o600)
+        started = __import__("time").monotonic()
+        with self.assertRaises(upgrade.UpgradeJournalError):
+            upgrade._read_regular(fifo, owner=os.geteuid(), modes={0o600})
+        self.assertLess(__import__("time").monotonic() - started, 1.0)
 
     def _operation_dir(self, intent: dict) -> Path:
         return (

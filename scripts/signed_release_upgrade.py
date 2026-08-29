@@ -194,7 +194,12 @@ def _read_regular(
     links: set[int] | None = None,
     allow_empty: bool = False,
 ) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     descriptor = os.open(path, flags)
     try:
         before = os.fstat(descriptor)
@@ -249,6 +254,10 @@ def _load_json(
     modes: set[int] | None = None,
 ) -> Any:
     payload = _read_regular(path, maximum=maximum, owner=owner, modes=modes)
+    return _load_json_bytes(payload, str(path))
+
+
+def _load_json_bytes(payload: bytes, label: str) -> Any:
     try:
         return json.loads(
             payload,
@@ -261,7 +270,7 @@ def _load_json(
             ),
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise UpgradeJournalError(f"{path} is not strict JSON") from exc
+        raise UpgradeJournalError(f"{label} is not strict JSON") from exc
 
 
 def _validate_directory(path: Path, *, owner: int, mode: int = 0o700) -> None:
@@ -297,6 +306,30 @@ def _validate_ancestor_chain(path: Path, *, owner: int) -> None:
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_regular(path: Path, *, owner: int, mode: int) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        file_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_uid != owner
+            or stat.S_IMODE(file_stat.st_mode) != mode
+            or file_stat.st_nlink not in {1, 2}
+        ):
+            raise UpgradeJournalError(
+                f"interrupted publication for {path.name} has an unsafe inode"
+            )
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -358,6 +391,9 @@ def _reconcile_exclusive(path: Path, payload: bytes, *, mode: int) -> bool:
         if final_payload != payload:
             raise UpgradeJournalError(f"existing {path.name} differs")
     if not final_exists:
+        # Reading an exact orphan proves its bytes, not their durability. Sync
+        # that same inode before linking it into the durable journal namespace.
+        _fsync_regular(temporary, owner=owner, mode=mode)
         os.link(temporary, path, follow_symlinks=False)
         _fsync_directory(path.parent)
     if temporary_exists:
@@ -371,8 +407,7 @@ def _reconcile_exclusive(path: Path, payload: bytes, *, mode: int) -> bool:
     return True
 
 
-def _descriptor(path: Path, *, modes: set[int] | None = None) -> dict[str, str]:
-    payload = _read_regular(path, owner=os.geteuid(), modes=modes or {0o600})
+def _descriptor_bytes(payload: bytes) -> dict[str, str]:
     try:
         text = payload.decode("ascii")
     except UnicodeDecodeError as exc:
@@ -421,8 +456,13 @@ def _descriptor(path: Path, *, modes: set[int] | None = None) -> dict[str, str]:
     return result
 
 
-def _receipt(path: Path, *, modes: set[int] | None = None) -> dict[str, str]:
-    payload = _read_regular(path, owner=os.geteuid(), modes=modes or {0o600})
+def _descriptor(path: Path, *, modes: set[int] | None = None) -> dict[str, str]:
+    return _descriptor_bytes(
+        _read_regular(path, owner=os.geteuid(), modes=modes or {0o600})
+    )
+
+
+def _receipt_bytes(payload: bytes) -> dict[str, str]:
     if not payload.endswith(b"\n") or b"\r" in payload or b"\x00" in payload:
         raise UpgradeJournalError("local image receipt is not canonical")
     expected = (
@@ -443,6 +483,12 @@ def _receipt(path: Path, *, modes: set[int] | None = None) -> dict[str, str]:
             raise UpgradeJournalError("local image receipt is reordered")
         result[key] = _string(line[len(prefix) :], DIGEST_RE, key)
     return result
+
+
+def _receipt(path: Path, *, modes: set[int] | None = None) -> dict[str, str]:
+    return _receipt_bytes(
+        _read_regular(path, owner=os.geteuid(), modes=modes or {0o600})
+    )
 
 
 def _verifier_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -517,15 +563,18 @@ def build_release_state(
     root_path = evidence / "sigstore-trusted-root.json"
     verification_path = evidence / "signature-verification.json"
     receipt_path = evidence / "local-images.txt"
-    descriptor = _descriptor(descriptor_path, modes=evidence_modes)
+    descriptor_bytes = _read_regular(
+        descriptor_path, owner=os.geteuid(), modes=evidence_modes
+    )
+    descriptor = _descriptor_bytes(descriptor_bytes)
     bundle = _read_regular(bundle_path, owner=os.geteuid(), modes=evidence_modes)
     root = _read_regular(root_path, maximum=65536, owner=os.geteuid(), modes=evidence_modes)
     manifest_bytes = _read_regular(manifest_path, owner=os.geteuid(), modes=evidence_modes)
-    manifest = _load_json(manifest_path, owner=os.geteuid(), modes=evidence_modes)
-    receipt = _receipt(receipt_path, modes=evidence_modes)
     receipt_bytes = _read_regular(
         receipt_path, owner=os.geteuid(), modes=evidence_modes
     )
+    manifest = _load_json_bytes(manifest_bytes, "release manifest")
+    receipt = _receipt_bytes(receipt_bytes)
     manifest = _mapping(manifest, "release manifest")
     _exact_keys(
         manifest,
@@ -573,8 +622,8 @@ def build_release_state(
     verification_bytes = _read_regular(
         verification_path, owner=os.geteuid(), modes=evidence_modes
     )
-    verification = _load_json(
-        verification_path, owner=os.geteuid(), modes=evidence_modes
+    verification = _load_json_bytes(
+        verification_bytes, "signature-verification receipt"
     )
     if verification_bytes != _canonical_bytes(verification):
         raise UpgradeJournalError("signature-verification receipt is not canonical")
@@ -609,9 +658,7 @@ def build_release_state(
     expected_verification = {
         "daemon_identity_sha256": verification["daemon_identity_sha256"],
         "descriptor_bundle_sha256": _sha256_bytes(bundle),
-        "descriptor_sha256": _sha256_bytes(
-            _read_regular(descriptor_path, owner=os.geteuid(), modes=evidence_modes)
-        ),
+        "descriptor_sha256": _sha256_bytes(descriptor_bytes),
         "manifest_sha256": _sha256_bytes(manifest_bytes),
         "migration_leaf_set_sha256": transition["migration_contract"]["leaf_set_sha256"],
         "migration_set_sha256": transition["migration_contract"]["migration_set_sha256"],
@@ -671,7 +718,7 @@ def build_release_state(
         "release_tag": descriptor["release_tag"],
         "release_epoch": transition["release_epoch"],
         "source_commit": descriptor["source_commit"],
-        "descriptor_sha256": _sha256_bytes(_read_regular(descriptor_path, owner=os.geteuid(), modes=evidence_modes)),
+        "descriptor_sha256": _sha256_bytes(descriptor_bytes),
         "descriptor_bundle_sha256": _sha256_bytes(bundle),
         "signature_verification_sha256": _sha256_bytes(verification_bytes),
         "signature_verification": verification,
@@ -1849,11 +1896,29 @@ def _validate_intent(value: Any) -> dict[str, Any]:
         _string(environment[key], DIGEST_RE, f"intent environment {key}")
     if environment["source_sha256"] != environment["rollback_sha256"]:
         raise UpgradeJournalError("intent rollback does not bind the source environment")
+    witness_request = {
+        "schema_version": WITNESS_SCHEMA_VERSION,
+        "attempt_nonce": intent["attempt_nonce"],
+        "installation_id": intent["installation_id"],
+        "compose_project": intent["compose_project"],
+        "daemon": intent["daemon"],
+        "checkouts": intent["checkouts"],
+        "compose": intent["compose"],
+        "target_active_pointer_sha256": intent["target_active_pointer_sha256"],
+        "volumes": intent["volumes"],
+        "artifact_provider": intent["artifact_provider"],
+    }
+    normalized_request = _validate_witness_request(witness_request)
+    if normalized_request != witness_request:
+        raise UpgradeJournalError("intent witness request is not canonical")
     source = _validate_release_state(intent["source"], "intent source release")
     target = _validate_release_state(intent["target"], "intent target release")
     if source != intent["source"] or target != intent["target"]:
         raise UpgradeJournalError("intent release state is not canonical")
-    platform = f"{intent['daemon']['os']}/{intent['daemon']['architecture']}"
+    platform = (
+        f"{normalized_request['daemon']['os']}/"
+        f"{normalized_request['daemon']['architecture']}"
+    )
     for label, release in (("source", source), ("target", target)):
         if release["signature_verification"]["daemon_identity_sha256"] != intent[
             "daemon"
@@ -1903,7 +1968,7 @@ def _validate_intent(value: Any) -> dict[str, Any]:
         authorization["source_verification"],
         source=source,
         target=target,
-        daemon=intent["daemon"],
+        daemon=normalized_request["daemon"],
     )
     if authorization["source_verification_sha256"] != _sha256_bytes(
         _canonical_bytes(source_verification)
@@ -1920,19 +1985,6 @@ def _validate_intent(value: Any) -> dict[str, Any]:
     ).hexdigest()
     if intent["operation_id"] != expected_operation:
         raise UpgradeJournalError("intent operation ID changed")
-    witness_request = {
-        "schema_version": WITNESS_SCHEMA_VERSION,
-        "attempt_nonce": intent["attempt_nonce"],
-        "installation_id": intent["installation_id"],
-        "compose_project": intent["compose_project"],
-        "daemon": intent["daemon"],
-        "checkouts": intent["checkouts"],
-        "compose": intent["compose"],
-        "target_active_pointer_sha256": intent["target_active_pointer_sha256"],
-        "volumes": intent["volumes"],
-        "artifact_provider": intent["artifact_provider"],
-    }
-    normalized_request = _validate_witness_request(witness_request)
     resource_digests = _mapping(intent["resource_digests"], "intent resource digests")
     expected_resources = {
         "volume_records_sha256": _domain_digest(
@@ -2668,7 +2720,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         return 0
-    except (OSError, UpgradeJournalError, release_transition.TransitionContractError) as exc:
+    except (
+        OSError,
+        KeyError,
+        TypeError,
+        IndexError,
+        UpgradeJournalError,
+        release_transition.TransitionContractError,
+    ) as exc:
         print(f"signed release transition refused: {exc}", file=sys.stderr)
         return 1
 

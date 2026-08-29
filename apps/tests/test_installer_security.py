@@ -718,6 +718,38 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
         self.assertNotIn("docker.sock", consumer)
         self.assertNotRegex(consumer, r"(?m)^\s*(?:eval|source)\s")
 
+    def test_stage_upgrade_authenticates_both_evidence_sets_without_runtime_mutation(self):
+        consumer = (
+            ROOT / "deploy/release/consume-signed-release.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('CONSUMER_MODE="stage-upgrade"', consumer)
+        self.assertIn('CHECKOUT_COMMIT="$SOURCE_RELEASE_COMMIT"', consumer)
+        self.assertIn('EVIDENCE_DIR="$TARGET_EVIDENCE_DIR"', consumer)
+        self.assertIn('stage_authorized_predecessor_verification', consumer)
+        self.assertIn('signed_release_upgrade.py authorize-source', consumer)
+        self.assertIn('--mount "type=bind,src=${SOURCE_EVIDENCE_DIR},dst=/source-evidence,readonly', consumer)
+        self.assertIn('--mount "type=bind,src=${TARGET_EVIDENCE_DIR},dst=/target-evidence,readonly', consumer)
+        self.assertIn('"$app_config" /usr/local/lib/backupsheep-release/signed_release_upgrade.py', consumer)
+        self.assertIn('VERIFIER_PURPOSE="authorized-predecessor"', consumer)
+        self.assertIn('com.backupsheep.authorizing-target-descriptor-sha256', consumer)
+        self.assertIn('publish_authorized_source_receipt "$receipt"', consumer)
+        self.assertIn('no runtime mutation was performed', consumer)
+        stage_body = consumer.split(
+            "stage_authorized_predecessor_verification() {", 1
+        )[1].split("\n}\n\nattest_verified_release_inputs()", 1)[0]
+        for forbidden in (
+            "docker compose",
+            " compose up",
+            " compose run",
+            " compose down",
+            " migrate ",
+            "start_core",
+            "start_operations",
+            "set_env_value",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, stage_body)
+
     def test_signed_consumer_attests_exact_clean_source_checkout_even_with_skip_worktree(self):
         consumer = ROOT / "deploy/release/consume-signed-release.sh"
         with tempfile.TemporaryDirectory(prefix="backupsheep-consumer-source-") as directory:

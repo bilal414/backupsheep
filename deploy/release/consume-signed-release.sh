@@ -44,12 +44,17 @@ ACTIVE_CAPTURE_FILE=""
 BOUNDED_CAPTURE_VALUE=""
 VERIFIER_CREATE_UNCERTAIN=false
 RECOVERY_VERIFIER_DIR=""
+SOURCE_RECOVERY_VERIFIER_DIR=""
 DOCKER_BIN=""
 CURL_BIN=""
 GIT_BIN=""
 SYNC_BIN=""
 INSTALL_DIR=""
 INSTALL_ANCESTOR_IDENTITY=""
+CONSUMER_MODE="install"
+CHECKOUT_COMMIT=""
+SOURCE_RELEASE_TAG=""
+SOURCE_RELEASE_COMMIT=""
 RELEASE_TAG=""
 SOURCE_COMMIT=""
 INSTALLATION_PATH_DIGEST=""
@@ -75,6 +80,20 @@ RELEASE_EPOCH=""
 MIGRATION_SET_SHA256=""
 MIGRATION_LEAF_SET_SHA256=""
 VERIFIER_MANIFEST_DIGEST=""
+VERIFIER_PURPOSE="target"
+VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256=""
+ACTIVE_VERIFIER_IMAGE="$COSIGN_IMAGE"
+ACTIVE_VERIFIER_REPODIGEST="$COSIGN_REPODIGEST"
+ACTIVE_VERIFIER_AMD64_IMAGE_ID="$COSIGN_AMD64_IMAGE_ID"
+ACTIVE_VERIFIER_ARM64_IMAGE_ID="$COSIGN_ARM64_IMAGE_ID"
+ACTIVE_VERIFIER_AMD64_MANIFEST="$COSIGN_AMD64_MANIFEST"
+ACTIVE_VERIFIER_ARM64_MANIFEST="$COSIGN_ARM64_MANIFEST"
+ACTIVE_VERIFIER_RUNTIME_CONTRACT_VERSION="$COSIGN_RUNTIME_CONTRACT_VERSION"
+ACTIVE_VERIFIER_IMAGE_LABEL_RECORDS=""
+SOURCE_EVIDENCE_DIR=""
+TARGET_EVIDENCE_DIR=""
+SOURCE_VERIFICATION_PATH=""
+AUTHORIZED_SOURCE_RECEIPT=""
 declare -a DOCKER_ENV=()
 
 die() { printf 'Signed release refused: %s\n' "$*" >&2; exit 1; }
@@ -83,6 +102,7 @@ file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 file_links() { stat -c '%h' "$1" 2>/dev/null || stat -f '%l' "$1"; }
 file_size() { stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1"; }
 file_inode() { stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1"; }
+file_node() { stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1"; }
 file_identity() { stat -c '%d:%i:%s:%h:%u:%a' "$1" 2>/dev/null || stat -f '%d:%i:%z:%l:%u:%Lp' "$1"; }
 directory_identity() { stat -c '%d:%i:%u:%a' "$1" 2>/dev/null || stat -f '%d:%i:%u:%Lp' "$1"; }
 
@@ -287,18 +307,20 @@ validate_regular_file() {
 }
 
 validate_trusted_root() {
-    local path="$1" size="" mode=""
+    local path="$1" expected_digest="${2:-$TRUSTED_ROOT_SHA256}" size="" mode=""
+    [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || die "Sigstore trusted-root policy digest is malformed"
     [[ -f "$path" && ! -L "$path" ]] || die "checked-in Sigstore trusted root is not a regular file"
     size="$(file_size "$path")"; mode="$(file_mode "$path")"
     [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size > 0 && 10#$size <= 65536 )) || die "checked-in Sigstore trusted root has an invalid size"
     [[ "$(file_uid "$path")" == "$EUID" && "$(file_links "$path")" == "1" ]] || die "checked-in Sigstore trusted root has an unsafe owner or link count"
     case "$mode" in 644|600|444|400) ;; *) die "checked-in Sigstore trusted root has unsafe permissions" ;; esac
-    [[ "$(sha256_file "$path")" == "$TRUSTED_ROOT_SHA256" ]] || die "checked-in Sigstore trusted root digest mismatch"
+    [[ "$(sha256_file "$path")" == "$expected_digest" ]] || die "checked-in Sigstore trusted root digest mismatch"
 }
 
 copy_trusted_root() {
-    local source="$1" destination="$2" before="" opened=""
-    validate_trusted_root "$source"
+    local source="$1" destination="$2" expected_digest="${3:-$TRUSTED_ROOT_SHA256}" before="" opened=""
+    validate_trusted_root "$source" "$expected_digest"
     before="$(file_inode "$source"):$(file_size "$source"):$(file_uid "$source"):$(file_links "$source")"
     exec 9< "$source" || die "could not open checked-in Sigstore trusted root"
     opened="$(file_inode /dev/fd/9):$(file_size /dev/fd/9):$(file_uid /dev/fd/9):$(file_links /dev/fd/9)"
@@ -307,7 +329,7 @@ copy_trusted_root() {
     exec 9<&-
     [[ ! -L "$source" && "$(file_inode "$source"):$(file_size "$source"):$(file_uid "$source"):$(file_links "$source")" == "$before" ]] \
         || die "checked-in Sigstore trusted root changed while copying"
-    validate_trusted_root "$destination"
+    validate_trusted_root "$destination" "$expected_digest"
 }
 
 docker_client() {
@@ -362,26 +384,26 @@ git_client() {
 }
 
 validate_checkout_control_file() {
-    local relative="$1" path="$INSTALL_DIR/$1" mode="" before=""
+    local relative="$1" path="$INSTALL_DIR/$1" mode="" before="" control_commit="${CHECKOUT_COMMIT:-$SOURCE_COMMIT}"
     [[ -f "$path" && ! -L "$path" && "$(file_uid "$path")" == "$EUID" && "$(file_links "$path")" == "1" ]] \
         || die "release control file has an unsafe identity: ${relative}"
     mode="$(file_mode "$path")"; [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "could not validate release control file permissions"
     (( (8#$mode & 8#022) == 0 )) || die "release control file is group- or world-writable: ${relative}"
     before="$(file_identity "$path")"
-    git_client -C "$INSTALL_DIR" show "${SOURCE_COMMIT}:${relative}" | cmp -s - "$path" \
+    git_client -C "$INSTALL_DIR" show "${control_commit}:${relative}" | cmp -s - "$path" \
         || die "release control file does not byte-match source commit: ${relative}"
     [[ ! -L "$path" && "$(file_identity "$path")" == "$before" ]] \
         || die "release control file changed during source attestation: ${relative}"
 }
 
 validate_source_checkout() {
-    local top="" git_dir="" head="" origins="" relative=""
+    local top="" git_dir="" head="" origins="" relative="" control_commit="${CHECKOUT_COMMIT:-$SOURCE_COMMIT}"
     [[ -d "$INSTALL_DIR/.git" && ! -L "$INSTALL_DIR/.git" ]] || die "release consumer requires an installer-managed Git checkout"
     top="$(git_client -C "$INSTALL_DIR" rev-parse --show-toplevel)" || die "could not resolve release checkout"
     git_dir="$(git_client -C "$INSTALL_DIR" rev-parse --absolute-git-dir)" || die "could not resolve release Git directory"
     [[ "$top" == "$INSTALL_DIR" && "$git_dir" == "$INSTALL_DIR/.git" ]] || die "release checkout escapes the installation directory"
     head="$(git_client -C "$INSTALL_DIR" rev-parse --verify 'HEAD^{commit}')" || die "could not resolve release checkout HEAD"
-    [[ "$head" == "$SOURCE_COMMIT" ]] || die "release checkout HEAD does not match requested source commit"
+    [[ "$head" == "$control_commit" ]] || die "release checkout HEAD does not match the authenticated control-source commit"
     origins="$(git_client -C "$INSTALL_DIR" remote get-url --all origin)" || die "could not attest release checkout origin"
     [[ "$origins" == "https://github.com/${SOURCE_REPOSITORY}.git" ]] || die "release checkout origin is not official"
     git_client -C "$INSTALL_DIR" fsck --strict --no-dangling >/dev/null || die "release checkout object verification failed"
@@ -457,6 +479,65 @@ verifier_snapshot_optional_value() {
 
 verifier_snapshot_count() {
     strict_json_count "$verifier_snapshot_json" '#0' "$@"
+}
+
+json_document_string() {
+    local document="$1" label="$2" pattern="$3" value=""
+    shift 3
+    value="$(strict_json_path "$document" "$@")" \
+        || die "${label} is absent from canonical JSON"
+    json_string_scalar "$value" "$pattern" "$label"
+}
+
+activate_target_verifier_contract() {
+    local release_identity_digest=""
+    ACTIVE_VERIFIER_IMAGE="$COSIGN_IMAGE"
+    ACTIVE_VERIFIER_REPODIGEST="$COSIGN_REPODIGEST"
+    ACTIVE_VERIFIER_AMD64_IMAGE_ID="$COSIGN_AMD64_IMAGE_ID"
+    ACTIVE_VERIFIER_ARM64_IMAGE_ID="$COSIGN_ARM64_IMAGE_ID"
+    ACTIVE_VERIFIER_AMD64_MANIFEST="$COSIGN_AMD64_MANIFEST"
+    ACTIVE_VERIFIER_ARM64_MANIFEST="$COSIGN_ARM64_MANIFEST"
+    ACTIVE_VERIFIER_RUNTIME_CONTRACT_VERSION="$COSIGN_RUNTIME_CONTRACT_VERSION"
+    VERIFIER_PURPOSE="target"
+    VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256=""
+    release_identity_digest="$(sha256_text "${RELEASE_TAG}|${SOURCE_COMMIT}")"
+    VERIFIER_NAME="backupsheep-release-verify-${INSTALLATION_PATH_DIGEST:0:12}-t-${release_identity_digest:0:12}"
+}
+
+activate_authorized_source_verifier_contract() {
+    local receipt="$1" reference="" selected_config="" selected_manifest=""
+    local source_identity_digest="" authorizer="" authorizer_hex="" runtime_contract=""
+    reference="$(json_document_string "$receipt" 'authorized source verifier reference' \
+        '^ghcr\.io/bilal414/backupsheep-release-verifier@sha256:[0-9a-f]{64}$' verifier_reference)"
+    selected_config="$(json_document_string "$receipt" 'authorized source verifier config digest' \
+        '^sha256:[0-9a-f]{64}$' verifier_config_digest)"
+    selected_manifest="$(json_document_string "$receipt" 'authorized source verifier manifest digest' \
+        '^sha256:[0-9a-f]{64}$' verifier_manifest_digest)"
+    authorizer="$(json_document_string "$receipt" 'authorizing target descriptor digest' \
+        '^sha256:[0-9a-f]{64}$' authorizing_target_descriptor_sha256)"
+    runtime_contract="$(strict_json_path "$receipt" verifier_runtime_contract_version)" \
+        || die "authorized source verifier runtime contract is absent"
+    [[ "$runtime_contract" == 1 ]] \
+        || die "authorized source verifier runtime contract is unsupported"
+    ACTIVE_VERIFIER_IMAGE="$reference"
+    ACTIVE_VERIFIER_REPODIGEST="$reference"
+    ACTIVE_VERIFIER_RUNTIME_CONTRACT_VERSION="$runtime_contract"
+    case "$DAEMON_ARCH" in
+        amd64)
+            ACTIVE_VERIFIER_AMD64_IMAGE_ID="$selected_config"
+            ACTIVE_VERIFIER_AMD64_MANIFEST="$selected_manifest"
+            ;;
+        arm64)
+            ACTIVE_VERIFIER_ARM64_IMAGE_ID="$selected_config"
+            ACTIVE_VERIFIER_ARM64_MANIFEST="$selected_manifest"
+            ;;
+        *) die "authorized source verifier targets an unsupported daemon platform" ;;
+    esac
+    VERIFIER_PURPOSE="authorized-predecessor"
+    VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256="$authorizer"
+    source_identity_digest="$(sha256_text "${RELEASE_TAG}|${SOURCE_COMMIT}")"
+    authorizer_hex="${authorizer#sha256:}"
+    VERIFIER_NAME="backupsheep-release-verify-${INSTALLATION_PATH_DIGEST:0:12}-s-${source_identity_digest:0:12}-${authorizer_hex:0:12}"
 }
 
 run_bounded() {
@@ -653,9 +734,9 @@ validate_signed_transition_metadata() {
         || die "release migration leaf-set digest is absent"
     MIGRATION_LEAF_SET_SHA256="$(json_string_scalar "$value" '^sha256:[0-9a-f]{64}$' 'release migration leaf-set digest')"
     if [[ "$DAEMON_ARCH" == amd64 ]]; then
-        VERIFIER_MANIFEST_DIGEST="$COSIGN_AMD64_MANIFEST"
+        VERIFIER_MANIFEST_DIGEST="$ACTIVE_VERIFIER_AMD64_MANIFEST"
     elif [[ "$DAEMON_ARCH" == arm64 ]]; then
-        VERIFIER_MANIFEST_DIGEST="$COSIGN_ARM64_MANIFEST"
+        VERIFIER_MANIFEST_DIGEST="$ACTIVE_VERIFIER_ARM64_MANIFEST"
     else
         die "release transition metadata requires an attested daemon architecture"
     fi
@@ -763,11 +844,11 @@ attest_verifier_container() {
     expected_image_id="$(verifier_snapshot_value Image)"
     expected_image_id="${expected_image_id#\"}"; expected_image_id="${expected_image_id%\"}"
     [[ "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ \
-        && "$(verifier_snapshot_value Config Image)" == "\"${COSIGN_IMAGE}\"" ]] \
+        && "$(verifier_snapshot_value Config Image)" == "\"${ACTIVE_VERIFIER_IMAGE}\"" ]] \
         || die "orphan verifier image reference or ID mismatch"
     attest_cosign_image "$expected_image_id" false
-    if docker_client image inspect "$COSIGN_IMAGE" >/dev/null 2>&1; then
-        [[ "$(docker_client image inspect --format '{{.Id}}' "$COSIGN_IMAGE")" == "$expected_image_id" ]] \
+    if docker_client image inspect "$ACTIVE_VERIFIER_IMAGE" >/dev/null 2>&1; then
+        [[ "$(docker_client image inspect --format '{{.Id}}' "$ACTIVE_VERIFIER_IMAGE")" == "$expected_image_id" ]] \
             || die "orphan verifier image ID conflicts with the currently pinned verifier reference"
     fi
     [[ "$(verifier_snapshot_value Config User)" == '"65532:65532"' \
@@ -818,21 +899,25 @@ attest_verifier_container() {
 
     labels="$(strict_json_object_records "$(verifier_snapshot_value Config Labels)" | LC_ALL=C sort)" \
         || die "orphan verifier labels are not one strict string map"
-    [[ "$(verifier_snapshot_count Config Labels)" == 'object|12' ]] \
-        || die "orphan verifier label set has an unexpected cardinality"
-    expected_labels="$(printf '"%s"\n' \
-        'org.opencontainers.image.title=BackupSheep release verifier' \
-        'org.opencontainers.image.description=Minimal Cosign verifier rebuilt with reviewed security updates' \
-        'org.opencontainers.image.source=https://github.com/bilal414/backupsheep' \
-        'org.opencontainers.image.licenses=Apache-2.0' \
-        'com.backupsheep.release-verifier.upstream-version=v3.1.3' \
-        'com.backupsheep.release-verifier.upstream-commit=11926fa5bbbbde47e88fc006b625a17769b743b2' \
-        'com.backupsheep.release-verifier.go-version=go1.26.6' \
-        'com.backupsheep.release-verifier.module-graph-sha256=894396e4119d1620852793d03419a7130f4c62881ae5e11301b36c2a775aa6f2' \
-        'com.backupsheep.release-verifier=true' \
-        "com.backupsheep.installation-path-sha256=${INSTALLATION_PATH_DIGEST}" \
-        "com.backupsheep.release-tag=${RELEASE_TAG}" \
-        "com.backupsheep.source-commit=${SOURCE_COMMIT}" | LC_ALL=C sort)"
+    expected_labels="$({
+        printf '%s\n' "$ACTIVE_VERIFIER_IMAGE_LABEL_RECORDS"
+        printf '"%s"\n' \
+            'com.backupsheep.release-verifier=true' \
+            "com.backupsheep.installation-path-sha256=${INSTALLATION_PATH_DIGEST}" \
+            "com.backupsheep.release-tag=${RELEASE_TAG}" \
+            "com.backupsheep.source-commit=${SOURCE_COMMIT}" \
+            "com.backupsheep.verification-purpose=${VERIFIER_PURPOSE}"
+        if [[ -n "$VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256" ]]; then
+            printf '"%s"\n' "com.backupsheep.authorizing-target-descriptor-sha256=${VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256}"
+        fi
+    } | LC_ALL=C sort)"
+    if [[ -n "$VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256" ]]; then
+        [[ "$(verifier_snapshot_count Config Labels)" == 'object|14' ]] \
+            || die "authorized-predecessor verifier label set has an unexpected cardinality"
+    else
+        [[ "$(verifier_snapshot_count Config Labels)" == 'object|13' ]] \
+            || die "target verifier label set has an unexpected cardinality"
+    fi
     [[ "$labels" == "$expected_labels" ]] || die "orphan verifier exact image and ownership label set mismatch"
 
     [[ "$(verifier_snapshot_value HostConfig NetworkMode)" == '"none"' \
@@ -1178,19 +1263,62 @@ reconcile_installation_verifier_orphans() {
         || die "could not safely reconcile all interrupted verifier containers for this installation"
 }
 
+assert_no_unrecognized_installation_verifiers() {
+    local allowed_primary="$1" allowed_secondary="${2:-}" listing="" container_id=""
+    local actual_name="" primary_count=0 secondary_count=0 total=0
+    run_bounded_capture 30 "installation verifier inventory" docker_client ps --all --quiet --no-trunc \
+        --filter 'label=com.backupsheep.release-verifier=true' \
+        --filter "label=com.backupsheep.installation-path-sha256=${INSTALLATION_PATH_DIGEST}" \
+        || die "could not inventory installation verifier containers"
+    listing="$BOUNDED_CAPTURE_VALUE"
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        total=$((total + 1)); (( total <= 2 )) \
+            || die "installation has more verifier containers than the source/target contract permits"
+        [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] \
+            || die "installation verifier inventory returned a malformed ID"
+        run_bounded_capture 30 "installation verifier name inspection" docker_client inspect \
+            --format '{{.Name}}' "$container_id" \
+            || die "could not inspect installation verifier name"
+        actual_name="$BOUNDED_CAPTURE_VALUE"
+        actual_name="${actual_name#/}"
+        if [[ "$actual_name" == "$allowed_primary" ]]; then
+            primary_count=$((primary_count + 1)); (( primary_count == 1 )) \
+                || die "installation has duplicate target verifier containers"
+        elif [[ -n "$allowed_secondary" && "$actual_name" == "$allowed_secondary" ]]; then
+            secondary_count=$((secondary_count + 1)); (( secondary_count == 1 )) \
+                || die "installation has duplicate authorized-source verifier containers"
+        else
+            die "installation contains a verifier outside the exact source/target transition contract"
+        fi
+    done <<< "$listing"
+}
+
 cleanup_residues() {
-    local residue="" count=0
+    local residue="" count=0 residue_tag="" residue_commit=""
     while IFS= read -r -d '' residue; do
         count=$((count + 1)); (( count <= 8 )) || die "too many interrupted release residues exist"
         if [[ -e "$residue/.verifier-container-id" || -L "$residue/.verifier-container-id" ]]; then
-            [[ -z "$RECOVERY_VERIFIER_DIR" ]] \
-                || die "multiple unresolved verifier-create residues require operator review"
             validate_residue_dir "$residue"
-            validate_descriptor "$residue/$DESCRIPTOR_NAME" "$RELEASE_TAG" "$SOURCE_COMMIT" "$residue/$MANIFEST_NAME"
-            validate_trusted_root "$residue/$TRUSTED_ROOT_NAME"
-            RECOVERY_VERIFIER_DIR="$residue"
-            VERIFIER_DIR="$residue"
-            VERIFIER_CREATE_UNCERTAIN=true
+            residue_tag="$(descriptor_value "$residue/$DESCRIPTOR_NAME" release_tag)"
+            residue_commit="$(descriptor_value "$residue/$DESCRIPTOR_NAME" source_commit)"
+            if [[ "$residue_tag" == "$RELEASE_TAG" && "$residue_commit" == "$SOURCE_COMMIT" ]]; then
+                [[ -z "$RECOVERY_VERIFIER_DIR" ]] \
+                    || die "multiple unresolved target verifier-create residues require operator review"
+                validate_descriptor "$residue/$DESCRIPTOR_NAME" "$RELEASE_TAG" "$SOURCE_COMMIT" "$residue/$MANIFEST_NAME"
+                validate_trusted_root "$residue/$TRUSTED_ROOT_NAME"
+                RECOVERY_VERIFIER_DIR="$residue"
+                VERIFIER_DIR="$residue"
+                VERIFIER_CREATE_UNCERTAIN=true
+            elif [[ "$CONSUMER_MODE" == stage-upgrade \
+                && "$residue_tag" == "$SOURCE_RELEASE_TAG" \
+                && "$residue_commit" == "$SOURCE_RELEASE_COMMIT" ]]; then
+                [[ -z "$SOURCE_RECOVERY_VERIFIER_DIR" ]] \
+                    || die "multiple unresolved source verifier-create residues require operator review"
+                SOURCE_RECOVERY_VERIFIER_DIR="$residue"
+            else
+                die "release residue belongs to an unauthorized verifier identity"
+            fi
             continue
         fi
         remove_residue_dir "$residue"
@@ -1200,19 +1328,23 @@ cleanup_residues() {
 image_repo_digest_present() { docker_client image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null | grep -Fxq -- "$2"; }
 
 attest_cosign_image() {
-    local reference="${1:-$COSIGN_IMAGE}" require_repo_digest="${2:-true}"
+    local reference="${1:-$ACTIVE_VERIFIER_IMAGE}" require_repo_digest="${2:-true}"
     local image_id="" expected_image_id="" image_user="" image_env="" image_config="" image_labels=""
+    local label_count="" title="" description="" source="" licenses="" upstream_version=""
+    local upstream_commit="" go_version="" graph_sha="" label_json=""
     [[ "$require_repo_digest" == true || "$require_repo_digest" == false ]] \
         || die "invalid verifier RepoDigest attestation mode"
+    [[ "$ACTIVE_VERIFIER_RUNTIME_CONTRACT_VERSION" == 1 ]] \
+        || die "Cosign verifier runtime contract is unsupported"
     if [[ "$require_repo_digest" == true ]]; then
-        image_repo_digest_present "$COSIGN_IMAGE" "$COSIGN_REPODIGEST" \
+        image_repo_digest_present "$ACTIVE_VERIFIER_IMAGE" "$ACTIVE_VERIFIER_REPODIGEST" \
             || die "local Cosign verifier does not resolve to pinned digest"
     fi
     image_id="$(docker_client image inspect --format '{{.Id}}' "$reference")"; [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Cosign verifier image ID is malformed"
     attest_local_image_platform cosign "$reference"
     case "$DAEMON_ARCH" in
-        amd64) expected_image_id="$COSIGN_AMD64_IMAGE_ID" ;;
-        arm64) expected_image_id="$COSIGN_ARM64_IMAGE_ID" ;;
+        amd64) expected_image_id="$ACTIVE_VERIFIER_AMD64_IMAGE_ID" ;;
+        arm64) expected_image_id="$ACTIVE_VERIFIER_ARM64_IMAGE_ID" ;;
         *) die "Cosign verifier platform was not admitted by release policy" ;;
     esac
     [[ "$image_id" == "$expected_image_id" ]] \
@@ -1229,13 +1361,31 @@ attest_cosign_image() {
         || die "pinned Cosign verifier image environment is not the exact reviewed scratch-image contract"
     image_labels="$(docker_client image inspect --format '{{len .Config.Labels}}|{{index .Config.Labels "org.opencontainers.image.title"}}|{{index .Config.Labels "org.opencontainers.image.description"}}|{{index .Config.Labels "org.opencontainers.image.source"}}|{{index .Config.Labels "org.opencontainers.image.licenses"}}|{{index .Config.Labels "com.backupsheep.release-verifier.upstream-version"}}|{{index .Config.Labels "com.backupsheep.release-verifier.upstream-commit"}}|{{index .Config.Labels "com.backupsheep.release-verifier.go-version"}}|{{index .Config.Labels "com.backupsheep.release-verifier.module-graph-sha256"}}' "$reference")" \
         || die "could not inspect pinned Cosign verifier provenance labels"
-    [[ "$image_labels" == '8|BackupSheep release verifier|Minimal Cosign verifier rebuilt with reviewed security updates|https://github.com/bilal414/backupsheep|Apache-2.0|v3.1.3|11926fa5bbbbde47e88fc006b625a17769b743b2|go1.26.6|894396e4119d1620852793d03419a7130f4c62881ae5e11301b36c2a775aa6f2' ]] \
-        || die "pinned Cosign verifier provenance labels differ from the reviewed first-party build"
+    IFS='|' read -r label_count title description source licenses upstream_version upstream_commit go_version graph_sha <<< "$image_labels"
+    [[ "$label_count" == 8 \
+        && "$title" == "BackupSheep release verifier" \
+        && "$description" == "Minimal Cosign verifier rebuilt with reviewed security updates" \
+        && "$source" == "https://github.com/${SOURCE_REPOSITORY}" \
+        && "$licenses" == Apache-2.0 \
+        && "$upstream_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ \
+        && "$upstream_commit" =~ ^[0-9a-f]{40}$ \
+        && "$go_version" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ \
+        && "$graph_sha" =~ ^[0-9a-f]{64}$ ]] \
+        || die "pinned Cosign verifier provenance labels differ from runtime contract 1"
+    label_json="$(docker_client image inspect --format '{{json .Config.Labels}}' "$reference")" \
+        || die "could not capture pinned Cosign verifier label map"
+    [[ "$(strict_json_count "$label_json")" == 'object|8' ]] \
+        || die "pinned Cosign verifier label map has an unexpected cardinality"
+    ACTIVE_VERIFIER_IMAGE_LABEL_RECORDS="$(strict_json_object_records "$label_json" | LC_ALL=C sort)" \
+        || die "pinned Cosign verifier label map is not strict JSON"
 }
 
 cosign() {
     local status=0 verifier_id="" verifier_id_file="${VERIFIER_DIR}/.verifier-container-id"
-    reconcile_installation_verifier_orphans
+    local -a authorizer_label_args=()
+    if [[ -n "$VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256" ]]; then
+        authorizer_label_args=(--label "com.backupsheep.authorizing-target-descriptor-sha256=${VERIFIER_AUTHORIZING_DESCRIPTOR_SHA256}")
+    fi
     reconcile_verifier_orphan
     if [[ -e "$verifier_id_file" || -L "$verifier_id_file" ]]; then
         validate_residue_dir "$VERIFIER_DIR"
@@ -1261,6 +1411,8 @@ cosign() {
         --runtime runc --stop-signal SIGTERM --stop-timeout 5 --log-driver none --workdir / \
         --label com.backupsheep.release-verifier=true --label "com.backupsheep.installation-path-sha256=${INSTALLATION_PATH_DIGEST}" \
         --label "com.backupsheep.release-tag=${RELEASE_TAG}" --label "com.backupsheep.source-commit=${SOURCE_COMMIT}" \
+        --label "com.backupsheep.verification-purpose=${VERIFIER_PURPOSE}" \
+        "${authorizer_label_args[@]}" \
         --read-only --cap-drop ALL --security-opt no-new-privileges:true --ipc private --cgroupns private \
         --pids-limit 64 --memory 256m --memory-swap 256m --cpus 0.5 \
         --oom-kill-disable=false --oom-score-adj 0 --shm-size 16m --init=false \
@@ -1273,7 +1425,7 @@ cosign() {
         --env DOCKER_CONFIG= --env COSIGN_REPOSITORY= --env COSIGN_EXPERIMENTAL= --env COSIGN_DOCKER_MEDIA_TYPES= --env SIGSTORE_NO_CACHE= \
         --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=700 \
         --mount "type=bind,src=${VERIFIER_DIR},dst=/evidence,readonly,bind-propagation=rprivate" \
-        "$COSIGN_IMAGE" "$@" > "$verifier_id_file" || status=$?
+        "$ACTIVE_VERIFIER_IMAGE" "$@" > "$verifier_id_file" || status=$?
     if [[ "$status" -ne 0 ]]; then
         VERIFIER_CREATE_UNCERTAIN=true
         die "Cosign verifier creation had an unknown outcome; protected residue was retained for bounded reconciliation"
@@ -1282,7 +1434,6 @@ cosign() {
     [[ "$(file_mode "$verifier_id_file")" == 600 ]] \
         || die "verifier container-ID capture has unsafe permissions"
     verifier_id="$(<"$verifier_id_file")"
-    rm -f -- "$verifier_id_file" || die "could not remove verifier container-ID capture"
     [[ "$status" -eq 0 && "$verifier_id" =~ ^[0-9a-f]{64}$ ]] \
         || die "could not create the exact pinned Cosign verifier container"
     VERIFIER_CREATE_UNCERTAIN=false
@@ -1293,6 +1444,9 @@ cosign() {
         attest_verifier_container_bounded "$verifier_id" exited "$status"
     fi
     reconcile_verifier_orphan
+    rm -f -- "$verifier_id_file" || die "could not finalize verifier container-ID capture"
+    durable_sync
+    VERIFIER_CREATE_UNCERTAIN=false
     return "$status"
 }
 
@@ -1311,9 +1465,9 @@ write_signature_verification_receipt() {
         || die "could not allocate signature-verification receipt"
     chmod 0600 "$candidate"
     if [[ "$DAEMON_ARCH" == amd64 ]]; then
-        verifier_config="$COSIGN_AMD64_IMAGE_ID"
+        verifier_config="$ACTIVE_VERIFIER_AMD64_IMAGE_ID"
     elif [[ "$DAEMON_ARCH" == arm64 ]]; then
-        verifier_config="$COSIGN_ARM64_IMAGE_ID"
+        verifier_config="$ACTIVE_VERIFIER_ARM64_IMAGE_ID"
     else
         die "signature-verification receipt requires an attested daemon platform"
     fi
@@ -1322,7 +1476,7 @@ write_signature_verification_receipt() {
     # canonical, sorted-key JSON form so future upgrade journals can hash and
     # retain this exact successful offline-verification witness.
     printf '%s\n' \
-        "{\"daemon_identity_sha256\":\"${DAEMON_IDENTITY_SHA256}\",\"descriptor_bundle_sha256\":\"sha256:${VERIFIED_BUNDLE_SHA256}\",\"descriptor_sha256\":\"sha256:${VERIFIED_DESCRIPTOR_SHA256}\",\"manifest_sha256\":\"sha256:${VERIFIED_MANIFEST_SHA256}\",\"migration_leaf_set_sha256\":\"${MIGRATION_LEAF_SET_SHA256}\",\"migration_set_sha256\":\"${MIGRATION_SET_SHA256}\",\"oidc_issuer\":\"${OIDC_ISSUER}\",\"platform\":\"${DAEMON_OS}/${DAEMON_ARCH}\",\"purpose\":\"target\",\"release_epoch\":${RELEASE_EPOCH},\"release_tag\":\"${RELEASE_TAG}\",\"runtime_contract_version\":${COSIGN_RUNTIME_CONTRACT_VERSION},\"schema_version\":2,\"source_commit\":\"${SOURCE_COMMIT}\",\"trigger\":\"push\",\"trusted_root_sha256\":\"sha256:${TRUSTED_ROOT_SHA256}\",\"verifier_config_digest\":\"${verifier_config}\",\"verifier_manifest_digest\":\"${VERIFIER_MANIFEST_DIGEST}\",\"verifier_reference\":\"${COSIGN_IMAGE}\",\"workflow_identity\":\"${WORKFLOW_IDENTITY}\",\"workflow_ref\":\"refs/tags/${RELEASE_TAG}\"}" \
+        "{\"daemon_identity_sha256\":\"${DAEMON_IDENTITY_SHA256}\",\"descriptor_bundle_sha256\":\"sha256:${VERIFIED_BUNDLE_SHA256}\",\"descriptor_sha256\":\"sha256:${VERIFIED_DESCRIPTOR_SHA256}\",\"manifest_sha256\":\"sha256:${VERIFIED_MANIFEST_SHA256}\",\"migration_leaf_set_sha256\":\"${MIGRATION_LEAF_SET_SHA256}\",\"migration_set_sha256\":\"${MIGRATION_SET_SHA256}\",\"oidc_issuer\":\"${OIDC_ISSUER}\",\"platform\":\"${DAEMON_OS}/${DAEMON_ARCH}\",\"purpose\":\"target\",\"release_epoch\":${RELEASE_EPOCH},\"release_tag\":\"${RELEASE_TAG}\",\"runtime_contract_version\":${ACTIVE_VERIFIER_RUNTIME_CONTRACT_VERSION},\"schema_version\":2,\"source_commit\":\"${SOURCE_COMMIT}\",\"trigger\":\"push\",\"trusted_root_sha256\":\"sha256:${TRUSTED_ROOT_SHA256}\",\"verifier_config_digest\":\"${verifier_config}\",\"verifier_manifest_digest\":\"${VERIFIER_MANIFEST_DIGEST}\",\"verifier_reference\":\"${ACTIVE_VERIFIER_IMAGE}\",\"workflow_identity\":\"${WORKFLOW_IDENTITY}\",\"workflow_ref\":\"refs/tags/${RELEASE_TAG}\"}" \
         > "$candidate" || die "could not render signature-verification receipt"
     durable_sync
     mv -- "$candidate" "$destination" \
@@ -1364,7 +1518,7 @@ validate_local_image_receipt() {
 }
 
 validate_persisted_evidence() {
-    local evidence="$1" entry="" count=0 base=""
+    local evidence="$1" expected_root="${2:-$TRUSTED_ROOT_SHA256}" entry="" count=0 base=""
     [[ -d "$evidence" && ! -L "$evidence" && "$(file_uid "$evidence")" == "$EUID" && "$(file_mode "$evidence")" == "700" ]] || die "persisted release evidence directory is unsafe"
     while IFS= read -r -d '' entry; do
         count=$((count + 1)); base="$(basename -- "$entry")"
@@ -1373,8 +1527,233 @@ validate_persisted_evidence() {
         [[ "$(file_mode "$entry")" == "600" ]] || die "persisted release evidence must be owner-only"
     done < <(find "$evidence" -mindepth 1 -maxdepth 1 -print0)
     [[ "$count" -eq 6 ]] || die "persisted release evidence is incomplete"
-    validate_trusted_root "$evidence/$TRUSTED_ROOT_NAME"
+    if [[ "$expected_root" == defer ]]; then
+        validate_regular_file "$evidence/$TRUSTED_ROOT_NAME" 65536
+    else
+        validate_trusted_root "$evidence/$TRUSTED_ROOT_NAME" "$expected_root"
+    fi
     validate_local_image_receipt "$evidence/local-images.txt"
+}
+
+local_image_receipt_value() {
+    local path="$1" key="$2" value="" count=""
+    count="$(awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$path")"
+    [[ "$count" == 1 ]] || die "local image receipt key ${key} is absent or duplicated"
+    value="$(awk -F= -v wanted="$key" '$1 == wanted { print substr($0, length(wanted) + 2) }' "$path")"
+    [[ "$value" =~ ^sha256:[0-9a-f]{64}$ ]] || die "local image receipt key ${key} is malformed"
+    printf '%s' "$value"
+}
+
+validate_release_evidence_identity() {
+    local evidence="$1" expected_tag="$2" expected_commit="$3"
+    local descriptor_tag="" descriptor_commit="" receipt="" receipt_tag="" receipt_commit=""
+    validate_persisted_evidence "$evidence" defer
+    descriptor_tag="$(descriptor_value "$evidence/$DESCRIPTOR_NAME" release_tag)"
+    descriptor_commit="$(descriptor_value "$evidence/$DESCRIPTOR_NAME" source_commit)"
+    [[ "$descriptor_tag" == "$expected_tag" && "$descriptor_commit" == "$expected_commit" ]] \
+        || die "persisted source release evidence differs from the expected-current release"
+    receipt="$(<"$evidence/$VERIFICATION_RECEIPT_NAME")"
+    [[ "$(strict_json_count "$receipt")" == 'object|21' ]] \
+        || die "persisted source signature receipt has an unexpected shape"
+    receipt_tag="$(json_document_string "$receipt" 'persisted source receipt tag' \
+        '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$' release_tag)"
+    receipt_commit="$(json_document_string "$receipt" 'persisted source receipt commit' \
+        '^[0-9a-f]{40}$' source_commit)"
+    [[ "$receipt_tag" == "$expected_tag" && "$receipt_commit" == "$expected_commit" \
+        && "$(json_document_string "$receipt" 'persisted source receipt purpose' '^target$' purpose)" == target \
+        && "$(json_document_string "$receipt" 'persisted source receipt daemon' '^sha256:[0-9a-f]{64}$' daemon_identity_sha256)" == "$DAEMON_IDENTITY_SHA256" ]] \
+        || die "persisted source signature receipt differs from expected-current release or Docker daemon"
+}
+
+build_authorized_source_receipt() {
+    local app_config="" receipt=""
+    AUTHORIZED_SOURCE_RECEIPT=""
+    app_config="$(local_image_receipt_value "$TARGET_EVIDENCE_DIR/local-images.txt" app_image_id)"
+    [[ "$(docker_client image inspect --format '{{.Id}}' "$APP_IMAGE")" == "$app_config" ]] \
+        || die "target authorization helper image differs from the signed local-image receipt"
+    run_bounded_capture 120 "signed predecessor authorization" docker_client run --rm \
+        --pull never --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges:true --pids-limit 64 \
+        --memory 256m --memory-swap 256m --cpus 0.5 --shm-size 16m \
+        --user 0:0 --workdir / --entrypoint /usr/local/bin/python --log-driver none \
+        --env PYTHONDONTWRITEBYTECODE=1 --env PYTHONHASHSEED=0 \
+        --env HTTP_PROXY= --env HTTPS_PROXY= --env FTP_PROXY= --env ALL_PROXY= --env NO_PROXY= \
+        --env http_proxy= --env https_proxy= --env ftp_proxy= --env all_proxy= --env no_proxy= \
+        --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+        --mount "type=bind,src=${SOURCE_EVIDENCE_DIR},dst=/source-evidence,readonly,bind-propagation=rprivate" \
+        --mount "type=bind,src=${TARGET_EVIDENCE_DIR},dst=/target-evidence,readonly,bind-propagation=rprivate" \
+        "$app_config" /usr/local/lib/backupsheep-release/signed_release_upgrade.py authorize-source \
+        --source-evidence /source-evidence --target-evidence /target-evidence \
+        --daemon-os "$DAEMON_OS" --daemon-architecture "$DAEMON_ARCH" \
+        --daemon-identity-sha256 "$DAEMON_IDENTITY_SHA256" \
+        || die "target release did not authorize the exact installed predecessor"
+    receipt="$BOUNDED_CAPTURE_VALUE"
+    [[ -n "$receipt" && ${#receipt} -le 16384 && "$receipt" != *$'\r'* ]] \
+        || die "authorized-predecessor receipt is empty, oversized, or noncanonical"
+    AUTHORIZED_SOURCE_RECEIPT="$receipt"
+}
+
+validate_authorized_source_receipt() {
+    local receipt="$1" keys="" source_receipt="" value="" expected="" source_epoch=""
+    local descriptor_verifier="" descriptor_config="" descriptor_manifest=""
+    keys="$(strict_json_object_keys "$receipt" | LC_ALL=C sort)" \
+        || die "authorized-predecessor receipt is not strict JSON"
+    expected=$'"authorized_predecessor_sha256"\n"authorizing_target_descriptor_sha256"\n"daemon_identity_sha256"\n"oidc_issuer"\n"platform"\n"purpose"\n"schema_version"\n"source_commit"\n"source_descriptor_bundle_sha256"\n"source_descriptor_sha256"\n"source_evidence_sha256"\n"source_manifest_sha256"\n"source_migration_leaf_set_sha256"\n"source_migration_set_sha256"\n"source_release_epoch"\n"source_release_tag"\n"source_trusted_root_sha256"\n"trigger"\n"verifier_config_digest"\n"verifier_manifest_digest"\n"verifier_reference"\n"verifier_runtime_contract_version"\n"workflow_identity"\n"workflow_ref"'
+    [[ "$keys" == "$expected" && "$(strict_json_path "$receipt" schema_version)" == 3 \
+        && "$(strict_json_path "$receipt" verifier_runtime_contract_version)" == 1 ]] \
+        || die "authorized-predecessor receipt has an unexpected schema or key set"
+    [[ "$(json_document_string "$receipt" 'authorized source tag' \
+        '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$' source_release_tag)" == "$SOURCE_RELEASE_TAG" \
+        && "$(json_document_string "$receipt" 'authorized source commit' '^[0-9a-f]{40}$' source_commit)" == "$SOURCE_RELEASE_COMMIT" \
+        && "$(json_document_string "$receipt" 'authorization purpose' '^authorized-predecessor$' purpose)" == authorized-predecessor \
+        && "$(json_document_string "$receipt" 'authorization daemon' '^sha256:[0-9a-f]{64}$' daemon_identity_sha256)" == "$DAEMON_IDENTITY_SHA256" \
+        && "$(json_document_string "$receipt" 'authorization platform' '^linux/(amd64|arm64)$' platform)" == "${DAEMON_OS}/${DAEMON_ARCH}" \
+        && "$(json_document_string "$receipt" 'authorization issuer' '^https://token\.actions\.githubusercontent\.com$' oidc_issuer)" == "$OIDC_ISSUER" \
+        && "$(json_document_string "$receipt" 'authorization trigger' '^push$' trigger)" == push \
+        && "$(json_document_string "$receipt" 'source workflow identity' '^https://github\.com/bilal414/backupsheep/\.github/workflows/release-images\.yml@refs/tags/v[0-9A-Za-z.-]+$' workflow_identity)" == "https://github.com/${SOURCE_REPOSITORY}/${RELEASE_WORKFLOW}@refs/tags/${SOURCE_RELEASE_TAG}" \
+        && "$(json_document_string "$receipt" 'source workflow ref' '^refs/tags/v[0-9A-Za-z.-]+$' workflow_ref)" == "refs/tags/${SOURCE_RELEASE_TAG}" ]] \
+        || die "authorized-predecessor receipt identity differs from the requested source or daemon"
+    source_epoch="$(strict_json_path "$receipt" source_release_epoch)" \
+        || die "authorized source release epoch is absent"
+    [[ "$source_epoch" =~ ^[1-9][0-9]{0,9}$ && 10#$source_epoch -le 2147483647 ]] \
+        || die "authorized source release epoch is not positive and bounded"
+    [[ "$(json_document_string "$receipt" 'authorizing target descriptor' '^sha256:[0-9a-f]{64}$' authorizing_target_descriptor_sha256)" == "sha256:$(sha256_file "$TARGET_EVIDENCE_DIR/$DESCRIPTOR_NAME")" \
+        && "$(json_document_string "$receipt" 'source descriptor digest' '^sha256:[0-9a-f]{64}$' source_descriptor_sha256)" == "sha256:$(sha256_file "$SOURCE_EVIDENCE_DIR/$DESCRIPTOR_NAME")" \
+        && "$(json_document_string "$receipt" 'source descriptor bundle digest' '^sha256:[0-9a-f]{64}$' source_descriptor_bundle_sha256)" == "sha256:$(sha256_file "$SOURCE_EVIDENCE_DIR/$BUNDLE_NAME")" \
+        && "$(json_document_string "$receipt" 'source manifest digest' '^sha256:[0-9a-f]{64}$' source_manifest_sha256)" == "sha256:$(sha256_file "$SOURCE_EVIDENCE_DIR/$MANIFEST_NAME")" \
+        && "$(json_document_string "$receipt" 'source trusted-root digest' '^sha256:[0-9a-f]{64}$' source_trusted_root_sha256)" == "sha256:$(sha256_file "$SOURCE_EVIDENCE_DIR/$TRUSTED_ROOT_NAME")" ]] \
+        || die "authorized-predecessor receipt does not bind the exact retained source and target bytes"
+    source_receipt="$(<"$SOURCE_EVIDENCE_DIR/$VERIFICATION_RECEIPT_NAME")"
+    for value in source_migration_set_sha256 source_migration_leaf_set_sha256; do
+        expected="$(json_document_string "$source_receipt" "source receipt ${value}" '^sha256:[0-9a-f]{64}$' "${value#source_}")"
+        [[ "$(json_document_string "$receipt" "authorization ${value}" '^sha256:[0-9a-f]{64}$' "$value")" == "$expected" ]] \
+            || die "authorized-predecessor receipt migration contract differs from retained source evidence"
+    done
+    descriptor_verifier="$(descriptor_value "$SOURCE_EVIDENCE_DIR/$DESCRIPTOR_NAME" release_verifier_image)"
+    if [[ "$DAEMON_ARCH" == amd64 ]]; then
+        descriptor_config="$(descriptor_value "$SOURCE_EVIDENCE_DIR/$DESCRIPTOR_NAME" release_verifier_linux_amd64_config)"
+        descriptor_manifest="$(descriptor_value "$SOURCE_EVIDENCE_DIR/$DESCRIPTOR_NAME" release_verifier_linux_amd64_manifest)"
+    else
+        descriptor_config="$(descriptor_value "$SOURCE_EVIDENCE_DIR/$DESCRIPTOR_NAME" release_verifier_linux_arm64_config)"
+        descriptor_manifest="$(descriptor_value "$SOURCE_EVIDENCE_DIR/$DESCRIPTOR_NAME" release_verifier_linux_arm64_manifest)"
+    fi
+    [[ "$(json_document_string "$receipt" 'authorized source verifier reference' '^ghcr\.io/bilal414/backupsheep-release-verifier@sha256:[0-9a-f]{64}$' verifier_reference)" == "$descriptor_verifier" \
+        && "$(json_document_string "$receipt" 'authorized source verifier config' '^sha256:[0-9a-f]{64}$' verifier_config_digest)" == "$descriptor_config" \
+        && "$(json_document_string "$receipt" 'authorized source verifier manifest' '^sha256:[0-9a-f]{64}$' verifier_manifest_digest)" == "$descriptor_manifest" \
+        && "$(json_document_string "$source_receipt" 'retained source verifier reference' '^ghcr\.io/bilal414/backupsheep-release-verifier@sha256:[0-9a-f]{64}$' verifier_reference)" == "$descriptor_verifier" \
+        && "$(json_document_string "$source_receipt" 'retained source verifier config' '^sha256:[0-9a-f]{64}$' verifier_config_digest)" == "$descriptor_config" \
+        && "$(json_document_string "$source_receipt" 'retained source verifier manifest' '^sha256:[0-9a-f]{64}$' verifier_manifest_digest)" == "$descriptor_manifest" ]] \
+        || die "authorized source verifier contract differs from retained source evidence"
+    [[ "$(json_document_string "$receipt" 'authorized predecessor digest' '^sha256:[0-9a-f]{64}$' authorized_predecessor_sha256)" != \
+        "$(json_document_string "$receipt" 'source evidence digest' '^sha256:[0-9a-f]{64}$' source_evidence_sha256)" ]] \
+        || die "authorized-predecessor receipt contains colliding state digests"
+    validate_trusted_root "$SOURCE_EVIDENCE_DIR/$TRUSTED_ROOT_NAME" \
+        "$(json_document_string "$receipt" 'source root digest' '^sha256:[0-9a-f]{64}$' source_trusted_root_sha256 | sed 's/^sha256://')"
+}
+
+publish_authorized_source_receipt() {
+    local receipt="$1" destination="$SOURCE_VERIFICATION_PATH" candidate="${SOURCE_VERIFICATION_PATH}.new"
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        if [[ -e "$candidate" || -L "$candidate" ]]; then
+            [[ -f "$candidate" && ! -L "$candidate" && -f "$destination" && ! -L "$destination" \
+                && "$(file_uid "$candidate")" == "$EUID" && "$(file_uid "$destination")" == "$EUID" \
+                && "$(file_mode "$candidate")" == 600 && "$(file_mode "$destination")" == 600 \
+                && "$(file_links "$candidate")" == 2 && "$(file_links "$destination")" == 2 \
+                && "$(file_node "$candidate")" == "$(file_node "$destination")" \
+                && "$(<"$candidate")" == "$receipt" && "$(<"$destination")" == "$receipt" ]] \
+                || die "interrupted authorized-predecessor publication is ambiguous"
+            rm -f -- "$candidate" || die "could not finalize interrupted authorized-predecessor receipt"
+            durable_sync
+        fi
+        validate_regular_file "$destination" 16384
+        [[ "$(file_mode "$destination")" == 600 && "$(<"$destination")" == "$receipt" ]] \
+            || die "existing authorized-predecessor receipt conflicts with the requested transition"
+        return 0
+    fi
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+        validate_regular_file "$candidate" 16384
+        [[ "$(file_mode "$candidate")" == 600 && "$(<"$candidate")" == "$receipt" ]] \
+            || die "interrupted authorized-predecessor receipt conflicts with the requested transition"
+    else
+        ( set -o noclobber; printf '%s\n' "$receipt" > "$candidate" ) \
+            || die "could not allocate authorized-predecessor receipt candidate"
+        chmod 0600 "$candidate"
+        durable_sync
+    fi
+    ln -- "$candidate" "$destination" 2>/dev/null \
+        || die "authorized-predecessor receipt destination appeared concurrently"
+    durable_sync
+    rm -f -- "$candidate" || die "could not finalize authorized-predecessor receipt"
+    durable_sync
+    validate_regular_file "$destination" 16384
+    [[ "$(file_mode "$destination")" == 600 && "$(<"$destination")" == "$receipt" ]] \
+        || die "published authorized-predecessor receipt changed"
+}
+
+stage_authorized_predecessor_verification() {
+    local receipt="" source_root_digest=""
+    local target_tag="$RELEASE_TAG" target_commit="$SOURCE_COMMIT" target_identity="$WORKFLOW_IDENTITY"
+    local target_verifier_name="$VERIFIER_NAME" target_verifier_dir="$VERIFIER_DIR"
+    validate_release_evidence_identity "$SOURCE_EVIDENCE_DIR" "$SOURCE_RELEASE_TAG" "$SOURCE_RELEASE_COMMIT"
+    build_authorized_source_receipt
+    receipt="$AUTHORIZED_SOURCE_RECEIPT"
+    validate_authorized_source_receipt "$receipt"
+    source_root_digest="$(json_document_string "$receipt" 'source trusted-root digest' \
+        '^sha256:[0-9a-f]{64}$' source_trusted_root_sha256)"
+    source_root_digest="${source_root_digest#sha256:}"
+
+    # Target verification is complete and its durable evidence has already
+    # been published. Remove its now-unmounted transient verifier source before
+    # switching the active verifier contract so cleanup always owns one path.
+    remove_residue_dir "$target_verifier_dir"
+    target_verifier_dir=""
+    VERIFIER_DIR=""
+
+    RELEASE_TAG="$SOURCE_RELEASE_TAG"
+    SOURCE_COMMIT="$SOURCE_RELEASE_COMMIT"
+    WORKFLOW_IDENTITY="https://github.com/${SOURCE_REPOSITORY}/${RELEASE_WORKFLOW}@refs/tags/${RELEASE_TAG}"
+    activate_authorized_source_verifier_contract "$receipt"
+    assert_no_unrecognized_installation_verifiers "$target_verifier_name" "$VERIFIER_NAME"
+    if [[ -n "$SOURCE_RECOVERY_VERIFIER_DIR" ]]; then
+        VERIFIER_DIR="$SOURCE_RECOVERY_VERIFIER_DIR"
+        validate_residue_dir "$VERIFIER_DIR"
+        cmp -s -- "$SOURCE_EVIDENCE_DIR/$DESCRIPTOR_NAME" "$VERIFIER_DIR/$DESCRIPTOR_NAME" \
+            && cmp -s -- "$SOURCE_EVIDENCE_DIR/$BUNDLE_NAME" "$VERIFIER_DIR/$BUNDLE_NAME" \
+            && cmp -s -- "$SOURCE_EVIDENCE_DIR/$MANIFEST_NAME" "$VERIFIER_DIR/$MANIFEST_NAME" \
+            && cmp -s -- "$SOURCE_EVIDENCE_DIR/$TRUSTED_ROOT_NAME" "$VERIFIER_DIR/$TRUSTED_ROOT_NAME" \
+            || die "interrupted source verifier residue differs from target-authorized predecessor evidence"
+    else
+        VERIFIER_DIR="$(mktemp -d "${INSTALL_DIR}/.release-evidence.verify.XXXXXXXX")"
+        chmod 0755 "$VERIFIER_DIR"
+        install -m 0444 "$SOURCE_EVIDENCE_DIR/$DESCRIPTOR_NAME" "$VERIFIER_DIR/$DESCRIPTOR_NAME"
+        install -m 0444 "$SOURCE_EVIDENCE_DIR/$BUNDLE_NAME" "$VERIFIER_DIR/$BUNDLE_NAME"
+        install -m 0444 "$SOURCE_EVIDENCE_DIR/$MANIFEST_NAME" "$VERIFIER_DIR/$MANIFEST_NAME"
+        copy_trusted_root "$SOURCE_EVIDENCE_DIR/$TRUSTED_ROOT_NAME" \
+            "$VERIFIER_DIR/$TRUSTED_ROOT_NAME" "$source_root_digest"
+    fi
+    assert_installation_ancestor_identity
+    if run_bounded 30 "cached authorized source verifier lookup" docker_client image inspect \
+        "$ACTIVE_VERIFIER_IMAGE" >/dev/null 2>&1; then
+        run_bounded 60 "cached authorized source verifier attestation" attest_cosign_image \
+            || die "cached authorized source verifier failed exact attestation"
+    fi
+    run_bounded 600 "authorized source verifier pull" docker_client pull \
+        "$ACTIVE_VERIFIER_IMAGE" >/dev/null \
+        || die "could not pull target-authorized source verifier"
+    run_bounded 60 "authorized source verifier attestation" attest_cosign_image \
+        || die "target-authorized source verifier failed exact attestation"
+    verify_signatures
+    validate_authorized_source_receipt "$receipt"
+    publish_authorized_source_receipt "$receipt"
+    remove_residue_dir "$VERIFIER_DIR"
+    VERIFIER_DIR=""
+
+    VERIFIER_DIR="$target_verifier_dir"
+    RELEASE_TAG="$target_tag"
+    SOURCE_COMMIT="$target_commit"
+    WORKFLOW_IDENTITY="$target_identity"
+    activate_target_verifier_contract
+    VERIFIER_NAME="$target_verifier_name"
 }
 
 attest_verified_release_inputs() {
@@ -1481,7 +1860,7 @@ cleanup() {
     local original_status=$? cleanup_failed=false
     trap - EXIT
     if [[ -n "$VERIFIER_NAME" ]]; then
-        (reconcile_installation_verifier_orphans && reconcile_verifier_orphan) >/dev/null 2>&1 \
+        reconcile_verifier_orphan >/dev/null 2>&1 \
             || cleanup_failed=true
     fi
     cleanup_paths
@@ -1501,7 +1880,7 @@ handle_signal() {
         ACTIVE_PID=""
     fi
     if [[ -n "$VERIFIER_NAME" ]]; then
-        (reconcile_installation_verifier_orphans && reconcile_verifier_orphan) >/dev/null 2>&1 || true
+        reconcile_verifier_orphan >/dev/null 2>&1 || true
     fi
     cleanup_paths
     release_mutation_lock >/dev/null 2>&1 || true
@@ -1509,12 +1888,25 @@ handle_signal() {
 }
 
 main() {
-    local script_real="" trusted_root="" docker_variable="" role="" image_ref="" image_tuple="" cosign_id="" release_identity_digest=""
+    local script_real="" trusted_root="" docker_variable="" role="" image_ref="" image_tuple="" cosign_id=""
     local install_path_regex='^/[A-Za-z0-9._/@+ -]+$'
     local selected_context=""
-    [[ $# -eq 8 ]] || die "expected --tag TAG --commit COMMIT --install-dir DIR --docker PATH"
-    [[ "$1" == --tag && "$3" == --commit && "$5" == --install-dir && "$7" == --docker ]] || die "arguments must be in canonical order"
-    RELEASE_TAG="$2"; SOURCE_COMMIT="$4"; INSTALL_DIR="$6"; DOCKER_BIN="$8"
+    if [[ $# -eq 8 && "$1" == --tag && "$3" == --commit \
+        && "$5" == --install-dir && "$7" == --docker ]]; then
+        CONSUMER_MODE="install"
+        RELEASE_TAG="$2"; SOURCE_COMMIT="$4"; INSTALL_DIR="$6"; DOCKER_BIN="$8"
+        CHECKOUT_COMMIT="$SOURCE_COMMIT"
+    elif [[ $# -eq 14 && "$1" == --mode && "$2" == stage-upgrade \
+        && "$3" == --source-tag && "$5" == --source-commit \
+        && "$7" == --target-tag && "$9" == --target-commit \
+        && "${11}" == --install-dir && "${13}" == --docker ]]; then
+        CONSUMER_MODE="stage-upgrade"
+        SOURCE_RELEASE_TAG="$4"; SOURCE_RELEASE_COMMIT="$6"
+        RELEASE_TAG="$8"; SOURCE_COMMIT="${10}"; INSTALL_DIR="${12}"; DOCKER_BIN="${14}"
+        CHECKOUT_COMMIT="$SOURCE_RELEASE_COMMIT"
+    else
+        die "expected canonical install arguments or --mode stage-upgrade with exact source and target identities"
+    fi
     trap cleanup EXIT
     trap 'handle_signal 129' HUP
     trap 'handle_signal 130' INT
@@ -1522,6 +1914,13 @@ main() {
     validate_privileged_consumer_environment
     [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || die "release tag must be exact SemVer prefixed by v"
     [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "source commit must be lowercase and full length"
+    if [[ "$CONSUMER_MODE" == stage-upgrade ]]; then
+        [[ "$SOURCE_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ \
+            && "$SOURCE_RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || die "stage-upgrade source identity is malformed"
+        [[ "$SOURCE_RELEASE_TAG" != "$RELEASE_TAG" && "$SOURCE_RELEASE_COMMIT" != "$SOURCE_COMMIT" ]] \
+            || die "stage-upgrade source and target identities must both differ"
+    fi
     [[ "$INSTALL_DIR" == /* && -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" && "$(file_uid "$INSTALL_DIR")" == "$EUID" && "$(file_mode "$INSTALL_DIR")" == "700" ]] || die "installation directory is unsafe"
     [[ "$INSTALL_DIR" != *','* && "$INSTALL_DIR" != *'|'* && "$INSTALL_DIR" != *[[:cntrl:]]* ]] || die "installation path contains Docker mount or filter metacharacters"
     [[ "$INSTALL_DIR" =~ $install_path_regex ]] || die "installation path contains characters outside the reviewed Docker mount and attestation grammar"
@@ -1568,17 +1967,28 @@ main() {
     assert_mutation_lock_ownership
     attest_docker_daemon_platform
     INSTALLATION_PATH_DIGEST="$(sha256_text "$INSTALL_DIR")"
-    release_identity_digest="$(sha256_text "${RELEASE_TAG}|${SOURCE_COMMIT}")"
-    VERIFIER_NAME="backupsheep-release-verify-${INSTALLATION_PATH_DIGEST:0:12}-${release_identity_digest:0:12}"
     WORKFLOW_IDENTITY="https://github.com/${SOURCE_REPOSITORY}/${RELEASE_WORKFLOW}@refs/tags/${RELEASE_TAG}"
-    EVIDENCE_DIR="${INSTALL_DIR}/.release-evidence"
+    activate_target_verifier_contract
+    SOURCE_EVIDENCE_DIR="${INSTALL_DIR}/.release-evidence"
+    TARGET_EVIDENCE_DIR="${INSTALL_DIR}/.release-evidence.target"
+    SOURCE_VERIFICATION_PATH="${INSTALL_DIR}/.release-evidence.source-verification.json"
+    if [[ "$CONSUMER_MODE" == stage-upgrade ]]; then
+        EVIDENCE_DIR="$TARGET_EVIDENCE_DIR"
+        [[ -d "$SOURCE_EVIDENCE_DIR" && ! -L "$SOURCE_EVIDENCE_DIR" ]] \
+            || die "stage-upgrade requires exact persisted source release evidence"
+        validate_release_evidence_identity "$SOURCE_EVIDENCE_DIR" "$SOURCE_RELEASE_TAG" "$SOURCE_RELEASE_COMMIT"
+    else
+        EVIDENCE_DIR="$SOURCE_EVIDENCE_DIR"
+    fi
     assert_mutation_lock_ownership
     assert_installation_ancestor_identity
     if [[ -e "$EVIDENCE_DIR" || -L "$EVIDENCE_DIR" ]]; then
         reconcile_evidence_refresh "$EVIDENCE_DIR"
         validate_persisted_evidence "$EVIDENCE_DIR"
     fi
-    reconcile_installation_verifier_orphans
+    if [[ "$CONSUMER_MODE" == install ]]; then
+        assert_no_unrecognized_installation_verifiers "$VERIFIER_NAME"
+    fi
     reconcile_verifier_orphan
     cleanup_residues
     assert_installation_ancestor_identity
@@ -1620,11 +2030,11 @@ main() {
     VERIFIED_BUNDLE_SHA256="$(sha256_file "$VERIFIER_DIR/$BUNDLE_NAME")"
     VERIFIED_MANIFEST_SHA256="$(sha256_file "$VERIFIER_DIR/$MANIFEST_NAME")"
     assert_installation_ancestor_identity
-    if run_bounded 30 "cached Cosign verifier lookup" docker_client image inspect "$COSIGN_IMAGE" >/dev/null 2>&1; then
+    if run_bounded 30 "cached Cosign verifier lookup" docker_client image inspect "$ACTIVE_VERIFIER_IMAGE" >/dev/null 2>&1; then
         run_bounded 60 "cached Cosign verifier attestation" attest_cosign_image \
             || die "cached Cosign verifier failed exact attestation"
     fi
-    run_bounded 600 "Cosign verifier pull" docker_client pull "$COSIGN_IMAGE" >/dev/null || die "could not pull pinned Cosign verifier"
+    run_bounded 600 "Cosign verifier pull" docker_client pull "$ACTIVE_VERIFIER_IMAGE" >/dev/null || die "could not pull pinned Cosign verifier"
     run_bounded 60 "Cosign verifier attestation" attest_cosign_image \
         || die "Cosign verifier failed exact attestation"
     verify_signatures
@@ -1647,7 +2057,7 @@ main() {
             || die "${image_tuple%%|*} release image failed exact attestation"
     done
     run_bounded_capture 30 "Cosign verifier image receipt" docker_client image inspect \
-        --format '{{.Id}}' "$COSIGN_IMAGE" \
+        --format '{{.Id}}' "$ACTIVE_VERIFIER_IMAGE" \
         || die "could not capture Cosign verifier image receipt"
     cosign_id="$BOUNDED_CAPTURE_VALUE"
     printf 'cosign_image_id=%s\n' "$cosign_id" >> "$STAGING_DIR/local-images.txt"
@@ -1675,6 +2085,15 @@ main() {
         durable_sync
         assert_mutation_lock_ownership
         assert_installation_ancestor_identity
+    fi
+    if [[ "$CONSUMER_MODE" == stage-upgrade ]]; then
+        stage_authorized_predecessor_verification
+        [[ -d "$TARGET_EVIDENCE_DIR" && -f "$SOURCE_VERIFICATION_PATH" ]] \
+            || die "stage-upgrade did not retain both authenticated evidence sets"
+        assert_mutation_lock_ownership
+        printf 'Staged signed release %s at source commit %s from exact predecessor %s at %s; no runtime mutation was performed.\n' \
+            "$RELEASE_TAG" "$SOURCE_COMMIT" "$SOURCE_RELEASE_TAG" "$SOURCE_RELEASE_COMMIT"
+        return 0
     fi
     assert_mutation_lock_ownership
     printf 'Verified signed release %s at source commit %s.\n' "$RELEASE_TAG" "$SOURCE_COMMIT"
