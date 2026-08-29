@@ -80,6 +80,41 @@ EXTERNAL_FOREIGN_KEYS = (
     ),
 )
 
+# These are deliberately literal statements, keyed by the complete reviewed
+# foreign-key fingerprint.  PostgreSQL cannot bind identifiers as query
+# parameters, so an unknown or modified table/column fingerprint must be
+# rejected before a cursor sees any SQL.
+_ORPHAN_PROBE_SQL_BY_FINGERPRINT = {
+    EXTERNAL_FOREIGN_KEYS[0]: (
+        "SELECT 1 FROM core_auth_wordpress AS retired_child "
+        "LEFT JOIN core_connection AS active_parent "
+        "ON active_parent.id = retired_child.connection_id "
+        "WHERE retired_child.connection_id IS NOT NULL "
+        "AND active_parent.id IS NULL LIMIT 1"
+    ),
+    EXTERNAL_FOREIGN_KEYS[1]: (
+        "SELECT 1 FROM core_wordpress AS retired_child "
+        "LEFT JOIN core_node AS active_parent "
+        "ON active_parent.id = retired_child.node_id "
+        "WHERE retired_child.node_id IS NOT NULL "
+        "AND active_parent.id IS NULL LIMIT 1"
+    ),
+    EXTERNAL_FOREIGN_KEYS[2]: (
+        "SELECT 1 FROM core_wordpress_backup AS retired_child "
+        "LEFT JOIN core_schedule AS active_parent "
+        "ON active_parent.id = retired_child.schedule_id "
+        "WHERE retired_child.schedule_id IS NOT NULL "
+        "AND active_parent.id IS NULL LIMIT 1"
+    ),
+    EXTERNAL_FOREIGN_KEYS[3]: (
+        "SELECT 1 FROM core_wordpress_backup_mtm_storage_points AS retired_child "
+        "LEFT JOIN core_storage AS active_parent "
+        "ON active_parent.id = retired_child.storage_id "
+        "WHERE retired_child.storage_id IS NOT NULL "
+        "AND active_parent.id IS NULL LIMIT 1"
+    ),
+}
+
 INTERNAL_FOREIGN_KEYS = (
     (
         "core_wordpress_backu_wordpress_id_8119660f_fk_core_word",
@@ -258,7 +293,6 @@ def detach_retired_wordpress_foreign_keys(apps, schema_editor):
 
 
 def _require_no_orphans(schema_editor):
-    quote = schema_editor.quote_name
     connection = schema_editor.connection
     with connection.cursor() as cursor:
         for fingerprint in EXTERNAL_FOREIGN_KEYS:
@@ -266,25 +300,34 @@ def _require_no_orphans(schema_editor):
                 _constraint_name,
                 child_table,
                 child_columns,
-                parent_table,
-                parent_columns,
+                _parent_table,
+                _parent_columns,
                 *_properties,
             ) = fingerprint
             child_column = child_columns[0]
-            parent_column = parent_columns[0]
-            cursor.execute(
-                f"SELECT 1 FROM {quote(child_table)} AS retired_child "
-                f"LEFT JOIN {quote(parent_table)} AS active_parent "
-                f"ON active_parent.{quote(parent_column)} = "
-                f"retired_child.{quote(child_column)} "
-                f"WHERE retired_child.{quote(child_column)} IS NOT NULL "
-                f"AND active_parent.{quote(parent_column)} IS NULL LIMIT 1"
-            )
+            _execute_orphan_probe(cursor, fingerprint)
             if cursor.fetchone() is not None:
                 raise RuntimeError(
                     "Cannot restore retired WordPress foreign keys: archived "
                     f"{child_table}.{child_column} identifiers are orphaned."
                 )
+
+
+def _execute_orphan_probe(cursor, fingerprint):
+    if (
+        len(_ORPHAN_PROBE_SQL_BY_FINGERPRINT) != len(EXTERNAL_FOREIGN_KEYS)
+        or set(_ORPHAN_PROBE_SQL_BY_FINGERPRINT) != set(EXTERNAL_FOREIGN_KEYS)
+    ):
+        raise RuntimeError(
+            "Retired WordPress orphan-probe SQL allowlist is out of sync."
+        )
+    try:
+        statement = _ORPHAN_PROBE_SQL_BY_FINGERPRINT[fingerprint]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError(
+            "Refusing an unreviewed retired WordPress orphan-probe identifier."
+        ) from error
+    cursor.execute(statement)
 
 
 def restore_retired_wordpress_foreign_keys(apps, schema_editor):

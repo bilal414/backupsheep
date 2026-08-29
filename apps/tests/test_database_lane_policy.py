@@ -1,5 +1,8 @@
+from unittest import mock
+
 from django.test import SimpleTestCase
 
+from backupsheep import database_lane_probe
 from backupsheep.database_lane_policy import (
     ARTIFACT_LEDGER_TABLES,
     BEAT_TABLES,
@@ -36,6 +39,77 @@ from backupsheep.database_lane_policy import (
     STORAGE_CONFIG_TABLES,
     UNUSED_WORKER_TABLES,
 )
+
+
+class DatabaseLaneProbeSqlAllowlistTests(SimpleTestCase):
+    def test_exact_retired_tables_use_literal_denial_probes(self):
+        self.assertEqual(
+            frozenset(database_lane_probe._RETIRED_TABLE_READ_SQL),
+            RETIRED_TABLES,
+        )
+        connection = object()
+        expected = mock.Mock()
+        with mock.patch.object(database_lane_probe, "_expect_denied", expected):
+            for table_name in sorted(RETIRED_TABLES):
+                with self.subTest(table_name=table_name):
+                    expected.reset_mock()
+                    database_lane_probe._expect_retired_table_read_denied(
+                        connection,
+                        table_name,
+                        lane="files",
+                    )
+                    expected.assert_called_once_with(
+                        connection,
+                        database_lane_probe._RETIRED_TABLE_READ_SQL[table_name],
+                        label=f"files retired table read {table_name}",
+                    )
+
+    def test_hostile_or_unknown_retired_table_never_reaches_sql_executor(self):
+        expected = mock.Mock()
+        with mock.patch.object(database_lane_probe, "_expect_denied", expected):
+            with self.assertRaisesRegex(
+                database_lane_probe.LaneProbeError,
+                "unreviewed",
+            ):
+                database_lane_probe._expect_retired_table_read_denied(
+                    object(),
+                    "core_wordpress; SELECT pg_sleep(30); --",
+                    lane="files",
+                )
+            with self.assertRaisesRegex(
+                database_lane_probe.LaneProbeError,
+                "unreviewed",
+            ):
+                database_lane_probe._expect_retired_table_read_denied(
+                    object(),
+                    ["core_wordpress"],
+                    lane="files",
+                )
+
+        expected.assert_not_called()
+
+    def test_retired_table_policy_drift_fails_before_sql_execution(self):
+        expected = mock.Mock()
+        drifted = RETIRED_TABLES | {"core_unreviewed_retired_table"}
+        with (
+            mock.patch.object(database_lane_probe, "_expect_denied", expected),
+            mock.patch.object(
+                database_lane_probe,
+                "RETIRED_TABLES",
+                drifted,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                database_lane_probe.LaneProbeError,
+                "out of sync",
+            ):
+                database_lane_probe._expect_retired_table_read_denied(
+                    object(),
+                    "core_auth_wordpress",
+                    lane="files",
+                )
+
+        expected.assert_not_called()
 
 
 class DatabaseLanePolicyTests(SimpleTestCase):

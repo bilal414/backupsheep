@@ -7,10 +7,13 @@ from django.core.management.base import CommandError
 from django.test import SimpleTestCase
 
 from apps.management.commands.migrate_and_verify_artifact_provider import (
+    _RETIRED_BACKUP_PROBE_SQL_BY_TABLE,
+    _RETIRED_BACKUP_TABLES,
     _artifact_has_durable_shape,
     _backup_preseal_recovery_statuses,
     _backup_output_statuses,
     _destination_matches_source,
+    _execute_retired_backup_probe,
     _recoverable_point_statuses,
     _retained_point_statuses,
     _unledgered_backup_inventory_exists,
@@ -42,6 +45,33 @@ class ArtifactProviderCurrentStateProofTests(SimpleTestCase):
             return_value=False,
         ).start()
         self.addCleanup(mock.patch.stopall)
+
+    def test_exact_retired_tables_use_literal_inventory_probes(self):
+        self.assertEqual(
+            tuple(_RETIRED_BACKUP_PROBE_SQL_BY_TABLE),
+            _RETIRED_BACKUP_TABLES,
+        )
+        for table_name in _RETIRED_BACKUP_TABLES:
+            with self.subTest(table_name=table_name):
+                cursor = mock.Mock()
+                _execute_retired_backup_probe(cursor, table_name)
+                cursor.execute.assert_called_once_with(
+                    _RETIRED_BACKUP_PROBE_SQL_BY_TABLE[table_name]
+                )
+
+    def test_hostile_or_unknown_retired_table_never_reaches_cursor(self):
+        cursor = mock.Mock()
+
+        with self.assertRaisesRegex(CommandError, "unreviewed"):
+            _execute_retired_backup_probe(
+                cursor,
+                "core_wordpress_backup; DELETE FROM core_backup_artifact; --",
+            )
+
+        with self.assertRaisesRegex(CommandError, "unreviewed"):
+            _execute_retired_backup_probe(cursor, ["core_wordpress_backup"])
+
+        cursor.execute.assert_not_called()
 
     def test_failed_and_cancelled_attempts_do_not_require_source_artifacts(self):
         output_statuses = _backup_output_statuses(CoreWebsiteBackup)

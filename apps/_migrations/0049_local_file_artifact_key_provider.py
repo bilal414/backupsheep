@@ -13,6 +13,38 @@ LEGACY_BACKUP_TABLES = (
     "core_hosting_backup",
 )
 
+_LEGACY_BACKUP_PROBE_SQL_BY_TABLE = {
+    "core_website_backup": "SELECT 1 FROM core_website_backup LIMIT 1",
+    "core_website_backup_mtm_storage_points": (
+        "SELECT 1 FROM core_website_backup_mtm_storage_points LIMIT 1"
+    ),
+    "core_wordpress_backup": "SELECT 1 FROM core_wordpress_backup LIMIT 1",
+    "core_wordpress_backup_mtm_storage_points": (
+        "SELECT 1 FROM core_wordpress_backup_mtm_storage_points LIMIT 1"
+    ),
+    "core_basecamp_backup": "SELECT 1 FROM core_basecamp_backup LIMIT 1",
+    "core_basecamp_backup_mtm_storage_points": (
+        "SELECT 1 FROM core_basecamp_backup_mtm_storage_points LIMIT 1"
+    ),
+    "core_database_backup": "SELECT 1 FROM core_database_backup LIMIT 1",
+    "core_database_backup_mtm_storage_points": (
+        "SELECT 1 FROM core_database_backup_mtm_storage_points LIMIT 1"
+    ),
+    "core_hosting_backup": "SELECT 1 FROM core_hosting_backup LIMIT 1",
+}
+
+
+def _execute_legacy_backup_probe(cursor, table_name):
+    if tuple(_LEGACY_BACKUP_PROBE_SQL_BY_TABLE) != LEGACY_BACKUP_TABLES:
+        raise RuntimeError("Legacy backup-table SQL allowlist is out of sync.")
+    try:
+        statement = _LEGACY_BACKUP_PROBE_SQL_BY_TABLE[table_name]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError(
+            "Refusing an unreviewed legacy backup-table identifier."
+        ) from error
+    cursor.execute(statement)
+
 
 def legacy_backup_inventory_exists(schema_editor):
     connection = schema_editor.connection
@@ -21,9 +53,7 @@ def legacy_backup_inventory_exists(schema_editor):
         for table_name in LEGACY_BACKUP_TABLES:
             if table_name not in present:
                 continue
-            cursor.execute(
-                f"SELECT 1 FROM {connection.ops.quote_name(table_name)} LIMIT 1"
-            )
+            _execute_legacy_backup_probe(cursor, table_name)
             if cursor.fetchone() is not None:
                 return True
     return False

@@ -31,6 +31,18 @@ from backupsheep.database_lane_policy import (
 )
 
 
+_RETIRED_TABLE_READ_SQL = {
+    "core_auth_wordpress": "SELECT * FROM public.core_auth_wordpress LIMIT 1",
+    "core_wordpress": "SELECT * FROM public.core_wordpress LIMIT 1",
+    "core_wordpress_backup": (
+        "SELECT * FROM public.core_wordpress_backup LIMIT 1"
+    ),
+    "core_wordpress_backup_mtm_storage_points": (
+        "SELECT * FROM public.core_wordpress_backup_mtm_storage_points LIMIT 1"
+    ),
+}
+
+
 class LaneProbeError(RuntimeError):
     """A runtime principal crossed a reviewed PostgreSQL boundary."""
 
@@ -72,6 +84,20 @@ def _expect_allowed(connection, statement: str, *, label: str) -> None:
         connection.rollback()
         raise LaneProbeError(f"{label} was unexpectedly denied") from None
     connection.rollback()
+
+
+def _expect_retired_table_read_denied(connection, table: str, *, lane: str) -> None:
+    if frozenset(_RETIRED_TABLE_READ_SQL) != RETIRED_TABLES:
+        raise LaneProbeError("retired-table SQL allowlist is out of sync")
+    try:
+        statement = _RETIRED_TABLE_READ_SQL[table]
+    except (KeyError, TypeError) as error:
+        raise LaneProbeError("refusing an unreviewed retired-table identifier") from error
+    _expect_denied(
+        connection,
+        statement,
+        label=f"{lane} retired table read {table}",
+    )
 
 
 def _assert_role_boundary(connection, lane: str, expected_user: str) -> None:
@@ -1835,10 +1861,10 @@ def run_probe(config: IdentityConfiguration) -> None:
                 )
         for lane, connection in connections.items():
             for table in sorted(RETIRED_TABLES):
-                _expect_denied(
+                _expect_retired_table_read_denied(
                     connection,
-                    f"SELECT * FROM public.{table} LIMIT 1",
-                    label=f"{lane} retired table read {table}",
+                    table,
+                    lane=lane,
                 )
         _expect_denied(
             connections["app"],

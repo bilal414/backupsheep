@@ -47,6 +47,33 @@ class ArtifactProviderMigrationTests(SimpleTestCase):
 
         return SimpleNamespace(get_model=get_model)
 
+    def test_exact_legacy_tables_use_literal_inventory_probes(self):
+        self.assertEqual(
+            tuple(migration._LEGACY_BACKUP_PROBE_SQL_BY_TABLE),
+            migration.LEGACY_BACKUP_TABLES,
+        )
+        for table_name in migration.LEGACY_BACKUP_TABLES:
+            with self.subTest(table_name=table_name):
+                cursor = mock.Mock()
+                migration._execute_legacy_backup_probe(cursor, table_name)
+                cursor.execute.assert_called_once_with(
+                    migration._LEGACY_BACKUP_PROBE_SQL_BY_TABLE[table_name]
+                )
+
+    def test_hostile_or_unknown_legacy_table_never_reaches_cursor(self):
+        cursor = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "unreviewed"):
+            migration._execute_legacy_backup_probe(
+                cursor,
+                "core_website_backup; DROP TABLE core_backup_artifact; --",
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "unreviewed"):
+            migration._execute_legacy_backup_probe(cursor, ["core_website_backup"])
+
+        cursor.execute.assert_not_called()
+
     def test_prior_local_development_wrap_blocks_local_file_transition(self):
         historical_apps = self._historical_apps(1)
 

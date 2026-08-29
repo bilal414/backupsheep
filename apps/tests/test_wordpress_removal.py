@@ -12,7 +12,7 @@ from django.apps import apps as django_apps
 from django.conf import settings
 from django.db import connection, transaction
 from django.db.migrations import SeparateDatabaseAndState
-from django.test import TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
 from rest_framework import status
@@ -468,6 +468,43 @@ class WordPressRemovalTests(BaseTestCase):
         for lane, policy in LANE_TABLE_POLICY.items():
             with self.subTest(lane=lane):
                 self.assertTrue(RETIRED_TABLES.isdisjoint(policy))
+
+
+class WordPressRetiredSqlAllowlistTests(SimpleTestCase):
+    def test_exact_retired_fingerprints_use_literal_orphan_probes(self):
+        migration = import_module(
+            "apps._migrations.0048_detach_retired_wordpress_foreign_keys"
+        )
+        self.assertEqual(
+            {fingerprint[1] for fingerprint in migration.EXTERNAL_FOREIGN_KEYS},
+            LEGACY_TABLES,
+        )
+
+        for fingerprint in migration.EXTERNAL_FOREIGN_KEYS:
+            with self.subTest(child_table=fingerprint[1]):
+                cursor = mock.Mock()
+                migration._execute_orphan_probe(cursor, fingerprint)
+                cursor.execute.assert_called_once_with(
+                    migration._ORPHAN_PROBE_SQL_BY_FINGERPRINT[fingerprint]
+                )
+
+    def test_hostile_or_unknown_orphan_identifier_never_reaches_cursor(self):
+        migration = import_module(
+            "apps._migrations.0048_detach_retired_wordpress_foreign_keys"
+        )
+        hostile = list(migration.EXTERNAL_FOREIGN_KEYS[0])
+        hostile[1] = "core_auth_wordpress; DROP TABLE core_connection; --"
+        cursor = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "unreviewed"):
+            migration._execute_orphan_probe(cursor, tuple(hostile))
+
+        cursor.execute.assert_not_called()
+
+        with self.assertRaisesRegex(RuntimeError, "unreviewed"):
+            migration._execute_orphan_probe(cursor, hostile)
+
+        cursor.execute.assert_not_called()
 
 
 class WordPressRetiredSchemaFlushTests(TransactionTestCase):
