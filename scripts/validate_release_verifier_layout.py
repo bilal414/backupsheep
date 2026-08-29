@@ -119,7 +119,7 @@ EXPECTED_SYFT_SCHEMA = {
     ),
 }
 EXPECTED_TRIVY_VERSION = "0.74.0"
-EXPECTED_INDEX_CREATED = "2026-08-05T23:43:27Z"
+EXPECTED_BUILD_TIMESTAMP = "2026-08-29T00:00:00Z"
 
 EXPECTED_HISTORY = (
     (
@@ -521,7 +521,9 @@ def _validate_history(config: dict[str, Any]) -> None:
     if len(history) != len(EXPECTED_HISTORY):
         _fail("image config history is not the exact scratch-verifier history")
     created = _timestamp(config.get("created"), "image config created")
-    previous: datetime | None = None
+    expected_created = _timestamp(EXPECTED_BUILD_TIMESTAMP, "expected build timestamp")
+    if created != expected_created:
+        _fail("image config created timestamp is not reproducibly bound")
     for index, (raw, expected) in enumerate(zip(history, EXPECTED_HISTORY, strict=True)):
         item = _object(raw, f"image config history[{index}]")
         created_by, empty = expected
@@ -530,19 +532,14 @@ def _validate_history(config: dict[str, Any]) -> None:
             expected_keys.add("empty_layer")
         _exact_keys(item, expected_keys, f"image config history[{index}]")
         when = _timestamp(item["created"], f"image config history[{index}].created")
-        if previous is not None and when < previous:
-            _fail("image config history timestamps are not monotonic")
-        if when > created:
-            _fail("image config history postdates the image config")
-        previous = when
+        if when != expected_created:
+            _fail("image config history timestamp is not reproducibly bound")
         if (
             item["created_by"] != created_by
             or item["comment"] != "buildkit.dockerfile.v0"
             or (empty and item.get("empty_layer") is not True)
         ):
             _fail(f"image config history[{index}] is not exact")
-    if previous != created:
-        _fail("image config created timestamp does not match its final history entry")
 
 
 def _validate_config(
@@ -797,7 +794,7 @@ def _validate_layout(
         _fail("OCI root descriptor does not match --index-digest")
     if root_descriptor["annotations"] != {
         "io.containerd.image.name": f"{repository}:{tag}",
-        "org.opencontainers.image.created": EXPECTED_INDEX_CREATED,
+        "org.opencontainers.image.created": EXPECTED_BUILD_TIMESTAMP,
         "org.opencontainers.image.ref.name": tag,
     }:
         _fail("OCI root descriptor is not bound to the requested repository and tag")

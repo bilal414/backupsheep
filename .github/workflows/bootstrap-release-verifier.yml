@@ -154,19 +154,22 @@ jobs:
       - name: Build the patched multi-platform verifier into a private OCI layout
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        env:
+          SOURCE_DATE_EPOCH: "1787961600"
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.release-verifier
           platforms: linux/amd64,linux/arm64
+          build-args: BUILDKIT_MULTI_PLATFORM=1
           pull: true
           no-cache: true
           push: false
-          outputs: type=oci,dest=${{ github.workspace }}/release-verifier-bootstrap/layout,tar=false,name=${{ env.QUARANTINE_REPOSITORY }}:${{ env.CANDIDATE_TAG }}
+          outputs: type=oci,dest=${{ github.workspace }}/release-verifier-bootstrap/layout,tar=false,name=${{ env.QUARANTINE_REPOSITORY }}:${{ env.CANDIDATE_TAG }},rewrite-timestamp=true
           tags: ghcr.io/bilal414/backupsheep-release-verifier-quarantine:${{ env.CANDIDATE_TAG }}
           # BuildKit otherwise injects the wall clock into the root descriptor.
-          # Bind it to the reviewed upstream tag commit for an exact,
-          # reproducible outer-layout contract.
-          annotations: index-descriptor:org.opencontainers.image.created=2026-08-05T23:43:27Z
+          # Bind it to the reviewed patched-build epoch for an exact,
+          # reproducible image and outer-layout contract.
+          annotations: index-descriptor:org.opencontainers.image.created=2026-08-29T00:00:00Z
           provenance: false
           sbom: false
 

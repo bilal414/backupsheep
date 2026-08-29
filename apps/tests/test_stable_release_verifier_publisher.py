@@ -56,7 +56,7 @@ class StableReleaseVerifierPublisherTests(unittest.TestCase):
                     "size": len(self.index),
                     "annotations": {
                         "io.containerd.image.name": f"{self.quarantine}:{self.candidate_tag}",
-                        "org.opencontainers.image.created": publisher.EXPECTED_INDEX_CREATED,
+                        "org.opencontainers.image.created": publisher.EXPECTED_BUILD_TIMESTAMP,
                         "org.opencontainers.image.ref.name": self.candidate_tag,
                     },
                 }

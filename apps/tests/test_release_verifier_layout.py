@@ -102,12 +102,10 @@ class VerifierFixture:
 
     @staticmethod
     def _history() -> list[dict]:
-        first = "2026-08-29T15:00:00Z"
-        last = "2026-08-29T15:00:01Z"
         result = []
-        for index, (created_by, empty) in enumerate(verifier.EXPECTED_HISTORY):
+        for created_by, empty in verifier.EXPECTED_HISTORY:
             item = {
-                "created": first if index < 2 else last,
+                "created": verifier.EXPECTED_BUILD_TIMESTAMP,
                 "created_by": created_by,
                 "comment": "buildkit.dockerfile.v0",
             }
@@ -147,7 +145,7 @@ class VerifierFixture:
                     "WorkingDir": "/",
                     "Labels": verifier.EXPECTED_LABELS,
                 },
-                "created": "2026-08-29T15:00:01Z",
+                "created": verifier.EXPECTED_BUILD_TIMESTAMP,
                 "history": self._history(),
                 "os": "linux",
                 "rootfs": {
@@ -203,7 +201,7 @@ class VerifierFixture:
         index_descriptor["mediaType"] = verifier.OCI_INDEX
         index_descriptor["annotations"] = {
             "io.containerd.image.name": f"{self.repository}:{self.tag}",
-            "org.opencontainers.image.created": verifier.EXPECTED_INDEX_CREATED,
+            "org.opencontainers.image.created": verifier.EXPECTED_BUILD_TIMESTAMP,
             "org.opencontainers.image.ref.name": self.tag,
         }
         self.index_digest = index_descriptor["digest"]
@@ -603,6 +601,18 @@ class ReleaseVerifierLayoutTests(TestCase):
                 expected_diff_ids=tuple(unsafe["rootfs"]["diff_ids"]),
             )
 
+    def test_wall_clock_image_history_is_rejected(self):
+        image = self.fixture.images["linux/amd64"]
+        unsafe = copy.deepcopy(image["config"])
+        unsafe["created"] = "2026-08-29T16:06:29Z"
+        unsafe["history"][-1]["created"] = "2026-08-29T16:06:29Z"
+        with self.assertRaisesRegex(verifier.ValidationError, "reproducibly bound"):
+            verifier._validate_config(
+                json.dumps(unsafe, separators=(",", ":")).encode(),
+                architecture="amd64",
+                expected_diff_ids=tuple(unsafe["rootfs"]["diff_ids"]),
+            )
+
     def test_layer_path_traversal_link_and_wrong_elf_architecture_are_rejected(self):
         raw = io.BytesIO()
         with tarfile.open(fileobj=raw, mode="w") as archive:
@@ -794,6 +804,9 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
         )
         self.assertIn(
             "index-descriptor:org.opencontainers.image.created="
-            + verifier.EXPECTED_INDEX_CREATED,
+            + verifier.EXPECTED_BUILD_TIMESTAMP,
             build_step,
         )
+        self.assertIn('SOURCE_DATE_EPOCH: "1787961600"', build_step)
+        self.assertIn("BUILDKIT_MULTI_PLATFORM=1", build_step)
+        self.assertIn("rewrite-timestamp=true", build_step)
