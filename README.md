@@ -31,8 +31,11 @@
 
 BackupSheep's stock self-hosted artifact encryption is local and does not require
 AWS KMS, AWS credentials, or an AWS account. The installer creates separate,
-installation-bound keyrings for database and file backups; AWS remains an optional
-source or storage integration only when an operator chooses it.
+installation-bound keyrings for database and file backups. The current runtime providers
+are `local-file` for production and `local-development` for development/test only;
+`aws-kms` remains solely as a historical migration/rollback identifier and cannot be
+selected by the current runtime. AWS remains optional only when an operator chooses an
+AWS source, storage destination, or Amazon SES email integration.
 
 ### Backup anything
 

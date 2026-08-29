@@ -40,7 +40,9 @@ chmod 700 install.sh
 ```
 
 The installer generates independent database/files artifact keyrings locally; no external
-key service or host credential is required. Back up both keyrings before enabling work.
+key service, AWS account, or AWS credential is required for artifact encryption. AWS
+credentials remain optional only for a configured AWS source, storage destination, or
+Amazon SES email integration. Back up both keyrings before enabling work.
 
 By default, run it as the same unprivileged user that is already authorized for the
 intended Docker daemon. Root and `sudo` remain refused unless the operator supplies the

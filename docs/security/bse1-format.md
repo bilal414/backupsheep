@@ -101,6 +101,12 @@ plaintext byte count, and the plaintext digest authenticate. A filesystem that
 cannot provide anonymous staging is rejected rather than given a readable
 partial-plaintext fallback.
 
+`O_TMPFILE` and publication through `linkat(AT_EMPTY_PATH)` are Linux- and
+filesystem-dependent. Production acceptance must exercise sealing and an isolated,
+data-verified restore on each exact worker mount; a settings check or health endpoint does
+not prove these primitives. Repeat that proof after changing the runtime, kernel,
+filesystem, volume driver, or mount options.
+
 ## Deterministic interoperability vector
 
 The normative BSE1 byte vector is

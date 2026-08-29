@@ -127,7 +127,15 @@ Stock production requires BSE1 chunked AES-256-GCM-SIV envelopes, enterprise mod
 independent database/files 256-bit keyrings under `.secrets`; Compose grants each only to
 its matching source worker. Storage receives ciphertext and no root key. This artifact
 encryption path requires no AWS account, AWS credentials, or AWS KMS; AWS is used only
-when an operator separately configures an optional AWS source or storage integration.
+when an operator separately configures an optional AWS source, storage destination, or
+Amazon SES email integration.
+
+The current runtime provider registry contains only `local-file` and
+`local-development`. `local-file` is the stock production provider;
+`local-development` is for development/test and is rejected in production enterprise
+mode. `aws-kms` is not an active runtime provider: the exact historical identifier remains
+only so the installer and schema history can recognize a legacy policy for a fail-closed
+migration or rollback. It does not load an AWS KMS client or convert an existing KMS wrap.
 
 When `DJANGO_SERVER=prod`, omitting `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE` defaults to
 `bse1`; a direct deployment does not silently write plaintext. `legacy-only` remains an
@@ -137,6 +145,11 @@ hardened production default.
 Back up both keyrings with the PostgreSQL recovery set. Reruns preserve their exact bytes,
 and a missing keyring in an existing installation fails closed rather than generating a
 replacement. Enterprise mode rejects the environment-backed local-development provider.
+These are exportable software keys stored on filesystems, not non-exportable HSM/KMS
+keys. Code in the matching source lane, the Docker daemon, or host administrators can
+access that lane's root material; protect the host and independently encrypted off-host
+copies accordingly. The stock runtime does not currently provide a hardware-backed
+artifact-key provider.
 See [Private staging and ciphertext handoff](security/staging-isolation.md) for rotation,
 legacy-key retention, loss consequences, and non-Docker operation.
 

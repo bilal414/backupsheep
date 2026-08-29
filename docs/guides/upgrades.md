@@ -194,6 +194,10 @@ deployment `.env` *before* rendering or building the model:
 This release replaces the prerelease artifact key-provider model with two local-file
 keyrings. An existing installation that records a blank, development-only or retired
 provider may transition only through `--migrate-artifact-key-provider-empty`. The
+current runtime provider registry contains only production `local-file` and
+development/test-only `local-development`; the historical `aws-kms` identifier is
+recognized only by this migration/rollback gate and cannot be selected by current code.
+This is an exact-empty adoption, not a KMS decrypt/rewrap conversion. The
 `migrate` one-shot applies schema changes and then performs a fresh current-state query;
 it succeeds only when `CoreBackupKeyWrap` contains exactly zero rows, including retired,
 pending and manual-review rows; `CoreBackupArtifact` contains no `legacy_zip` row of any
@@ -282,6 +286,25 @@ review the provider configuration and rerun without the migration flag and with
 lane and retained-key-ID boundaries. Preserve an independent encrypted off-host recovery
 copy even after successful cleanup. Do not invoke a long-lived service or edit pending
 metadata by hand.
+
+A crash can occur after generation `1` is activated but before local rollback/credential
+cleanup. In that state the protected `artifact_provider_transition_rollback` file remains,
+and the next installer run refuses ordinary startup. Keep operations disabled and rerun
+the same reviewed target with `--migrate-artifact-key-provider-empty`; the installer
+revalidates the rollback digest, sealed local-file database state, rendered model,
+authenticated preflight and healthy core before cleanup. Do not delete the marker or
+legacy credential files, edit generation/witness values, or rerun without the flag to
+force activation.
+
+Accepted installer cleanup retires only the validated local legacy credential files and
+rollback policy; it cannot revoke anything in AWS. As a separate post-retirement operator
+action, disable/revoke the legacy IAM access keys or role access, remove AWS KMS grants and
+key-policy permissions, and verify the remote identities no longer authorize use. Scope
+that action to the exact retired artifact-KMS principal; do not revoke credentials still
+used by an explicitly configured AWS source, storage destination, or Amazon SES. Do not
+disable or schedule deletion of a KMS key while any approved old-release rollback,
+retention, legal-hold, or recovery set still depends on it; key deletion is a separate
+destructive decision with its own evidence and approval.
 
 For an eligible generation-2 database, that pre-hardening bootstrap must stage every
 applicable database generation-3, staging-v3, RabbitMQ identity-generation-2 and

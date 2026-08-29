@@ -351,7 +351,10 @@ encrypted, access-audited off-host copies with PostgreSQL. A database restore wi
 same keyrings cannot decrypt existing BSE1 artifacts; generating replacement keys does not
 recover them. The installer creates each file once with a 256-bit random key, validates
 owner/mode/link/content on every rerun, and preserves the exact bytes. It refuses a missing
-keyring in an existing installation.
+keyring in an existing installation. These are exportable software keys, not
+non-exportable HSM/KMS keys: the matching source worker, Docker daemon, and host
+administrators are inside the custody boundary. The stock runtime does not currently
+provide a hardware-backed artifact-key provider.
 
 Inspect IDs without printing key material, then stop all operations before rotating one
 lane. Supply the observed active ID as a replay/staleness witness:
@@ -406,11 +409,15 @@ the files keyring):
 ```
 
 Continue bounded batches until `remaining_source=0`. Retain the old key through the
-maximum in-flight/retry/retention window. There is intentionally no automatic prune:
-remove a legacy key only in a separately reviewed change after the database proves that
-no non-retired wrap in that lane references its ID. Pending/manual-review generations
-must be reconciled or explicitly retired before pruning; checking active rows alone is
-insufficient and causes source startup to fail closed.
+maximum in-flight/retry/retention window. Rotation is not crypto-erasure: it retains the
+old root and retired wraps for recovery. There is intentionally no automatic prune. Remove
+a legacy key only in a separately reviewed change after a current complete database query
+proves zero non-retired wraps (`pending`, `active`, or `manual_review`) in that lane
+reference its ID. Pending/manual-review generations must be reconciled or explicitly
+retired before pruning; checking active rows alone is insufficient and causes source
+startup to fail closed. A later prune still does not erase copies in snapshots, recovery
+sets, process memory, or exported material; dispose of them under a separately audited
+retention/media-destruction policy.
 After rewrapping, capture and verify a new coordinated recovery set containing PostgreSQL
 and both exact lane keyrings. Keep the post-rotation and post-rewrap evidence together;
 neither a database-only snapshot nor one lane keyring is a complete recovery set.
@@ -454,6 +461,16 @@ only IDs/counts. The keyring header is bound to the original installation ID; a 
 same-lane keyring and a recovered keyring paired with a replacement ID are rejected. Set
 `BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH` only in the matching database or files
 process; every other role must omit it.
+
+BSE1 sealing and restore require Linux `O_TMPFILE` and
+`linkat(AT_EMPTY_PATH)` on the exact destination filesystems. Static settings/container
+health checks do not prove those filesystem primitives. Before enabling operations, run a
+disposable backup and isolated data-verified restore through each database/files lane on
+its production mounts and worker identity; also prove cross-lane/keyring denial. Repeat
+after a runtime, kernel, filesystem, volume-driver, or mount-option change. BackupSheep
+fails closed instead of creating a named partial-plaintext fallback. Native non-Docker
+workers therefore require Linux; a non-Linux host must supply the needed Linux semantics
+through its container/VM.
 
 ## Manual Docker Compose installation
 
@@ -648,8 +665,11 @@ env BACKUPSHEEP_RUNTIME_ROLE=migration \
 ```
 
 Do not substitute plain `manage.py migrate` in production; it does not perform the
-current-state proof. Direct non-Docker installs do not support an in-place transition
-from a blank, `local-development` or retired KMS artifact provider. Keep the old release
+current-state proof. The current runtime registry contains only `local-file` and
+development/test-only `local-development`; `aws-kms` survives solely as a historical
+migration/rollback identifier. Direct non-Docker installs do not support an in-place
+transition from a blank, `local-development` or historical `aws-kms` artifact provider.
+Keep the old release
 and its credentials available while an operator exports/reseals or explicitly retires
 every old archive-backed record, then bootstrap the new direct deployment with empty
 artifact, backup and storage-point inventories. Generation `1-pending-empty` and its

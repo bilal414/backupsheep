@@ -102,6 +102,11 @@ exact bytes; a missing keyring in an existing installation is treated as key los
 is never silently regenerated. Keep protected, encrypted, independently access-audited
 copies of both keyrings with the PostgreSQL recovery set. Losing one keyring makes every
 BSE1 artifact in that lane whose required key is absent cryptographically unrecoverable.
+These roots are exportable software keys. The lane mount boundary prevents unrelated
+containers from receiving them, but it is not equivalent to a non-exportable HSM/KMS:
+code in the matching source lane, the Docker daemon, and host administrators can read that
+lane's keyring. The stock runtime has no hardware-backed artifact provider, so host and
+off-host keyring custody remain explicit trust assumptions.
 
 Rotation is lane-scoped and deliberately two-phase:
 
@@ -115,13 +120,22 @@ Rotation is lane-scoped and deliberately two-phase:
    witness until it reports `remaining_source=0`;
 3. retain the legacy key through the maximum in-flight backup/restore retry and retention
    grace. BackupSheep provides no automatic eviction operation. A separately reviewed
-   prune may occur only after database evidence proves no non-retired wrap references it;
-   pending and manual-review generations must be reconciled or explicitly retired first.
+   prune may occur only after a current complete database query proves that zero
+   non-retired wraps (`pending`, `active`, or `manual_review`) in that lane reference its
+   ID. Pending and manual-review generations must be reconciled or explicitly retired
+   first.
 
 The keyring is capped at eight entries and another rotation refuses rather than evicting
 recovery material. The non-Docker `scripts/manage_artifact_keyring.py` tool provides the
 same create, inspect, and rotate rules for owner-controlled mode-`0700` directories and
 mode-`0400` keyrings; it prints IDs and counts, never root key material.
+
+Rotation is not crypto-erasure: it retains the old root in the keyring and retired wraps
+in PostgreSQL so old recovery state remains usable. Even a later reviewed prune proves
+only that BackupSheep no longer needs that root for any non-retired wrap; it does not erase
+copies in snapshots, encrypted recovery sets, process memory, or previously exported
+material. Dispose of those copies under the operator's separately audited retention and
+media-destruction policy.
 
 ## Restore ciphertext handoff
 
@@ -154,6 +168,23 @@ blocks/inodes available to the unprivileged caller. Configured byte/inode reserv
 are additive to the current operation's
 declared requirement. Fence creation and publication recheck transfer headroom, so
 an exhausted filesystem fails before another handoff is exposed.
+
+## Linux anonymous-staging preflight
+
+BSE1 sealing and restore require Linux `O_TMPFILE` plus `linkat(AT_EMPTY_PATH)` on the
+actual destination filesystem. BackupSheep never falls back to a discoverable named
+partial file when the kernel, C library, mount, or filesystem lacks those primitives. A
+settings check or healthy container cannot prove this filesystem behavior.
+
+Before enabling operations, treat a disposable same-lane backup and isolated restore as
+the operational preflight for each database/files lane on its exact production mounts and
+under its exact worker identity. Verify the restored data digest/content, not only task
+status; also prove that swapping keyrings or crossing lanes is denied before plaintext is
+published. Repeat this proof after changing the container runtime, kernel, filesystem,
+volume driver, or mount options. A native non-Docker deployment must run these workers on
+Linux; a non-Linux host is acceptable only when its container/VM supplies the required
+Linux filesystem semantics. An `O_TMPFILE` refusal is a compatibility failure to fix, not
+a gate to bypass.
 
 ## Existing installations
 

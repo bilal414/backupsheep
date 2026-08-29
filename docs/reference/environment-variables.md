@@ -224,7 +224,7 @@ semicolon failover list whose members could cross transport trust boundaries.
 | `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE` | `bse1` | Requires the versioned chunked AES-256-GCM-SIV envelope; stock production does not write legacy plaintext artifacts |
 | `BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE` | `true` | Enforces BSE1, lane-scoped local-file keys and legacy-restore denial |
 | `BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE` | `false` | Must remain false in enterprise mode; an old non-BSE1 object fails closed |
-| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER` | `local-file` | Sole stock production provider. `local-development` is rejected in production/enterprise mode |
+| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER` | `local-file` | Current runtime providers are production `local-file` and development/test-only `local-development`; production/enterprise mode rejects the latter. Historical `aws-kms` is recognized only by migration/rollback handling and is not selectable at runtime |
 | `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION` | blank sample; production requires sealed `1` | Provider-policy generation. The installer owns it for Docker. A fresh direct deployment derives generation `1` with the reviewed lifecycle command; `1-pending-empty` disables long-lived roles and is reserved for the installer's stopped-operations adoption proof. Never edit it to bypass a transition |
 | `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS` | blank sample; production requires SHA-256 witness | Installation-ID, provider and generation-bound policy witness. Settings and preflight recompute it and fail closed on drift. Docker uses the installer-owned value; fresh direct deployments use `manage_artifact_keyring.py policy-witness`. Never copy it between installations or synthesize it to bypass a pending transition |
 | `BACKUPSHEEP_ARTIFACT_CHUNK_SIZE` | `4194304` | Authenticated-record plaintext bytes; accepted range is 64 KiB through 64 MiB |
@@ -240,8 +240,16 @@ database recovery set. See [Private staging and ciphertext handoff](../security/
 before enabling operations or rotating a key wrap.
 
 The `local-file` artifact provider requires no AWS account, credentials, or KMS service.
-AWS credentials are needed only for optional AWS sources or storage destinations that an
-operator explicitly configures.
+AWS credentials are needed only for optional AWS sources, storage destinations, or Amazon
+SES email that an operator explicitly configures. The historical `aws-kms` identifier in
+schema migrations and installer rollback handling does not load a current KMS provider or
+convert old ciphertext.
+
+The two local-file roots are exportable software keys, not non-exportable HSM/KMS keys.
+The matching source lane necessarily reads its own root, and the Docker daemon or host
+administrator can access mounted key material. Protect those boundaries and the separately
+encrypted off-host recovery copies; the stock runtime does not currently offer a
+hardware-backed artifact-key provider.
 
 Direct production deployments also default an omitted encryption mode to `bse1` when
 `DJANGO_SERVER=prod`. `legacy-only` must be selected explicitly for a bounded

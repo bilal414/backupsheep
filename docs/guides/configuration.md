@@ -203,12 +203,26 @@ the `local-file` provider, and legacy restore disabled. The installer creates se
 database/files keyrings beneath `.secrets` and mounts each only into its matching source
 lane. Storage, web, cloud, logs and Beat receive neither keyring nor path. No AWS account,
 credentials, or KMS service is required for artifact encryption; AWS remains optional
-only for users who configure an AWS source or storage destination.
+only for users who configure an AWS source, storage destination, or Amazon SES email
+integration.
+
+The current runtime provider registry contains exactly `local-file` and
+`local-development`. The latter is development/test-only and production enterprise mode
+rejects it. `aws-kms` is retained only as a historical schema and installer
+migration/rollback identifier; it is not selectable, imports no current KMS provider, and
+does not silently translate old wraps. A legacy installation may use the explicit
+exact-empty transition in the [upgrade guide](upgrades.md#upgrade-to-the-exact-reviewed-commit)
+only after every old artifact and backup inventory gate passes.
 
 The strict keyring contains one active 256-bit key and at most seven retained legacy keys.
 Wrapping authenticates the complete installation-bound artifact context, including the
 lane. Reruns preserve exact keyring bytes, and existing-install key loss is never hidden by
 regeneration. Enterprise mode rejects the environment-backed local-development provider.
+The keyrings are exportable software custody, not non-exportable HSM/KMS custody. The
+matching source lane necessarily reads its own root; the Docker daemon and host
+administrators can also access mounted material. Protect those boundaries and encrypted
+off-host keyring copies accordingly. The stock runtime has no hardware-backed artifact
+provider.
 See [Private staging and ciphertext handoff](../security/staging-isolation.md) for backup,
 rotation, recovery, and non-Docker procedures.
 

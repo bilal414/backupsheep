@@ -105,6 +105,8 @@ recovery set. PostgreSQL identifies each wrapping key and stores the authenticat
 wrap; only the matching lane keyring supplies that root key. Losing, replacing, pruning or
 regenerating either keyring is irreversible for every retained artifact that references a
 missing key, even when its ciphertext and the database both survive.
+The files are exportable software keys rather than non-exportable HSM/KMS keys; protect
+host access and every off-host copy as part of the custody boundary.
 
 ### 3. Protect Local Storage and work material
 
@@ -241,6 +243,10 @@ Verify:
 - an isolated known database artifact unwraps only with the restored database keyring and
   a known files artifact unwraps only with the restored files keyring; swapping the two
   keyrings or crossing either lane is rejected before any plaintext is released;
+- BSE1 sealing and isolated restore on each exact recovered worker mount succeeds under
+  its real worker identity, proving Linux `O_TMPFILE` plus `linkat(AT_EMPTY_PATH)` support;
+  verify the restored data digest/content rather than accepting container health or task
+  completion as filesystem/recovery proof;
 - account-scoped SSH approvals and append-only approval events are present in PostgreSQL;
   an operation receives only its exact current approval in a transient private-runtime
   file, and unknown or changed keys remain rejected;
