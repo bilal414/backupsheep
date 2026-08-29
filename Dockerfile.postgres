@@ -6,13 +6,19 @@
 FROM postgres:18.6-alpine3.24@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
 
 LABEL com.backupsheep.postgres.runtime-generation="18.6-alpine3.24-icu-v1" \
-      com.backupsheep.postgres.base-index-digest="sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
+      com.backupsheep.postgres.base-index-digest="sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2" \
+      com.backupsheep.postgres.openssl-package-version="3.5.8-r0"
 
 RUN set -eux; \
     printf '%s  %s\n' 9c440299ae04a0a79d55b8bf03307036d890a40979d2fb698073c9050d4b20a5 /usr/local/bin/docker-entrypoint.sh \
         | sha256sum -c -; \
     test "$(grep -Fc 'exec gosu postgres "$BASH_SOURCE" "$@"' /usr/local/bin/docker-entrypoint.sh)" = 1; \
-    apk add --no-cache 'su-exec=0.3-r0'; \
+    apk add --no-cache \
+        'libcrypto3=3.5.8-r0' \
+        'libssl3=3.5.8-r0' \
+        'su-exec=0.3-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libcrypto3-3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libssl3-3.5.8-r0'; \
     apk info -v 2>/dev/null | grep -Fxq 'su-exec-0.3-r0'; \
     sed -i \
         's#exec gosu postgres "$BASH_SOURCE" "$@"#exec su-exec postgres "$BASH_SOURCE" "$@"#' \
