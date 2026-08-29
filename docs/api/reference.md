@@ -53,7 +53,6 @@ Provider-specific connection families:
 | `connections/google_cloud/` | CRUD, `endpoints`, `objects`, `validate`. |
 | `connections/database/` | CRUD, `endpoints`, `objects`, `update_db_type_and_version`, `validate`. |
 | `connections/website/` | CRUD, `endpoints`, `objects`, `validate`. |
-| `connections/wordpress/` | CRUD, `endpoints`, `objects`, `validate`. |
 | `connections/basecamp/` | CRUD, `endpoints`, `objects`, `validate`. |
 
 ## Sources and nodes
@@ -68,7 +67,7 @@ Source families:
 |---|---|---|
 | Databases | `databases/` | CRUD, `connections`, `totals`. |
 | Websites | `websites/` | CRUD, `connections`, `totals`. |
-| SaaS | `saas/wordpress/`, `saas/basecamp/` | CRUD, `connections`, `generate_key`, `totals`. |
+| SaaS | `saas/basecamp/` | CRUD, `connections`, `generate_key`, `totals`. |
 | Cloud | `clouds/digitalocean/`, `aws/`, `vultr/`, `vultr_database/`, `ovh_ca/`, `ovh_eu/`, `ovh_us/`, `aws_rds/`, `lightsail/`, `lightsail_database/`, `hetzner/`, `upcloud/`, `oracle/`, `google_cloud/` | CRUD, `connections`, `totals`; Vultr servers also expose `automatic-backups`. |
 | Volumes | `volumes/digitalocean/`, `aws/`, `vultr/`, `ovh_ca/`, `ovh_eu/`, `ovh_us/`, `lightsail/`, `upcloud/`, `oracle/`, `google_cloud/` | CRUD, `connections`, `totals`. |
 
@@ -133,7 +132,6 @@ Every backup family exposes list/create, detail CRUD, and `cancel`. Most expose
 |---|---|
 | `backups/database/` | download, transfer log, restore, restore history, resume restore, retry, storage points. |
 | `backups/website/` | download, directory tree, transfer log, restore, restore history, retry, storage points. |
-| `backups/wordpress/` | download, transfer log, retry, storage points. |
 | `backups/basecamp/` | download, transfer log, retry, storage points. |
 | `backups/vultr_database/` | managed database restore. |
 | `backups/digitalocean/` | provider snapshot CRUD, chart data, cancel. |
@@ -150,9 +148,9 @@ Every backup family exposes list/create, detail CRUD, and `cancel`. Most expose
 The archive-family `download` actions remain routed for API compatibility, but the stock
 enterprise pipeline refuses direct download for BSE1 artifacts. The Local Storage file
 route likewise returns a conflict for BSE1 rather than exposing ciphertext as a ZIP. Use
-the authenticated database/website restore actions; WordPress and Basecamp currently have
-no authenticated BSE1 plaintext-export or automatic-restore action. Stock enterprise mode
-therefore omits both from capability/connection choices and returns a generic HTTP `409`
+the authenticated database/website restore actions; Basecamp currently has no
+authenticated BSE1 plaintext-export or automatic-restore action. Stock enterprise mode
+therefore omits it from capability/connection choices and returns a generic HTTP `409`
 recovery-unavailable refusal at new-connection, node, schedule, on-demand, retry, outbox,
 and worker initiation boundaries. Durable outbox rows record
 `SOURCE_RECOVERY_UNAVAILABLE`. Read/list and destructive retention operations remain

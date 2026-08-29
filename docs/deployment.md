@@ -106,7 +106,7 @@ Named volumes in the Compose stack:
 | retired `pgdata` | not mounted | Detached Debian/UID-999 rollback evidence after the explicit logical migration |
 | `rabbitmq_data` | `/var/lib/rabbitmq` (RabbitMQ) | Broker metadata and durable queued messages |
 | `database_workdir` | `/code/_storage` in `worker-database` only | Private plaintext database dump/restore work and database run logs |
-| `files_workdir` | `/code/_storage` in `worker-files` only | Private website/WordPress/Basecamp work, incremental cache and files-lane run logs |
+| `files_workdir` | `/code/_storage` in `worker-files` only | Private website/Basecamp work, incremental cache and files-lane run logs |
 | `storage_workdir` | `/code/_storage` in `worker-storage` only | Private BSE1 materialization, provider transfer work and destination-upload run logs |
 | `database_ciphertext_transfer` | `/var/lib/backupsheep/transfer/database` | Database writes a fenced BSE1 handoff; storage receives it read-only |
 | `files_ciphertext_transfer` | `/var/lib/backupsheep/transfer/files` | Files writes a fenced BSE1 handoff; storage receives it read-only |

@@ -66,7 +66,7 @@
         <div class="nav-group">
           <p class="nav-group-label">Protect</p>
           <a href="#cloud-backups" data-route="cloud-backups"><svg><use href="#icon-cloud"/></svg><span>Cloud snapshots</span></a>
-          <a href="#website-backups" data-route="website-backups"><svg><use href="#icon-folder"/></svg><span>Websites &amp; WordPress</span></a>
+          <a href="#website-backups" data-route="website-backups"><svg><use href="#icon-folder"/></svg><span>Websites</span></a>
           <a href="#database-backups" data-route="database-backups"><svg><use href="#icon-database"/></svg><span>Databases</span></a>
           <a href="#data-backups" data-route="data-backups"><svg><use href="#icon-archive"/></svg><span>AWS data &amp; SaaS</span></a>
           <a href="#storage" data-route="storage"><svg><use href="#icon-storage"/></svg><span>Storage destinations</span></a>
@@ -247,7 +247,7 @@
               <div class="definition-list">
                 <article><h3>Account</h3><p>The tenant boundary for connections, nodes, storage, schedules, activity, notification channels, and memberships. Switching the current account changes scope; it does not move data.</p><span class="tag">Tenant-owned</span></article>
                 <article><h3>Connection</h3><p>Account-scoped encrypted credentials plus provider/source settings. Validation exercises the adapter but does not prove a backup or restore.</p><span class="tag">Secret-bearing</span></article>
-                <article><h3>Node</h3><p>A protected workload: a cloud resource, volume, website, database, WordPress site, or Basecamp selection. Node settings define what the backup engine should include.</p><span class="tag">Protection scope</span></article>
+                <article><h3>Node</h3><p>A protected workload: a cloud resource, volume, website, database, or Basecamp selection. Node settings define what the backup engine should include.</p><span class="tag">Protection scope</span></article>
                 <article><h3>Schedule</h3><p>A database-backed policy that binds nodes, timing, destination copies, retention, and notification behavior. An on-demand run still produces the same durable backup records.</p><span class="tag">Policy</span></article>
                 <article><h3>Backup request</h3><p>The accepted intent and dispatch outbox. It survives a publish failure and lets recovery republish work without inventing a second request.</p><span class="tag verified">Durable intent</span></article>
                 <article><h3>Backup &amp; execution</h3><p>The customer-visible run and its operational ledger: correlation, phase, attempts, leases, errors, provider identity, progress, artifact evidence, and reconciliation.</p><span class="tag verified">Durable outcome</span></article>
@@ -302,7 +302,7 @@
                     <tr><td><strong>app</strong></td><td>Gunicorn :8000</td><td>Console, API, onboarding, validation, static delivery</td><td>PostgreSQL/RabbitMQ only; no work or <code>/backups</code> mount</td></tr>
                     <tr><td><strong>worker-cloud</strong></td><td><code>cloud,default</code></td><td>Provider-native snapshots, restores, polling, general tasks</td><td>Stateless; no work or <code>/backups</code> mount</td></tr>
                     <tr><td><strong>worker-database</strong></td><td><code>database</code></td><td>MySQL, MariaDB, PostgreSQL dumps and database restores</td><td>Database-private work + exact forward/reverse ciphertext lanes</td></tr>
-                    <tr><td><strong>worker-files</strong></td><td><code>files</code></td><td>Website, WordPress, and Basecamp collection/restores</td><td>Files-private work/cache + exact forward/reverse ciphertext lanes</td></tr>
+                    <tr><td><strong>worker-files</strong></td><td><code>files</code></td><td>Website and Basecamp collection/restores</td><td>Files-private work/cache + exact forward/reverse ciphertext lanes</td></tr>
                     <tr><td><strong>worker-storage</strong></td><td><code>storage</code></td><td>BSE1 upload/readback, finalization, restore staging, cleanup</td><td>Storage-private work; read-only source handoffs; writable reverse handoff and <code>/backups</code></td></tr>
                     <tr><td><strong>worker-logs</strong></td><td><code>logs</code></td><td>Activity and notification fan-out</td><td>No work or <code>/backups</code> mount</td></tr>
                     <tr><td><strong>beat</strong></td><td>database scheduler</td><td>Schedule occurrences, recovery, retention, maintenance dispatch</td><td>Singleton; no work or <code>/backups</code> mount</td></tr>
@@ -482,7 +482,7 @@
             <section id="cloud-model" class="section-block">
               <div class="placement-comparison">
                 <article class="native-path"><div class="path-title"><svg><use href="#icon-cloud"/></svg><div><small>Provider-native</small><h2>Snapshot or recovery point</h2></div></div><div class="mini-flow"><span>Node</span><i></i><span>Provider API</span><i></i><span>Owned backup ID</span><i></i><span>New-resource restore</span></div><p>The provider retains the protected data. Schedule destinations do not apply. Retention calls the same provider adapter using stored ownership evidence.</p></article>
-                <article class="archive-path"><div class="path-title"><svg><use href="#icon-archive"/></svg><div><small>Archive-producing</small><h2>Verified file copied offsite</h2></div></div><div class="mini-flow"><span>Node</span><i></i><span>Dump / collect</span><i></i><span>Artifact</span><i></i><span>1…n destinations</span></div><p>Website, logical database, WordPress, and Basecamp jobs create an artifact and require at least one configured storage destination.</p></article>
+                <article class="archive-path"><div class="path-title"><svg><use href="#icon-archive"/></svg><div><small>Archive-producing</small><h2>Verified file copied offsite</h2></div></div><div class="mini-flow"><span>Node</span><i></i><span>Dump / collect</span><i></i><span>Artifact</span><i></i><span>1…n destinations</span></div><p>Website, logical database, and Basecamp jobs create an artifact and require at least one configured storage destination.</p></article>
               </div>
             </section>
 
@@ -535,7 +535,7 @@
             <div class="page-links"><a href="../features/backup-sources.md">Source feature guide</a><a href="../reference/provider-matrix.md">Canonical provider matrix</a><a href="#execution">Retry and reconciliation model</a></div>
           </article>
 
-          <article class="doc-page" data-page="website-backups" data-title="Websites &amp; WordPress">
+          <article class="doc-page" data-page="website-backups" data-title="Websites">
             <header class="page-hero">
               <p class="eyebrow">Archive protection</p>
               <h1>Website backups turn remote trees into verified, portable archives</h1>
@@ -577,15 +577,6 @@
                 <div><i>5</i><strong>Verify</strong><small>manifest · size · hash</small></div><span></span>
                 <div><i>6</i><strong>Copy</strong><small>one storage point each</small></div>
               </div>
-            </section>
-
-            <section id="website-wordpress" class="section-block split-section">
-              <div>
-                <div class="section-heading"><p class="eyebrow">WordPress mode</p><h2>Files, database, or both</h2></div>
-                <p>The WordPress connection/plugin workflow can protect the database and files together, database only, or files only. The result is an archive copied to storage destinations.</p>
-                <p class="muted"><strong>Recovery boundary:</strong> direct BSE1 artifact download is disabled, no authenticated WordPress export or automatic restore workflow is implemented, and the transfer UI/serializer surface has no complete server action/task. Do not advertise this source family as recoverable protection.</p>
-              </div>
-              <aside class="boundary-card attention"><p class="eyebrow">Separate data planes</p><h3>A green connection is not enough</h3><p>Verify that the WordPress workflow can read both the file tree and database content selected by the node. Test a real archive and application-level recovery.</p></aside>
             </section>
 
             <section id="website-restore" class="section-block">
@@ -762,7 +753,7 @@
             <section id="schedules-destination-policy" class="section-block split-section">
               <div>
                 <div class="section-heading"><p class="eyebrow">Destination policy</p><h2>Placement depends on source type</h2></div>
-                <dl class="stacked-definitions"><div><dt>Archive-producing nodes</dt><dd>Website, logical database, WordPress, and Basecamp schedules require one or more current-account storage destinations.</dd></div><div><dt>Provider-native nodes</dt><dd>Cloud and volume schedules do not take destinations because snapshots/recovery points stay with the provider.</dd></div><div><dt>Required air-gapped copy</dt><dd>An archive schedule can require a selected S3 destination with the enforced air-gap configuration. Failure to validate it stops source work as Storage Validation Failed.</dd></div></dl>
+                <dl class="stacked-definitions"><div><dt>Archive-producing nodes</dt><dd>Website, logical database, and Basecamp schedules require one or more current-account storage destinations.</dd></div><div><dt>Provider-native nodes</dt><dd>Cloud and volume schedules do not take destinations because snapshots/recovery points stay with the provider.</dd></div><div><dt>Required air-gapped copy</dt><dd>An archive schedule can require a selected S3 destination with the enforced air-gap configuration. Failure to validate it stops source work as Storage Validation Failed.</dd></div></dl>
               </div>
               <aside class="boundary-card"><p class="eyebrow">Tenant invariant</p><h3>No cross-account destination</h3><p>The serializer rejects destinations outside the current account and checks that the member can see the scheduled node.</p></aside>
             </section>
@@ -892,7 +883,7 @@
                 <tr><td><strong>AWS S3 / DynamoDB</strong></td><td>AWS Backup job to a distinct target bucket/table</td><td>No source overwrite</td><td>Object versions/table data, encryption, policies, application reads</td></tr>
                 <tr><td><strong>Vultr Managed Database</strong></td><td>Create a new provider-managed database fork</td><td>No</td><td>Engine/plan status, connection, schema/data, application test</td></tr>
                 <tr><td><strong>Lightsail bucket replication</strong></td><td>Copy run/object ledger to selected target prefix</td><td>May write under target prefix</td><td>Key/version/size/checksum and target isolation</td></tr>
-                <tr><td><strong>WordPress / Basecamp archive</strong></td><td>No authenticated export or automatic restore; direct BSE1 download is disabled and transfer is incomplete.</td><td>No automatic change</td><td>Release blocker: implement and rehearse an exact-lane authenticated export or restore path</td></tr>
+                <tr><td><strong>Basecamp archive</strong></td><td>No authenticated export or automatic restore; direct BSE1 download is disabled and transfer is incomplete.</td><td>No automatic change</td><td>Release blocker: implement and rehearse an exact-lane authenticated export or restore path</td></tr>
               </tbody></table></div>
             </section>
 
@@ -1061,7 +1052,7 @@ Authorization: Token &lt;api-key&gt;</code></pre></div>
                 <tr><td><strong>Generic backup CRUD</strong></td><td>Exposes internal bookkeeping fields and does not initiate the supported durable workflow.</td><td>Legacy/internal; use node/schedule initiation and purpose-built restore actions.</td></tr>
                 <tr><td><strong>Aggregate connection create</strong></td><td>Required account/integration fields are read-only in the aggregate serializer.</td><td>Use the provider-specific connection route.</td></tr>
                 <tr><td><strong>Generic account create</strong></td><td>Can create an account without creating the caller's membership.</td><td>Do not automate until ownership/membership creation is atomic.</td></tr>
-                <tr><td><strong>Serializer exposure</strong></td><td>Some member, Slack/email notification, backup, storage-copy, and website/WordPress responses expose secret or internal coordination fields.</td><td>Restrict API access and sanitize serializers before delegated/customer use.</td></tr>
+                <tr><td><strong>Serializer exposure</strong></td><td>Some member, Slack/email notification, backup, storage-copy, and website responses expose secret or internal coordination fields.</td><td>Restrict API access and sanitize serializers before delegated/customer use.</td></tr>
                 <tr><td><strong>Date filters</strong></td><td>Shared filters expect <code>dateFrom</code>/<code>dateTo</code> in <code>DD-Mon-YYYY</code>; malformed values may produce <code>500</code>.</td><td>Validate client-side; remediate server error mapping before declaring a stable contract.</td></tr>
                 <tr><td><strong>Cancel / delete completion</strong></td><td><code>202</code>/<code>204</code> can record local intent while provider/storage cleanup continues or is deferred.</td><td>Poll durable state and prove provider-side outcome; HTTP acceptance is not cleanup proof.</td></tr>
               </tbody></table></div>
@@ -1202,7 +1193,7 @@ Authorization: Token &lt;api-key&gt;</code></pre></div>
 
             <section id="operations-queues" class="section-block">
               <div class="section-heading"><p class="eyebrow">Queue triage</p><h2>Backlog points to the constrained lane</h2></div>
-              <div class="queue-lanes"><article><code>cloud / default</code><p>Provider snapshot/restore polling and general work. Check outbound provider access and rate limits.</p></article><article><code>database</code><p>Logical dumps/restores. Check source network, client version, locks, CPU, work disk.</p></article><article><code>files</code><p>Website/WordPress/Basecamp collection. Check account-scoped SSH approval, file count, cache, source free space.</p></article><article><code>storage</code><p>Upload/download/finalization. A rising backlog with healthy dump lanes indicates destination throughput pressure.</p></article><article><code>logs</code><p>Activity, notifications, pruning. Lag should not rewrite backup terminal state.</p></article></div>
+              <div class="queue-lanes"><article><code>cloud / default</code><p>Provider snapshot/restore polling and general work. Check outbound provider access and rate limits.</p></article><article><code>database</code><p>Logical dumps/restores. Check source network, client version, locks, CPU, work disk.</p></article><article><code>files</code><p>Website/Basecamp collection. Check account-scoped SSH approval, file count, cache, source free space.</p></article><article><code>storage</code><p>Upload/download/finalization. A rising backlog with healthy dump lanes indicates destination throughput pressure.</p></article><article><code>logs</code><p>Activity, notifications, pruning. Lag should not rewrite backup terminal state.</p></article></div>
               <p>Scale the measured bottleneck. Keep database/files concurrency conservative. Stock sample defaults are cloud/database/files/storage/logs = <strong>4 / 1 / 1 / 2 / 2</strong>, all with prefetch multiplier 1.</p>
             </section>
 
@@ -1321,7 +1312,6 @@ Authorization: Token &lt;api-key&gt;</code></pre></div>
                 <tr><td>Website</td><td>FTP/FTPS/SFTP collect or SFTP tar → ZIP → BSE1</td><td>1…n storage destinations</td><td>Fenced authenticated files-lane restore; overlay / exact mirror</td><td><span class="matrix-state limited">Complete only</span> built-in restore rejects Partial backups</td></tr>
                 <tr><td>MySQL / MariaDB</td><td>Logical dump → archive → BSE1</td><td>1…n storage destinations</td><td>Fenced authenticated database-lane restore; fork default; API in-place</td><td><span class="matrix-state implemented">Implemented</span> certify exact server/client/privileges</td></tr>
                 <tr><td>PostgreSQL</td><td>Logical dump → archive → BSE1</td><td>1…n storage destinations</td><td>Fenced authenticated database-lane restore; fork default; API in-place</td><td><span class="matrix-state attention">Known mode gap</span> direct non-table modes need remediation</td></tr>
-                <tr><td>WordPress</td><td>Plugin/API files/database archive → BSE1</td><td>1…n storage destinations</td><td>None in current stock path</td><td><span class="matrix-state unavailable">No authenticated restore/export</span> direct download is disabled</td></tr>
                 <tr><td>Basecamp</td><td>OAuth API export archive → BSE1</td><td>1…n storage destinations</td><td>None in current stock path</td><td><span class="matrix-state unavailable">No authenticated restore/export</span> direct download is disabled</td></tr>
                 <tr><td>Lightsail bucket replication</td><td>Per-object/version copy ledger</td><td>Supported S3-compatible subset</td><td>Target prefix copy</td><td><span class="matrix-state specialized">Specialized API</span> not a normal node schedule</td></tr>
                 <tr><td>Zendesk / Slack source</td><td>None</td><td>—</td><td>—</td><td><span class="matrix-state unavailable">Coming Soon / unavailable</span></td></tr>

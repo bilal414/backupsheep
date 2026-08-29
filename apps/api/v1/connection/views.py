@@ -51,7 +51,10 @@ class CoreConnectionView(viewsets.ModelViewSet):
     def get_queryset(self):
         member = self.request.user.member
         query_partners = Q(account=member.get_current_account())
-        queryset = CoreConnection.objects.filter(query_partners)
+        queryset = CoreConnection.objects.filter(
+            query_partners,
+            integration__enabled=True,
+        )
         if not member.is_primary_account:
             queryset = queryset.filter(nodes__in=visible_nodes(member)).distinct()
         return queryset
@@ -180,7 +183,7 @@ class CoreConnectionView(viewsets.ModelViewSet):
             }
         }
 
-        for integration in CoreIntegration.objects.filter():
+        for integration in CoreIntegration.objects.filter(enabled=True):
             all_totals[integration.code] = {
                 "connections": connections.filter(integration=integration).count(),
                 "paused": connections.filter(

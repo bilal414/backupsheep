@@ -17,7 +17,7 @@ The timezone is stored with the schedule and is used by the periodic scheduler.
 
 ## Destinations by source type
 
-Website, logical database, WordPress, and Basecamp schedules require at least
+Website, logical database, and Basecamp schedules require at least
 one current-account storage destination. Cloud and volume schedules do not take
 storage destinations because their snapshots or recovery points stay at the
 provider.

@@ -989,23 +989,19 @@ be read as current-candidate deployment evidence.
    SAML/OIDC SSO policy, SCIM deprovisioning, governed break-glass access, scoped
    selector-verifier API credentials, and immutable off-host audit evidence remain
    incomplete or unproven.
-8. **WordPress transport is held, not a core release blocker.** The repository now
-   contains an authenticated POST-only protocol-v2 client and plugin, including
-   UUID-scoped download ownership checks, but it does not yet have deployed compatibility
-   evidence. Enterprise/BSE1 mode omits WordPress and Basecamp from capability lists and
-   refuses their connection, schedule, request, outbox and worker mutation paths even
-   when legacy feature flags are true. A release for the supported source families can
-   therefore proceed without silently enabling this protocol. Before enabling WordPress,
-   release the matching plugin, rotate keys, and prove URLs, logs and backup-file
-   ownership stay clean end to end.
-9. **WordPress/Basecamp BSE1 recovery remains intentionally unavailable.** Direct archive
-   download correctly fails closed for encrypted artifacts, and those source families
-   still lack an authenticated plaintext-export or automatic-restore path. Existing rows
-   remain visible for retention and investigation, while new enterprise protection is
-   blocked before mutation or dispatch. Treat this as a feature acceptance gate for
-   those two families, not as recovery coverage; do not advertise or re-enable them until
-   an exact-lane export/restore workflow is implemented, authorization-tested and
-   rehearsed end to end.
+8. **WordPress has been retired from the product.** Runtime models, routes, tasks,
+   connector/plugin code, UI, configuration, packaging and current product documentation
+   are removed. The retirement migration disables historical schedules, nodes,
+   connections and the integration while deliberately retaining the old database tables
+   and columns for non-destructive upgrades. Runtime database lanes have no access to
+   those retained tables.
+9. **Basecamp BSE1 recovery remains intentionally unavailable.** Direct archive download
+   correctly fails closed for encrypted artifacts, and Basecamp still lacks an
+   authenticated plaintext-export or automatic-restore path. Existing rows remain visible
+   for retention and investigation, while new enterprise protection is blocked before
+   mutation or dispatch. Treat this as a feature acceptance gate, not as recovery
+   coverage; do not advertise or re-enable it until an exact-lane export/restore workflow
+   is implemented, authorization-tested and rehearsed end to end.
 
 ### Medium and operational
 
@@ -1064,8 +1060,7 @@ be read as current-candidate deployment evidence.
 5. Add immutable off-host audit export and alerting for auth abuse, preflight changes,
    unexpected task publishers, outbound destinations, disk growth, queue age, and
    container restarts.
-6. Complete enterprise identity, API credential, invite, and WordPress compatibility
-   work.
+6. Complete enterprise identity, API credential, and invite work.
 
 ### P2 — continuous assurance
 

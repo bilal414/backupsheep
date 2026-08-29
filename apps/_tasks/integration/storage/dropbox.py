@@ -35,7 +35,6 @@ from apps.api.v1.utils.api_helpers import bs_decrypt
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreWebsiteBackup,
-    CoreWordPressBackup,
 )
 from apps.console.node.models import CoreNode
 from django.utils import timezone
@@ -799,9 +798,6 @@ def storage_dropbox_delete(node, backup_name):
             backup = CoreWebsiteBackup.objects.get(uuid=backup_name)
         elif node.type == CoreNode.Type.DATABASE:
             backup = CoreDatabaseBackup.objects.get(uuid=backup_name)
-        elif node.type == CoreNode.Type.SAAS:
-            backup = CoreWordPressBackup.objects.get(uuid=backup_name)
-
         if backup:
             dbx = dropbox.Dropbox(
                 oauth2_access_token=bs_decrypt(

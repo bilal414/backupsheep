@@ -106,8 +106,9 @@ from apps._tasks.integration.storage.s3_cleanup import (
 from apps.console.backup.models import (
     CoreWebsiteBackup,
     CoreDatabaseBackup,
-    CoreWordPressBackup, CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints,
-    CoreWordPressBackupStoragePoints, CoreBasecampBackup,
+    CoreWebsiteBackupStoragePoints,
+    CoreDatabaseBackupStoragePoints,
+    CoreBasecampBackup,
     CoreBasecampBackupStoragePoints,
     CoreDatabaseRestore,
     CoreWebsiteRestore,
@@ -213,7 +214,6 @@ _STORAGE_NOT_FOUND_CODES = {"404", "NoSuchBucket", "NoSuchKey", "NotFound"}
 _STORAGE_POINT_MODELS = {
     "website": CoreWebsiteBackupStoragePoints,
     "database": CoreDatabaseBackupStoragePoints,
-    "wordpress": CoreWordPressBackupStoragePoints,
     "basecamp": CoreBasecampBackupStoragePoints,
 }
 _STORAGE_POINT_MODEL_KEYS = {
@@ -222,13 +222,11 @@ _STORAGE_POINT_MODEL_KEYS = {
 _BACKUP_MODELS = {
     "website": CoreWebsiteBackup,
     "database": CoreDatabaseBackup,
-    "wordpress": CoreWordPressBackup,
     "basecamp": CoreBasecampBackup,
 }
 _BACKUP_POINT_RELATIONS = {
     "website": "stored_website_backups",
     "database": "stored_database_backups",
-    "wordpress": "stored_wordpress_backups",
     "basecamp": "stored_basecamp_backups",
 }
 _LOCAL_RESTORE_MODELS = {
@@ -1241,10 +1239,7 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
         backup = CoreDatabaseBackup.objects.get(id=backup_id)
         stored_backup = backup.stored_database_backups.get(id=stored_backup_id)
     elif node.type == CoreNode.Type.SAAS:
-        if node.connection.integration.code == "wordpress":
-            backup = CoreWordPressBackup.objects.get(id=backup_id)
-            stored_backup = backup.stored_wordpress_backups.get(id=stored_backup_id)
-        elif node.connection.integration.code == "basecamp":
+        if node.connection.integration.code == "basecamp":
             backup = CoreBasecampBackup.objects.get(id=backup_id)
             stored_backup = backup.stored_basecamp_backups.get(id=stored_backup_id)
         else:
@@ -1695,9 +1690,7 @@ def finalize_backup(self, node_id, backup_id):
     elif node.type == CoreNode.Type.DATABASE:
         backup = CoreDatabaseBackup.objects.get(id=backup_id)
     elif node.type == CoreNode.Type.SAAS:
-        if node.connection.integration.code == "wordpress":
-            backup = CoreWordPressBackup.objects.get(id=backup_id)
-        elif node.connection.integration.code == "basecamp":
+        if node.connection.integration.code == "basecamp":
             backup = CoreBasecampBackup.objects.get(id=backup_id)
         else:
             raise TaskParamsNotProvided()
@@ -1707,11 +1700,7 @@ def finalize_backup(self, node_id, backup_id):
     relation_name = {
         CoreNode.Type.WEBSITE: "stored_website_backups",
         CoreNode.Type.DATABASE: "stored_database_backups",
-        CoreNode.Type.SAAS: (
-            "stored_wordpress_backups"
-            if node.connection.integration.code == "wordpress"
-            else "stored_basecamp_backups"
-        ),
+        CoreNode.Type.SAAS: "stored_basecamp_backups",
     }[node.type]
 
     # Lock both the backup row and all of its storage points so an early or duplicate
@@ -1916,11 +1905,7 @@ def finalize_backup(self, node_id, backup_id):
                     model_key = (
                         "website"
                         if node.type == CoreNode.Type.WEBSITE
-                        else (
-                            "wordpress"
-                            if node.connection.integration.code == "wordpress"
-                            else "basecamp"
-                        )
+                        else "basecamp"
                     )
                     cleanup_files_ciphertext_fence.apply_async(
                         args=[model_key, backup.pk]

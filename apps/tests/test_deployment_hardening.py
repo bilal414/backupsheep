@@ -848,9 +848,6 @@ raise SystemExit(99)
         for service, allowed in INTEGRATION_CREDENTIAL_ALLOWLIST.items():
             service_environment = model["services"][service]["environment"]
             self.assertEqual(
-                service_environment.get("WORDPRESS_INTEGRATION_ENABLED"), "true"
-            )
-            self.assertEqual(
                 service_environment.get("BASECAMP_INTEGRATION_ENABLED"), "true"
             )
             for variable, canary in canaries.items():

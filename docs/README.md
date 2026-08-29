@@ -36,7 +36,7 @@ drift can be detected during documentation validation.
 | [Feature overview](features/README.md) | Entry point for all user-facing capabilities. |
 | [Core concepts](features/core-concepts.md) | Accounts, connections, nodes, schedules, backups, storage points, and restores. |
 | [Console workflows](features/console-workflows.md) | Dashboard and normal setup/management flow. |
-| [Backup sources](features/backup-sources.md) | Websites, databases, cloud resources, volumes, WordPress, and Basecamp. |
+| [Backup sources](features/backup-sources.md) | Websites, databases, cloud resources, volumes, and Basecamp. |
 | [Storage destinations](features/storage-destinations.md) | Local and cloud destinations, validation, multiple copies, and S3 controls. |
 | [Schedules and policies](features/schedules-and-policies.md) | Cron/rate/one-time timing, retention, pause/resume, and on-demand runs. |
 | [Executions and history](features/executions-and-history.md) | Durable progress, status, retries, reconciliation, logs, and downloads. |

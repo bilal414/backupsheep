@@ -76,9 +76,6 @@ TASK_POLICIES: dict[str, TaskPolicy] = {
     "backup_website": _policy(
         "files", ("app", "cloud", "files", "storage"), "backup_request"
     ),
-    "backup_wordpress": _policy(
-        "files", ("app", "cloud", "files", "storage"), "backup_request"
-    ),
     "backup_basecamp": _policy(
         "files", ("app", "cloud", "files", "storage"), "backup_request"
     ),

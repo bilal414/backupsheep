@@ -162,7 +162,6 @@ _LOCAL_UPLOAD_STATUS_TOKENS = {
 _LOCAL_STORAGE_RELATIONS = (
     "stored_website_backups",
     "stored_database_backups",
-    "stored_wordpress_backups",
     "stored_basecamp_backups",
 )
 # Restore engines persist detailed component checkpoints while the parent

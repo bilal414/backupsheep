@@ -112,44 +112,6 @@ def _bounded_positive_int(name, default, maximum):
     return value
 
 
-def _private_network_allowlist(name):
-    """Parse an explicit list of private networks; public catch-alls are invalid."""
-
-    private_supernets = tuple(
-        ipaddress.ip_network(value)
-        for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
-    )
-    raw_value = config.get(name, "")
-    values = (
-        raw_value
-        if isinstance(raw_value, (list, tuple))
-        else str(raw_value).split(",")
-    )
-    networks = []
-    for value in values:
-        value = str(value).strip()
-        if not value:
-            continue
-        try:
-            network = ipaddress.ip_network(value, strict=True)
-        except ValueError as error:
-            raise ImproperlyConfigured(
-                f"{name} must contain exact comma-separated CIDR networks."
-            ) from error
-        if not any(
-            network.version == private_supernet.version
-            and network.subnet_of(private_supernet)
-            for private_supernet in private_supernets
-        ):
-            raise ImproperlyConfigured(
-                f"{name} may contain only RFC1918 IPv4 or ULA IPv6 networks."
-            )
-        networks.append(network)
-    if len(networks) > 32:
-        raise ImproperlyConfigured(f"{name} may contain at most 32 networks.")
-    return tuple(networks)
-
-
 def _trusted_proxy_network_allowlist(name):
     """Parse exact immediate-proxy addresses/CIDRs for auth throttling."""
 
@@ -1093,7 +1055,6 @@ CELERY_IMPORTS = (
     "apps._tasks.integration.vultr",
     "apps._tasks.integration.vultr_database",
     "apps._tasks.integration.website",
-    "apps._tasks.integration.wordpress",
     "apps._tasks.integration.storage.tasks",
 )
 # Local scheduled backups are driven by BackupSheep's django-celery-beat database
@@ -1325,27 +1286,13 @@ S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
     60 * 60,
 )
 
-# WordPress and Basecamp have no enterprise BSE1 plaintext-export/restore path.
-# Their feature switches are compatibility opt-ins only; the shared recovery
-# capability gate additionally requires non-enterprise legacy-only artifacts with
-# legacy download enabled. Security-policy booleans are strict so a typo cannot
-# accidentally enable an incomplete source family.
-WORDPRESS_INTEGRATION_ENABLED = _strict_bool(
-    "WORDPRESS_INTEGRATION_ENABLED",
-    config.get("WORDPRESS_INTEGRATION_ENABLED"),
-    default=False,
-)
+# Basecamp has no enterprise BSE1 plaintext-export/restore path. Its feature switch
+# is a compatibility opt-in only; the shared recovery capability gate additionally
+# requires non-enterprise legacy-only artifacts with legacy download enabled.
 BASECAMP_INTEGRATION_ENABLED = _strict_bool(
     "BASECAMP_INTEGRATION_ENABLED",
     config.get("BASECAMP_INTEGRATION_ENABLED"),
     default=False,
-)
-
-# WordPress targets are public HTTPS origins by default. Self-hosters that must
-# reach a private WordPress origin can enumerate only the required private CIDRs;
-# loopback, link-local, reserved and metadata targets remain forbidden regardless.
-WORDPRESS_PRIVATE_TARGET_CIDRS = _private_network_allowlist(
-    "WORDPRESS_PRIVATE_TARGET_CIDRS"
 )
 
 # Plain FTP sends credentials and backup contents without transport encryption.
@@ -1670,7 +1617,7 @@ CELERY_BEAT_SCHEDULE = {
 #   cloud ..... API-only provider snapshots + general/misc tasks; scales horizontally
 #   database .. database dumps (heavy CPU/disk); isolated so a big dump can't starve
 #               file backups
-#   files ..... website / wordpress / basecamp dumps (heavy CPU/disk); isolated
+#   files ..... website / basecamp dumps (heavy CPU/disk); isolated
 #   storage ... uploads each dump to the storage backends + every local-artifact
 #               mutation/cleanup; scalable pool sharing _storage with dump workers
 #   logs ...... DB log entries and Slack/Telegram notifications; no artifact volume

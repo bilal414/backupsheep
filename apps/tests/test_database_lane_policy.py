@@ -23,6 +23,7 @@ from backupsheep.database_lane_policy import (
     MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
     MIGRATION_TABLE,
     REPLAY_TABLE,
+    RETIRED_TABLES,
     RESULT_TABLES,
     RLS_COMMAND_POLICY,
     RLS_POLICY,
@@ -95,7 +96,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             "core_auth_aws",
             "core_auth_database",
             "core_auth_website",
-            "core_auth_wordpress",
             "core_cloud_restore",
             "core_aws_backup",
             "core_notification_slack",
@@ -119,7 +119,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             "core_database_restore",
             "core_website_backup",
             "core_website_restore",
-            "core_wordpress_backup",
             "core_basecamp_backup",
         ):
             with self.subTest(table=table):
@@ -274,7 +273,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
         for table in (
             "core_auth_basecamp",
             "core_auth_website",
-            "core_auth_wordpress",
         ):
             with self.subTest(table=table):
                 self.assertNotIn(table, database)
@@ -283,7 +281,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             "core_basecamp_backup",
             "core_website_backup",
             "core_website_restore",
-            "core_wordpress_backup",
         ):
             self.assertNotIn(table, database)
         for table in (
@@ -312,7 +309,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             "files": {
                 "core_basecamp_backup_mtm_storage_points",
                 "core_website_backup_mtm_storage_points",
-                "core_wordpress_backup_mtm_storage_points",
             },
         }
         for lane, tables in point_tables.items():
@@ -327,11 +323,16 @@ class DatabaseLanePolicyTests(SimpleTestCase):
                     )
         for table in point_tables["database"] | point_tables["files"]:
             self.assertEqual(LANE_TABLE_POLICY["storage"][table], DML)
-        for table in ("core_basecamp", "core_database", "core_website", "core_wordpress"):
+        for table in ("core_basecamp", "core_database", "core_website"):
             self.assertEqual(
                 LANE_TABLE_POLICY["storage"][table],
                 frozenset({"SELECT", "DELETE"}),
             )
+
+    def test_retired_tables_are_inaccessible_to_every_runtime_identity(self):
+        for lane, policy in LANE_TABLE_POLICY.items():
+            with self.subTest(lane=lane):
+                self.assertTrue(RETIRED_TABLES.isdisjoint(policy))
 
     def test_managed_ssh_intent_is_row_and_column_isolated(self):
         self.assertEqual(

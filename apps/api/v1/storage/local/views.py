@@ -104,7 +104,6 @@ class LocalStorageFileDownloadView(APIView):
         from apps.console.backup.models import (
             CoreWebsiteBackupStoragePoints,
             CoreDatabaseBackupStoragePoints,
-            CoreWordPressBackupStoragePoints,
             CoreBasecampBackupStoragePoints,
         )
 
@@ -118,7 +117,6 @@ class LocalStorageFileDownloadView(APIView):
         for model, node_lookup in (
                 (CoreWebsiteBackupStoragePoints, "backup__website__node"),
                 (CoreDatabaseBackupStoragePoints, "backup__database__node"),
-                (CoreWordPressBackupStoragePoints, "backup__wordpress__node"),
                 (CoreBasecampBackupStoragePoints, "backup__basecamp__node"),
         ):
             stored_backup = model.objects.filter(

@@ -7,7 +7,7 @@
 #   worker-cloud .... API-only provider snapshots (DigitalOcean, Hetzner, AWS, …) plus
 #                     general default-queue tasks. Stateless.
 #   worker-database . database dumps (pg_dump/mysqldump). Heavy CPU/disk.
-#   worker-files .... website/wordpress/basecamp dumps. Heavy CPU/disk.
+#   worker-files .... website/basecamp dumps. Heavy CPU/disk.
 #   worker-storage .. uploads each finished dump to the storage backends + cleanup.
 #                     Recreate its exact namespace pair when changing scale:
 #                         ./backupsheep-compose --profile operations up --detach --no-deps --force-recreate --scale worker-storage=4 storage-egress-guard worker-storage
@@ -219,9 +219,7 @@ x-app-configuration-environment: &app-configuration-environment
   BACKUP_CREATE_LEASE_SECONDS: "${BACKUP_CREATE_LEASE_SECONDS:-3600}"
   BACKUP_STORAGE_STALE_SECONDS: "${BACKUP_STORAGE_STALE_SECONDS:-21600}"
   S3_DOWNLOAD_URL_EXPIRES: "${S3_DOWNLOAD_URL_EXPIRES:-300}"
-  WORDPRESS_INTEGRATION_ENABLED: "${WORDPRESS_INTEGRATION_ENABLED:-false}"
   BASECAMP_INTEGRATION_ENABLED: "${BASECAMP_INTEGRATION_ENABLED:-false}"
-  WORDPRESS_PRIVATE_TARGET_CIDRS: "${WORDPRESS_PRIVATE_TARGET_CIDRS:-}"
   ALLOW_INSECURE_FTP: "${ALLOW_INSECURE_FTP:-false}"
   SSH_CONNECT_TIMEOUT: "${SSH_CONNECT_TIMEOUT:-15}"
   SSH_BANNER_TIMEOUT: "${SSH_BANNER_TIMEOUT:-15}"
@@ -1303,7 +1301,7 @@ services:
       files-egress:
         gw_priority: 1
 
-  # Website / WordPress / Basecamp source material stays private to the files UID.
+  # Website / Basecamp source material stays private to the files UID.
   worker-files:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"

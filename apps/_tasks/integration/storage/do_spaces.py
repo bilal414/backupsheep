@@ -16,7 +16,6 @@ from apps.api.v1.utils.boto import bounded_boto3_client
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreWebsiteBackup,
-    CoreWordPressBackup,
 )
 from apps.console.node.models import CoreNode
 
@@ -87,9 +86,6 @@ def storage_do_spaces_delete(node, backup_name):
             backup = CoreWebsiteBackup.objects.get(uuid=backup_name)
         elif node.type == CoreNode.Type.DATABASE:
             backup = CoreDatabaseBackup.objects.get(uuid=backup_name)
-        elif node.type == CoreNode.Type.SAAS:
-            backup = CoreWordPressBackup.objects.get(uuid=backup_name)
-
         if backup:
             spaces = backup.storage_byo.storage_do_spaces
             s3_client = _s3_client(spaces, encryption_key)

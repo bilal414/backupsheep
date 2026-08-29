@@ -12,7 +12,7 @@ worker, scheduler, or preflight container receives another lane's password.
 | Beat | Long-lived scheduler | Beat tables plus narrowly scoped scheduled-backup occurrence/outbox writes; no member, destination-configuration, source-worker, notification, or replay-row access |
 | Cloud | Cloud/default worker | Explicit remote-provider tables and only cloud-scoped shared rows |
 | Database | Database worker | Database source/backup/restore rows and database-scoped shared rows; no destination-configuration reads |
-| Files | Files worker | Website, WordPress and Basecamp source rows and files-scoped shared rows; no destination-configuration reads |
+| Files | Files worker | Website and Basecamp source rows and files-scoped shared rows; no destination-configuration reads |
 | Storage | Storage worker | Storage configuration, local artifact handoff, deletion and recovery rows; no user/session/token, source-auth, cloud-auth, notification-secret, or Beat tables |
 | Logs | Logs worker | Run-log/notification delivery rows and bounded terminal replay cleanup |
 

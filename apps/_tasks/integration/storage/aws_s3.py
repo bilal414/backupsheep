@@ -14,7 +14,6 @@ from apps.api.v1.utils.api_helpers import bs_decrypt
 from apps.console.backup.models import (
     CoreWebsiteBackup,
     CoreDatabaseBackup,
-    CoreWordPressBackup,
 )
 from apps.console.node.models import CoreNode, CoreServerStatus
 from apps.console.storage.models import CoreStorage
@@ -86,16 +85,6 @@ def storage_aws_s3(stored_backup):
                     "connection": backup.website.node.connection.id,
                 }
             )
-        elif hasattr(backup, "wordpress"):
-            metadata.update(
-                {
-                    "node": backup.wordpress.node.id,
-                    "type": backup.wordpress.node.get_type_display(),
-                    "wordpress": backup.wordpress.id,
-                    "connection": backup.wordpress.node.connection.id,
-                }
-            )
-
         metadata_new = json.loads(json.dumps(metadata), parse_int=str)
 
         extra_args = {

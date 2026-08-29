@@ -151,15 +151,3 @@ for all three Dockerfiles, Cosign bundle verification, official tag refusal on
 replay, and GitHub release asset publication. This checked-in foundation does not
 itself configure those GitHub/GHCR controls and has not published or deployed a
 release.
-
-## WordPress connector publication hook
-
-The WordPress connector under `integrations/wordpress/backupsheep-v2` has its own
-package contract and publication lifecycle. This container workflow intentionally
-does not publish a WordPress ZIP or imply that a container release also shipped the
-plugin. A future plugin release job should run only after its focused package and
-protocol tests, build from the exact Git tree with `scripts/build_wordpress_plugin.py`,
-record the archive SHA-256 in a small plugin manifest, keyless-sign both files under
-the same protected tag identity, and attach them to the GitHub release. WordPress.org
-or marketplace publication remains a separately approved operation with separate
-credentials and acceptance evidence.

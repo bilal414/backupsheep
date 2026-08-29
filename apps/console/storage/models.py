@@ -2428,17 +2428,12 @@ class CoreStorage(TimeStampedModel):
     # Counts
     stats_website_count = models.BigIntegerField(null=True)
     stats_database_count = models.BigIntegerField(null=True)
-    stats_wordpress_count = models.BigIntegerField(null=True)
     # Backups
     stats_website_backup_count = models.BigIntegerField(null=True)
     stats_database_backup_count = models.BigIntegerField(null=True)
-    stats_wordpress_backup_count = models.BigIntegerField(null=True)
     # Size
     stats_website_size = models.BigIntegerField(null=True)
     stats_database_size = models.BigIntegerField(null=True)
-    stats_wordpress_size = models.BigIntegerField(null=True)
-    # Delete this later
-    stat_wordpress_size = models.BigIntegerField(null=True)
     # Protection and pricing are destination-level settings. Pricing is deliberately
     # explicit: provider rates vary by region, agreement, and storage class.
     is_air_gapped = models.BooleanField(default=False)
@@ -2522,7 +2517,6 @@ class CoreStorage(TimeStampedModel):
             CoreBasecampBackupStoragePoints,
             CoreDatabaseBackupStoragePoints,
             CoreWebsiteBackupStoragePoints,
-            CoreWordPressBackupStoragePoints,
         )
 
         storages = {
@@ -2566,12 +2560,6 @@ class CoreStorage(TimeStampedModel):
                 "backup__database__node_id",
                 "backup__database__node__name",
                 "database",
-            ),
-            (
-                CoreWordPressBackupStoragePoints,
-                "backup__wordpress__node_id",
-                "backup__wordpress__node__name",
-                "saas",
             ),
             (
                 CoreBasecampBackupStoragePoints,

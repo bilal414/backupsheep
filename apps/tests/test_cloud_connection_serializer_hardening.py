@@ -59,10 +59,6 @@ from apps.api.v1.connection.vultr.serializers import (
     CoreAuthVultrReadSerializer,
     CoreAuthVultrWriteSerializer,
 )
-from apps.api.v1.connection.wordpress.serializers import (
-    CoreAuthWordPressReadSerializer,
-    CoreAuthWordPressWriteSerializer,
-)
 from apps.api.v1.utils.api_helpers import bs_decrypt, bs_encrypt
 from apps.console.connection.models import (
     CoreAuthAWS,
@@ -78,7 +74,6 @@ from apps.console.connection.models import (
     CoreAuthOVHUS,
     CoreAuthUpCloud,
     CoreAuthVultr,
-    CoreAuthWordPress,
     CoreAWSRegion,
     CoreLightsailRegion,
 )
@@ -210,17 +205,6 @@ class CloudConnectionSerializerHardeningTests(BaseTestCase):
                 {"api_key"},
             ),
             (
-                CoreAuthWordPressReadSerializer,
-                CoreAuthWordPress(
-                    url="https://wordpress.example.test",
-                    key=self._secret("wordpress-key"),
-                    http_user="safe-http-user",
-                    http_pass=self._secret("wordpress-password"),
-                ),
-                {"key_configured", "http_password_configured"},
-                {"key", "http_pass"},
-            ),
-            (
                 CoreAuthBasecampReadSerializer,
                 CoreAuthBasecamp(
                     identity_id="safe-identity-id",
@@ -334,14 +318,6 @@ class CloudConnectionSerializerHardeningTests(BaseTestCase):
                 info_name=f"safe {code} name",
             )
         add(
-            "wordpress",
-            CoreAuthWordPress,
-            url="https://wordpress.example.test",
-            key=self._secret("api-wordpress-key"),
-            http_user="safe-wordpress-user",
-            http_pass=self._secret("api-wordpress-password"),
-        )
-        add(
             "basecamp",
             CoreAuthBasecamp,
             identity_id="safe-basecamp-identity",
@@ -374,7 +350,6 @@ class CloudConnectionSerializerHardeningTests(BaseTestCase):
             (CoreAuthOracleWriteSerializer, ("private_key",)),
             (CoreAuthUpCloudWriteSerializer, ("password",)),
             (CoreAuthVultrWriteSerializer, ("api_key",)),
-            (CoreAuthWordPressWriteSerializer, ("key", "http_pass")),
             (CoreAuthBasecampWriteSerializer, ("access_token", "refresh_token", "metadata")),
             (CoreAuthOVHCAWriteSerializer, ("consumer_key",)),
             (CoreAuthOVHEUWriteSerializer, ("consumer_key",)),
@@ -388,12 +363,6 @@ class CloudConnectionSerializerHardeningTests(BaseTestCase):
                 self.assertTrue(field.write_only, f"{serializer_class.__name__}.{field_name}")
                 self.assertFalse(field.required, f"{serializer_class.__name__}.{field_name}")
 
-    @override_settings(
-        BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
-        BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="legacy-only",
-        BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
-        WORDPRESS_INTEGRATION_ENABLED=True,
-    )
     def test_partial_credential_pairs_are_rejected_without_provider_calls(self):
         specs = (
             (CoreAuthAWSWriteSerializer, {"access_key": "only-access"}),
@@ -401,14 +370,6 @@ class CloudConnectionSerializerHardeningTests(BaseTestCase):
             (CoreAuthLightsailWriteSerializer, {"access_key": "only-access"}),
             (CoreAuthUpCloudWriteSerializer, {"password": "only-password"}),
             (CoreAuthDigitalOceanWriteSerializer, {"access_token": "only-token"}),
-            (
-                CoreAuthWordPressWriteSerializer,
-                {
-                    "url": "https://wordpress.example.test",
-                    "key": "wordpress-key",
-                    "http_user": "only-user",
-                },
-            ),
         )
 
         for serializer_class, data in specs:

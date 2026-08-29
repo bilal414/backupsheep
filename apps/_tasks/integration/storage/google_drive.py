@@ -34,7 +34,6 @@ from apps._tasks.integration.storage.s3_verified import (
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreWebsiteBackup,
-    CoreWordPressBackup,
 )
 
 
@@ -1141,7 +1140,6 @@ def storage_google_drive_delete(node, backup_name):
     for backup_model, owner_relation, storage_relation in (
         (CoreWebsiteBackup, "website", "stored_website_backups"),
         (CoreDatabaseBackup, "database", "stored_database_backups"),
-        (CoreWordPressBackup, "wordpress", "stored_wordpress_backups"),
     ):
         backup = (
             backup_model.objects.filter(

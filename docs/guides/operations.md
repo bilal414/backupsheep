@@ -235,7 +235,7 @@ guard.
 | --- | --- | --- |
 | Provider snapshots wait | `worker-cloud`, `cloud`/`default` queues, provider API | Restore worker/broker connectivity; let durable polling resume |
 | Database dumps wait | `worker-database`, disk, source network/client version | Free capacity or correct source connectivity; preserve the row for retry |
-| Website/WordPress/Basecamp waits | `worker-files`, work volume, source network/account-scoped SSH approval | Fix source/approval/capacity, then observe retry |
+| Website/Basecamp waits | `worker-files`, work volume, source network/account-scoped SSH approval | Fix source/approval/capacity, then observe retry |
 | Completed dump is not offsite | `worker-storage`, `storage` queue, destination validation | Restore upload capacity/credentials; do not delete the work artifact |
 | Logs/notifications lag | `worker-logs`, `logs` queue, email/channel provider | Scale or repair that lane; backup execution can continue independently |
 

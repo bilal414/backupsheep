@@ -274,7 +274,7 @@ escape hatch, not an enterprise-safe mode.
 | Path | Compose volume | Contents | Required visibility |
 | --- | --- | --- | --- |
 | `/code/_storage` | `database_workdir` | Plaintext database dump/restore work, database run logs and lane-local locks | Read/write only in `worker-database`; absent from every other runtime role |
-| `/code/_storage` | `files_workdir` | Plaintext website/WordPress/Basecamp work, website incremental cache, files-lane run logs and locks | Read/write only in `worker-files`; absent from every other runtime role |
+| `/code/_storage` | `files_workdir` | Plaintext website/Basecamp work, website incremental cache, files-lane run logs and locks | Read/write only in `worker-files`; absent from every other runtime role |
 | `/code/_storage` | `storage_workdir` | Storage-private BSE1 materialization, provider transfer work and destination-upload run logs | Read/write only in `worker-storage`; absent from every other runtime role |
 | `/var/lib/backupsheep/transfer/database` | `database_ciphertext_transfer` | Fenced, published BSE1 handoff from database to storage | Read/write in `worker-database`, read-only in `worker-storage`; absent elsewhere |
 | `/var/lib/backupsheep/transfer/files` | `files_ciphertext_transfer` | Fenced, published BSE1 handoff from files to storage | Read/write in `worker-files`, read-only in `worker-storage`; absent elsewhere |
@@ -366,9 +366,9 @@ or application-signing flows:
 API-host and OAuth-endpoint variables have public defaults in settings. Override them only
 for a reviewed provider change, proxy or test environment.
 
-`WORDPRESS_INTEGRATION_ENABLED` and `BASECAMP_INTEGRATION_ENABLED` both default to `false`.
-They are compatibility switches, not enterprise feature switches: either source is usable
-only when enterprise mode is explicitly false, artifact mode is `legacy-only`, and legacy
+`BASECAMP_INTEGRATION_ENABLED` defaults to `false`. It is a compatibility switch, not an
+enterprise feature switch: the source is usable only when enterprise mode is explicitly
+false, artifact mode is `legacy-only`, and legacy
 restore/download is explicitly enabled. Enterprise/BSE1 installs ignore a true family
 switch, hide the source choices, reject every new-protection/backup initiation boundary,
 and preserve existing records for inspection.

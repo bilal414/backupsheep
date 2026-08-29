@@ -25,6 +25,7 @@ from backupsheep.database_lane_policy import (
     MANAGED_SSH_RETENTION_ROUTINE,
     MANAGED_SSH_ROUTINES,
     MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
+    RETIRED_TABLES,
     SSH_HOST_KEY_REVOKE_WITNESS_TABLE,
     STORAGE_CONFIG_TABLES,
 )
@@ -1818,7 +1819,6 @@ def run_probe(config: IdentityConfiguration) -> None:
                 (
                     "core_basecamp_backup_mtm_storage_points",
                     "core_website_backup_mtm_storage_points",
-                    "core_wordpress_backup_mtm_storage_points",
                 ),
             ),
         ):
@@ -1832,6 +1832,13 @@ def run_probe(config: IdentityConfiguration) -> None:
                     connections[lane],
                     f"DELETE FROM public.{table} WHERE false",
                     label=f"{lane} destination authorization delete {table}",
+                )
+        for lane, connection in connections.items():
+            for table in sorted(RETIRED_TABLES):
+                _expect_denied(
+                    connection,
+                    f"SELECT * FROM public.{table} LIMIT 1",
+                    label=f"{lane} retired table read {table}",
                 )
         _expect_denied(
             connections["app"],

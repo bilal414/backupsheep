@@ -160,7 +160,7 @@ API token is issued.
 | `DB_BEAT_USER` | `backupsheep_beat` | Scheduler lane; workers cannot read or mutate its schedule tables |
 | `DB_CLOUD_USER` | `backupsheep_cloud` | Explicit remote-provider worker lane |
 | `DB_DATABASE_USER` | `backupsheep_database` | Database source/backup/restore lane |
-| `DB_FILES_USER` | `backupsheep_files` | Website, WordPress and Basecamp source lane |
+| `DB_FILES_USER` | `backupsheep_files` | Website and Basecamp source lane |
 | `DB_STORAGE_USER` | `backupsheep_storage` | Local storage/artifact handoff lane |
 | `DB_LOGS_USER` | `backupsheep_logs` | Run-log/notification and bounded replay-retention lane |
 | `DB_USER` | `backupsheep_app` | Compatibility alias used by non-Compose deployments; stock Compose pins each service to its lane user |
@@ -339,9 +339,7 @@ not be repointed through `.env`.
 | `BS_LOCAL_STORAGE_PATH` | `/backups` | Stock Local Storage root, mounted read/write only in `worker-storage`; every other runtime role must have no `/backups` mount |
 | `LOG_RETENTION_DAYS` | `30` | Days before files/database/storage private run logs and PostgreSQL `CoreLog` activity rows are pruned |
 | `S3_DOWNLOAD_URL_EXPIRES` | `300` | Compatibility-only provider-signed URL lifetime for an explicitly enabled non-enterprise legacy artifact; hard maximum `3600`. Stock BSE1 direct download is refused |
-| `WORDPRESS_INTEGRATION_ENABLED` | `false` | Explicit non-enterprise compatibility opt-in for WordPress secure connector v2; it has no effect in enterprise/BSE1 mode or unless legacy artifact download is enabled |
 | `BASECAMP_INTEGRATION_ENABLED` | `false` | Explicit non-enterprise compatibility opt-in for Basecamp; it has no effect in enterprise/BSE1 mode or unless legacy artifact download is enabled |
-| `WORDPRESS_PRIVATE_TARGET_CIDRS` | blank | Exact RFC1918/ULA CIDRs permitted for DNS-pinned, certificate-verified HTTPS WordPress targets; special/metadata ranges remain denied |
 | `ALLOW_INSECURE_FTP` | `false` | Explicit legacy compatibility opt-in for plaintext FTP; prefer SFTP or certificate-verified FTPS |
 | `SSH_KNOWN_HOSTS_PATH` | `_storage/ssh_known_hosts` outside stock Compose | Compatibility-only file setting for separately reviewed non-stock deployments. Stock Compose ignores this shared-file model: approvals and append-only audit events are account-scoped PostgreSQL records, and each SSH operation receives only its exact approved keys in a transient mode-`0600` private-runtime file |
 | `SSH_MANAGED_DATABASE_PUBLIC_KEY` | blank | Public half of the optional database-worker Ed25519 identity; it must match `.secrets/ssh_managed_database_private_key` and differ from the files identity |
@@ -355,17 +353,13 @@ compatible, Google Cloud, Azure, Alibaba or Tencent signature. Dropbox, OneDrive
 similar APIs may issue provider-bounded temporary links in that legacy path without
 accepting a caller-selected lifetime.
 
-WordPress and Basecamp do not currently have an authenticated BSE1 plaintext-export or
-automatic-restore action. Their family switches take effect only when all of the following
-are explicit: `BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=false`,
+Basecamp does not currently have an authenticated BSE1 plaintext-export or automatic-
+restore action. Its family switch takes effect only when all of the following are explicit:
+`BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=false`,
 `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=legacy-only`, and
-`BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true`. Stock enterprise mode hides both choices
+`BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true`. Stock enterprise mode hides the choice
 and rejects direct API, schedule, outbox, retry, and worker-task bypasses while retaining
 existing records for inspection.
-
-WordPress credentials never use plaintext HTTP. Public HTTPS targets work by default.
-Private targets require the smallest practical comma-separated CIDR allowlist in
-`WORDPRESS_PRIVATE_TARGET_CIDRS`; DNS failures and mixed public/private answers fail closed.
 
 ## Durable execution and recovery
 

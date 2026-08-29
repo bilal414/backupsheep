@@ -134,7 +134,6 @@ class CeleryTaskManifestTests(SimpleTestCase):
         for task_name in (
             "backup_database",
             "backup_website",
-            "backup_wordpress",
             "backup_basecamp",
         ):
             self.assertIn("storage", TASK_POLICIES[task_name].publishers)

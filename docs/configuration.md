@@ -111,7 +111,6 @@ fragments are present.
 | `RABBITMQ_CA_CERT` | optional | system roots | Private CA bundle for `amqps`; hostname verification is always enabled. |
 | `LOG_RETENTION_DAYS` | optional | `30` | Days to keep run logs in the files/database/storage private work volumes and activity rows in PostgreSQL. Lane tasks prune files at 03:00, database at 03:05 and storage at 03:10; `delete_old_db_logs` prunes `CoreLog` rows at 03:30. |
 | `S3_DOWNLOAD_URL_EXPIRES` | optional | `300` | Compatibility-only provider-signed URL lifetime for explicitly enabled non-enterprise legacy artifacts; values above `3600` are rejected. It does not enable stock BSE1 direct download. |
-| `WORDPRESS_PRIVATE_TARGET_CIDRS` | optional | blank | Exact comma-separated RFC1918/ULA CIDRs allowed for HTTPS WordPress origins. Blank rejects all private targets; loopback, link-local, reserved and metadata addresses are always rejected. |
 | `ALLOW_INSECURE_FTP` | optional | `false` | Compatibility escape hatch for plaintext FTP. Keep disabled; prefer SFTP or certificate-verified FTPS because FTP exposes credentials and backup data in transit. |
 | `SSH_KNOWN_HOSTS_PATH` | compatibility only | `_storage/ssh_known_hosts` outside stock Compose | Separately reviewed non-stock file setting. Stock Compose uses account-scoped PostgreSQL approvals/audit and transient exact per-operation private-runtime trust files instead. |
 | `SSH_MANAGED_DATABASE_PUBLIC_KEY` | optional | blank | Public half of the database-worker Ed25519 identity; must match its lane secret and differ from the files identity. |
@@ -175,17 +174,6 @@ review dependencies and authorize the safe reset once with `--migrate-egress-pol
 all six roles become `deny` and all lists are cleared. Customized or mixed legacy policy
 must be reviewed and manually reset first, and the migration flag is rejected once
 generation 2 is active.
-
-WordPress integration keys and optional HTTP Basic credentials are sent only over
-certificate-verified HTTPS. BackupSheep resolves each target once, rejects the entire DNS
-answer if any address violates the target policy, and connects to one approved IP while
-retaining TLS SNI and hostname verification. Private WordPress sites require an explicit
-`WORDPRESS_PRIVATE_TARGET_CIDRS` entry; do not use a broader network than the site needs.
-This application revision requires a BackupSheep WordPress plugin release that reads the
-integration key from `X-BackupSheep-Key`; the legacy query-only v1.8 plugin fails closed
-and must be upgraded before rolling this application change out to WordPress users.
-Pinned WordPress traffic also ignores ambient HTTP(S) proxy variables because a proxy
-would replace the verified connection peer.
 
 Stock Compose stores host-key approvals and their append-only audit in PostgreSQL, then
 materializes the exact current approval only for the operation that needs it. Optional
