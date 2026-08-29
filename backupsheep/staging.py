@@ -618,15 +618,18 @@ def _artifact_name(value: object) -> str:
 
 
 def _validate_bse1_descriptor(
-    descriptor: int, fence: CiphertextFence | RestoreCiphertextFence
+    descriptor: int,
+    artifact_name: str,
 ) -> None:
     # Lazy import keeps the filesystem policy usable during image/bootstrap checks
     # without initializing the artifact-crypto implementation.
     from backupsheep.artifact_crypto import read_envelope_header_from_descriptor
 
     envelope = read_envelope_header_from_descriptor(descriptor)
-    if str(envelope.envelope_id) != fence.backup_uuid:
-        raise StagingIsolationError("The BSE1 envelope is not bound to its backup fence.")
+    if artifact_name != f"{envelope.envelope_id}.bse1":
+        raise StagingIsolationError(
+            "The BSE1 object name is not bound to its random envelope identity."
+        )
 
 
 def publish_ciphertext(
@@ -674,7 +677,7 @@ def publish_ciphertext(
                     raise StagingIsolationError(
                         "Only a private, single-link source-owned file can be published."
                     )
-                _validate_bse1_descriptor(descriptor, fence)
+                _validate_bse1_descriptor(descriptor, name)
                 held_after = os.fstat(descriptor)
                 after = os.stat(name, dir_fd=fence_fd, follow_symlinks=False)
                 if (
@@ -743,7 +746,7 @@ def open_ciphertext(
                     or _mode(before) != PUBLISHED_FILE_MODE
                 ):
                     raise StagingIsolationError("The published ciphertext metadata is unsafe.")
-                _validate_bse1_descriptor(descriptor, fence)
+                _validate_bse1_descriptor(descriptor, name)
                 held_after = os.fstat(descriptor)
                 after = os.stat(name, dir_fd=fence_fd, follow_symlinks=False)
                 if (
@@ -821,7 +824,7 @@ def cleanup_ciphertext_fence(
                 # entire cleanup before any mutation.
                 descriptor = os.open(normalized, _FILE_FLAGS, dir_fd=fence_fd)
                 try:
-                    _validate_bse1_descriptor(descriptor, fence)
+                    _validate_bse1_descriptor(descriptor, normalized)
                 finally:
                     os.close(descriptor)
                 artifacts.append(normalized)
@@ -1146,7 +1149,7 @@ def publish_restore_ciphertext(
                     raise StagingIsolationError(
                         "Only a private, single-link storage-owned restore file can be published."
                     )
-                _validate_bse1_descriptor(descriptor, fence)
+                _validate_bse1_descriptor(descriptor, name)
                 held_after = os.fstat(descriptor)
                 after = os.stat(name, dir_fd=fence_fd, follow_symlinks=False)
                 if (
@@ -1232,7 +1235,7 @@ def open_restore_ciphertext(
                     raise StagingIsolationError(
                         "The published restore ciphertext metadata is unsafe."
                     )
-                _validate_bse1_descriptor(descriptor, fence)
+                _validate_bse1_descriptor(descriptor, name)
                 held_after = os.fstat(descriptor)
                 after = os.stat(name, dir_fd=fence_fd, follow_symlinks=False)
                 if (
@@ -1319,7 +1322,7 @@ def cleanup_restore_ciphertext_fence(
                     )
                 descriptor = os.open(normalized, _FILE_FLAGS, dir_fd=fence_fd)
                 try:
-                    _validate_bse1_descriptor(descriptor, fence)
+                    _validate_bse1_descriptor(descriptor, normalized)
                 finally:
                     os.close(descriptor)
                 artifacts.append(normalized)

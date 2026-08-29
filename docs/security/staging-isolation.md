@@ -55,17 +55,20 @@ Stock Compose has no shared trust volume or global `known_hosts` file.
    ciphertext even when a backup UUID is known.
 3. It calls `artifact_crypto.seal_file` with the private work root as
    `trusted_source_root`, the fence as `trusted_destination_root`, and the canonical
-   backup UUID as the BSE1 envelope ID. The completed output must use a bounded
-   `*.bse1` name and remains private mode `0600`.
+   backup context in the wrapping AAD. Sealing generates an independent random
+   envelope UUID; the completed output is named `<envelope_uuid>.bse1` and remains
+   private mode `0600`. The public envelope ID is never the backup UUID.
 4. Only after the durable envelope/key record is ready, it calls
    `publish_ciphertext`. Publication checks the marker, owner, group, mode, link
-   count, no-follow path, BSE1 structure and fence-bound envelope UUID before the
-   single `0600 -> 0640` transition.
+   count, no-follow path, BSE1 structure and exact filename-to-envelope-UUID binding
+   before the single `0600 -> 0640` transition. Storage cannot validate the encrypted
+   private context digest; the source lane proves that during authenticated restore.
 5. The storage worker calls `private_storage_root()` and `open_ciphertext` with the
    durable source lane, checks it against the durable
    envelope record, and atomically materializes those same BSE1 bytes in its private
-   `/code/_storage/<uuid>.zip`. The historical extension exists only for adapter
-   compatibility: provider objects contain BSE1 ciphertext, never a decrypted ZIP.
+   `/code/_storage/<envelope_uuid>.bse1`. The random envelope UUID is also the only
+   application-derived identity used by new provider object keys; provider objects
+   contain BSE1 ciphertext, never a decrypted ZIP.
    The storage role can read a published envelope but cannot write or delete the
    source fence.
 6. Storage deletes only its private ciphertext copy. A task routed to the recorded source
@@ -156,7 +159,7 @@ restore lanes.
 fence invariants. Storage first downloads or copies a provider/local BSE1 object into
 its private work volume and verifies its exact durable byte count and SHA-256. It
 then copies into the storage-owned fence at mode `0600`; publication validates BSE1
-framing and the backup-bound envelope ID before mode `0640`. The target source opens
+framing and the exact random-envelope filename binding before mode `0640`. The target source opens
 a held read-only descriptor, copies and re-hashes it into its private volume, and
 only then performs full authenticated decryption. Source cannot modify or delete the
 handoff. Storage cleanup validates the complete inventory and is idempotent only for

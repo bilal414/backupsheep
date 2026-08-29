@@ -51,6 +51,7 @@ _REPOSITORY_ROOT = _pin_repository_import_root()
 
 import argparse  # noqa: E402
 import fcntl  # noqa: E402
+import hashlib  # noqa: E402
 import json  # noqa: E402
 import secrets  # noqa: E402
 import stat  # noqa: E402
@@ -141,6 +142,52 @@ def _new_key() -> tuple[str, bytearray]:
     return f"lfk-{secrets.token_hex(16)}", bytearray(secrets.token_bytes(32))
 
 
+def _rotation_file_witness(path: Path) -> tuple[object, ...]:
+    """Return metadata plus a full digest from one stable, no-follow read."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) != 0o400
+            or before.st_nlink != 1
+        ):
+            raise KeyringLifecycleError(
+                "direct keyring rotation requires an owner-controlled mode-0400 "
+                "single-link file; installer-managed mode-0444 keyrings must be "
+                "rotated through install.sh"
+            )
+        digest = hashlib.sha256()
+        observed_size = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            observed_size += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        metadata_fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_nlink",
+        )
+        before_metadata = tuple(getattr(before, field) for field in metadata_fields)
+        after_metadata = tuple(getattr(after, field) for field in metadata_fields)
+        if before_metadata != after_metadata or observed_size != before.st_size:
+            raise KeyringLifecycleError(
+                "the keyring changed concurrently; refusing rotation"
+            )
+        return (*after_metadata, digest.digest())
+    finally:
+        os.close(descriptor)
+
+
 def _validate(
     path: Path, lane: str, installation_id: str
 ) -> LocalFileKeyProvider:
@@ -223,19 +270,12 @@ def rotate(
     temporary = None
     provider = None
     try:
-        direct_metadata = os.lstat(path)
-        if (
-            not stat.S_ISREG(direct_metadata.st_mode)
-            or direct_metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(direct_metadata.st_mode) != 0o400
-            or direct_metadata.st_nlink != 1
-        ):
-            raise KeyringLifecycleError(
-                "direct keyring rotation requires an owner-controlled mode-0400 "
-                "single-link file; installer-managed mode-0444 keyrings must be "
-                "rotated through install.sh"
-            )
+        original = _rotation_file_witness(path)
         provider = _validate(path, lane, installation_id)
+        if _rotation_file_witness(path) != original:
+            raise KeyringLifecycleError(
+                "the keyring changed concurrently; refusing rotation"
+            )
         if provider.active_key_id != expected_active_key_id:
             raise KeyringLifecycleError(
                 "the expected active key ID does not match; refusing repeated or stale rotation"
@@ -244,7 +284,6 @@ def rotate(
             raise KeyringLifecycleError(
                 "the keyring is full; no legacy key was evicted"
             )
-        original = os.lstat(path)
         new_key_id, new_key = _new_key()
         entries = [(new_key_id, bytes(new_key).hex())]
         entries.extend(
@@ -257,22 +296,8 @@ def rotate(
             active_key_id=new_key_id,
             keys=entries,
         )
-        mode = stat.S_IMODE(original.st_mode)
-        temporary = _write_temporary(path, content, mode=mode)
-        current = os.lstat(path)
-        if (
-            current.st_dev,
-            current.st_ino,
-            current.st_size,
-            current.st_mtime_ns,
-            current.st_nlink,
-        ) != (
-            original.st_dev,
-            original.st_ino,
-            original.st_size,
-            original.st_mtime_ns,
-            original.st_nlink,
-        ):
+        temporary = _write_temporary(path, content, mode=0o400)
+        if _rotation_file_witness(path) != original:
             raise KeyringLifecycleError(
                 "the keyring changed concurrently; refusing rotation"
             )

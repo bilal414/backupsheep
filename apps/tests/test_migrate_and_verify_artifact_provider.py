@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from django.core.management.base import CommandError
+from django.core.exceptions import MultipleObjectsReturned
 from django.test import SimpleTestCase
 
 from apps.management.commands.migrate_and_verify_artifact_provider import (
@@ -13,6 +14,7 @@ from apps.management.commands.migrate_and_verify_artifact_provider import (
     _backup_preseal_recovery_statuses,
     _backup_output_statuses,
     _destination_matches_source,
+    _encryption_ledger_is_complete,
     _execute_retired_backup_probe,
     _recoverable_point_statuses,
     _retained_point_statuses,
@@ -26,6 +28,8 @@ from apps._tasks.artifact_deletion import (
 )
 from apps.console.backup.models import (
     CoreBackupArtifact,
+    CoreBackupEncryptionEnvelope,
+    CoreBackupKeyWrap,
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
 )
@@ -44,7 +48,127 @@ class ArtifactProviderCurrentStateProofTests(SimpleTestCase):
             "_unledgered_backup_inventory_exists",
             return_value=False,
         ).start()
+        self.encryption_ledger = mock.patch(
+            "apps.management.commands.migrate_and_verify_artifact_provider."
+            "_encryption_ledger_is_complete",
+            return_value=True,
+        ).start()
+        self.envelope_objects = mock.patch(
+            "apps.management.commands.migrate_and_verify_artifact_provider."
+            "CoreBackupEncryptionEnvelope.objects"
+        ).start()
+        self.envelope_objects.all.return_value.exists.return_value = False
         self.addCleanup(mock.patch.stopall)
+
+    @staticmethod
+    def _envelope_query(rows):
+        class Query:
+            def __init__(self, values):
+                self.rows = list(values)
+
+            def select_related(self, *_fields):
+                return self
+
+            def prefetch_related(self, *_fields):
+                return self
+
+            def iterator(self, **_kwargs):
+                return iter(self.rows)
+
+        return Query(rows)
+
+    @staticmethod
+    def _valid_envelope_fixture():
+        envelope_id = 71
+        envelope_uuid = "169fefff-ab41-42f4-a7e5-0639a7876cd2"
+        execution = SimpleNamespace(
+            backup_content_type_id=12,
+            backup_object_id=41,
+        )
+        wrap = SimpleNamespace(
+            pk=83,
+            envelope_id=envelope_id,
+            provider=CoreBackupKeyWrap.Provider.LOCAL_FILE,
+            status=CoreBackupKeyWrap.Status.ACTIVE,
+            full_clean=mock.Mock(),
+        )
+        envelope = SimpleNamespace(
+            pk=envelope_id,
+            uuid=envelope_uuid,
+            format_version=2,
+            algorithm="AES-256-GCM-SIV",
+            status=CoreBackupEncryptionEnvelope.Status.ACTIVE,
+            sealed_at=object(),
+            ciphertext_byte_count=128,
+            execution=execution,
+            _valid_sha256=lambda value: value == "a" * 64,
+            full_clean=mock.Mock(),
+            get_active_key_wrap=mock.Mock(return_value=wrap),
+        )
+        source = SimpleNamespace(
+            pk=97,
+            artifact_format=CoreBackupArtifact.Format.BSE1,
+            role=CoreBackupArtifact.Role.SOURCE,
+            encryption_envelope=envelope,
+            encryption_envelope_id=envelope_id,
+            backup_content_type_id=execution.backup_content_type_id,
+            backup_object_id=execution.backup_object_id,
+            verified_at=object(),
+            byte_count=128,
+            checksum_algorithm="sha256",
+            checksum_value="a" * 64,
+            object_key=f"{envelope_uuid}.bse1",
+            metadata={"transfer_artifact_name": f"{envelope_uuid}.bse1"},
+            storage_id=None,
+            validate_encrypted_restore_state=mock.Mock(),
+        )
+        envelope.artifacts = SimpleNamespace(all=lambda: [source])
+        envelope.key_wraps = SimpleNamespace(all=lambda: [wrap])
+        return envelope, wrap, source
+
+    def test_complete_encryption_ledger_enumerates_every_envelope_and_wrap(self):
+        envelope, wrap, source = self._valid_envelope_fixture()
+        self.envelope_objects.all.return_value = self._envelope_query([envelope])
+        with mock.patch(
+            "apps.management.commands.migrate_and_verify_artifact_provider."
+            "CoreBackupKeyWrap.objects"
+        ) as wraps:
+            wraps.values_list.return_value = [wrap.pk]
+            self.assertTrue(_encryption_ledger_is_complete())
+
+        envelope.full_clean.assert_called_once_with()
+        wrap.full_clean.assert_called_once_with()
+        source.validate_encrypted_restore_state.assert_called_once_with()
+
+    def test_pending_or_unreferenced_envelope_fails_complete_ledger(self):
+        envelope, _wrap, _source = self._valid_envelope_fixture()
+        envelope.status = CoreBackupEncryptionEnvelope.Status.PENDING
+        self.envelope_objects.all.return_value = self._envelope_query([envelope])
+        self.assertFalse(_encryption_ledger_is_complete())
+
+        envelope.status = CoreBackupEncryptionEnvelope.Status.ACTIVE
+        envelope.artifacts = SimpleNamespace(all=lambda: [])
+        self.envelope_objects.all.return_value = self._envelope_query([envelope])
+        self.assertFalse(_encryption_ledger_is_complete())
+
+    def test_unpaired_or_pending_wrap_fails_complete_ledger(self):
+        self.envelope_objects.all.return_value = self._envelope_query([])
+        with mock.patch(
+            "apps.management.commands.migrate_and_verify_artifact_provider."
+            "CoreBackupKeyWrap.objects"
+        ) as wraps:
+            wraps.values_list.return_value = [919]
+            self.assertFalse(_encryption_ledger_is_complete())
+
+        envelope, wrap, _source = self._valid_envelope_fixture()
+        wrap.status = CoreBackupKeyWrap.Status.PENDING
+        self.envelope_objects.all.return_value = self._envelope_query([envelope])
+        self.assertFalse(_encryption_ledger_is_complete())
+
+        envelope, _wrap, _source = self._valid_envelope_fixture()
+        envelope.get_active_key_wrap.side_effect = MultipleObjectsReturned()
+        self.envelope_objects.all.return_value = self._envelope_query([envelope])
+        self.assertFalse(_encryption_ledger_is_complete())
 
     def test_exact_retired_tables_use_literal_inventory_probes(self):
         self.assertEqual(
@@ -477,6 +601,10 @@ class ArtifactProviderCurrentStateProofTests(SimpleTestCase):
         wrap_objects.all.return_value.exists.return_value = False
         verify_artifact_provider_rows(generation="1-pending-empty")
 
+        self.envelope_objects.all.return_value.exists.return_value = True
+        with self.assertRaisesRegex(CommandError, "zero encryption envelopes"):
+            verify_artifact_provider_rows(generation="1-pending-empty")
+
     @mock.patch(
         "apps.management.commands.migrate_and_verify_artifact_provider."
         "CoreBackupKeyWrap.objects"
@@ -575,4 +703,25 @@ class ArtifactProviderCurrentStateProofTests(SimpleTestCase):
         self.unledgered_inventory.return_value = True
 
         with self.assertRaisesRegex(CommandError, "without an exact BSE1"):
+            verify_artifact_provider_rows(generation="1")
+
+    @mock.patch(
+        "apps.management.commands.migrate_and_verify_artifact_provider."
+        "CoreBackupKeyWrap.objects"
+    )
+    @mock.patch(
+        "apps.management.commands.migrate_and_verify_artifact_provider."
+        "CoreBackupArtifact.objects"
+    )
+    def test_sealed_generation_rejects_any_incomplete_encryption_ledger(
+        self, artifact_objects, wrap_objects
+    ):
+        wraps = SimpleNamespace()
+        wraps.exclude = mock.Mock()
+        wraps.exclude.return_value.exists.return_value = False
+        wrap_objects.all.return_value = wraps
+        artifact_objects.filter.return_value.exists.return_value = False
+        self.encryption_ledger.return_value = False
+
+        with self.assertRaisesRegex(CommandError, "orphan, pending, unpaired"):
             verify_artifact_provider_rows(generation="1")

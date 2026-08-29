@@ -1328,10 +1328,10 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     log_file.write(f"{storage_type_name}: {stored_backup.storage.name} \n")
 
     try:
-        # In BSE1 mode this context materializes only authenticated-header,
-        # ledger-matched ciphertext into storage's private volume.  The .zip
-        # suffix is retained solely for compatibility with existing adapters;
-        # remote objects contain BSE1 bytes and are never decrypted here.
+        # In BSE1 mode this context materializes only structurally validated,
+        # ledger-matched ciphertext into storage's private volume. New artifacts
+        # use their random envelope UUID and the .bse1 suffix; storage workers
+        # never receive or publish plaintext here.
         with storage_upload_artifact(
             backup,
             legacy_verifier=verify_and_commit_source_artifact,

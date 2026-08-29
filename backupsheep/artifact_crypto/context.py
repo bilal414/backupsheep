@@ -54,9 +54,10 @@ def artifact_provider_policy_witness(installation_id: str, generation: str) -> s
 class ArtifactContext:
     """Identity that an artifact and its wrapped data key are bound to.
 
-    Every value is intentionally non-secret. The canonical JSON digest is stored
-    in the BSE1 header, and the same identity is authenticated by the wrapping
-    provider so a data key cannot cross installations, backups, or lanes.
+    Every value is intentionally non-secret inside BackupSheep's custody ledger.
+    Its digest is stored only in BSE1 v2's encrypted terminal payload, and the
+    same identity is authenticated by the wrapping provider so a data key cannot
+    cross installations, backups, or lanes.
     """
 
     installation_id: str

@@ -5,6 +5,7 @@ from .envelope import (
     ALGORITHM,
     DEFAULT_CHUNK_SIZE,
     FORMAT_VERSION,
+    AuthenticatedEnvelopeDescriptor,
     EnvelopeDescriptor,
     EnvelopeExpectation,
     SealedArtifact,
@@ -28,6 +29,7 @@ from .providers import (
 __all__ = [
     "ALGORITHM",
     "ArtifactContext",
+    "AuthenticatedEnvelopeDescriptor",
     "artifact_provider_policy_witness",
     "DEFAULT_CHUNK_SIZE",
     "EnvelopeDescriptor",

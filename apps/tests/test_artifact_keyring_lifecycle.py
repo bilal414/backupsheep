@@ -10,6 +10,7 @@ import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from django.test import SimpleTestCase
 
@@ -120,6 +121,49 @@ class ArtifactKeyringLifecycleTests(SimpleTestCase):
 
         inspected = lifecycle.inspect(self.path, "database", INSTALLATION_ID)
         self.assertEqual(inspected["active_key_id"], created["active_key_id"])
+
+    def test_rotation_rejects_same_size_tamper_with_restored_mtime(self):
+        created = lifecycle.create(self.path, "database", INSTALLATION_ID)
+        original = self.path.read_bytes()
+        original_stat = self.path.stat()
+        write_temporary = lifecycle._write_temporary
+
+        def tamper_after_candidate(*args, **kwargs):
+            temporary = write_temporary(*args, **kwargs)
+            tampered = bytearray(self.path.read_bytes())
+            index = len(tampered) - 2
+            tampered[index] = ord("0") if tampered[index] != ord("0") else ord("1")
+            self.path.chmod(0o600)
+            self.path.write_bytes(tampered)
+            self.path.chmod(0o400)
+            os.utime(
+                self.path,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            self.assertEqual(self.path.stat().st_size, original_stat.st_size)
+            self.assertEqual(self.path.stat().st_mtime_ns, original_stat.st_mtime_ns)
+            return temporary
+
+        with mock.patch.object(
+            lifecycle,
+            "_write_temporary",
+            side_effect=tamper_after_candidate,
+        ):
+            with self.assertRaisesRegex(
+                lifecycle.KeyringLifecycleError,
+                "changed concurrently",
+            ):
+                lifecycle.rotate(
+                    self.path,
+                    "database",
+                    INSTALLATION_ID,
+                    str(created["active_key_id"]),
+                )
+
+        self.assertNotEqual(self.path.read_bytes(), original)
+        self.assertEqual(self.path.stat().st_size, original_stat.st_size)
+        self.assertEqual(self.path.stat().st_mtime_ns, original_stat.st_mtime_ns)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o400)
 
     def test_mutation_refuses_unsafe_metadata_links_and_parent_lock(self):
         lifecycle.create(self.path, "database", INSTALLATION_ID)

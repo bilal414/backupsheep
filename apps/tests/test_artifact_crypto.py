@@ -135,19 +135,70 @@ class ArtifactEnvelopeTests(SimpleTestCase):
                 self.assertEqual(os.stat(encrypted).st_mode & 0o777, 0o600)
                 self.assertEqual(os.stat(restored).st_mode & 0o777, 0o600)
 
-    def test_header_reader_is_structural_and_exposes_durable_witness(self):
+    def test_public_header_exposes_no_private_digest_or_backup_identity(self):
         payload = b"backup" * 1000
         _source, encrypted, descriptor = self._seal(payload)
 
         parsed = read_envelope_header(encrypted)
+        raw = encrypted.read_bytes()
+        preamble = raw[: envelope_module._PREAMBLE.size]
+        _magic, _version, _flags, _reserved, header_size = (
+            envelope_module._PREAMBLE.unpack(preamble)
+        )
+        header = json.loads(
+            raw[
+                envelope_module._PREAMBLE.size :
+                envelope_module._PREAMBLE.size + header_size
+            ]
+        )
 
-        self.assertEqual(parsed, descriptor)
         self.assertEqual(parsed.envelope_id, ENVELOPE_ID)
-        self.assertEqual(parsed.plaintext_sha256, hashlib.sha256(payload).hexdigest())
-        self.assertEqual(parsed.context_sha256, self.context.sha256)
+        self.assertEqual(parsed.header_sha256, descriptor.header_sha256)
+        self.assertFalse(hasattr(parsed, "plaintext_sha256"))
+        self.assertFalse(hasattr(parsed, "context_sha256"))
+        self.assertNotIn("plaintext_sha256", header)
+        self.assertNotIn("context_sha256", header)
+        self.assertNotIn(hashlib.sha256(payload).hexdigest().encode("ascii"), raw)
+        self.assertNotIn(self.context.sha256.encode("ascii"), raw)
+        self.assertNotIn(self.context.backup_id.encode("ascii"), raw)
 
-    def test_normative_bse1_v1_vector_is_byte_for_byte_deterministic(self):
-        vector_path = Path(__file__).with_name("fixtures") / "bse1-v1-vector.json"
+    def test_equal_plaintexts_have_no_stable_public_equality_witness(self):
+        payload = b"the same private backup" * 100
+        first_source = self._source(payload, "equal-first.zip")
+        second_source = self._source(payload, "equal-second.zip")
+        first_path = self.root / "equal-first.bse1"
+        second_path = self.root / "equal-second.bse1"
+
+        first = encrypt_file(
+            first_source,
+            first_path,
+            data_key=DATA_KEY,
+            context=self.context,
+            chunk_size=CHUNK_SIZE,
+        )
+        second = encrypt_file(
+            second_source,
+            second_path,
+            data_key=DATA_KEY,
+            context=self.context,
+            chunk_size=CHUNK_SIZE,
+        )
+
+        first_public = read_envelope_header(first_path)
+        second_public = read_envelope_header(second_path)
+        self.assertEqual(first.plaintext_sha256, second.plaintext_sha256)
+        self.assertNotEqual(first_public.envelope_id, second_public.envelope_id)
+        self.assertNotEqual(first_public.nonce_prefix, second_public.nonce_prefix)
+        self.assertNotEqual(first_public.header_sha256, second_public.header_sha256)
+        self.assertNotEqual(
+            hashlib.sha256(first_path.read_bytes()).digest(),
+            hashlib.sha256(second_path.read_bytes()).digest(),
+        )
+        self.assertFalse(hasattr(first_public, "plaintext_sha256"))
+        self.assertFalse(hasattr(second_public, "plaintext_sha256"))
+
+    def test_normative_bse1_v2_vector_is_byte_for_byte_deterministic(self):
+        vector_path = Path(__file__).with_name("fixtures") / "bse1-v2-vector.json"
         vector = json.loads(vector_path.read_text(encoding="utf-8"))
         context = ArtifactContext.from_mapping(vector["context"])
         plaintext = bytes.fromhex(vector["plaintext_hex"])
@@ -192,7 +243,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
             restored,
             data_key=bytes.fromhex(vector["data_key_hex"]),
             context=context,
-            expected=parsed.expectation(),
+            expected=descriptor.expectation(),
             trusted_source_root=self.root,
             trusted_destination_root=self.root,
         )
@@ -213,6 +264,13 @@ class ArtifactEnvelopeTests(SimpleTestCase):
             plaintext_sha256=descriptor.plaintext_sha256,
         )
         self._decrypt_failure(encrypted, expected=mismatched)
+        private_mismatch = EnvelopeExpectation(
+            envelope_id=descriptor.envelope_id,
+            header_sha256=descriptor.header_sha256,
+            plaintext_size=descriptor.plaintext_size,
+            plaintext_sha256="0" * 64,
+        )
+        self._decrypt_failure(encrypted, expected=private_mismatch)
 
     def test_header_and_ciphertext_tampering_fail_closed(self):
         _source, encrypted, _descriptor = self._seal(b"A" * (CHUNK_SIZE + 71))
@@ -224,12 +282,12 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         header_end = header_start + header_size
 
         header_tampered = bytearray(original)
-        digest_marker = header_tampered.find(
-            b'"plaintext_sha256":"', header_start, header_end
+        nonce_marker = header_tampered.find(
+            b'"nonce_prefix":"', header_start, header_end
         )
-        digest_offset = digest_marker + len(b'"plaintext_sha256":"')
-        header_tampered[digest_offset] = (
-            ord("0") if header_tampered[digest_offset] != ord("0") else ord("1")
+        nonce_offset = nonce_marker + len(b'"nonce_prefix":"')
+        header_tampered[nonce_offset] = (
+            ord("0") if header_tampered[nonce_offset] != ord("0") else ord("1")
         )
         header_path = self.root / "header-tampered.bse"
         header_path.write_bytes(header_tampered)
@@ -247,6 +305,38 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         terminal_path.write_bytes(terminal_tampered)
         self._decrypt_failure(terminal_path)
 
+    def test_swapped_authenticated_terminal_never_publishes_plaintext(self):
+        first_source, first_path, _first = self._seal(
+            b"first terminal payload", "terminal-first.bse1"
+        )
+        second_context = artifact_context(
+            backup_id="66666666-7777-4888-8999-aaaaaaaaaaaa"
+        )
+        second_source = self._source(
+            b"second terminal data!", "terminal-second.zip"
+        )
+        second_path = self.root / "terminal-second.bse1"
+        encrypt_file(
+            second_source,
+            second_path,
+            data_key=DATA_KEY,
+            context=second_context,
+            chunk_size=CHUNK_SIZE,
+        )
+        terminal_size = (
+            envelope_module._RECORD.size
+            + envelope_module._TERMINAL_PAYLOAD.size
+            + envelope_module._TAG_SIZE
+        )
+        swapped = self.root / "terminal-swapped.bse1"
+        swapped.write_bytes(
+            first_path.read_bytes()[:-terminal_size]
+            + second_path.read_bytes()[-terminal_size:]
+        )
+
+        self._decrypt_failure(swapped)
+        self.assertTrue(first_source.exists())
+
     def test_truncation_at_every_format_boundary_never_publishes_plaintext(self):
         _source, encrypted, _descriptor = self._seal(b"B" * (CHUNK_SIZE + 29))
         original = encrypted.read_bytes()
@@ -255,7 +345,11 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         )
         header_end = 12 + header_size
         first_record_end = header_end + 13 + CHUNK_SIZE + 16
-        terminal_size = 13 + 16
+        terminal_size = (
+            envelope_module._RECORD.size
+            + envelope_module._TERMINAL_PAYLOAD.size
+            + envelope_module._TAG_SIZE
+        )
         cuts = {
             0,
             1,
@@ -320,7 +414,11 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         wrong_length_path.write_bytes(wrong_length)
         self._decrypt_failure(wrong_length_path)
 
-        terminal_start = len(original) - 29
+        terminal_start = len(original) - (
+            envelope_module._RECORD.size
+            + envelope_module._TERMINAL_PAYLOAD.size
+            + envelope_module._TAG_SIZE
+        )
         wrong_terminal = bytearray(original)
         wrong_terminal[terminal_start] = 1
         wrong_terminal_path = self.root / "wrong-terminal.bse"
@@ -336,8 +434,8 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         header_end = 12 + header_size
 
         unknown_version = bytearray(original)
-        unknown_version[4] = 2
-        version_path = self.root / "unknown-version.bse"
+        unknown_version[4] = 1
+        version_path = self.root / "rejected-v1.bse"
         version_path.write_bytes(unknown_version)
         self._decrypt_failure(version_path, error=UnsupportedArtifactFormatError)
 
@@ -348,7 +446,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         ).encode("ascii")
         algorithm_path = self.root / "unknown-algorithm.bse"
         algorithm_path.write_bytes(
-            struct.pack(">4sBBHI", b"BSE1", 1, 0, 0, len(altered_header))
+            struct.pack(">4sBBHI", b"BSE1", 2, 0, 0, len(altered_header))
             + altered_header
             + original[header_end:]
         )
@@ -357,15 +455,23 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         noncanonical = b" " + bytes(original[12:header_end])
         noncanonical_path = self.root / "noncanonical.bse"
         noncanonical_path.write_bytes(
-            struct.pack(">4sBBHI", b"BSE1", 1, 0, 0, len(noncanonical))
+            struct.pack(">4sBBHI", b"BSE1", 2, 0, 0, len(noncanonical))
             + noncanonical
             + original[header_end:]
         )
         self._decrypt_failure(noncanonical_path, error=ArtifactFormatError)
 
         oversized_path = self.root / "oversized-header.bse"
-        oversized_path.write_bytes(struct.pack(">4sBBHI", b"BSE1", 1, 0, 0, 65537))
+        oversized_path.write_bytes(struct.pack(">4sBBHI", b"BSE1", 2, 0, 0, 65537))
         self._decrypt_failure(oversized_path, error=ArtifactFormatError)
+
+    def test_frozen_bse1_v1_envelope_is_rejected(self):
+        vector_path = Path(__file__).with_name("fixtures") / "bse1-v1-vector.json"
+        vector = json.loads(vector_path.read_text(encoding="utf-8"))
+        legacy = self.root / "legacy-v1.bse1"
+        legacy.write_bytes(bytes.fromhex(vector["envelope_hex"]))
+
+        self._decrypt_failure(legacy, error=UnsupportedArtifactFormatError)
 
     def test_no_clobber_preserves_existing_destination(self):
         source = self._source(b"source")
@@ -450,6 +556,15 @@ class ArtifactEnvelopeTests(SimpleTestCase):
             artifact_context(backup_id="not-a-uuid")
         with self.assertRaises(ArtifactConfigurationError):
             artifact_context(lane="shared")
+        with self.assertRaises(ArtifactConfigurationError):
+            encrypt_file(
+                source,
+                self.root / "backup-id-envelope.bse",
+                data_key=DATA_KEY,
+                context=self.context,
+                envelope_id=self.context.backup_id,
+                chunk_size=CHUNK_SIZE,
+            )
 
     def test_trusted_roots_reject_ancestor_symlinks_and_path_escape(self):
         source_directory = self.root / "source-directory"

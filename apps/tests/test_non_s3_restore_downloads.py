@@ -3,19 +3,35 @@
 import hashlib
 import os
 import tempfile
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest import mock
 
 from django.test import SimpleTestCase, override_settings
 
+from apps._tasks.artifact_encryption import StorageArtifactIdentity
 from apps._tasks.integration import restore_common
-from apps._tasks.integration.storage import azure, google_cloud, google_drive, pcloud
+from apps._tasks.integration.storage import (
+    azure,
+    google_cloud,
+    google_drive,
+    onedrive,
+    pcloud,
+)
 
 
 PAYLOAD = b"BackupSheep exact restore payload\n"
 SHA256 = hashlib.sha256(PAYLOAD).hexdigest()
-BACKUP_UUID = "restore-exact-123"
+BACKUP_UUID = "74dd0455-7f95-4896-b6ad-7b86c0a81a54"
 NODE_SLUG = "restore-node"
+BSE_ENVELOPE_UUID = "a533c0a4-5f41-4f0e-88f1-3f46a6168f91"
+BSE_IDENTITY = StorageArtifactIdentity(
+    identifier=BSE_ENVELOPE_UUID,
+    filename=f"{BSE_ENVELOPE_UUID}.bse1",
+    artifact_format="bse1",
+    ownership_marker=f"bse2:{BSE_ENVELOPE_UUID}",
+    content_type="application/octet-stream",
+)
 
 
 class _Artifacts:
@@ -230,6 +246,30 @@ class ExactRestoreFixtures:
             generate_download_url=mock.Mock(return_value="https://legacy.invalid/view"),
         )
         return point
+
+    @staticmethod
+    def _bse_identity(point):
+        point.backup.get_execution_state = mock.Mock()
+        active = SimpleNamespace(
+            envelope=SimpleNamespace(uuid=BSE_ENVELOPE_UUID),
+        )
+        stack = ExitStack()
+        stack.enter_context(
+            mock.patch(
+                "apps._tasks.artifact_encryption._load_active_source_state",
+                return_value=active,
+            )
+        )
+        # These tests isolate the provider transport contract. The end-to-end
+        # artifact pipeline suite separately exercises authenticated BSE unseal.
+        stack.enter_context(
+            mock.patch.object(
+                restore_common,
+                "restore_encryption_plan",
+                return_value=None,
+            )
+        )
+        return stack
 
     @staticmethod
     def _base_state(provider, **overrides):
@@ -916,6 +956,308 @@ class NonS3RestoreDownloadTests(ExactRestoreFixtures, SimpleTestCase):
         self.assertNotIn("database-secret", str(raised.exception))
         self.assertNotIn("live-token", str(raised.exception))
         self.assertFalse(os.path.exists(self._destination()))
+
+    def test_bse_dropbox_restore_uses_only_opaque_envelope_path_and_marker(self):
+        state = self._base_state(
+            "dropbox",
+            provider_id="id:bse-dropbox-file",
+            path=f"/{BSE_IDENTITY.filename}",
+            ownership_marker=f"backupsheep:{BSE_IDENTITY.identifier}",
+            revision="bse-rev-1",
+            version_id="bse-rev-1",
+            content_hash="bse-dropbox-hash",
+        )
+        config = SimpleNamespace(access_token=b"encrypted-access", refresh_token=None)
+        point = self._point("dropbox", state, config=config)
+        metadata = self._dropbox_metadata(state)
+        client = mock.Mock()
+        client.files_get_metadata.side_effect = [metadata, metadata]
+        client.files_download.return_value = (
+            metadata,
+            _Response(chunks=[PAYLOAD]),
+        )
+
+        with self._bse_identity(point), mock.patch(
+            "dropbox.Dropbox", return_value=client
+        ), mock.patch(
+            "apps._tasks.integration.restore_common.bs_decrypt",
+            return_value="token",
+        ):
+            restore_common.fetch_backup_zip(point, self._destination())
+
+        self.assertEqual(state["path"], f"/{BSE_IDENTITY.filename}")
+        self.assertNotIn(BACKUP_UUID, state["path"])
+        self.assertNotIn(NODE_SLUG, state["path"])
+        self.assertFalse(state["path"].endswith(".zip"))
+        client.files_download.assert_called_once_with(
+            state["provider_id"], rev=state["revision"]
+        )
+
+    def test_bse_pcloud_restore_uses_exact_opaque_file_id_and_root_path(self):
+        state = self._base_state(
+            "pcloud",
+            provider_id="bse-pcloud-id",
+            file_id="bse-pcloud-id",
+            fileid="bse-pcloud-id",
+            path=f"/{BSE_IDENTITY.filename}",
+            ownership_marker=f"backupsheep:{BSE_IDENTITY.identifier}",
+        )
+        config = SimpleNamespace(
+            hostname="api.pcloud.com",
+            get_access_token=mock.Mock(return_value="pcloud-token"),
+        )
+        point = self._point(
+            "pcloud",
+            state,
+            storage_file_id=state["path"],
+            config=config,
+        )
+        candidate = {
+            "fileid": state["provider_id"],
+            "path": state["path"],
+            "name": BSE_IDENTITY.filename,
+            "size": len(PAYLOAD),
+        }
+
+        def request_json(_config, _token, _method, operation, *, data=None, **_kwargs):
+            if operation == "stat":
+                self.assertEqual(data["fileid"], state["provider_id"])
+                return {"metadata": dict(candidate)}
+            if operation == "getfilelink":
+                self.assertEqual(data["fileid"], state["provider_id"])
+                return {
+                    "hosts": ["api.pcloud.com"],
+                    "path": "/download/bse-pcloud-id",
+                }
+            raise AssertionError(operation)
+
+        with self._bse_identity(point), mock.patch.object(
+            pcloud,
+            "_request_json",
+            side_effect=request_json,
+        ), mock.patch.object(
+            pcloud,
+            "_verify_candidate",
+            return_value=candidate,
+        ), mock.patch.object(
+            restore_common.requests,
+            "get",
+            return_value=_Response(chunks=[PAYLOAD]),
+        ):
+            restore_common.fetch_backup_zip(point, self._destination())
+
+        self.assertEqual(state["path"], f"/{BSE_IDENTITY.filename}")
+        self.assertNotIn(BACKUP_UUID, state["path"])
+        self.assertNotIn(NODE_SLUG, state["path"])
+
+    def test_bse_google_drive_restore_validates_opaque_name_and_properties(self):
+        state = self._base_state(
+            "google_drive",
+            provider_id="bse-gdrive-id",
+            object_key="bse-gdrive-id",
+            provider_path=f"BackupSheep/{BSE_IDENTITY.filename}",
+            parent_id="gdrive-root-folder",
+            version_id="9",
+            revision="head-revision-9",
+            md5_checksum="md5-bse",
+        )
+        markers = google_drive._marker_values(
+            BSE_IDENTITY,
+            state,
+            role="backup",
+            node_slug=None,
+        )
+        item = {
+            "id": state["provider_id"],
+            "name": BSE_IDENTITY.filename,
+            "mimeType": BSE_IDENTITY.content_type,
+            "parents": [state["parent_id"]],
+            "trashed": False,
+            "size": len(PAYLOAD),
+            "version": state["version_id"],
+            "headRevisionId": state["revision"],
+            "md5Checksum": state["md5_checksum"],
+            "appProperties": markers,
+        }
+        client = _GoogleClient(item)
+        point = self._point(
+            "google_drive",
+            state,
+            config=SimpleNamespace(get_client=mock.Mock(return_value=client)),
+        )
+
+        with self._bse_identity(point):
+            restore_common.fetch_backup_zip(point, self._destination())
+
+        self.assertEqual(
+            state["provider_path"],
+            f"BackupSheep/{BSE_IDENTITY.filename}",
+        )
+        self.assertNotIn("backupsheep_backup_uuid", markers)
+        self.assertNotIn("backupsheep_node_slug", markers)
+        self.assertEqual(
+            markers["backupsheep_artifact_id"],
+            BSE_IDENTITY.ownership_marker,
+        )
+
+    def test_bse_google_cloud_restore_uses_committed_opaque_object_key(self):
+        object_key = f"backups/{BSE_IDENTITY.filename}"
+        state = self._base_state("google_cloud")
+        state.pop("provider_id")
+        state.update(
+            {
+                "object_key": object_key,
+                "generation": "23",
+                "metageneration": "4",
+                "version_id": "23",
+                "etag": '"gcs-bse-etag"',
+            }
+        )
+        markers = google_cloud._marker_values(BSE_IDENTITY, state)
+        state["ownership_marker"] = dict(markers)
+        blob = _GCSRestoreBlob(object_key, state, markers)
+        bucket = _GCSRestoreBucket(blob)
+        client = _GCSRestoreClient(bucket)
+        config = SimpleNamespace(
+            prefix="backups",
+            bucket_name="restore-bucket",
+            get_credentials=mock.Mock(return_value=object()),
+        )
+        point = self._point(
+            "google_cloud",
+            state,
+            storage_file_id=object_key,
+            config=config,
+        )
+
+        with self._bse_identity(point), mock.patch.object(
+            google_cloud.gc_storage,
+            "Client",
+            return_value=client,
+        ):
+            restore_common.fetch_backup_zip(point, self._destination())
+
+        self.assertEqual(bucket.blob_calls[0][0], object_key)
+        self.assertNotIn(BACKUP_UUID, object_key)
+        self.assertNotIn(NODE_SLUG, object_key)
+        self.assertEqual(
+            markers["backupsheep_artifact_id"],
+            BSE_IDENTITY.ownership_marker,
+        )
+        self.assertNotIn("backupsheep_backup_uuid", markers)
+
+    def test_bse_azure_restore_uses_committed_opaque_object_key(self):
+        object_key = f"backups/{BSE_IDENTITY.filename}"
+        state = self._base_state("azure")
+        state.pop("provider_id")
+        state.update(
+            {
+                "object_key": object_key,
+                "version_id": "bse-azure-version",
+                "etag": '"bse-azure-etag"',
+            }
+        )
+        markers = azure._marker_values(BSE_IDENTITY, state)
+        state["ownership_marker"] = dict(markers)
+        blob = _AzureRestoreBlob(state, markers)
+        service = _AzureRestoreService(blob)
+        config = SimpleNamespace(
+            prefix="backups",
+            bucket_name="restore-container",
+            get_client=mock.Mock(return_value=service),
+        )
+        point = self._point(
+            "azure",
+            state,
+            storage_file_id=object_key,
+            config=config,
+        )
+
+        with self._bse_identity(point):
+            restore_common.fetch_backup_zip(point, self._destination())
+
+        self.assertEqual(service.calls[0]["blob"], object_key)
+        self.assertNotIn(BACKUP_UUID, object_key)
+        self.assertNotIn(NODE_SLUG, object_key)
+        self.assertEqual(
+            markers["backupsheep_artifact_id"],
+            BSE_IDENTITY.ownership_marker,
+        )
+        self.assertNotIn("backupsheep_backup_uuid", markers)
+
+    def test_bse_onedrive_restore_uses_opaque_path_and_description(self):
+        target_path = f"backupsheep/{BSE_IDENTITY.filename}"
+        state = self._base_state(
+            "onedrive",
+            provider_id="bse-onedrive-id",
+            object_key=target_path,
+            provider_path=target_path,
+            etag="bse-etag-1",
+            revision="bse-ctag-1",
+            version_id="bse-ctag-1",
+        )
+        marker = onedrive._marker(BSE_IDENTITY, state)
+        item = {
+            "id": state["provider_id"],
+            "name": BSE_IDENTITY.filename,
+            "description": marker,
+            "size": len(PAYLOAD),
+            "eTag": state["etag"],
+            "cTag": state["revision"],
+            "parentReference": {"driveId": "drive-bse"},
+            "file": {},
+        }
+        config = SimpleNamespace(
+            drive_id="drive-bse",
+            get_client=mock.Mock(return_value={"Authorization": "Bearer token"}),
+        )
+        point = self._point(
+            "onedrive",
+            state,
+            storage_file_id=target_path,
+            config=config,
+        )
+
+        with self._bse_identity(point), mock.patch.object(
+            restore_common.requests,
+            "get",
+            side_effect=[
+                _Response(payload=item),
+                _Response(chunks=[PAYLOAD]),
+                _Response(payload=item),
+            ],
+        ) as get:
+            restore_common.fetch_backup_zip(point, self._destination())
+
+        self.assertIn(
+            f"/items/{state['provider_id']}/content",
+            get.call_args_list[1].args[0],
+        )
+        self.assertIn(BSE_IDENTITY.ownership_marker, marker)
+        self.assertNotIn(BACKUP_UUID, target_path + marker)
+        self.assertNotIn(NODE_SLUG, target_path + marker)
+
+    def test_bse_restore_rejects_swapped_envelope_path_before_provider_auth(self):
+        other_envelope = "3e1e2e75-c922-49b8-a341-612b23ca5a4f"
+        state = self._base_state(
+            "dropbox",
+            provider_id="id:swapped-bse-file",
+            path=f"/{other_envelope}.bse1",
+            ownership_marker=f"backupsheep:{other_envelope}",
+            revision="swap-rev",
+            version_id="swap-rev",
+            content_hash="swap-hash",
+        )
+        config = SimpleNamespace(access_token=b"encrypted-access", refresh_token=None)
+        point = self._point("dropbox", state, config=config)
+
+        with self._bse_identity(point), mock.patch("dropbox.Dropbox") as client:
+            with self.assertRaises(restore_common._SafeProviderRestoreError) as raised:
+                restore_common.fetch_backup_zip(point, self._destination())
+
+        self.assertEqual(raised.exception.code, "PROVIDER_OWNERSHIP_MISMATCH")
+        client.assert_not_called()
+        point.generate_download_url.assert_not_called()
 
     def test_provider_state_normalization_does_not_mutate_persisted_metadata(self):
         point, state, _blob, _bucket, _client = self._google_cloud_point()

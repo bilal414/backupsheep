@@ -17,6 +17,7 @@ from django.utils import timezone
 
 from apps._tasks.artifact_encryption import (
     ArtifactPipelineError,
+    _new_envelope_id,
     _configured_provider,
     cleanup_terminal_restore_ciphertext_handoff,
     cleanup_terminal_source_ciphertext,
@@ -135,7 +136,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
                 self.archive,
                 zip_verifier=self._verify_zip,
             )
-        return artifact, self.fence / f"{self.backup.uuid_str}.bse1"
+        return artifact, self.fence / f"{artifact.encryption_envelope.uuid}.bse1"
 
     def _local_destination(self, source_artifact, ciphertext):
         local_root = Path(self.temporary.name) / "local-storage"
@@ -147,7 +148,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             added_by=self.member,
         )
         CoreStorageLocal.objects.create(storage=storage, path=str(local_root))
-        remote = local_root / f"{self.backup.uuid_str}.zip"
+        remote = local_root / source_artifact.object_key
         shutil.copyfile(ciphertext, remote)
         point = CoreWebsiteBackupStoragePoints.objects.create(
             backup=self.backup,
@@ -176,6 +177,14 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         )
         return point, destination, remote, local_root
 
+    def test_random_envelope_identity_retries_a_backup_uuid_collision(self):
+        expected = uuid.UUID("77777777-6666-4555-8444-333333333333")
+        with mock.patch(
+            "apps._tasks.artifact_encryption.uuid.uuid4",
+            side_effect=[uuid.UUID(self.backup.uuid_str), expected],
+        ):
+            self.assertEqual(_new_envelope_id(self.backup.uuid_str), expected)
+
     def test_source_validates_zip_before_key_provider_and_activates_atomically(self):
         self.archive.write_bytes(b"not-a-zip")
         provider = mock.Mock()
@@ -199,7 +208,9 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         self.assertEqual(artifact.artifact_format, CoreBackupArtifact.Format.BSE1)
         self.assertEqual(artifact.encryption_envelope, envelope)
         self.assertEqual(envelope.status, envelope.Status.ACTIVE)
-        self.assertEqual(envelope.uuid, uuid.UUID(self.backup.uuid_str))
+        self.assertNotEqual(envelope.uuid, uuid.UUID(self.backup.uuid_str))
+        self.assertEqual(envelope.format_version, 2)
+        self.assertEqual(artifact.object_key, f"{envelope.uuid}.bse1")
         self.assertFalse(self.archive.exists())
         self.assertEqual(stat_mode(ciphertext), 0o600)
         self.assertEqual(ciphertext.read_bytes()[:4], b"BSE1")
@@ -237,7 +248,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
                 self.backup,
                 legacy_verifier=mock.Mock(side_effect=AssertionError("legacy")),
             ) as observed:
-                snapshot = storage_root / f"{self.backup.uuid_str}.zip"
+                snapshot = storage_root / source_artifact.object_key
                 self.assertEqual(observed.pk, source_artifact.pk)
                 self.assertEqual(snapshot.read_bytes(), ciphertext.read_bytes())
                 self.assertNotEqual(os.stat(snapshot).st_ino, os.stat(ciphertext).st_ino)
@@ -245,7 +256,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             self.assertFalse(snapshot.exists())
         opener.assert_called_once_with(
             self.backup.uuid_str,
-            f"{self.backup.uuid_str}.bse1",
+            f"{source_artifact.encryption_envelope.uuid}.bse1",
             source_lane="files",
             installation_id=INSTALLATION_ID,
         )
@@ -390,7 +401,9 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
                     task_id="storage-stage-1",
                 )
             )
-        restored_ciphertext = reverse_fence / f"{self.backup.uuid_str}.bse1"
+        restored_ciphertext = (
+            reverse_fence / f"{source_artifact.encryption_envelope.uuid}.bse1"
+        )
         self.assertEqual(restored_ciphertext.read_bytes(), remote.read_bytes())
         restore.refresh_from_db()
         self.assertEqual(

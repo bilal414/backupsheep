@@ -240,6 +240,10 @@ Verify:
 - Local Storage BSE1 objects are present, match their recorded storage-point evidence and
   complete an authenticated restore through the exact database/files reverse lane; direct
   browser/ZIP download remains disabled;
+- each recovered BSE1 object is format v2, its random envelope UUID differs from the
+  durable backup UUID, and its public header exposes neither the backup UUID nor the
+  private plaintext/context digests; the decrypting lane must prove those digests from
+  the encrypted terminal record before publishing plaintext;
 - an isolated known database artifact unwraps only with the restored database keyring and
   a known files artifact unwraps only with the restored files keyring; swapping the two
   keyrings or crossing either lane is rejected before any plaintext is released;

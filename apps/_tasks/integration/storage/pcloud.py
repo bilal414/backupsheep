@@ -1,10 +1,11 @@
 """Crash-safe, integrity-verified pCloud backup uploads.
 
-pCloud has no user-defined object metadata on ordinary files.  BackupSheep uses
-the exact ``/<node slug>/<backup uuid>.zip`` path as the ownership marker and
-uses pCloud's file ID plus provider revision/hash fields as the durable provider
-identity.  ``renameifexists`` and ``nopartial`` make the upload collision-safe:
-an existing object is never overwritten by a retry or a concurrent request.
+pCloud has no user-defined object metadata on ordinary files. BackupSheep uses
+the exact opaque ``/<random envelope uuid>.bse1`` path as the ownership marker
+and uses pCloud's file ID plus provider revision/hash fields as the durable
+provider identity. ``renameifexists`` and ``nopartial`` make the upload
+collision-safe: an existing object is never overwritten by a retry or a
+concurrent request.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps._tasks.exceptions import StoragePCloudUploadFailedError
+from apps._tasks.artifact_encryption import storage_artifact_identity
 from apps.api.v1.utils.http import request_timeout, requests
 
 
@@ -110,18 +112,18 @@ def _value(value, name, default=None):
     return getattr(value, name, default)
 
 
-def _backup_identifier(backup):
-    identifier = str(getattr(backup, "uuid_str", None) or getattr(backup, "uuid", ""))
+def _artifact_filename(backup):
+    filename = storage_artifact_identity(backup).filename
     if (
-        not identifier
-        or identifier in {".", ".."}
-        or "\x00" in identifier
-        or "/" in identifier
-        or "\\" in identifier
-        or os.path.basename(identifier) != identifier
+        not filename
+        or filename in {".", ".."}
+        or "\x00" in filename
+        or "/" in filename
+        or "\\" in filename
+        or os.path.basename(filename) != filename
     ):
-        raise _PCloudIntegrityError("The backup identifier is invalid.")
-    return identifier
+        raise _PCloudIntegrityError("The artifact object name is invalid.")
+    return filename
 
 
 def _safe_folder(value):
@@ -143,8 +145,8 @@ def _deterministic_folder(backup):
     return _safe_folder(f"/{slug}")
 
 
-def _deterministic_path(folder, identifier):
-    return f"{folder.rstrip('/')}/{identifier}.zip" if folder != "/" else f"/{identifier}.zip"
+def _deterministic_path(folder, filename):
+    return f"{folder.rstrip('/')}/{filename}" if folder != "/" else f"/{filename}"
 
 
 def _normalize_path(value):
@@ -372,7 +374,7 @@ def _append_unique(candidates, candidate, folder, filename):
 
 
 def _pcloud_candidates(storage_config, token, folder, filename, *, hint=None):
-    expected_path = _normalize_path(_deterministic_path(folder, filename[:-4] if filename.endswith(".zip") else filename))
+    expected_path = _normalize_path(_deterministic_path(folder, filename))
     candidates = []
     if hint is not None:
         _append_unique(candidates, hint, folder, filename)
@@ -413,13 +415,15 @@ def _pcloud_candidates(storage_config, token, folder, filename, *, hint=None):
         entries = listed_metadata
     else:
         raise PCloudStorageAdapterError("MALFORMED_RESPONSE", SAFE_UPLOAD_FAILURE)
-    stem = filename[:-4] if filename.endswith(".zip") else filename
+    stem, suffix = os.path.splitext(filename)
     for entry in entries:
         if not isinstance(entry, dict) or bool(entry.get("isfolder")):
             continue
         name = str(entry.get("name") or "")
         path = _normalize_path(entry.get("path") or f"{folder.rstrip('/')}/{name}")
-        is_variant = name.startswith(f"{stem} (") and name.endswith(".zip")
+        is_variant = bool(
+            suffix and name.startswith(f"{stem} (") and name.endswith(suffix)
+        )
         if path == expected_path or name == filename or is_variant:
             _append_unique(candidates, entry, folder, filename)
     return candidates
@@ -485,7 +489,7 @@ def _download_identity(storage_config, token, candidate, expected):
 
 def _verify_candidate(storage_config, token, candidate, folder, filename, expected):
     path = _normalize_path(_value(candidate, "path") or f"{folder.rstrip('/')}/{_value(candidate, 'name') or filename}")
-    expected_path = _normalize_path(_deterministic_path(folder, filename[:-4] if filename.endswith(".zip") else filename))
+    expected_path = _normalize_path(_deterministic_path(folder, filename))
     if path != expected_path or str(_value(candidate, "name") or filename) != filename:
         raise _PCloudIntegrityError("The pCloud object path is not this backup's deterministic destination.")
     try:
@@ -599,12 +603,22 @@ def _finalize(stored_backup, state, candidate, identity, identifier, folder, fil
     _save_state(stored_backup, state, status=_status(stored_backup, "UPLOAD_COMPLETE"))
 
 
-def _upload(storage_config, token, folder, filename, local_zip, identity, state, stored_backup):
+def _upload(
+    storage_config,
+    token,
+    folder,
+    filename,
+    local_artifact,
+    identity,
+    state,
+    stored_backup,
+    artifact_identity,
+):
     state.update(
         {
             "phase": "uploading",
-            "progress_hash": f"backupsheep-{stored_backup.backup.uuid_str}",
-            "path": _deterministic_path(folder, stored_backup.backup.uuid_str),
+            "progress_hash": f"backupsheep-{artifact_identity.identifier}",
+            "path": _deterministic_path(folder, filename),
             "sha256": identity["sha256"],
             "size_bytes": identity["size_bytes"],
             "checksum_algorithm": CHECKSUM_ALGORITHM,
@@ -613,7 +627,7 @@ def _upload(storage_config, token, folder, filename, local_zip, identity, state,
     _save_state(stored_backup, state, status=_status(stored_backup, "UPLOAD_VALIDATION"))
     hint = None
     try:
-        with open(local_zip, "rb") as source:
+        with open(local_artifact, "rb") as source:
             payload = _request_json(
                 storage_config,
                 token,
@@ -626,7 +640,7 @@ def _upload(storage_config, token, folder, filename, local_zip, identity, state,
                     "nopartial": 1,
                     "progresshash": state["progress_hash"],
                 },
-                files={"file": (filename, source, "application/zip")},
+                files={"file": (filename, source, artifact_identity.content_type)},
             )
         metadata = payload.get("metadata") or []
         if not isinstance(metadata, list):
@@ -653,16 +667,22 @@ def storage_pcloud(stored_backup):
     """Upload one backup and adopt one verified pCloud object on retry."""
     try:
         backup = stored_backup.backup
-        identifier = _backup_identifier(backup)
-        filename = f"{identifier}.zip"
-        local_zip = os.path.join("_storage", filename)
+        artifact_identity = storage_artifact_identity(backup)
+        identifier = artifact_identity.identifier
+        filename = _artifact_filename(backup)
+        local_artifact = os.path.join("_storage", filename)
         storage_config = stored_backup.storage.storage_pcloud
         token = storage_config.get_access_token()
         metadata, state = _state(stored_backup)
         expected = _expected_identity(state)
-        folder = _safe_folder(state.get("folder") or _deterministic_folder(backup))
+        default_folder = (
+            _deterministic_folder(backup)
+            if artifact_identity.artifact_format == "legacy_zip"
+            else "/"
+        )
+        folder = _safe_folder(state.get("folder") or default_folder)
         persisted_path = state.get("path")
-        expected_path = _deterministic_path(folder, identifier)
+        expected_path = _deterministic_path(folder, filename)
         if persisted_path and _normalize_path(persisted_path) != _normalize_path(expected_path):
             raise _PCloudIntegrityError("The persisted pCloud path is not this backup's deterministic destination.")
         state.update(
@@ -674,7 +694,7 @@ def storage_pcloud(stored_backup):
             }
         )
         if expected is None:
-            expected = _file_identity(local_zip)
+            expected = _file_identity(local_artifact)
             state.update(
                 {
                     "sha256": expected["sha256"],
@@ -682,8 +702,8 @@ def storage_pcloud(stored_backup):
                     "checksum_algorithm": CHECKSUM_ALGORITHM,
                 }
             )
-        elif os.path.exists(local_zip):
-            source_identity = _file_identity(local_zip)
+        elif os.path.exists(local_artifact):
+            source_identity = _file_identity(local_artifact)
             if source_identity != expected:
                 raise _PCloudIntegrityError("The local backup changed after upload state was persisted.")
         _save_state(stored_backup, state, status=_status(stored_backup, "UPLOAD_VALIDATION"))
@@ -705,7 +725,17 @@ def storage_pcloud(stored_backup):
                 "createfolderifnotexists",
                 data={"path": folder},
             )
-            remote = _upload(storage_config, token, folder, filename, local_zip, expected, state, stored_backup)
+            remote = _upload(
+                storage_config,
+                token,
+                folder,
+                filename,
+                local_artifact,
+                expected,
+                state,
+                stored_backup,
+                artifact_identity,
+            )
         _finalize(stored_backup, state, remote, expected, identifier, folder, filename)
     except _PCloudSourceMissing:
         try:

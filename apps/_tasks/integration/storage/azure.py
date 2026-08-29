@@ -23,6 +23,10 @@ from django.utils import timezone
 from requests import exceptions as requests_exceptions
 
 from apps._tasks.exceptions import StorageAzureUploadFailedError
+from apps._tasks.artifact_encryption import (
+    storage_artifact_identity,
+    validate_storage_object_key,
+)
 from apps._tasks.integration.storage.s3_verified import (
     S3ObjectIntegrityError,
     S3UploadReconciliationRequired,
@@ -34,7 +38,7 @@ from apps.console.backup.models import StoragePointLeaseLostError
 STATE_KEY = "azure_blob_object"
 CHECKSUM_ALGORITHM = "sha256"
 NAMESPACE = "backupsheep-v1"
-OBJECT_CONTENT_TYPE = "application/zip"
+OBJECT_CONTENT_TYPE = "application/octet-stream"
 BLOCK_SIZE = 4 * 1024 * 1024
 MAX_PROVIDER_ATTEMPTS = 3
 SAFE_UPLOAD = "Azure Blob Storage could not verify the backup upload. Please retry."
@@ -248,8 +252,7 @@ def _provider_call(operation, function, *args, stored_backup=None, **kwargs):
 
 
 def _backup_identifier(stored_backup):
-    backup = stored_backup.backup
-    value = str(getattr(backup, "uuid_str", None) or getattr(backup, "uuid", ""))
+    value = storage_artifact_identity(stored_backup.backup).identifier
     if (
         not value
         or value in {".", ".."}
@@ -377,13 +380,19 @@ def _status(stored_backup, name):
     return getattr(getattr(stored_backup, "Status", None), name, None)
 
 
-def _marker_values(identifier, identity):
-    return {
+def _marker_values(artifact_identity, identity):
+    values = {
         "backupsheep_namespace": NAMESPACE,
-        "backupsheep_backup_uuid": identifier,
         "backupsheep_sha256": identity["sha256"],
         "backupsheep_bytes": str(identity["size_bytes"]),
     }
+    if not hasattr(artifact_identity, "artifact_format"):
+        values["backupsheep_backup_uuid"] = str(artifact_identity)
+    elif artifact_identity.artifact_format == "bse1":
+        values["backupsheep_artifact_id"] = artifact_identity.ownership_marker
+    else:
+        values["backupsheep_backup_uuid"] = artifact_identity.identifier
+    return values
 
 
 def _property(value, name, default=None):
@@ -403,6 +412,8 @@ def _metadata(properties):
 def _owned_properties(properties, markers, *, stored_backup=None):
     actual = _metadata(properties)
     if any(actual.get(str(name).lower()) != str(value) for name, value in markers.items()):
+        raise AzureOwnershipFailure(stored_backup=stored_backup)
+    if "backupsheep_artifact_id" in markers and "backupsheep_backup_uuid" in actual:
         raise AzureOwnershipFailure(stored_backup=stored_backup)
     return properties
 
@@ -673,7 +684,8 @@ def delete_owned_azure_blob(stored_backup):
         or (committed_version and committed_version != version_id)
     ):
         raise AzureOwnershipFailure(stored_backup=stored_backup)
-    markers = _marker_values(stored_backup.backup.uuid_str, expected)
+    artifact_identity = validate_storage_object_key(stored_backup.backup, object_key)
+    markers = _marker_values(artifact_identity, expected)
     if dict(state.get("ownership_marker") or {}) != markers:
         raise AzureOwnershipFailure(stored_backup=stored_backup)
 
@@ -737,7 +749,9 @@ def _build_block_list(plan):
 
 def _stage_blocks(stored_backup, blob_client, state, plan, identity):
     uploaded = dict(state.get("uploaded_blocks") or {})
-    local_filename = os.path.join("_storage", f"{_backup_identifier(stored_backup)}.zip")
+    local_filename = os.path.join(
+        "_storage", storage_artifact_identity(stored_backup.backup).filename
+    )
     source_exists = os.path.isfile(local_filename)
     if not source_exists and len(uploaded) != len(plan):
         raise _AzureSourceMissing from None
@@ -784,11 +798,14 @@ def _stage_blocks(stored_backup, blob_client, state, plan, identity):
 
 
 def _commit_blocks(stored_backup, blob_client, state, plan, markers):
+    content_type = str(state.get("content_type") or "")
+    if content_type not in {"application/octet-stream", "application/zip"}:
+        raise AzureOwnershipFailure(stored_backup=stored_backup)
     return _provider_call(
         "commit block list",
         blob_client.commit_block_list,
         _build_block_list(plan),
-        content_settings=ContentSettings(content_type=OBJECT_CONTENT_TYPE),
+        content_settings=ContentSettings(content_type=content_type),
         metadata=markers,
         if_none_match="*",
         timeout=_timeout(),
@@ -799,14 +816,19 @@ def _commit_blocks(stored_backup, blob_client, state, plan, markers):
 def storage_azure(stored_backup):
     """Upload/adopt one deterministic Azure blob and commit verified evidence."""
     try:
-        identifier = _backup_identifier(stored_backup)
-        node_slug = _node_slug(stored_backup)
-        local_filename = os.path.join("_storage", f"{identifier}.zip")
+        artifact_identity = storage_artifact_identity(stored_backup.backup)
+        identifier = artifact_identity.identifier
+        local_filename = os.path.join("_storage", artifact_identity.filename)
         config = stored_backup.storage.storage_azure
         prefix = str(config.prefix or "")
         if prefix and not prefix.endswith("/"):
             prefix += "/"
-        object_key = f"{prefix}{node_slug}/{identifier}.zip"
+        object_key = (
+            f"{prefix}{_node_slug(stored_backup)}/{artifact_identity.filename}"
+            if artifact_identity.artifact_format == "legacy_zip"
+            else f"{prefix}{artifact_identity.filename}"
+        )
+        validate_storage_object_key(stored_backup.backup, object_key)
         metadata, state = _state(stored_backup)
         persisted_key = str(state.get("object_key") or stored_backup.storage_file_id or object_key)
         if persisted_key != object_key:
@@ -823,8 +845,9 @@ def storage_azure(stored_backup):
                 "sha256": identity["sha256"],
                 "size_bytes": identity["size_bytes"],
                 "checksum_algorithm": CHECKSUM_ALGORITHM,
-                "ownership_marker": _marker_values(identifier, identity),
+                "ownership_marker": _marker_values(artifact_identity, identity),
                 "block_size": BLOCK_SIZE,
+                "content_type": artifact_identity.content_type,
             }
         )
         markers = dict(state["ownership_marker"])
@@ -866,7 +889,8 @@ def storage_azure(stored_backup):
 
         # A committed object was not found.  The following list is safe to use
         # for continuation because every accepted block ID is derived from this
-        # backup UUID and its exact index.  Any other ID is an ownership failure.
+        # opaque artifact identifier and its exact index. Any other ID is an
+        # ownership failure.
         _reconcile_blocks(blob_client, state, plan, stored_backup=stored_backup)
         _stage_blocks(stored_backup, blob_client, state, plan, identity)
         try:

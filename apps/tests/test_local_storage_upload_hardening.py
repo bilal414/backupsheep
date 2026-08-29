@@ -7,6 +7,7 @@ import uuid
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
+from apps._tasks.artifact_encryption import StorageArtifactIdentity
 from apps._tasks.exceptions import StorageLocalUploadFailedError
 from apps._tasks.integration.storage import local as local_storage_module
 from apps._tasks.integration.storage.local import (
@@ -81,6 +82,16 @@ class LocalStorageUploadHardeningTests(TestCase):
     def _point(self, root, events=None, path="backups"):
         return _Point(root, self.identifier, events if events is not None else [], path)
 
+    def _bse_identity(self):
+        identifier = "12345678-1234-4abc-8def-1234567890ab"
+        return StorageArtifactIdentity(
+            identifier=identifier,
+            filename=f"{identifier}.bse1",
+            artifact_format="bse1",
+            ownership_marker=f"bse2:{identifier}",
+            content_type="application/octet-stream",
+        )
+
     @staticmethod
     def _target(root, path, identifier):
         return os.path.join(os.path.realpath(root), path, f"{identifier}.zip")
@@ -132,6 +143,73 @@ class LocalStorageUploadHardeningTests(TestCase):
         self.assertEqual(artifact["object_key"], point.storage_file_id)
         self.assertEqual(artifact["byte_count"], len(payload))
         self.assertEqual(artifact["checksum_value"], checksum)
+
+    def test_encrypted_local_destination_uses_only_random_envelope_name(self):
+        artifact = self._bse_identity()
+        payload = b"encrypted-local-artifact"
+        source_path = os.path.join("_storage", artifact.filename)
+        with open(source_path, "wb") as source:
+            source.write(payload)
+        self.addCleanup(
+            lambda: os.path.exists(source_path) and os.remove(source_path)
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            point = self._point(root)
+            with mock.patch.object(
+                local_storage_module,
+                "storage_artifact_identity",
+                return_value=artifact,
+            ):
+                storage_local(point)
+
+            target = os.path.realpath(
+                os.path.join(root, "backups", artifact.filename)
+            )
+            self.assertTrue(os.path.isfile(target))
+            self.assertEqual(point.storage_file_id, target)
+            self.assertEqual(
+                point.metadata[LOCAL_OBJECT_METADATA_KEY]["object_key"],
+                f"backups/{artifact.filename}",
+            )
+            self.assertNotIn(self.identifier, point.storage_file_id)
+            self.assertNotIn(".zip", point.storage_file_id)
+
+    def test_encrypted_local_delete_uses_random_envelope_identity(self):
+        artifact = self._bse_identity()
+        payload = b"encrypted-local-delete-artifact"
+        checksum = hashlib.sha256(payload).hexdigest()
+        source_path = os.path.join("_storage", artifact.filename)
+        with open(source_path, "wb") as source:
+            source.write(payload)
+        self.addCleanup(
+            lambda: os.path.exists(source_path) and os.remove(source_path)
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            point = self._point(root)
+            point.committed_integrity_identity = lambda: {
+                "sha256": checksum,
+                "size_bytes": len(payload),
+            }
+            with mock.patch.object(
+                local_storage_module,
+                "storage_artifact_identity",
+                return_value=artifact,
+            ):
+                storage_local(point)
+                target = point.storage_file_id
+                self.assertTrue(local_storage_module.delete_local_object(point))
+
+            self.assertFalse(os.path.exists(target))
+            visible = repr(
+                {
+                    "path": target,
+                    "state": point.metadata[LOCAL_OBJECT_METADATA_KEY],
+                }
+            )
+            self.assertNotIn(self.identifier, visible)
+            self.assertNotIn(".zip", visible)
 
     def test_long_hash_and_copy_loops_pulse_the_bound_upload_lease(self):
         payload = b"lease-heartbeat-checkpoints"

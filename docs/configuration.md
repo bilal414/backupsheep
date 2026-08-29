@@ -122,13 +122,21 @@ hostname matching are mandatory. System trust roots are used unless a private CA
 
 ## Artifact encryption and local-file keys
 
-Stock production requires BSE1 chunked AES-256-GCM-SIV envelopes, enterprise mode, the
+Stock production requires BSE1 format-v2 chunked AES-256-GCM-SIV envelopes, enterprise mode, the
 `local-file` provider, and legacy restore disabled. The installer atomically generates
 independent database/files 256-bit keyrings under `.secrets`; Compose grants each only to
 its matching source worker. Storage receives ciphertext and no root key. This artifact
 encryption path requires no AWS account, AWS credentials, or AWS KMS; AWS is used only
 when an operator separately configures an optional AWS source, storage destination, or
 Amazon SES email integration.
+
+BSE1 v2 keeps the plaintext SHA-256, artifact-context SHA-256, and backup UUID out
+of its readable header. Each ciphertext handoff uses a distinct random envelope
+UUID; the private digests are authenticated inside the encrypted terminal record
+and checked by the decrypting source lane before plaintext publication. Storage
+still necessarily observes ciphertext size, chunk geometry, transfer timing, and
+the random envelope identity. Format-v1 artifacts are rejected rather than
+silently accepted or converted.
 
 The current runtime provider registry contains only `local-file` and
 `local-development`. `local-file` is the stock production provider;

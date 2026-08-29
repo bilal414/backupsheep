@@ -1,13 +1,18 @@
 """Apply schema migrations and prove the current artifact-provider transition."""
 
 from django.conf import settings
-from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.exceptions import (
+    MultipleObjectsReturned,
+    ObjectDoesNotExist,
+    ValidationError,
+)
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
 
 from apps.console.backup.models import (
     CoreBackupArtifact,
+    CoreBackupEncryptionEnvelope,
     CoreBackupKeyWrap,
     CoreBasecampBackup,
     CoreBasecampBackupStoragePoints,
@@ -137,8 +142,7 @@ def _artifact_has_durable_shape(artifact) -> bool:
     ):
         return False
     if artifact.role == CoreBackupArtifact.Role.SOURCE:
-        backup = artifact.backup
-        expected_name = f"{backup.uuid_str}.bse1" if backup is not None else ""
+        expected_name = f"{envelope.uuid}.bse1"
         return bool(
             artifact.storage_id is None
             and artifact.object_key == expected_name
@@ -184,6 +188,79 @@ def _destination_matches_source(artifact, source_artifact, storage_point) -> boo
         and artifact.checksum_algorithm == "sha256"
         and artifact.checksum_value == source_artifact.checksum_value
     )
+
+
+def _encryption_ledger_is_complete() -> bool:
+    """Enumerate every envelope/wrap and require one referenced active lineage."""
+
+    observed_wrap_ids = set()
+    try:
+        envelopes = (
+            CoreBackupEncryptionEnvelope.objects.all()
+            .select_related("execution")
+            .prefetch_related("key_wraps", "artifacts__storage")
+        )
+        for envelope in envelopes.iterator(chunk_size=250):
+            if (
+                envelope.format_version != 2
+                or envelope.algorithm != "AES-256-GCM-SIV"
+                or envelope.status != CoreBackupEncryptionEnvelope.Status.ACTIVE
+                or envelope.sealed_at is None
+            ):
+                return False
+            envelope.full_clean()
+            active_wrap = envelope.get_active_key_wrap()
+            artifacts = list(envelope.artifacts.all())
+            sources = [
+                artifact
+                for artifact in artifacts
+                if artifact.role == CoreBackupArtifact.Role.SOURCE
+            ]
+            if len(sources) != 1:
+                return False
+            source = sources[0]
+            if (
+                source.artifact_format != CoreBackupArtifact.Format.BSE1
+                or source.encryption_envelope_id != envelope.pk
+                or source.backup_content_type_id
+                != envelope.execution.backup_content_type_id
+                or source.backup_object_id != envelope.execution.backup_object_id
+                or not _artifact_has_durable_shape(source)
+            ):
+                return False
+            source.validate_encrypted_restore_state()
+
+            wraps = list(envelope.key_wraps.all())
+            if active_wrap.pk not in {wrap.pk for wrap in wraps}:
+                return False
+            for wrap in wraps:
+                if (
+                    wrap.pk in observed_wrap_ids
+                    or wrap.envelope_id != envelope.pk
+                    or wrap.provider != CoreBackupKeyWrap.Provider.LOCAL_FILE
+                    or wrap.status
+                    not in {
+                        CoreBackupKeyWrap.Status.ACTIVE,
+                        CoreBackupKeyWrap.Status.RETIRED,
+                    }
+                ):
+                    return False
+                wrap.full_clean()
+                observed_wrap_ids.add(wrap.pk)
+
+        persisted_wrap_ids = set(
+            CoreBackupKeyWrap.objects.values_list("pk", flat=True)
+        )
+        return observed_wrap_ids == persisted_wrap_ids
+    except (
+        AttributeError,
+        MultipleObjectsReturned,
+        ObjectDoesNotExist,
+        TypeError,
+        ValueError,
+        ValidationError,
+    ):
+        return False
 
 
 def _unledgered_backup_inventory_exists() -> bool:
@@ -302,18 +379,21 @@ def verify_artifact_provider_rows(*, generation: str) -> None:
     """Reject incompatible wraps or legacy artifacts using current database state."""
 
     wraps = CoreBackupKeyWrap.objects.all()
+    envelopes = CoreBackupEncryptionEnvelope.objects.all()
     legacy_artifacts = CoreBackupArtifact.objects.filter(
         artifact_format=CoreBackupArtifact.Format.LEGACY_ZIP
     )
     if generation == "1-pending-empty":
         if (
             wraps.exists()
+            or envelopes.exists()
             or legacy_artifacts.exists()
             or _any_backup_inventory_exists()
         ):
             raise CommandError(
-                "Artifact key-provider transition requires zero data-key wraps and "
-                "zero legacy or unledgered backup, storage-point, and artifact records."
+                "Artifact key-provider transition requires zero encryption envelopes, "
+                "zero data-key wraps, and zero legacy or unledgered backup, "
+                "storage-point, and artifact records."
             )
         return
     if generation != "1":
@@ -325,6 +405,11 @@ def verify_artifact_provider_rows(*, generation: str) -> None:
     if legacy_artifacts.exists():
         raise CommandError(
             "Production artifact custody contains a legacy plaintext artifact record."
+        )
+    if not _encryption_ledger_is_complete():
+        raise CommandError(
+            "Production artifact custody contains an orphan, pending, unpaired, "
+            "or unreferenced encryption envelope or data-key wrap."
         )
     if _unledgered_backup_inventory_exists():
         raise CommandError(

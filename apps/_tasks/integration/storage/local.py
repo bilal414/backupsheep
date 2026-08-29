@@ -15,6 +15,7 @@ import tempfile
 from django.utils import timezone
 
 from apps._tasks.exceptions import StorageLocalUploadFailedError
+from apps._tasks.artifact_encryption import storage_artifact_identity
 from apps._tasks.integration.storage.lease import StorageUploadLeaseLost
 from apps.console.backup.models import StoragePointLeaseLostError
 
@@ -36,8 +37,8 @@ class _LocalStorageIntegrityError(Exception):
     """Internal marker for a destination/source identity mismatch."""
 
 
-def _backup_identifier(backup):
-    value = str(getattr(backup, "uuid_str", None) or getattr(backup, "uuid", ""))
+def _artifact_filename(backup):
+    value = storage_artifact_identity(backup).filename
     if (
         not value
         or value in {".", ".."}
@@ -46,7 +47,7 @@ def _backup_identifier(backup):
         or "\\" in value
         or os.path.basename(value) != value
     ):
-        raise _LocalStorageIntegrityError("The backup identifier is invalid.")
+        raise _LocalStorageIntegrityError("The artifact object name is invalid.")
     return value
 
 
@@ -275,8 +276,7 @@ def delete_local_object(stored_backup):
     """
 
     backup = stored_backup.backup
-    identifier = _backup_identifier(backup)
-    filename = f"{identifier}.zip"
+    filename = _artifact_filename(backup)
     root = stored_backup.storage.storage_local.storage_root()
     _metadata, state = _state(stored_backup)
     object_key = str(state.get("object_key") or "")
@@ -371,8 +371,7 @@ def storage_local(stored_backup):
     """Upload one local backup with atomic publication and verified adoption."""
     try:
         backup = stored_backup.backup
-        identifier = _backup_identifier(backup)
-        filename = f"{identifier}.zip"
+        filename = _artifact_filename(backup)
         local_zip = os.path.join("_storage", filename)
         storage_local_config = stored_backup.storage.storage_local
         root = storage_local_config.storage_root()

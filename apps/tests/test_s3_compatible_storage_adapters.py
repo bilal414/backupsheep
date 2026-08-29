@@ -10,6 +10,7 @@ from unittest import mock
 from botocore.exceptions import ClientError
 from django.test import SimpleTestCase, override_settings
 
+from apps._tasks.artifact_encryption import StorageArtifactIdentity
 from apps._tasks.exceptions import (
     NodeDigitalOceanSpacesBucketDeletedError,
     NodeDigitalOceanSpacesNoSuchBucketError,
@@ -175,6 +176,15 @@ ADAPTERS = (
     ),
 )
 
+BSE_ENVELOPE_ID = "12345678-1234-4abc-8def-1234567890ab"
+BSE_IDENTITY = StorageArtifactIdentity(
+    identifier=BSE_ENVELOPE_ID,
+    filename=f"{BSE_ENVELOPE_ID}.bse1",
+    artifact_format="bse1",
+    ownership_marker=f"bse2:{BSE_ENVELOPE_ID}",
+    content_type="application/octet-stream",
+)
+
 
 def _provider(spec, prefix="backups"):
     endpoint = "provider.example"
@@ -204,6 +214,8 @@ def _stored_backup(spec, prefix="backups"):
     )
     setattr(storage, spec.relation, provider)
     backup = SimpleNamespace(
+        pk=42,
+        id=42,
         uuid="backup-uuid",
         uuid_str="backup-uuid",
         attempt_no=1,
@@ -234,6 +246,176 @@ def _not_found(operation="HeadObject"):
 
 
 class S3CompatibleStorageAdapterContractTests(SimpleTestCase):
+    def test_encrypted_keys_are_opaque_across_every_simple_s3_adapter(self):
+        for spec in ADAPTERS:
+            with self.subTest(provider=spec.module):
+                module_name = f"apps._tasks.integration.storage.{spec.module}"
+                module = importlib.import_module(module_name)
+                point, _provider_config = _stored_backup(spec)
+                client = mock.Mock(name=f"{spec.module}-client")
+
+                with mock.patch.object(
+                    module,
+                    "storage_artifact_identity",
+                    return_value=BSE_IDENTITY,
+                ), mock.patch.object(
+                    module, "_s3_client", return_value=client
+                ), mock.patch.object(module, "upload_verified_s3") as upload:
+                    getattr(module, spec.function)(point)
+
+                call = upload.call_args
+                self.assertEqual(call.kwargs["key"], f"backups/{BSE_IDENTITY.filename}")
+                self.assertEqual(
+                    call.kwargs["local_path"], f"_storage/{BSE_IDENTITY.filename}"
+                )
+                visible = f"{call.kwargs['key']} {call.kwargs['local_path']}"
+                self.assertNotIn(point.backup.uuid_str, visible)
+                self.assertNotIn(point.backup.node.name_slug, visible)
+                self.assertNotIn(".zip", visible)
+
+    def test_common_encrypted_delete_requires_opaque_key_and_marker(self):
+        key = f"backups/{BSE_IDENTITY.filename}"
+        payload = b"opaque-ciphertext"
+        checksum = hashlib.sha256(payload).hexdigest()
+        client = mock.Mock()
+        client.head_object.return_value = {
+            "ContentLength": len(payload),
+            "VersionId": "version-1",
+            "Metadata": {
+                "backupsheep-artifact-id": BSE_IDENTITY.ownership_marker,
+                "backupsheep-sha256": checksum,
+                "backupsheep-bytes": str(len(payload)),
+            },
+        }
+        point = SimpleNamespace(
+            backup=SimpleNamespace(uuid_str="backup-uuid"),
+            storage_file_id=key,
+            committed_integrity_identity=lambda: {
+                "sha256": checksum,
+                "size_bytes": len(payload),
+            },
+            committed_version_id=lambda: "version-1",
+            committed_version_kwargs=lambda: {"VersionId": "version-1"},
+        )
+        point.verify_s3_head_ownership = lambda head: (
+            CoreWebsiteBackupStoragePoints.verify_s3_head_ownership(point, head)
+        )
+
+        with mock.patch(
+            "apps._tasks.artifact_encryption.storage_artifact_identity",
+            return_value=BSE_IDENTITY,
+        ), mock.patch(
+            "apps._tasks.artifact_encryption.validate_storage_object_key",
+            return_value=BSE_IDENTITY,
+        ):
+            self.assertTrue(
+                CoreWebsiteBackupStoragePoints.delete_owned_s3_object(
+                    point,
+                    client,
+                    Bucket="test-bucket",
+                    Key=key,
+                )
+            )
+
+        client.delete_object.assert_called_once_with(
+            Bucket="test-bucket",
+            Key=key,
+            VersionId="version-1",
+        )
+        visible = repr(
+            {
+                "key": key,
+                "metadata": client.head_object.return_value["Metadata"],
+            }
+        )
+        self.assertNotIn("backup-uuid", visible)
+        self.assertNotIn("website-node", visible)
+        self.assertNotIn(".zip", visible)
+
+        client.reset_mock()
+        client.head_object.return_value["Metadata"]["backupsheep-backup-id"] = "42"
+        with mock.patch(
+            "apps._tasks.artifact_encryption.storage_artifact_identity",
+            return_value=BSE_IDENTITY,
+        ), mock.patch(
+            "apps._tasks.artifact_encryption.validate_storage_object_key",
+            return_value=BSE_IDENTITY,
+        ):
+            with self.assertRaises(RuntimeError):
+                CoreWebsiteBackupStoragePoints.delete_owned_s3_object(
+                    point,
+                    client,
+                    Bucket="test-bucket",
+                    Key=key,
+                )
+        client.delete_object.assert_not_called()
+
+    def test_encrypted_keys_are_opaque_for_aws_and_vultr(self):
+        cases = (
+            (
+                "aws_s3",
+                "storage_aws_s3",
+                SimpleNamespace(
+                    prefix="backups",
+                    bucket_name="test-bucket",
+                    expected_bucket_owner="",
+                    object_lock_is_configured=lambda: False,
+                ),
+                "storage_aws_s3",
+                "aws_s3_object",
+            ),
+            (
+                "vultr",
+                "storage_vultr",
+                SimpleNamespace(prefix="backups", bucket_name="test-bucket"),
+                "storage_vultr",
+                "vultr_s3_object",
+            ),
+        )
+        for module_suffix, function_name, provider, relation, metadata_key in cases:
+            with self.subTest(provider=module_suffix):
+                module = importlib.import_module(
+                    f"apps._tasks.integration.storage.{module_suffix}"
+                )
+                backup = SimpleNamespace(
+                    pk=42,
+                    id=42,
+                    uuid_str="private-backup-uuid",
+                    attempt_no=1,
+                    type="on_demand",
+                    node=SimpleNamespace(name_slug="private-node"),
+                )
+                storage = SimpleNamespace(
+                    account=SimpleNamespace(get_encryption_key=lambda: b"key")
+                )
+                setattr(storage, relation, provider)
+                point = SimpleNamespace(
+                    backup=backup,
+                    storage=storage,
+                    status=None,
+                    Status=SimpleNamespace(UPLOAD_FAILED_FILE_NOT_FOUND="missing"),
+                    save=mock.Mock(),
+                )
+                client = mock.Mock()
+                with mock.patch.object(
+                    module,
+                    "storage_artifact_identity",
+                    return_value=BSE_IDENTITY,
+                ), mock.patch.object(
+                    module, "_s3_client", return_value=client
+                ), mock.patch.object(module, "upload_verified_s3") as upload:
+                    getattr(module, function_name)(point)
+
+                self.assertEqual(
+                    upload.call_args.kwargs["key"],
+                    f"backups/{BSE_IDENTITY.filename}",
+                )
+                self.assertEqual(
+                    upload.call_args.kwargs["local_path"],
+                    f"_storage/{BSE_IDENTITY.filename}",
+                )
+                self.assertEqual(upload.call_args.kwargs["metadata_key"], metadata_key)
+
     def test_every_adapter_uses_verified_upload_and_bounded_boto_client(self):
         for spec in ADAPTERS:
             with self.subTest(provider=spec.module):

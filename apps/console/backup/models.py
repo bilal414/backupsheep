@@ -861,7 +861,7 @@ class CoreBackupExecution(TimeStampedModel):
 
 
 class CoreBackupEncryptionEnvelope(TimeStampedModel):
-    """Durable identity and authenticated-header witness for one backup.
+    """Durable identity and authenticated envelope witness for one backup.
 
     Wrapped data keys are separate generation records so a root-key rotation never
     requires rewriting a potentially multi-terabyte backup object.
@@ -879,7 +879,7 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
         related_name="encryption_envelope",
         on_delete=models.CASCADE,
     )
-    format_version = models.PositiveSmallIntegerField(default=1)
+    format_version = models.PositiveSmallIntegerField(default=2)
     algorithm = models.CharField(max_length=32, default="AES-256-GCM-SIV")
     chunk_size = models.PositiveIntegerField(default=4 * 1024 * 1024)
     context_canonical_json = models.CharField(max_length=2048)
@@ -898,7 +898,7 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(
-                    format_version=1, algorithm="AES-256-GCM-SIV"
+                    format_version=2, algorithm="AES-256-GCM-SIV"
                 ),
                 name="backup_envelope_bse1_algorithm",
             ),
@@ -965,6 +965,10 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
             if context.sha256 != self.context_sha256:
                 errors["context_sha256"] = (
                     "The artifact context digest does not match its canonical context."
+                )
+            if str(self.uuid) == context.backup_id:
+                errors["uuid"] = (
+                    "The encryption envelope identifier must be independent of the backup identifier."
                 )
         if self.status == self.Status.ACTIVE and self.sealed_at is None:
             errors["sealed_at"] = "An active encryption envelope must be sealed."
@@ -5278,14 +5282,28 @@ class BaseBackupStoragePoints(TimeStampedModel):
 
     def verify_s3_head_ownership(self, head):
         """Fail closed unless HEAD proves this exact object belongs to this row."""
+        from apps._tasks.artifact_encryption import storage_artifact_identity
+
+        artifact_identity = storage_artifact_identity(self.backup)
         metadata = {
             str(key).lower(): str(value)
             for key, value in (head.get("Metadata") or {}).items()
         }
-        backup_marker = metadata.get("backupsheep-backup-id") or metadata.get(
-            "backup"
-        )
-        if backup_marker != str(self.backup_id):
+        if artifact_identity.artifact_format == CoreBackupArtifact.Format.BSE1:
+            if "backupsheep-backup-id" in metadata or "backup" in metadata:
+                raise RuntimeError(
+                    "Storage object exposes ambiguous legacy ownership metadata."
+                )
+            backup_marker = metadata.get("backupsheep-artifact-id")
+        else:
+            if "backupsheep-artifact-id" in metadata:
+                raise RuntimeError(
+                    "Legacy storage object exposes ambiguous ownership metadata."
+                )
+            backup_marker = metadata.get("backupsheep-backup-id") or metadata.get(
+                "backup"
+            )
+        if backup_marker != artifact_identity.ownership_marker:
             raise RuntimeError(
                 "Storage object ownership marker does not match this backup."
             )
@@ -5319,8 +5337,11 @@ class BaseBackupStoragePoints(TimeStampedModel):
 
     def delete_owned_s3_object(self, client, **kwargs):
         """HEAD, verify ownership/integrity, then delete the exact object version."""
+        from apps._tasks.artifact_encryption import validate_storage_object_key
+
         if str(kwargs.get("Key") or "") != str(self.storage_file_id or ""):
             raise RuntimeError("Storage delete key does not match this backup.")
+        validate_storage_object_key(self.backup, kwargs["Key"])
         head_args = dict(kwargs)
         head_args.update(self.committed_version_kwargs())
         try:
@@ -5676,10 +5697,17 @@ class BaseBackupStoragePoints(TimeStampedModel):
             else:
                 return None
         elif self.storage.type.code == "pcloud":
-            url = f"https://my.pcloud.com/#page=filemanager" \
-                  f"&q=name:{self.backup.uuid_str}" \
-                  f"&folderid={self.metadata.get('parentfolderid')}" \
-                  f"&filter=all"
+            from apps._tasks.artifact_encryption import storage_artifact_identity
+            from apps._tasks.integration.storage.pcloud import PCLOUD_METADATA_KEY
+
+            artifact_identity = storage_artifact_identity(self.backup)
+            state = dict((self.metadata or {}).get(PCLOUD_METADATA_KEY) or {})
+            url = (
+                "https://my.pcloud.com/#page=filemanager"
+                f"&q=name:{artifact_identity.filename}"
+                f"&folderid={state.get('parentfolderid') or ''}"
+                "&filter=all"
+            )
             return url
         elif self.storage.type.code == "onedrive":
             onedrive_path = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.storage.storage_onedrive.drive_id}/root:/{self.storage_file_id}"
@@ -6132,6 +6160,10 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         Key=f"{self.storage_file_id}",
                     )
                 elif self.storage.type.code == "dropbox":
+                    from apps._tasks.artifact_encryption import (
+                        storage_artifact_identity,
+                        validate_storage_object_key,
+                    )
                     from apps._tasks.integration.storage.dropbox import (
                         DROPBOX_METADATA_KEY,
                         _dropbox_timeout,
@@ -6143,9 +6175,12 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         (self.metadata or {}).get(DROPBOX_METADATA_KEY) or {}
                     )
                     expected = self.committed_integrity_identity()
+                    artifact_identity = storage_artifact_identity(self.backup)
+                    expected_marker = f"backupsheep:{artifact_identity.identifier}"
+                    validate_storage_object_key(self.backup, state.get("path"))
                     if (
                         state.get("ownership_marker")
-                        != f"backupsheep:{self.backup.uuid_str}"
+                        != expected_marker
                         or str(state.get("provider_id") or "")
                         != str(self.storage_file_id)
                         or expected is None
@@ -6219,6 +6254,10 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         )
                         return False
                 elif self.storage.type.code == "pcloud":
+                    from apps._tasks.artifact_encryption import (
+                        storage_artifact_identity,
+                        validate_storage_object_key,
+                    )
                     from apps._tasks.integration.storage.pcloud import (
                         PCLOUD_METADATA_KEY,
                         PCloudStorageAdapterError,
@@ -6230,6 +6269,9 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         (self.metadata or {}).get(PCLOUD_METADATA_KEY) or {}
                     )
                     expected = self.committed_integrity_identity()
+                    artifact_identity = storage_artifact_identity(self.backup)
+                    expected_marker = f"backupsheep:{artifact_identity.identifier}"
+                    validate_storage_object_key(self.backup, state.get("path"))
                     file_id = str(
                         state.get("fileid")
                         or state.get("file_id")
@@ -6238,7 +6280,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     )
                     if (
                         state.get("ownership_marker")
-                        != f"backupsheep:{self.backup.uuid_str}"
+                        != expected_marker
                         or not file_id
                         or expected is None
                     ):
@@ -6270,7 +6312,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                             token,
                             candidate,
                             str(state.get("folder") or ""),
-                            f"{self.backup.uuid_str}.zip",
+                            artifact_identity.filename,
                             expected,
                         )
                         if (
@@ -6292,6 +6334,10 @@ class BaseBackupStoragePoints(TimeStampedModel):
                             data={"fileid": file_id},
                         )
                 elif self.storage.type.code == "onedrive":
+                    from apps._tasks.artifact_encryption import (
+                        storage_artifact_identity,
+                        validate_storage_object_key,
+                    )
                     from apps._tasks.integration.storage.onedrive import (
                         STATE_KEY,
                         _client_headers,
@@ -6310,7 +6356,9 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     session_fingerprint = str(
                         state.get("session_fingerprint") or ""
                     )
-                    marker = _marker(self.backup.uuid_str, expected or {})
+                    artifact_identity = storage_artifact_identity(self.backup)
+                    validate_storage_object_key(self.backup, target_path)
+                    marker = _marker(artifact_identity, expected or {})
                     if (
                         state.get("phase") != "committed"
                         or target_path != str(self.storage_file_id or "")

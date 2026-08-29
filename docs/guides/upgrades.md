@@ -199,9 +199,10 @@ development/test-only `local-development`; the historical `aws-kms` identifier i
 recognized only by this migration/rollback gate and cannot be selected by current code.
 This is an exact-empty adoption, not a KMS decrypt/rewrap conversion. The
 `migrate` one-shot applies schema changes and then performs a fresh current-state query;
-it succeeds only when `CoreBackupKeyWrap` contains exactly zero rows, including retired,
-pending and manual-review rows; `CoreBackupArtifact` contains no `legacy_zip` row of any
-role; and all historical database/files backup and storage-point tables are empty:
+it succeeds only when `CoreBackupEncryptionEnvelope` and `CoreBackupKeyWrap` each contain
+exactly zero rows, including orphan, retired, pending and manual-review rows;
+`CoreBackupArtifact` contains no `legacy_zip` row of any role; and all historical
+database/files backup and storage-point tables are empty:
 `core_website_backup`, `core_website_backup_mtm_storage_points`,
 `core_basecamp_backup`, `core_basecamp_backup_mtm_storage_points`,
 `core_database_backup`, `core_database_backup_mtm_storage_points`,
@@ -212,6 +213,25 @@ recorded schema migration cannot bypass this current-state proof. Any wrap, plai
 artifact, or unledgered historical backup/storage point blocks the transition: neither
 the installer nor migration invents a cryptographic conversion or silently retires a
 recorded backup.
+
+The same exact-empty boundary introduces internal BSE1 format version 2. Version 2 keeps
+the plaintext and context digests inside its authenticated encrypted terminal payload and
+uses an independent random envelope UUID for each `.bse1` object name. Version 1 is a
+prerelease format and is rejected rather than heuristically converted. The explicit
+legacy-only runtime keeps historical plaintext `.zip` read/delete naming only for records
+that have not entered the encrypted provider migration; new encrypted uploads never reuse
+those paths or their backup-UUID ownership metadata. A mixed, mismatched or ambiguous
+legacy/encrypted identity stops reconciliation and deletion.
+
+Migration `0049_local_file_artifact_key_provider` is immutable historical schema and may
+already have been applied by a prerelease installation; it continues to describe the
+format-v1 constraint it originally shipped with. Migration
+`0050_bse2_private_terminal_metadata` performs the format-v2 transition. Before changing
+the default or constraint in either direction, `0050` enumerates every envelope and wrap
+and refuses when even one orphan, pending, manual, retired, or otherwise unreferenced row
+exists. This makes an already-applied empty `0049` database upgrade safely while preventing
+schema history from being mistaken for proof that no v1 custody data exists. Do not fake,
+delete, or edit migration-history rows to bypass this gate.
 
 Preserve the old release, database, credentials, key service, legacy archive objects and
 ciphertext as encrypted rollback evidence. If any wrap or legacy record exists,

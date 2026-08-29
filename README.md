@@ -60,9 +60,9 @@ Or stick with classic **Full mode** — every file, every time.
 Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, DigitalOcean Spaces, Google Cloud
 Storage, Google Drive, Azure Blob, Dropbox, OneDrive, pCloud, IDrive e2, IBM COS,
 Oracle, Scaleway, Linode, Vultr, UpCloud, Exoscale, Filebase, IONOS, Leviia, RackCorp,
-Tencent COS, Alibaba OSS — plus **Local Storage**: keep backups as plain zip files on
-the BackupSheep server's own disk (or any bind-mounted path/NFS). Push every backup to
-several destinations at once.
+Tencent COS, Alibaba OSS — plus **Local Storage**: keep encrypted `.bse1` backup
+artifacts on the BackupSheep server's own disk (or any bind-mounted path/NFS). Push
+every backup to several destinations at once.
 
 ### Immutable S3 archives and lifecycle controls
 

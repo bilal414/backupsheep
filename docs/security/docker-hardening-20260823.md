@@ -329,8 +329,11 @@ role can read every secret deliberately granted to that role.
 
 ### Artifact custody and private staging (current repository)
 
-- Database and files source lanes create chunked BSE1 envelopes with
-  AES-256-GCM-SIV, canonical authenticated context and a per-artifact data key. The
+- Database and files source lanes create chunked BSE1 v2 envelopes with
+  AES-256-GCM-SIV, canonical authenticated context, a random object UUID and a
+  per-artifact data key. Readable headers omit the backup UUID and plaintext/context
+  digests; the decrypting lane proves both private digests from the authenticated
+  encrypted terminal record before publishing plaintext. The
   stock production policy requires independent strict local-file keyrings whose
   authenticated wraps bind the installation, lane, account, node, backup, model,
   purpose, context digest and active key ID.

@@ -45,7 +45,7 @@ from .providers.base import KeyProvider, WrappedDataKey, zeroize
 from .providers.registry import ensure_provider_allowed
 
 MAGIC = b"BSE1"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 ALGORITHM = "AES-256-GCM-SIV"
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
 MIN_CHUNK_SIZE = 64 * 1024
@@ -60,15 +60,16 @@ _FINAL_RECORD = 255
 _TAG_SIZE = 16
 _NONCE_PREFIX_SIZE = 4
 _AAD_DOMAIN = b"BackupSheep/BSE1/record\x00"
+_TERMINAL_MAGIC = b"BSET"
+_TERMINAL_VERSION = 1
+_TERMINAL_PAYLOAD = struct.Struct(">4sB32s32s")
 _HEADER_FIELDS = frozenset(
     {
         "algorithm",
         "chunk_count",
         "chunk_size",
-        "context_sha256",
         "envelope_id",
         "nonce_prefix",
-        "plaintext_sha256",
         "plaintext_size",
         "version",
     }
@@ -91,12 +92,18 @@ class EnvelopeDescriptor:
     chunk_size: int
     chunk_count: int
     plaintext_size: int
-    plaintext_sha256: str
-    context_sha256: str
     header_sha256: str
     header_size: int
     nonce_prefix: bytes
     ciphertext_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedEnvelopeDescriptor(EnvelopeDescriptor):
+    """Envelope metadata proven only after terminal-record authentication."""
+
+    plaintext_sha256: str
+    context_sha256: str
 
     def expectation(self) -> EnvelopeExpectation:
         return EnvelopeExpectation(
@@ -109,7 +116,7 @@ class EnvelopeDescriptor:
 
 @dataclass(frozen=True, slots=True)
 class SealedArtifact:
-    envelope: EnvelopeDescriptor
+    envelope: AuthenticatedEnvelopeDescriptor
     wrapped_data_key: WrappedDataKey
 
 
@@ -379,8 +386,6 @@ def _header_bytes(
     envelope_id: uuid.UUID,
     chunk_size: int,
     plaintext_size: int,
-    plaintext_sha256: str,
-    context: ArtifactContext,
     nonce_prefix: bytes,
 ) -> bytes:
     chunk_count = (plaintext_size + chunk_size - 1) // chunk_size
@@ -389,10 +394,8 @@ def _header_bytes(
             "algorithm": ALGORITHM,
             "chunk_count": chunk_count,
             "chunk_size": chunk_size,
-            "context_sha256": context.sha256,
             "envelope_id": str(envelope_id),
             "nonce_prefix": nonce_prefix.hex(),
-            "plaintext_sha256": plaintext_sha256,
             "plaintext_size": plaintext_size,
             "version": FORMAT_VERSION,
         }
@@ -445,10 +448,6 @@ def _parse_header(header_bytes: bytes, *, ciphertext_size: int) -> EnvelopeDescr
         or chunk_count != (plaintext_size + chunk_size - 1) // chunk_size
     ):
         raise ArtifactFormatError("The BSE1 header size or chunk count is invalid.")
-    if not _sha256_hex(header["plaintext_sha256"]) or not _sha256_hex(
-        header["context_sha256"]
-    ):
-        raise ArtifactFormatError("The BSE1 header digest is invalid.")
     nonce_prefix_hex = header["nonce_prefix"]
     if not isinstance(nonce_prefix_hex, str) or len(nonce_prefix_hex) != 8:
         raise ArtifactFormatError("The BSE1 nonce prefix is invalid.")
@@ -463,7 +462,7 @@ def _parse_header(header_bytes: bytes, *, ciphertext_size: int) -> EnvelopeDescr
         envelope_id = uuid.UUID(str(envelope_id_value))
     except (AttributeError, TypeError, ValueError):
         raise ArtifactFormatError("The BSE1 envelope identifier is invalid.") from None
-    if str(envelope_id) != envelope_id_value:
+    if str(envelope_id) != envelope_id_value or envelope_id.version != 4:
         raise ArtifactFormatError("The BSE1 envelope identifier is invalid.")
 
     return EnvelopeDescriptor(
@@ -473,8 +472,6 @@ def _parse_header(header_bytes: bytes, *, ciphertext_size: int) -> EnvelopeDescr
         chunk_size=chunk_size,
         chunk_count=chunk_count,
         plaintext_size=plaintext_size,
-        plaintext_sha256=header["plaintext_sha256"],
-        context_sha256=header["context_sha256"],
         header_sha256=hashlib.sha256(header_bytes).hexdigest(),
         header_size=len(header_bytes),
         nonce_prefix=nonce_prefix,
@@ -507,6 +504,7 @@ def _read_header(source: BinaryIO, *, ciphertext_size: int) -> EnvelopeDescripto
         + descriptor.plaintext_size
         + (descriptor.chunk_count * (_RECORD.size + _TAG_SIZE))
         + _RECORD.size
+        + _TERMINAL_PAYLOAD.size
         + _TAG_SIZE
     )
     if ciphertext_size < expected_size:
@@ -685,7 +683,7 @@ def _check_destination(destination: _AnchoredPath, *, overwrite: bool) -> None:
     raise ArtifactDestinationExistsError("The artifact destination already exists.")
 
 
-def _verify_expectation(
+def _verify_public_expectation(
     descriptor: EnvelopeDescriptor, expected: EnvelopeExpectation | None
 ) -> None:
     if expected is None:
@@ -694,11 +692,75 @@ def _verify_expectation(
         descriptor.envelope_id != expected.envelope_id
         or descriptor.header_sha256 != expected.header_sha256
         or descriptor.plaintext_size != expected.plaintext_size
-        or descriptor.plaintext_sha256 != expected.plaintext_sha256
     ):
         raise ArtifactIntegrityError(
             "The encrypted artifact does not match its durable envelope record."
         )
+
+
+def _verify_authenticated_expectation(
+    descriptor: AuthenticatedEnvelopeDescriptor,
+    expected: EnvelopeExpectation | None,
+) -> None:
+    _verify_public_expectation(descriptor, expected)
+    if expected is not None and descriptor.plaintext_sha256 != expected.plaintext_sha256:
+        raise ArtifactIntegrityError(
+            "The encrypted artifact does not match its durable envelope record."
+        )
+
+
+def _authenticated_descriptor(
+    descriptor: EnvelopeDescriptor,
+    *,
+    plaintext_sha256: str,
+    context_sha256: str,
+) -> AuthenticatedEnvelopeDescriptor:
+    if not _sha256_hex(plaintext_sha256) or not _sha256_hex(context_sha256):
+        raise ArtifactIntegrityError(
+            "The encrypted artifact terminal digest payload is invalid."
+        )
+    return AuthenticatedEnvelopeDescriptor(
+        envelope_id=descriptor.envelope_id,
+        version=descriptor.version,
+        algorithm=descriptor.algorithm,
+        chunk_size=descriptor.chunk_size,
+        chunk_count=descriptor.chunk_count,
+        plaintext_size=descriptor.plaintext_size,
+        header_sha256=descriptor.header_sha256,
+        header_size=descriptor.header_size,
+        nonce_prefix=descriptor.nonce_prefix,
+        ciphertext_size=descriptor.ciphertext_size,
+        plaintext_sha256=plaintext_sha256,
+        context_sha256=context_sha256,
+    )
+
+
+def _terminal_payload(*, plaintext_sha256: str, context_sha256: str) -> bytes:
+    if not _sha256_hex(plaintext_sha256) or not _sha256_hex(context_sha256):
+        raise ArtifactConfigurationError(
+            "The BSE1 terminal digest payload is invalid."
+        )
+    return _TERMINAL_PAYLOAD.pack(
+        _TERMINAL_MAGIC,
+        _TERMINAL_VERSION,
+        bytes.fromhex(plaintext_sha256),
+        bytes.fromhex(context_sha256),
+    )
+
+
+def _parse_terminal_payload(payload: bytes) -> tuple[str, str]:
+    if len(payload) != _TERMINAL_PAYLOAD.size:
+        raise ArtifactIntegrityError(
+            "The encrypted artifact terminal payload length is invalid."
+        )
+    magic, version, plaintext_digest, context_digest = _TERMINAL_PAYLOAD.unpack(
+        payload
+    )
+    if magic != _TERMINAL_MAGIC or version != _TERMINAL_VERSION:
+        raise ArtifactIntegrityError(
+            "The encrypted artifact terminal payload version is invalid."
+        )
+    return plaintext_digest.hex(), context_digest.hex()
 
 
 def _normalize_envelope_id(value: uuid.UUID | str | None) -> uuid.UUID:
@@ -710,9 +772,9 @@ def _normalize_envelope_id(value: uuid.UUID | str | None) -> uuid.UUID:
         raise ArtifactConfigurationError(
             "The BSE1 envelope identifier is invalid."
         ) from None
-    if str(parsed) != str(value):
+    if str(parsed) != str(value) or parsed.version != 4:
         raise ArtifactConfigurationError(
-            "The BSE1 envelope identifier must be a canonical UUID."
+            "The BSE1 envelope identifier must be a canonical random UUIDv4."
         )
     return parsed
 
@@ -734,6 +796,10 @@ def _preflight_encrypt_request(
         )
     _validate_chunk_size(chunk_size)
     normalized_id = _normalize_envelope_id(envelope_id)
+    if normalized_id == uuid.UUID(context.backup_id):
+        raise ArtifactConfigurationError(
+            "The BSE1 envelope identifier must be independent of the backup identifier."
+        )
     with _open_regular_source(
         source_path, encrypted=False, trusted_root=trusted_source_root
     ):
@@ -768,11 +834,7 @@ def _preflight_decrypt_request(
     descriptor = read_envelope_header(
         source_path, trusted_source_root=trusted_source_root
     )
-    _verify_expectation(descriptor, expected)
-    if descriptor.context_sha256 != context.sha256:
-        raise ArtifactContextMismatchError(
-            "The encrypted artifact context does not match this backup."
-        )
+    _verify_public_expectation(descriptor, expected)
     destination = _anchor_path(
         destination_path,
         trusted_root=trusted_destination_root,
@@ -797,7 +859,7 @@ def encrypt_file(
     overwrite: bool = False,
     trusted_source_root: str | os.PathLike[str] | None = None,
     trusted_destination_root: str | os.PathLike[str] | None = None,
-) -> EnvelopeDescriptor:
+) -> AuthenticatedEnvelopeDescriptor:
     """Seal one regular file and atomically publish a BSE1 artifact."""
 
     envelope_uuid = _preflight_encrypt_request(
@@ -830,8 +892,6 @@ def encrypt_file(
                 envelope_id=envelope_uuid,
                 chunk_size=chunk_size,
                 plaintext_size=plaintext_size,
-                plaintext_sha256=plaintext_sha256,
-                context=context,
                 nonce_prefix=nonce_prefix,
             )
             header_digest = hashlib.sha256(header).digest()
@@ -876,15 +936,24 @@ def encrypt_file(
                     raise ArtifactSourceChangedError(
                         "The source artifact changed while it was being sealed."
                     )
-                terminal_header = _RECORD.pack(_FINAL_RECORD, descriptor.chunk_count, 0)
+                terminal_plaintext = _terminal_payload(
+                    plaintext_sha256=plaintext_sha256,
+                    context_sha256=context.sha256,
+                )
+                terminal_length = len(terminal_plaintext)
+                terminal_header = _RECORD.pack(
+                    _FINAL_RECORD,
+                    descriptor.chunk_count,
+                    terminal_length,
+                )
                 terminal = cipher.encrypt(
                     _nonce(nonce_prefix, descriptor.chunk_count),
-                    b"",
+                    terminal_plaintext,
                     _aad(
                         header_digest,
                         _FINAL_RECORD,
                         descriptor.chunk_count,
-                        0,
+                        terminal_length,
                     ),
                 )
                 _write_all(output, terminal_header)
@@ -893,7 +962,11 @@ def encrypt_file(
                 os.fsync(output.fileno())
             ciphertext_size = os.fstat(staging_fd).st_size
             _publish_unnamed_file(staging_fd, destination, overwrite=overwrite)
-            return replace(descriptor, ciphertext_size=ciphertext_size)
+            return _authenticated_descriptor(
+                replace(descriptor, ciphertext_size=ciphertext_size),
+                plaintext_sha256=plaintext_sha256,
+                context_sha256=context.sha256,
+            )
     finally:
         if staging_fd is not None:
             os.close(staging_fd)
@@ -910,7 +983,7 @@ def decrypt_file(
     overwrite: bool = False,
     trusted_source_root: str | os.PathLike[str] | None = None,
     trusted_destination_root: str | os.PathLike[str] | None = None,
-) -> EnvelopeDescriptor:
+) -> AuthenticatedEnvelopeDescriptor:
     """Authenticate, decrypt, and atomically publish one BSE1 artifact."""
 
     _preflight_decrypt_request(
@@ -937,11 +1010,7 @@ def decrypt_file(
         ) as source:
             source_stat = os.fstat(source.fileno())
             descriptor = _read_header(source, ciphertext_size=source_stat.st_size)
-            _verify_expectation(descriptor, expected)
-            if descriptor.context_sha256 != context.sha256:
-                raise ArtifactContextMismatchError(
-                    "The encrypted artifact context does not match this backup."
-                )
+            _verify_public_expectation(descriptor, expected)
             header_digest = bytes.fromhex(descriptor.header_sha256)
 
             staging_fd = _new_unnamed_staging_file(destination)
@@ -995,12 +1064,12 @@ def decrypt_file(
                 if (
                     record_type != _FINAL_RECORD
                     or index != descriptor.chunk_count
-                    or length != 0
+                    or length != _TERMINAL_PAYLOAD.size
                 ):
                     raise ArtifactIntegrityError(
                         "The encrypted artifact terminal record is invalid."
                     )
-                terminal = _read_exact(source, _TAG_SIZE)
+                terminal = _read_exact(source, length + _TAG_SIZE)
                 try:
                     terminal_plaintext = cipher.decrypt(
                         _nonce(descriptor.nonce_prefix, descriptor.chunk_count),
@@ -1009,28 +1078,41 @@ def decrypt_file(
                             header_digest,
                             _FINAL_RECORD,
                             descriptor.chunk_count,
-                            0,
+                            length,
                         ),
                     )
                 except InvalidTag:
                     raise ArtifactIntegrityError(
                         "The encrypted artifact terminal record failed authentication."
                     ) from None
-                if terminal_plaintext or source.read(1):
+                if source.read(1):
                     raise ArtifactIntegrityError(
                         "The encrypted artifact has unauthenticated trailing data."
                     )
+                terminal_plaintext_sha256, terminal_context_sha256 = (
+                    _parse_terminal_payload(terminal_plaintext)
+                )
+                if terminal_context_sha256 != context.sha256:
+                    raise ArtifactContextMismatchError(
+                        "The encrypted artifact context does not match this backup."
+                    )
                 if (
                     plaintext_size != descriptor.plaintext_size
-                    or digest.hexdigest() != descriptor.plaintext_sha256
+                    or digest.hexdigest() != terminal_plaintext_sha256
                 ):
                     raise ArtifactIntegrityError(
                         "The encrypted artifact plaintext digest is invalid."
                     )
                 output.flush()
                 os.fsync(output.fileno())
+            authenticated = _authenticated_descriptor(
+                descriptor,
+                plaintext_sha256=terminal_plaintext_sha256,
+                context_sha256=terminal_context_sha256,
+            )
+            _verify_authenticated_expectation(authenticated, expected)
             _publish_unnamed_file(staging_fd, destination, overwrite=overwrite)
-            return descriptor
+            return authenticated
     finally:
         if staging_fd is not None:
             os.close(staging_fd)
@@ -1100,7 +1182,7 @@ def unseal_file(
     overwrite: bool = False,
     trusted_source_root: str | os.PathLike[str] | None = None,
     trusted_destination_root: str | os.PathLike[str] | None = None,
-) -> EnvelopeDescriptor:
+) -> AuthenticatedEnvelopeDescriptor:
     """Unwrap a data key and authenticate/decrypt one artifact."""
 
     if enterprise_mode and expected is None:

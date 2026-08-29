@@ -112,6 +112,7 @@ class ArtifactEncryptionModelTests(BaseTestCase):
         key_wrap = self._key_wrap(envelope)
         envelope.full_clean()
         key_wrap.full_clean()
+        self.assertEqual(envelope.format_version, 2)
 
         envelope.activate_with_key_wrap(key_wrap, artifacts=[artifact])
         artifact.refresh_from_db()
@@ -121,6 +122,15 @@ class ArtifactEncryptionModelTests(BaseTestCase):
         context, active_wrap = artifact.validate_encrypted_restore_state()
         self.assertEqual(context, self._context(backup))
         self.assertEqual(active_wrap, key_wrap)
+
+    def test_envelope_database_rejects_retired_v1_format(self):
+        backup, execution, _artifact = self._backup()
+        envelope = self._envelope(execution, backup)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CoreBackupEncryptionEnvelope.objects.filter(pk=envelope.pk).update(
+                format_version=1
+            )
 
     def test_artifact_format_constraint_fails_closed_in_both_directions(self):
         backup, execution, artifact = self._backup()
@@ -186,6 +196,19 @@ class ArtifactEncryptionModelTests(BaseTestCase):
             key_wrap.full_clean()
         self.assertIn("wrapped_key_sha256", key_error.exception.message_dict)
         self.assertIn("activated_at", key_error.exception.message_dict)
+
+    def test_envelope_identifier_cannot_reuse_private_backup_context_identifier(self):
+        backup, execution, _artifact = self._backup()
+        context = self._context(backup)
+        envelope = self._envelope(
+            execution,
+            backup,
+            uuid=context.backup_id,
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            envelope.full_clean()
+        self.assertIn("uuid", error.exception.message_dict)
 
     def test_only_one_active_key_wrap_generation_is_allowed(self):
         backup, execution, _artifact = self._backup()

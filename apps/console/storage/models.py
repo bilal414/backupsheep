@@ -2795,9 +2795,11 @@ class CoreStorage(TimeStampedModel):
 
 
 class CoreStorageLocal(TimeStampedModel):
-    """'Local Storage' backend: backups are kept as plain zip files on a disk path of
-    this BackupSheep server. `path` is an optional subdirectory under
-    settings.LOCAL_STORAGE_ROOT (''/None = the root itself)."""
+    """Store encrypted BSE1 artifacts below the configured local disk root.
+
+    ``path`` is an optional subdirectory under ``settings.LOCAL_STORAGE_ROOT``;
+    an empty value selects the root itself.
+    """
 
     storage = models.OneToOneField(
         "CoreStorage", related_name="storage_local", on_delete=models.CASCADE
