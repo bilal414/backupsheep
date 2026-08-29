@@ -2,4 +2,5 @@
 # Read docs/guides/rabbitmq-upgrade.md and complete every gate before using this overlay.
 services:
   rabbitmq:
-    image: rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095
+    image: "${BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE:-rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095}"
+    pull_policy: never

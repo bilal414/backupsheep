@@ -1236,6 +1236,367 @@ set_env_value() {
     mv -f -- "$temporary_file" "$ENV_FILE"
 }
 
+set_env_values_atomically() {
+    local contract="" key="" value="" temporary_file=""
+    (( $# >= 2 && $# % 2 == 0 )) \
+        || die "Atomic environment updates require key/value pairs."
+    while (( $# > 0 )); do
+        key="$1"
+        value="$2"
+        shift 2
+        [[ "$key" =~ ^[A-Z0-9_]+$ ]] || die "Invalid environment key: ${key}"
+        [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *"'"* \
+            && "$value" != *'|'* && "$value" != *$'\034'* ]] \
+            || die "Installer-managed environment values must be single-line and quote-safe."
+        contract+="${key}|${value}"$'\034'
+    done
+    temporary_file="$(mktemp "${INSTALL_DIR}/.env-update.XXXXXXXX")"
+    if ! awk -v contract="$contract" '
+        BEGIN {
+            count = split(contract, lines, "\034")
+            for (item = 1; item <= count; item++) {
+                if (lines[item] == "") continue
+                separator = index(lines[item], "|")
+                if (separator < 2) exit 90
+                key = substr(lines[item], 1, separator - 1)
+                value = substr(lines[item], separator + 1)
+                if (key in replacement) exit 91
+                replacement[key] = key "=\047" value "\047"
+                order[++order_count] = key
+            }
+        }
+        {
+            key = $0
+            sub(/=.*/, "", key)
+            if (key in replacement) {
+                if (!seen[key]) print replacement[key]
+                seen[key] = 1
+                next
+            }
+            print
+        }
+        END {
+            for (item = 1; item <= order_count; item++) {
+                key = order[item]
+                if (!seen[key]) print replacement[key]
+            }
+        }
+    ' "$ENV_FILE" > "$temporary_file"; then
+        rm -f -- "$temporary_file"
+        die "Could not prepare the atomic environment update."
+    fi
+    chmod 0600 "$temporary_file"
+    sync || die "Could not durably stage the atomic environment update."
+    mv -f -- "$temporary_file" "$ENV_FILE" \
+        || die "Could not atomically publish the environment update."
+    sync || die "Could not durably publish the atomic environment update."
+    validate_env_file
+}
+
+set_image_source_contract_atomically() {
+    local contract="$1"
+    local temporary_file="${INSTALL_DIR}/.env.image-source.new"
+
+    [[ -n "$contract" && "$contract" != *"'"* && "$contract" != *$'\r'* ]] \
+        || die "Image-source contract is empty or not quote-safe."
+    [[ ! -e "$temporary_file" && ! -L "$temporary_file" ]] \
+        || die "An interrupted image-source contract update must be reconciled before retry."
+    ( set -o noclobber; : > "$temporary_file" ) \
+        || die "Could not allocate the atomic image-source contract update."
+    chmod 0600 "$temporary_file"
+    if ! awk -v contract="$contract" '
+        BEGIN {
+            count = split(contract, lines, "\034")
+            for (item = 1; item <= count; item++) {
+                if (lines[item] == "") continue
+                separator = index(lines[item], "|")
+                if (separator < 2) exit 90
+                key = substr(lines[item], 1, separator - 1)
+                value = substr(lines[item], separator + 1)
+                if (key in replacement) exit 91
+                replacement[key] = key "=\047" value "\047"
+                order[++order_count] = key
+            }
+        }
+        {
+            key = $0
+            sub(/=.*/, "", key)
+            if (key in replacement) {
+                if (!seen[key]) print replacement[key]
+                seen[key] = 1
+                next
+            }
+            print
+        }
+        END {
+            for (item = 1; item <= order_count; item++) {
+                key = order[item]
+                if (!seen[key]) print replacement[key]
+            }
+        }
+    ' "$ENV_FILE" > "$temporary_file"; then
+        rm -f -- "$temporary_file"
+        die "Could not prepare the atomic image-source contract update."
+    fi
+    chmod 0600 "$temporary_file"
+    sync || die "Could not durably stage the image-source contract."
+    mv -f -- "$temporary_file" "$ENV_FILE" \
+        || die "Could not atomically publish the image-source contract."
+    sync || die "Could not durably publish the image-source contract."
+    validate_env_file
+}
+
+create_fresh_env_atomically() {
+    local source="${INSTALL_DIR}/.env_sample" candidate="${INSTALL_DIR}/.env.fresh.new"
+    local descriptor="${INSTALL_DIR}/.release-evidence/backupsheep-release-descriptor-v2.txt"
+    local release_tag="" release_commit="" descriptor_digest=""
+    local release_app="" release_postgres="" release_egress="" release_rabbitmq="" release_rabbitmq_upgrade=""
+    local app_image="backupsheep:${INSTALL_REF}"
+    local postgres_image="backupsheep-postgres:${INSTALL_REF}"
+    local egress_image="backupsheep-egress:${INSTALL_REF}"
+    local rabbitmq_image="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+    local rabbitmq_upgrade_image="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+    local contract="" original_env_file="$ENV_FILE" fresh_key="" fresh_value=""
+    local installation_id="" staging_witness="" postgres_witness="" artifact_witness=""
+
+    [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" && ! -e "$candidate" && ! -L "$candidate" ]] \
+        || die "Fresh configuration publication requires absent final and candidate files."
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        validate_release_evidence_files
+        release_tag="$RELEASE_TAG"
+        release_commit="$INSTALL_REF"
+        descriptor_digest="sha256:$(sha256_file "$descriptor")"
+        release_app="$(release_evidence_value "$descriptor" app_image)"
+        release_postgres="$(release_evidence_value "$descriptor" postgres_image)"
+        release_egress="$(release_evidence_value "$descriptor" egress_image)"
+        release_rabbitmq="$(release_evidence_value "$descriptor" rabbitmq_image)"
+        release_rabbitmq_upgrade="$(release_evidence_value "$descriptor" rabbitmq_upgrade_image)"
+        app_image="$release_app"
+        postgres_image="$release_postgres"
+        egress_image="$release_egress"
+        rabbitmq_image="$release_rabbitmq"
+        rabbitmq_upgrade_image="$release_rabbitmq_upgrade"
+    fi
+    installation_id="$(random_hex 32)"
+    staging_witness="$(sha256_text "BackupSheep/staging-layout/v3|${installation_id}|new-empty-v3")"
+    postgres_witness="$(sha256_text "BackupSheep/postgres-storage/v1|${installation_id}|${PROJECT_NAME}|${POSTGRES_STORAGE_LOGICAL_VOLUME}|${POSTGRES_STORAGE_GENERATION}|icu=und|new-empty-v1")"
+    artifact_witness="$(sha256_text "BackupSheep/artifact-key-provider/v1|${installation_id}|local-file|generation=1")"
+    while IFS='|' read -r fresh_key fresh_value; do
+        [[ "$fresh_key" =~ ^[A-Z0-9_]+$ && "$fresh_value" != *$'\n'* \
+            && "$fresh_value" != *$'\r'* && "$fresh_value" != *"'"* \
+            && "$fresh_value" != *'|'* && "$fresh_value" != *$'\034'* ]] \
+            || die "Fresh configuration contract contains an unsafe key or value."
+        contract+="${fresh_key}|${fresh_value}"$'\034'
+    done <<EOF
+BACKUPSHEEP_DATABASE_IDENTITY_GENERATION|3-pending-fresh
+BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION|2-pending-fresh
+BACKUPSHEEP_CELERY_SECURITY_GENERATION|3-pending-fresh
+BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION|1
+BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE|pending-fresh
+BACKUPSHEEP_INSTALLATION_ID|${installation_id}
+BACKUPSHEEP_COMPOSE_PROJECT_NAME|${PROJECT_NAME}
+BACKUPSHEEP_STAGING_LAYOUT_INTENT|new-empty-v3
+BACKUPSHEEP_STAGING_LAYOUT_WITNESS|${staging_witness}
+BACKUPSHEEP_POSTGRES_STORAGE_GENERATION|${POSTGRES_STORAGE_GENERATION}-pending-fresh
+BACKUPSHEEP_POSTGRES_STORAGE_INTENT|new-empty-v1
+BACKUPSHEEP_POSTGRES_STORAGE_WITNESS|${postgres_witness}
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION|1
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS|${artifact_witness}
+BACKUPSHEEP_IMAGE_MODE|${IMAGE_MODE}
+BACKUPSHEEP_RELEASE_TAG|${release_tag}
+BACKUPSHEEP_RELEASE_SOURCE_COMMIT|${release_commit}
+BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256|${descriptor_digest}
+BACKUPSHEEP_RELEASE_APP_IMAGE|${release_app}
+BACKUPSHEEP_RELEASE_POSTGRES_IMAGE|${release_postgres}
+BACKUPSHEEP_RELEASE_EGRESS_IMAGE|${release_egress}
+BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE|${release_rabbitmq}
+BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE|${release_rabbitmq_upgrade}
+BACKUPSHEEP_IMAGE|${app_image}
+BACKUPSHEEP_POSTGRES_IMAGE|${postgres_image}
+BACKUPSHEEP_EGRESS_IMAGE|${egress_image}
+BACKUPSHEEP_RABBITMQ_IMAGE|${rabbitmq_image}
+BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE|${rabbitmq_upgrade_image}
+DJANGO_ALLOWED_HOSTS|${PUBLIC_HOST},localhost,127.0.0.1
+APP_DOMAIN|${APP_DOMAIN}
+APP_PROTOCOL|http://
+DJANGO_HTTPS|false
+BACKUPSHEEP_BIND_ADDRESS|127.0.0.1
+EOF
+    ( set -o noclobber; : > "$candidate" ) \
+        || die "Could not allocate the fresh configuration candidate."
+    chmod 0600 "$candidate"
+    if ! awk -v contract="$contract" '
+        BEGIN {
+            count = split(contract, lines, "\034")
+            for (item = 1; item <= count; item++) {
+                if (lines[item] == "") continue
+                separator = index(lines[item], "|")
+                if (separator < 2) exit 90
+                key = substr(lines[item], 1, separator - 1)
+                value = substr(lines[item], separator + 1)
+                if (key in replacement) exit 91
+                replacement[key] = key "=\047" value "\047"
+                order[++order_count] = key
+            }
+        }
+        {
+            key = $0
+            sub(/=.*/, "", key)
+            if (key in replacement) {
+                if (!seen[key]) print replacement[key]
+                seen[key] = 1
+                next
+            }
+            print
+        }
+        END {
+            for (item = 1; item <= order_count; item++) {
+                key = order[item]
+                if (!seen[key]) print replacement[key]
+            }
+        }
+    ' "$source" > "$candidate"; then
+        rm -f -- "$candidate"
+        die "Could not render the fresh configuration atomically."
+    fi
+    chmod 0600 "$candidate"
+    ENV_FILE="$candidate"
+    validate_env_file
+    ENV_FILE="$original_env_file"
+    sync || die "Could not durably stage the fresh configuration."
+    [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]] \
+        || die "Fresh configuration destination appeared during publication."
+    mv -- "$candidate" "$ENV_FILE" || die "Could not atomically publish fresh configuration."
+    sync || die "Could not durably publish fresh configuration."
+    validate_env_file
+    FRESH_CONFIG_PENDING=true
+}
+
+reconcile_fresh_env_candidate() {
+    local candidate="${INSTALL_DIR}/.env.fresh.new" size=""
+    [[ -e "$candidate" || -L "$candidate" ]] || return 0
+    [[ -f "$candidate" && ! -L "$candidate" && "$(file_uid "$candidate")" == "$EUID" \
+        && "$(file_mode "$candidate")" == "600" && "$(file_links "$candidate")" == "1" ]] \
+        || die "Interrupted fresh configuration candidate has an unsafe identity."
+    size="$(file_size "$candidate")"
+    [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) \
+        || die "Interrupted fresh configuration candidate is too large."
+    if [[ -e "${INSTALL_DIR}/.env" || -L "${INSTALL_DIR}/.env" ]]; then
+        ENV_FILE="${INSTALL_DIR}/.env"
+        validate_env_file
+    fi
+    rm -f -- "$candidate" || die "Could not reconcile interrupted fresh configuration candidate."
+    sync || die "Could not durably reconcile fresh configuration candidate."
+}
+
+reconcile_installer_temp_residues() {
+    local path="" base="" entry="" count=0 size="" mode=""
+    for path in "${INSTALL_DIR}"/.env-update.* "${INSTALL_DIR}"/.env-artifact-policy.*; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        base="$(basename -- "$path")"
+        [[ "$base" =~ ^\.env-(update|artifact-policy)\.[A-Za-z0-9]{8}$ ]] \
+            || die "Installer environment residue has a noncanonical name."
+        count=$((count + 1)); (( count <= 8 )) || die "Too many installer environment residues exist."
+        [[ -f "$path" && ! -L "$path" && "$(file_uid "$path")" == "$EUID" \
+            && "$(file_links "$path")" == "1" ]] \
+            || die "Installer environment residue has an unsafe identity."
+        mode="$(file_mode "$path")"; [[ "$mode" == "600" ]] \
+            || die "Installer environment residue is not owner-only."
+        size="$(file_size "$path")"; [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) \
+            || die "Installer environment residue is too large."
+        rm -f -- "$path" || die "Could not reconcile installer environment residue."
+    done
+    if [[ -d "${INSTALL_DIR}/.secrets" && ! -L "${INSTALL_DIR}/.secrets" ]]; then
+        [[ "$(file_uid "${INSTALL_DIR}/.secrets")" == "$EUID" \
+            && "$(file_mode "${INSTALL_DIR}/.secrets")" == "700" ]] \
+            || die "Cannot reconcile an unsafe secret residue directory."
+        while IFS= read -r -d '' entry; do
+            base="$(basename -- "$entry")"
+            case "$base" in
+                .managed-key-check.*|.celery-key-check.*|.artifact-provider-rollback.*|\
+                .artifact-keyring-database.*|.artifact-keyring-files.*|\
+                .artifact-keyring-database-rotation.*|.artifact-keyring-files-rotation.*|\
+                .django_secret_key.*|.onboarding_token.*|.rabbitmq_*_password.*|\
+                .db_*_password.*|.celery_signing_*_private_key.*|\
+                .ssh_managed_*_private_key.*|.artifact_local_file_*_keyring.*|\
+                .celery-public.*|.celery-rotation-registry.*|.celery-activate-*.*) ;;
+                *) continue ;;
+            esac
+            [[ "$base" =~ \.[A-Za-z0-9]{8}$ ]] \
+                || die "Installer secret residue has a noncanonical name."
+            count=$((count + 1)); (( count <= 64 )) || die "Too many installer residues exist."
+            [[ -f "$entry" && ! -L "$entry" && "$(file_uid "$entry")" == "$EUID" \
+                && "$(file_links "$entry")" == "1" ]] \
+                || die "Installer secret residue has an unsafe identity."
+            mode="$(file_mode "$entry")"; [[ "$mode" == "600" || "$mode" == "444" ]] \
+                || die "Installer secret residue has unsafe permissions."
+            size="$(file_size "$entry")"; [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) \
+                || die "Installer secret residue is too large."
+            rm -f -- "$entry" || die "Could not reconcile installer secret residue."
+        done < <(find "${INSTALL_DIR}/.secrets" -mindepth 1 -maxdepth 1 -type f -print0)
+    fi
+    sync || die "Could not durably reconcile installer residues."
+}
+
+validate_release_request_witness() {
+    local witness="${INSTALL_DIR}/.release-request" line1="" line2="" extra="" size=""
+    [[ -f "$witness" && ! -L "$witness" && "$(file_uid "$witness")" == "$EUID" \
+        && "$(file_mode "$witness")" == "600" && "$(file_links "$witness")" == "1" ]] \
+        || die "Signed-release request witness has an unsafe identity."
+    size="$(file_size "$witness")"
+    [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size > 0 && 10#$size <= 256 )) \
+        || die "Signed-release request witness has an invalid size."
+    { IFS= read -r line1; IFS= read -r line2; ! IFS= read -r extra; } < "$witness" \
+        || die "Signed-release request witness is not the exact two-line contract."
+    [[ "$line1" == "release_tag=${RELEASE_TAG}" && "$line2" == "source_commit=${INSTALL_REF}" ]] \
+        || die "Signed-release request witness does not match this exact request."
+}
+
+prepare_release_request_witness() {
+    local witness="${INSTALL_DIR}/.release-request" candidate="${INSTALL_DIR}/.release-request.new"
+    [[ "$IMAGE_MODE" == "signed-release" ]] || return 0
+    if [[ -e "$witness" || -L "$witness" ]]; then
+        validate_release_request_witness
+        return
+    fi
+    [[ ! -e "$candidate" && ! -L "$candidate" ]] || die "Interrupted signed-release request witness must be reconciled."
+    ( set -o noclobber; : > "$candidate" ) || die "Could not allocate signed-release request witness."
+    chmod 0600 "$candidate"
+    printf 'release_tag=%s\nsource_commit=%s\n' "$RELEASE_TAG" "$INSTALL_REF" > "$candidate"
+    sync || die "Could not durably stage signed-release request witness."
+    mv -- "$candidate" "$witness" || die "Could not publish signed-release request witness."
+    sync || die "Could not durably publish signed-release request witness."
+    validate_release_request_witness
+}
+
+reconcile_release_request_candidate() {
+    local candidate="${INSTALL_DIR}/.release-request.new" size=""
+    [[ -e "$candidate" || -L "$candidate" ]] || return 0
+    [[ -f "$candidate" && ! -L "$candidate" && "$(file_uid "$candidate")" == "$EUID" \
+        && "$(file_mode "$candidate")" == "600" && "$(file_links "$candidate")" == "1" ]] \
+        || die "Interrupted signed-release request candidate has an unsafe identity."
+    size="$(file_size "$candidate")"
+    [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 256 )) \
+        || die "Interrupted signed-release request candidate is too large."
+    rm -f -- "$candidate" || die "Could not reconcile interrupted signed-release request candidate."
+    sync || die "Could not durably reconcile signed-release request candidate."
+}
+
+reconcile_image_source_contract_candidate() {
+    local candidate="${INSTALL_DIR}/.env.image-source.new" size=""
+    [[ -e "$candidate" || -L "$candidate" ]] || return 0
+    ENV_FILE="${INSTALL_DIR}/.env"
+    [[ -f "$candidate" && ! -L "$candidate" && "$(file_uid "$candidate")" == "$EUID" \
+        && "$(file_mode "$candidate")" == "600" && "$(file_links "$candidate")" == "1" ]] \
+        || die "Interrupted image-source contract candidate has an unsafe identity."
+    size="$(file_size "$candidate")"
+    [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) \
+        || die "Interrupted image-source contract candidate is too large."
+    validate_env_file
+    rm -f -- "$candidate" || die "Could not remove interrupted image-source contract candidate."
+    sync || die "Could not durably reconcile the image-source contract candidate."
+}
+
 read_env_value() {
     local key="$1"
     local raw=""
@@ -2734,8 +3095,8 @@ validate_release_evidence_files() {
         && "$(file_mode "$evidence_dir")" == "700" ]] \
         || die "Signed-release evidence directory must be owner-only and non-symlink."
     for name in \
-        backupsheep-release-descriptor-v1.txt \
-        backupsheep-release-descriptor-v1.sigstore.json \
+        backupsheep-release-descriptor-v2.txt \
+        backupsheep-release-descriptor-v2.sigstore.json \
         release-manifest.json \
         local-images.txt; do
         path="${evidence_dir}/${name}"
@@ -2748,7 +3109,7 @@ validate_release_evidence_files() {
     while IFS= read -r -d '' entry; do
         count=$((count + 1))
         case "$(basename -- "$entry")" in
-            backupsheep-release-descriptor-v1.txt|backupsheep-release-descriptor-v1.sigstore.json|release-manifest.json|local-images.txt) ;;
+            backupsheep-release-descriptor-v2.txt|backupsheep-release-descriptor-v2.sigstore.json|release-manifest.json|local-images.txt) ;;
             *) die "Signed-release evidence contains an unexpected entry." ;;
         esac
     done < <(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print0)
@@ -2778,9 +3139,13 @@ validate_requested_image_mode_against_existing() {
             && -z "$(read_env_value BACKUPSHEEP_RELEASE_APP_IMAGE)" \
             && -z "$(read_env_value BACKUPSHEEP_RELEASE_POSTGRES_IMAGE)" \
             && -z "$(read_env_value BACKUPSHEEP_RELEASE_EGRESS_IMAGE)" \
+            && -z "$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE)" \
+            && -z "$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE)" \
             && "$(read_env_value BACKUPSHEEP_IMAGE)" == "backupsheep:local" \
             && "$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)" == "backupsheep-postgres:local" \
-            && "$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)" == "backupsheep-egress:local" ]] \
+            && "$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)" == "backupsheep-egress:local" \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)" == rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7 \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)" == rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095 ]] \
             || die "Interrupted signed-release request found non-pristine image-source fields."
         return 0
     fi
@@ -2815,7 +3180,7 @@ prepare_image_source() {
 }
 
 configure_image_source() {
-    local descriptor="${INSTALL_DIR}/.release-evidence/backupsheep-release-descriptor-v1.txt"
+    local descriptor="${INSTALL_DIR}/.release-evidence/backupsheep-release-descriptor-v2.txt"
     local expected_mode="$IMAGE_MODE"
     local expected_tag=""
     local expected_commit=""
@@ -2823,6 +3188,8 @@ configure_image_source() {
     local expected_app="backupsheep:${INSTALL_REF}"
     local expected_postgres="backupsheep-postgres:${INSTALL_REF}"
     local expected_egress="backupsheep-egress:${INSTALL_REF}"
+    local expected_rabbitmq="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+    local expected_rabbitmq_upgrade="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
     local key=""
     local expected=""
     local current=""
@@ -2836,6 +3203,8 @@ configure_image_source() {
         expected_app="$(release_evidence_value "$descriptor" app_image)"
         expected_postgres="$(release_evidence_value "$descriptor" postgres_image)"
         expected_egress="$(release_evidence_value "$descriptor" egress_image)"
+        expected_rabbitmq="$(release_evidence_value "$descriptor" rabbitmq_image)"
+        expected_rabbitmq_upgrade="$(release_evidence_value "$descriptor" rabbitmq_upgrade_image)"
     fi
 
     while IFS='|' read -r key expected; do
@@ -2854,7 +3223,7 @@ configure_image_source() {
                         [[ -z "$current" ]] \
                             || die "${key} must be blank in local-build mode."
                         ;;
-                    BACKUPSHEEP_IMAGE|BACKUPSHEEP_POSTGRES_IMAGE|BACKUPSHEEP_EGRESS_IMAGE)
+                    BACKUPSHEEP_IMAGE|BACKUPSHEEP_POSTGRES_IMAGE|BACKUPSHEEP_EGRESS_IMAGE|BACKUPSHEEP_RABBITMQ_IMAGE|BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)
                         : # Preserve historical behavior: rebind local tags to --ref.
                         ;;
                 esac
@@ -2872,9 +3241,13 @@ BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256|${expected_descriptor_digest}
 BACKUPSHEEP_RELEASE_APP_IMAGE|${expected_app/#backupsheep:${INSTALL_REF}/}
 BACKUPSHEEP_RELEASE_POSTGRES_IMAGE|${expected_postgres/#backupsheep-postgres:${INSTALL_REF}/}
 BACKUPSHEEP_RELEASE_EGRESS_IMAGE|${expected_egress/#backupsheep-egress:${INSTALL_REF}/}
+BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE|${expected_rabbitmq/#rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7/}
+BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE|${expected_rabbitmq_upgrade/#rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095/}
 BACKUPSHEEP_IMAGE|${expected_app}
 BACKUPSHEEP_POSTGRES_IMAGE|${expected_postgres}
 BACKUPSHEEP_EGRESS_IMAGE|${expected_egress}
+BACKUPSHEEP_RABBITMQ_IMAGE|${expected_rabbitmq}
+BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE|${expected_rabbitmq_upgrade}
 EOF
     set_image_source_contract_atomically "$contract"
     if [[ "$IMAGE_MODE" == "signed-release" ]]; then
@@ -2912,19 +3285,8 @@ attest_local_release_image() {
         || die "Local ${role} image provenance labels do not match the signed release."
 }
 
-attest_local_vendor_release_image() {
-    local role="$1" reference="$2" repo_digest="$3" expected_id="" actual_id="" repo_digests=""
-    expected_id="$(release_evidence_value "${INSTALL_DIR}/.release-evidence/local-images.txt" "${role}_image_id")"
-    [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Persisted ${role} image ID is malformed."
-    repo_digests="$("$DOCKER_BIN" image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$reference")" \
-        || die "Pinned ${role} image digest is no longer present locally."
-    grep -Fxq -- "$repo_digest" <<< "$repo_digests" || die "Local ${role} image no longer exposes its pinned RepoDigest."
-    actual_id="$("$DOCKER_BIN" image inspect --format '{{.Id}}' "$reference")"
-    [[ "$actual_id" == "$expected_id" ]] || die "Local ${role} image ID changed after verification."
-}
-
 validate_local_release_images() {
-    local descriptor="${INSTALL_DIR}/.release-evidence/backupsheep-release-descriptor-v1.txt"
+    local descriptor="${INSTALL_DIR}/.release-evidence/backupsheep-release-descriptor-v2.txt"
     [[ "$IMAGE_MODE" == "signed-release" ]] || return 0
     validate_release_evidence_files
     [[ "sha256:$(sha256_file "$descriptor")" == "$(read_env_value BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256)" ]] \
@@ -2932,12 +3294,8 @@ validate_local_release_images() {
     attest_local_release_image app "$(read_env_value BACKUPSHEEP_IMAGE)"
     attest_local_release_image postgres "$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
     attest_local_release_image egress "$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
-    attest_local_vendor_release_image rabbit_current \
-        "rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7" \
-        "rabbitmq@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
-    attest_local_vendor_release_image rabbit_upgrade \
-        "rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095" \
-        "rabbitmq@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+    attest_local_release_image rabbitmq "$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)"
+    attest_local_release_image rabbitmq_upgrade "$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)"
 }
 
 configure_postgres_storage_generation() {
@@ -4115,6 +4473,54 @@ validate_compose_model() {
         "${OPERATION_GUARD_SERVICES[@]}"; do
         require_compose_service "$service_name" "$available_services"
     done
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        validate_signed_release_compose_model
+    fi
+}
+
+validate_signed_release_compose_model() {
+    local rendered=""
+    local images=""
+    local image=""
+    local app_image="$(read_env_value BACKUPSHEEP_IMAGE)"
+    local postgres_image="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
+    local egress_image="$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
+    local rabbit_current="$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)"
+    local rabbit_upgrade="$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)"
+
+    rendered="$(compose --profile operations config)" \
+        || die "Could not render the signed-release Compose model."
+    ! grep -Eq '^[[:space:]]+build:' <<< "$rendered" \
+        || die "Signed-release Compose model contains a build definition."
+    ! grep -Eq '(^|,)(exec|suid|dev)(,|$)' <<< "$rendered" \
+        || die "Signed-release Compose model contains an unsafe tmpfs mount option."
+    awk -v app="$app_image" -v postgres="$postgres_image" -v egress="$egress_image" -v rabbit="$rabbit_current" -v rabbit_upgrade="$rabbit_upgrade" '
+        function finish_service() {
+            if ((image == app || image == postgres || image == egress || image == rabbit || image == rabbit_upgrade) && pull != "never") exit 7
+        }
+        /^services:$/ { in_services = 1; next }
+        in_services && /^[^ ]/ { finish_service(); in_services = 0 }
+        in_services && /^  [A-Za-z0-9_-]+:$/ {
+            finish_service(); image = ""; pull = ""; next
+        }
+        in_services && /^    image: / { image = substr($0, 12); gsub(/^"|"$/, "", image) }
+        in_services && /^    pull_policy: / { pull = substr($0, 18); gsub(/^"|"$/, "", pull) }
+        END { if (in_services) finish_service() }
+    ' <<< "$rendered" \
+        || die "Every signed-release digest service must retain pull_policy: never."
+    images="$(compose --profile operations config --images)" \
+        || die "Could not enumerate signed-release Compose images."
+    for image in "$app_image" "$postgres_image" "$egress_image" "$rabbit_current"; do
+        grep -Fxq -- "$image" <<< "$images" \
+            || die "Signed-release Compose model omitted verified image ${image}."
+    done
+    while IFS= read -r image; do
+        [[ -n "$image" ]] || continue
+        case "$image" in
+            "$app_image"|"$postgres_image"|"$egress_image"|"$rabbit_current"|"$rabbit_upgrade") ;;
+            *) die "Signed-release Compose model references unauthorized image ${image}." ;;
+        esac
+    done <<< "$images"
 }
 
 docker_resource_label() {

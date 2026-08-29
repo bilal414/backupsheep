@@ -315,7 +315,6 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
     for key, expected in expected_consumer_names.items():
         if consumer[key] != expected:
             raise ReleaseVerificationError(f"policy.consumer.{key} is not the canonical consumer filename")
-
     trusted_root = _mapping(consumer["trusted_root"], "policy.consumer.trusted_root")
     _exact_keys(
         trusted_root,
@@ -412,6 +411,24 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         )
     if len(verifier_digests) != len(set(verifier_digests)):
         raise ReleaseVerificationError("consumer verifier index, manifest, and config digests must all be distinct")
+
+    expected_verifier_index = (
+        "sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e"
+    )
+    expected_verifier_platforms = {
+        "linux/amd64": {
+            "manifest_digest": "sha256:29c25a1a2bcbe8190166f65e0914fbd4c904968be5a615f59421dc8fd4526f06",
+            "config_digest": "sha256:6feeb7c97d6b7b709f2dc6b33723de442205437694fd3679461d78635745349d",
+        },
+        "linux/arm64": {
+            "manifest_digest": "sha256:2d0bfa77e828bff3c198039763f05f44017e6c2cd75572fce8f61431a95b927d",
+            "config_digest": "sha256:9a6ceeac0bc63631bd168417839d56e01a2ee157411daef235df13e0c8d04c01",
+        },
+    }
+    if verifier_index != expected_verifier_index:
+        raise ReleaseVerificationError("consumer verifier index digest is not approved")
+    if verifier_platforms != expected_verifier_platforms:
+        raise ReleaseVerificationError("consumer verifier platform digests are not approved")
 
     attestations = _mapping(policy["attestations"], "policy.attestations")
     _exact_keys(

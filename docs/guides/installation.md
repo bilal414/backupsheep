@@ -116,6 +116,54 @@ Supported options are:
 The script does not look up the server's public IP, configure DNS, open a firewall,
 issue a TLS certificate or install a reverse proxy.
 
+### Signed-release consumer mode
+
+Local build remains the default and requires no release assets. To consume a published
+official release, obtain both the exact tag and the 40-character commit to which that tag
+points, download `install.sh` from that commit, and add `--release-tag`:
+
+```bash
+RELEASE_TAG='v1.2.3'
+COMMIT='<40-character-commit-for-v1.2.3>'
+./install.sh \
+  --ref "${COMMIT}" \
+  --release-tag "${RELEASE_TAG}" \
+  --install-dir "$HOME/.local/share/backupsheep" \
+  --project-name backupsheep \
+  --domain backups.example.com
+```
+
+This mode downloads only three bounded GitHub release assets: the canonical V2 descriptor,
+its Sigstore bundle, and the digest-bound release manifest. It does not install Cosign or
+any host package. Instead it pulls BackupSheep's reviewed first-party verifier, built from
+Cosign 3.1.3, by an exact index digest and binds the selected amd64/arm64 manifest and
+configuration digest. It confirms its non-root user and entrypoint and runs it without the Docker
+socket or network, with all capabilities dropped, `no-new-privileges`, a read-only root
+filesystem, a private bounded tmpfs, and bounded PIDs/CPU/memory.
+
+The descriptor signature must have the exact BackupSheep release-workflow identity, GitHub
+Actions issuer, repository, source commit, tag ref, and `push` trigger. The installer then
+strictly parses sixteen ordered ASCII lines without evaluating or sourcing them, checks the
+manifest SHA-256, and verifies that descriptor bundle offline with a source-controlled,
+hash-pinned Sigstore trusted root. The verifier assertion inside the descriptor must
+byte-match the independently distributed bootstrap policy and cannot select its own verifier.
+The release workflow verifies all five official image signatures online before signing the
+descriptor; the Docker daemon then pulls only the five
+authenticated immutable digest references. Local `RepoDigests`, image IDs, and OCI
+source/revision/version labels are persisted under owner-only `.release-evidence` and are
+re-attested by the installer and wrapper before mutation. The final Compose overlay is
+always last, removes all three build definitions, restores the verified digest references,
+and retains `pull_policy: never`. The five roles are application, PostgreSQL, egress guard,
+RabbitMQ 4.3 runtime, and the RabbitMQ 4.2 upgrade helper. A wrong tag/commit/repository/digest, skipped signature,
+duplicate line, existing evidence collision, missing image, or model override fails closed.
+
+An installation cannot change between `local-build` and `signed-release`, or between
+signed release tags. The current generic [upgrade and rollback runbook](upgrades.md) is
+not a signed-release transition: it cannot atomically bind a new checkout, evidence,
+configuration and database migration or restore the prior state after a crash. Use signed
+mode only for a fresh project until the journaled signed-to-signed lifecycle is implemented.
+Preserve `.release-evidence` with the complete control-plane recovery set.
+
 ### Explicit rootful-daemon mode
 
 Use this mode only when the host policy intentionally keeps Docker access behind root or
@@ -189,7 +237,9 @@ On a new installation the script:
    installer-owned data-generation witness. It refuses orphaned, stopped, unhealthy,
    ambiguous, 3.13 or 4.2 broker state instead of guessing at a volume format;
 7. validates Compose through explicit `--project-name`, `--env-file` and `-f` arguments;
-8. builds commit-tagged PostgreSQL, application and namespace-guard images and starts only
+8. in default mode builds commit-tagged PostgreSQL, application and namespace-guard images;
+   in signed-release mode re-attests the five pre-pulled official digests and disables
+   every corresponding Compose build; then starts only
    PostgreSQL/RabbitMQ, the volume/broker/staging/database provisioners, migrate/seal/
    preflight gates, app guard and web UI on `127.0.0.1:8000`;
 9. waits up to five minutes for the `app` health check;

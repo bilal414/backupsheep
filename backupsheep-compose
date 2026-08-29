@@ -780,12 +780,16 @@ release_descriptor_digest="$(read_env_value BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA25
 release_app_image="$(read_env_value BACKUPSHEEP_RELEASE_APP_IMAGE)"
 release_postgres_image="$(read_env_value BACKUPSHEEP_RELEASE_POSTGRES_IMAGE)"
 release_egress_image="$(read_env_value BACKUPSHEEP_RELEASE_EGRESS_IMAGE)"
+release_rabbitmq_image="$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE)"
+release_rabbitmq_upgrade_image="$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE)"
 configured_app_image="$(read_env_value BACKUPSHEEP_IMAGE)"
 configured_postgres_image="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
 configured_egress_image="$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
+configured_rabbitmq_image="$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)"
+configured_rabbitmq_upgrade_image="$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)"
 
 if [[ "$image_mode" == "local-build" ]]; then
-    [[ -z "$release_tag$release_commit$release_descriptor_digest$release_app_image$release_postgres_image$release_egress_image" ]] \
+    [[ -z "$release_tag$release_commit$release_descriptor_digest$release_app_image$release_postgres_image$release_egress_image$release_rabbitmq_image$release_rabbitmq_upgrade_image" ]] \
         || die "signed-release provenance must be blank in local-build mode."
 else
     [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ \
@@ -794,15 +798,17 @@ else
         || die "signed-release tag, commit, or descriptor digest is malformed."
     [[ "$release_app_image" =~ ^ghcr\.io/bilal414/backupsheep@sha256:[0-9a-f]{64}$ \
         && "$release_postgres_image" =~ ^ghcr\.io/bilal414/backupsheep-postgres@sha256:[0-9a-f]{64}$ \
-        && "$release_egress_image" =~ ^ghcr\.io/bilal414/backupsheep-egress@sha256:[0-9a-f]{64}$ ]] \
+        && "$release_egress_image" =~ ^ghcr\.io/bilal414/backupsheep-egress@sha256:[0-9a-f]{64}$ \
+        && "$release_rabbitmq_image" =~ ^ghcr\.io/bilal414/backupsheep-rabbitmq@sha256:[0-9a-f]{64}$ \
+        && "$release_rabbitmq_upgrade_image" =~ ^ghcr\.io/bilal414/backupsheep-rabbitmq-upgrade@sha256:[0-9a-f]{64}$ ]] \
         || die "signed-release image references are not official immutable digests."
     [[ "$configured_app_image" == "$release_app_image" \
         && "$configured_postgres_image" == "$release_postgres_image" \
-        && "$configured_egress_image" == "$release_egress_image" ]] \
+        && "$configured_egress_image" == "$release_egress_image" \
+        && "$configured_rabbitmq_image" == "$release_rabbitmq_image" \
+        && "$configured_rabbitmq_upgrade_image" == "$release_rabbitmq_upgrade_image" ]] \
         || die "runtime image references do not match signed-release provenance."
-    [[ "$release_app_image" != "$release_postgres_image" \
-        && "$release_app_image" != "$release_egress_image" \
-        && "$release_postgres_image" != "$release_egress_image" ]] \
+    [[ "$(printf '%s\n' "$release_app_image" "$release_postgres_image" "$release_egress_image" "$release_rabbitmq_image" "$release_rabbitmq_upgrade_image" | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')" == 5 ]] \
         || die "signed-release image references collide."
     [[ "$(read_env_value BACKUPSHEEP_BIND_ADDRESS)" == "127.0.0.1" \
         && "$(read_env_value DJANGO_SERVER)" == "prod" \
@@ -820,8 +826,8 @@ else
     validate_private_directory "$release_evidence_dir" "signed-release evidence directory"
     [[ "$(file_mode "$release_evidence_dir")" == "700" ]] \
         || die "signed-release evidence directory must have mode 0700."
-    for evidence_name in backupsheep-release-descriptor-v1.txt \
-        backupsheep-release-descriptor-v1.sigstore.json \
+    for evidence_name in backupsheep-release-descriptor-v2.txt \
+        backupsheep-release-descriptor-v2.sigstore.json \
         release-manifest.json local-images.txt; do
         validate_private_file "$release_evidence_dir/$evidence_name" "signed-release evidence ${evidence_name}"
         [[ "$(file_mode "$release_evidence_dir/$evidence_name")" == "600" ]] \
@@ -831,25 +837,34 @@ else
     while IFS= read -r -d '' evidence_path; do
         evidence_count=$((evidence_count + 1))
         case "$(basename -- "$evidence_path")" in
-            backupsheep-release-descriptor-v1.txt|backupsheep-release-descriptor-v1.sigstore.json|release-manifest.json|local-images.txt) ;;
+            backupsheep-release-descriptor-v2.txt|backupsheep-release-descriptor-v2.sigstore.json|release-manifest.json|local-images.txt) ;;
             *) die "signed-release evidence contains an unexpected entry." ;;
         esac
     done < <(find "$release_evidence_dir" -mindepth 1 -maxdepth 1 -print0)
     [[ "$evidence_count" -eq 4 ]] \
         || die "signed-release evidence must contain exactly four control files."
-    descriptor="$release_evidence_dir/backupsheep-release-descriptor-v1.txt"
+    descriptor="$release_evidence_dir/backupsheep-release-descriptor-v2.txt"
     descriptor_lines=()
     while IFS= read -r descriptor_line; do
         descriptor_lines[${#descriptor_lines[@]}]="$descriptor_line"
     done < "$descriptor"
-    [[ "${#descriptor_lines[@]}" == "7" \
-        && "${descriptor_lines[0]}" == "BACKUPSHEEP-SIGNED-RELEASE-V1" \
+    [[ "${#descriptor_lines[@]}" == "16" \
+        && "${descriptor_lines[0]}" == "BACKUPSHEEP-SIGNED-RELEASE-V2" \
         && "${descriptor_lines[1]}" == "release_tag=${release_tag}" \
         && "${descriptor_lines[2]}" == "source_commit=${release_commit}" \
         && "${descriptor_lines[3]}" =~ ^release_manifest_sha256=sha256:[0-9a-f]{64}$ \
         && "${descriptor_lines[4]}" == "app_image=${release_app_image}" \
         && "${descriptor_lines[5]}" == "postgres_image=${release_postgres_image}" \
-        && "${descriptor_lines[6]}" == "egress_image=${release_egress_image}" ]] \
+        && "${descriptor_lines[6]}" == "egress_image=${release_egress_image}" \
+        && "${descriptor_lines[7]}" == "rabbitmq_image=${release_rabbitmq_image}" \
+        && "${descriptor_lines[8]}" == "rabbitmq_upgrade_image=${release_rabbitmq_upgrade_image}" \
+        && "${descriptor_lines[9]}" == "release_verifier_image=ghcr.io/bilal414/backupsheep-release-verifier@sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e" \
+        && "${descriptor_lines[10]}" == "release_verifier_runtime_contract_version=1" \
+        && "${descriptor_lines[11]}" == "release_verifier_linux_amd64_manifest=sha256:29c25a1a2bcbe8190166f65e0914fbd4c904968be5a615f59421dc8fd4526f06" \
+        && "${descriptor_lines[12]}" == "release_verifier_linux_amd64_config=sha256:6feeb7c97d6b7b709f2dc6b33723de442205437694fd3679461d78635745349d" \
+        && "${descriptor_lines[13]}" == "release_verifier_linux_arm64_manifest=sha256:2d0bfa77e828bff3c198039763f05f44017e6c2cd75572fce8f61431a95b927d" \
+        && "${descriptor_lines[14]}" == "release_verifier_linux_arm64_config=sha256:9a6ceeac0bc63631bd168417839d56e01a2ee157411daef235df13e0c8d04c01" \
+        && "${descriptor_lines[15]}" == "trusted_root_sha256=sha256:6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66" ]] \
         || die "persisted signed-release descriptor is not the exact ordered contract."
     [[ "sha256:$(sha256_file "$descriptor")" == "$release_descriptor_digest" ]] \
         || die "persisted signed-release descriptor digest changed."
@@ -1942,8 +1957,8 @@ validate_container_runtime_image_identity() {
     if [[ "$image_mode" == signed-release ]]; then
         if [[ "$service" == rabbitmq && -n "$rabbitmq_transition_target" ]]; then
             case "$actual_ref" in
-                rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7) role=rabbit_current ;;
-                rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095) role=rabbit_upgrade ;;
+                "$release_rabbitmq_image") role=rabbitmq ;;
+                "$release_rabbitmq_upgrade_image") role=rabbitmq_upgrade ;;
                 *) die "signed-release RabbitMQ transition source is not an exact authenticated release role." ;;
             esac
             expected_id="$(release_evidence_value "$release_evidence_dir/local-images.txt" "${role}_image_id")"
@@ -2263,17 +2278,6 @@ attest_signed_release_image() {
         || die "local ${role} image provenance labels do not match the signed release."
 }
 
-attest_signed_release_vendor_image() {
-    local role="$1" reference="$2" repo_digest="$3" expected_id="" actual_id="" repo_digests=""
-    expected_id="$(release_evidence_value "$release_evidence_dir/local-images.txt" "${role}_image_id")"
-    [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "persisted ${role} image ID is malformed."
-    repo_digests="$("${docker_command[@]}" image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$reference")" \
-        || die "pinned ${role} image digest is not present locally."
-    grep -Fxq -- "$repo_digest" <<< "$repo_digests" || die "local ${role} image does not expose its pinned RepoDigest."
-    actual_id="$("${docker_command[@]}" image inspect --format '{{.Id}}' "$reference")"
-    [[ "$actual_id" == "$expected_id" ]] || die "local ${role} image ID changed after verification."
-}
-
 attest_signed_release_container_image() {
     local service="$1" container_id="$2" role="" expected_ref="" expected_id=""
     local actual_ref="" actual_id=""
@@ -2282,16 +2286,16 @@ attest_signed_release_container_image() {
         app-egress-guard|cloud-egress-guard|database-egress-guard|files-egress-guard|storage-egress-guard|logs-egress-guard)
             role=egress; expected_ref="$release_egress_image" ;;
         rabbitmq-volume-init|rabbitmq-provision)
-            role=rabbit_current
-            expected_ref="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+            role=rabbitmq
+            expected_ref="$release_rabbitmq_image"
             ;;
         rabbitmq)
             if [[ "$approved_rabbit" == true ]]; then
-                role=rabbit_upgrade
-                expected_ref="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+                role=rabbitmq_upgrade
+                expected_ref="$release_rabbitmq_upgrade_image"
             else
-                role=rabbit_current
-                expected_ref="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+                role=rabbitmq
+                expected_ref="$release_rabbitmq_image"
             fi
             ;;
         staging-provision|db-provision|migrate|db-seal|preflight|app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
@@ -2656,8 +2660,8 @@ validate_signed_release_compose_model() {
     local service_images=""
     local service_image=""
     local service_image_count=0
-    local rabbit_current="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
-    local rabbit_upgrade_image="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+    local rabbit_current="$release_rabbitmq_image"
+    local rabbit_upgrade_image="$release_rabbitmq_upgrade_image"
 
     rendered="$("${compose_command[@]}" --profile operations config)" \
         || die "could not render the signed-release Compose model."
@@ -2713,7 +2717,7 @@ EOF
             app) expected_image="$release_app_image" ;;
             postgres) expected_image="$release_postgres_image" ;;
             egress) expected_image="$release_egress_image" ;;
-            rabbit_current) expected_image="$rabbit_current" ;;
+            rabbitmq) expected_image="$rabbit_current" ;;
             rabbit_target)
                 if [[ "$approved_rabbit" == true ]]; then
                     expected_image="$rabbit_upgrade_image"
@@ -2736,9 +2740,9 @@ EOF
             || die "signed-release service ${service} does not use its exact role image."
     done <<'EOF'
 db|postgres
-rabbitmq-volume-init|rabbit_current
+rabbitmq-volume-init|rabbitmq
 rabbitmq|rabbit_target
-rabbitmq-provision|rabbit_current
+rabbitmq-provision|rabbitmq
 staging-provision|app
 db-provision|app
 migrate|app
@@ -2760,7 +2764,7 @@ beat|app
 EOF
     images="$("${compose_command[@]}" --profile operations config --images)" \
         || die "could not enumerate signed-release Compose images."
-    for image in "$release_app_image" "$release_postgres_image" "$release_egress_image"; do
+    for image in "$release_app_image" "$release_postgres_image" "$release_egress_image" "$rabbit_current"; do
         grep -Fxq -- "$image" <<< "$images" \
             || die "signed-release Compose model omitted verified image ${image}."
     done
@@ -2779,13 +2783,9 @@ if [[ "$image_mode" == "signed-release" ]]; then
         attest_signed_release_image app "$release_app_image"
         attest_signed_release_image postgres "$release_postgres_image"
         attest_signed_release_image egress "$release_egress_image"
-        attest_signed_release_vendor_image rabbit_current \
-            "rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7" \
-            "rabbitmq@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+        attest_signed_release_image rabbitmq "$release_rabbitmq_image"
         if [[ "$approved_rabbit" == true ]]; then
-            attest_signed_release_vendor_image rabbit_upgrade \
-                "rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095" \
-                "rabbitmq@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+            attest_signed_release_image rabbitmq_upgrade "$release_rabbitmq_upgrade_image"
         fi
     fi
 fi

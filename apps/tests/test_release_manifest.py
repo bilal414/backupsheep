@@ -698,6 +698,24 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
                 predicate=predicate,
             )
 
+    def test_image_signature_output_is_exactly_one_digest_bound_record(self):
+        digest = "sha256:" + "a" * 64
+        record = {
+            "critical": {"image": {"docker-manifest-digest": digest}}
+        }
+        verifier._require_one_verified_signature(json.dumps([record]), digest=digest)
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "exactly one verified image signature"
+        ):
+            verifier._require_one_verified_signature(
+                json.dumps([record, record]), digest=digest
+            )
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "does not bind exact digest"
+        ):
+            verifier._require_one_verified_signature(
+                json.dumps([record]), digest="sha256:" + "b" * 64
+            )
 
 class ReleaseToolInstallerTests(TestCase):
     def test_installer_verifies_asset_hash_extracts_only_regular_member_and_uses_private_modes(self):

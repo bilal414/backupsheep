@@ -19,18 +19,21 @@ readonly COSIGN_IMAGE="ghcr.io/bilal414/backupsheep-release-verifier@sha256:ba8e
 readonly COSIGN_REPODIGEST="ghcr.io/bilal414/backupsheep-release-verifier@sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e"
 readonly COSIGN_AMD64_IMAGE_ID="sha256:6feeb7c97d6b7b709f2dc6b33723de442205437694fd3679461d78635745349d"
 readonly COSIGN_ARM64_IMAGE_ID="sha256:9a6ceeac0bc63631bd168417839d56e01a2ee157411daef235df13e0c8d04c01"
-readonly DESCRIPTOR_NAME="backupsheep-release-descriptor-v1.txt"
-readonly BUNDLE_NAME="backupsheep-release-descriptor-v1.sigstore.json"
+readonly COSIGN_RUNTIME_CONTRACT_VERSION="1"
+readonly DESCRIPTOR_NAME="backupsheep-release-descriptor-v2.txt"
+readonly BUNDLE_NAME="backupsheep-release-descriptor-v2.sigstore.json"
+readonly CONSUMER_ASSET_NAME="backupsheep-consume-signed-release-v2.sh"
+readonly CONSUMER_BUNDLE_NAME="backupsheep-consume-signed-release-v2.sigstore.json"
 readonly MANIFEST_NAME="release-manifest.json"
 readonly TRUSTED_ROOT_NAME="sigstore-trusted-root.json"
 readonly TRUSTED_ROOT_SHA256="6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66"
 readonly APP_REPOSITORY="ghcr.io/bilal414/backupsheep"
 readonly POSTGRES_REPOSITORY="ghcr.io/bilal414/backupsheep-postgres"
 readonly EGRESS_REPOSITORY="ghcr.io/bilal414/backupsheep-egress"
-readonly RABBIT_CURRENT_IMAGE="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
-readonly RABBIT_CURRENT_REPODIGEST="rabbitmq@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
-readonly RABBIT_UPGRADE_IMAGE="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
-readonly RABBIT_UPGRADE_REPODIGEST="rabbitmq@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+readonly RABBITMQ_REPOSITORY="ghcr.io/bilal414/backupsheep-rabbitmq"
+readonly RABBITMQ_UPGRADE_REPOSITORY="ghcr.io/bilal414/backupsheep-rabbitmq-upgrade"
+readonly COSIGN_AMD64_MANIFEST="sha256:29c25a1a2bcbe8190166f65e0914fbd4c904968be5a615f59421dc8fd4526f06"
+readonly COSIGN_ARM64_MANIFEST="sha256:2d0bfa77e828bff3c198039763f05f44017e6c2cd75572fce8f61431a95b927d"
 
 STAGING_DIR=""
 VERIFIER_DIR=""
@@ -61,6 +64,11 @@ MUTATION_LOCK_INHERITED=false
 VERIFIED_DESCRIPTOR_SHA256=""
 VERIFIED_BUNDLE_SHA256=""
 VERIFIED_MANIFEST_SHA256=""
+APP_IMAGE=""
+POSTGRES_IMAGE=""
+EGRESS_IMAGE=""
+RABBITMQ_IMAGE=""
+RABBITMQ_UPGRADE_IMAGE=""
 declare -a DOCKER_ENV=()
 
 die() { printf 'Signed release refused: %s\n' "$*" >&2; exit 1; }
@@ -543,7 +551,7 @@ descriptor_value() {
 validate_descriptor() {
     local path="$1" expected_tag="$2" expected_commit="$3" manifest_path="$4"
     local before_descriptor="" before_manifest="" manifest_digest=""
-    local app_ref="" postgres_ref="" egress_ref=""
+    local app_ref="" postgres_ref="" egress_ref="" rabbitmq_ref="" rabbitmq_upgrade_ref=""
     local -a lines=()
     validate_regular_file "$path" 2048
     validate_regular_file "$manifest_path" 1048576
@@ -553,18 +561,33 @@ validate_descriptor() {
         END { if (count < 1 || count > 2048 || last != 10) exit 3 }
     ' || die "descriptor is not canonical bounded ASCII with a final LF"
     while IFS= read -r descriptor_line; do lines[${#lines[@]}]="$descriptor_line"; done < "$path"
-    [[ "${#lines[@]}" -eq 7 ]] || die "descriptor must contain exactly seven ordered lines"
-    [[ "${lines[0]}" == "BACKUPSHEEP-SIGNED-RELEASE-V1" ]] || die "descriptor magic is invalid"
+    [[ "${#lines[@]}" -eq 16 ]] || die "descriptor must contain exactly sixteen ordered lines"
+    [[ "${lines[0]}" == "BACKUPSHEEP-SIGNED-RELEASE-V2" ]] || die "descriptor magic is invalid or downgraded"
     [[ "${lines[1]}" == "release_tag=${expected_tag}" ]] || die "descriptor release tag mismatch"
     [[ "${lines[2]}" == "source_commit=${expected_commit}" ]] || die "descriptor source commit mismatch"
     [[ "${lines[3]}" =~ ^release_manifest_sha256=sha256:[0-9a-f]{64}$ ]] || die "descriptor manifest digest is malformed"
     [[ "${lines[4]}" =~ ^app_image=${APP_REPOSITORY}@sha256:[0-9a-f]{64}$ ]] || die "descriptor application reference is not official"
     [[ "${lines[5]}" =~ ^postgres_image=${POSTGRES_REPOSITORY}@sha256:[0-9a-f]{64}$ ]] || die "descriptor PostgreSQL reference is not official"
     [[ "${lines[6]}" =~ ^egress_image=${EGRESS_REPOSITORY}@sha256:[0-9a-f]{64}$ ]] || die "descriptor egress reference is not official"
+    [[ "${lines[7]}" =~ ^rabbitmq_image=${RABBITMQ_REPOSITORY}@sha256:[0-9a-f]{64}$ ]] || die "descriptor RabbitMQ reference is not official"
+    [[ "${lines[8]}" =~ ^rabbitmq_upgrade_image=${RABBITMQ_UPGRADE_REPOSITORY}@sha256:[0-9a-f]{64}$ ]] || die "descriptor RabbitMQ upgrade reference is not official"
+    # The signed descriptor may assert the independently distributed verifier
+    # trust seed, but it can never select or rotate the verifier that authenticates
+    # this descriptor. Every value must byte-match the compiled bootstrap policy.
+    [[ "${lines[9]}" == "release_verifier_image=${COSIGN_IMAGE}" \
+        && "${lines[10]}" == "release_verifier_runtime_contract_version=${COSIGN_RUNTIME_CONTRACT_VERSION}" \
+        && "${lines[11]}" == "release_verifier_linux_amd64_manifest=${COSIGN_AMD64_MANIFEST}" \
+        && "${lines[12]}" == "release_verifier_linux_amd64_config=${COSIGN_AMD64_IMAGE_ID}" \
+        && "${lines[13]}" == "release_verifier_linux_arm64_manifest=${COSIGN_ARM64_MANIFEST}" \
+        && "${lines[14]}" == "release_verifier_linux_arm64_config=${COSIGN_ARM64_IMAGE_ID}" \
+        && "${lines[15]}" == "trusted_root_sha256=sha256:${TRUSTED_ROOT_SHA256}" ]] \
+        || die "descriptor verifier or trusted-root assertion does not match the independent bootstrap policy"
     manifest_digest="${lines[3]#release_manifest_sha256=sha256:}"
     [[ "$(sha256_file "$manifest_path")" == "$manifest_digest" ]] || die "release manifest does not match the signed descriptor"
     app_ref="${lines[4]#app_image=}"; postgres_ref="${lines[5]#postgres_image=}"; egress_ref="${lines[6]#egress_image=}"
-    [[ "$app_ref" != "$postgres_ref" && "$app_ref" != "$egress_ref" && "$postgres_ref" != "$egress_ref" ]] || die "descriptor image references collide"
+    rabbitmq_ref="${lines[7]#rabbitmq_image=}"; rabbitmq_upgrade_ref="${lines[8]#rabbitmq_upgrade_image=}"
+    [[ "$(printf '%s\n' "$app_ref" "$postgres_ref" "$egress_ref" "$rabbitmq_ref" "$rabbitmq_upgrade_ref" | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')" == 5 ]] \
+        || die "descriptor release image references collide"
     [[ "$(file_identity "$path")" == "$before_descriptor" && "$(file_identity "$manifest_path")" == "$before_manifest" ]] || die "release input changed while it was parsed"
 }
 
@@ -1212,7 +1235,10 @@ attest_release_image() {
     local role="$1" reference="$2" repository="${2%@*}" image_id="" source_label="" revision_label="" version_label=""
     image_repo_digest_present "$reference" "$reference" || die "${role} image does not expose exact official RepoDigest"
     attest_local_image_platform "$role" "$reference"
-    [[ "$repository" == "$APP_REPOSITORY" || "$repository" == "$POSTGRES_REPOSITORY" || "$repository" == "$EGRESS_REPOSITORY" ]] || die "${role} image repository is not official"
+    [[ "$repository" == "$APP_REPOSITORY" || "$repository" == "$POSTGRES_REPOSITORY" \
+        || "$repository" == "$EGRESS_REPOSITORY" || "$repository" == "$RABBITMQ_REPOSITORY" \
+        || "$repository" == "$RABBITMQ_UPGRADE_REPOSITORY" ]] \
+        || die "${role} image repository is not official"
     image_id="$(docker_client image inspect --format '{{.Id}}' "$reference")"; [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "${role} image ID is malformed"
     source_label="$(docker_client image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$reference")"
     revision_label="$(docker_client image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$reference")"
@@ -1221,20 +1247,11 @@ attest_release_image() {
     printf '%s_image_id=%s\n' "$role" "$image_id" >> "${STAGING_DIR}/local-images.txt"
 }
 
-attest_vendor_image() {
-    local role="$1" reference="$2" repo_digest="$3" record="${4:-false}" image_id=""
-    image_repo_digest_present "$reference" "$repo_digest" || die "local ${role} image does not expose its pinned RepoDigest"
-    attest_local_image_platform "$role" "$reference"
-    image_id="$(docker_client image inspect --format '{{.Id}}' "$reference")"
-    [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "${role} image ID is malformed"
-    [[ "$record" != true ]] || printf '%s_image_id=%s\n' "$role" "$image_id" >> "${STAGING_DIR}/local-images.txt"
-}
-
 validate_local_image_receipt() {
     local path="$1" line="" index=0
     local -a expected=(
         app_image_id postgres_image_id egress_image_id
-        rabbit_current_image_id rabbit_upgrade_image_id cosign_image_id
+        rabbitmq_image_id rabbitmq_upgrade_image_id cosign_image_id
     )
     validate_regular_file "$path" 4096
     [[ "$(file_mode "$path")" == "600" ]] || die "local image receipt must be owner-only"
@@ -1392,7 +1409,7 @@ handle_signal() {
 }
 
 main() {
-    local script_real="" trusted_root="" docker_variable="" role="" image_ref="" image_tuple="" repo_digest="" cosign_id="" release_identity_digest=""
+    local script_real="" trusted_root="" docker_variable="" role="" image_ref="" image_tuple="" cosign_id="" release_identity_digest=""
     local install_path_regex='^/[A-Za-z0-9._/@+ -]+$'
     local selected_context=""
     [[ $# -eq 8 ]] || die "expected --tag TAG --commit COMMIT --install-dir DIR --docker PATH"
@@ -1496,6 +1513,8 @@ main() {
     APP_IMAGE="$(descriptor_value "$VERIFIER_DIR/$DESCRIPTOR_NAME" app_image)"
     POSTGRES_IMAGE="$(descriptor_value "$VERIFIER_DIR/$DESCRIPTOR_NAME" postgres_image)"
     EGRESS_IMAGE="$(descriptor_value "$VERIFIER_DIR/$DESCRIPTOR_NAME" egress_image)"
+    RABBITMQ_IMAGE="$(descriptor_value "$VERIFIER_DIR/$DESCRIPTOR_NAME" rabbitmq_image)"
+    RABBITMQ_UPGRADE_IMAGE="$(descriptor_value "$VERIFIER_DIR/$DESCRIPTOR_NAME" rabbitmq_upgrade_image)"
     VERIFIED_DESCRIPTOR_SHA256="$(sha256_file "$VERIFIER_DIR/$DESCRIPTOR_NAME")"
     VERIFIED_BUNDLE_SHA256="$(sha256_file "$VERIFIER_DIR/$BUNDLE_NAME")"
     VERIFIED_MANIFEST_SHA256="$(sha256_file "$VERIFIER_DIR/$MANIFEST_NAME")"
@@ -1510,20 +1529,8 @@ main() {
     verify_signatures
     attest_verified_release_inputs
 
-    for image_tuple in "rabbit_current|$RABBIT_CURRENT_IMAGE|$RABBIT_CURRENT_REPODIGEST" "rabbit_upgrade|$RABBIT_UPGRADE_IMAGE|$RABBIT_UPGRADE_REPODIGEST"; do
-        role="${image_tuple%%|*}"; image_ref="${image_tuple#*|}"; image_ref="${image_ref%%|*}"
-        repo_digest="${image_tuple##*|}"
-        if run_bounded 30 "cached ${role} lookup" docker_client image inspect "$image_ref" >/dev/null 2>&1; then
-            run_bounded 60 "cached ${role} attestation" attest_vendor_image "$role" "$image_ref" "$repo_digest" \
-                || die "cached ${role} image failed exact attestation"
-        fi
-        run_bounded 600 "${role} digest pull" docker_client pull "$image_ref" >/dev/null \
-            || die "could not pull pinned ${role} digest"
-        run_bounded 60 "${role} image attestation" attest_vendor_image "$role" "$image_ref" "$repo_digest" \
-            || die "${role} image failed exact attestation"
-    done
-
-    for image_tuple in "app|$APP_IMAGE" "postgres|$POSTGRES_IMAGE" "egress|$EGRESS_IMAGE"; do
+    for image_tuple in "app|$APP_IMAGE" "postgres|$POSTGRES_IMAGE" "egress|$EGRESS_IMAGE" \
+        "rabbitmq|$RABBITMQ_IMAGE" "rabbitmq_upgrade|$RABBITMQ_UPGRADE_IMAGE"; do
         role="${image_tuple%%|*}"; image_ref="${image_tuple#*|}"
         if run_bounded 30 "cached ${role} lookup" docker_client image inspect "$image_ref" >/dev/null 2>&1; then
             : # A cached image is still re-attested after all exact pulls below.
@@ -1531,17 +1538,12 @@ main() {
         run_bounded 600 "${role} digest pull" docker_client pull "$image_ref" >/dev/null || die "could not pull verified ${role} digest"
     done
     : > "$STAGING_DIR/local-images.txt"
-    for image_tuple in "app|$APP_IMAGE" "postgres|$POSTGRES_IMAGE" "egress|$EGRESS_IMAGE"; do
+    for image_tuple in "app|$APP_IMAGE" "postgres|$POSTGRES_IMAGE" "egress|$EGRESS_IMAGE" \
+        "rabbitmq|$RABBITMQ_IMAGE" "rabbitmq_upgrade|$RABBITMQ_UPGRADE_IMAGE"; do
         run_bounded 60 "${image_tuple%%|*} release image attestation" \
             attest_release_image "${image_tuple%%|*}" "${image_tuple#*|}" \
             || die "${image_tuple%%|*} release image failed exact attestation"
     done
-    run_bounded 60 "RabbitMQ current image receipt" \
-        attest_vendor_image rabbit_current "$RABBIT_CURRENT_IMAGE" "$RABBIT_CURRENT_REPODIGEST" true \
-        || die "RabbitMQ current image receipt attestation failed"
-    run_bounded 60 "RabbitMQ upgrade image receipt" \
-        attest_vendor_image rabbit_upgrade "$RABBIT_UPGRADE_IMAGE" "$RABBIT_UPGRADE_REPODIGEST" true \
-        || die "RabbitMQ upgrade image receipt attestation failed"
     run_bounded_capture 30 "Cosign verifier image receipt" docker_client image inspect \
         --format '{{.Id}}' "$COSIGN_IMAGE" \
         || die "could not capture Cosign verifier image receipt"

@@ -569,8 +569,8 @@ while [[ ! -e "$4" ]]; do sleep 0.05; done
             evidence = install_dir / ".release-evidence"
             staging.mkdir(mode=0o700)
             for name in (
-                "backupsheep-release-descriptor-v1.txt",
-                "backupsheep-release-descriptor-v1.sigstore.json",
+                "backupsheep-release-descriptor-v2.txt",
+                "backupsheep-release-descriptor-v2.sigstore.json",
                 "release-manifest.json",
             ):
                 path = staging / name
@@ -585,8 +585,8 @@ while [[ ! -e "$4" ]]; do sleep 0.05; done
                             "app",
                             "postgres",
                             "egress",
-                            "rabbit_current",
-                            "rabbit_upgrade",
+                            "rabbitmq",
+                            "rabbitmq_upgrade",
                             "cosign",
                         ),
                         start=1,
@@ -1056,8 +1056,8 @@ if containers_mounting_path /wanted/source 1; then exit 1; else test "$?" -eq 12
             residue.mkdir(mode=0o700)
             evidence.mkdir(mode=0o700)
             for name in (
-                "backupsheep-release-descriptor-v1.txt",
-                "backupsheep-release-descriptor-v1.sigstore.json",
+                "backupsheep-release-descriptor-v2.txt",
+                "backupsheep-release-descriptor-v2.sigstore.json",
                 "release-manifest.json",
                 "sigstore-trusted-root.json",
             ):
@@ -1065,8 +1065,8 @@ if containers_mounting_path /wanted/source 1; then exit 1; else test "$?" -eq 12
                 path.write_text("x\n", encoding="utf-8")
                 path.chmod(0o600)
             for name in (
-                "backupsheep-release-descriptor-v1.txt",
-                "backupsheep-release-descriptor-v1.sigstore.json",
+                "backupsheep-release-descriptor-v2.txt",
+                "backupsheep-release-descriptor-v2.sigstore.json",
                 "release-manifest.json",
             ):
                 path = evidence / name
@@ -1079,8 +1079,8 @@ if containers_mounting_path /wanted/source 1; then exit 1; else test "$?" -eq 12
                     for index, role in zip(
                         "123456",
                         (
-                            "app", "postgres", "egress", "rabbit_current",
-                            "rabbit_upgrade", "cosign",
+                            "app", "postgres", "egress", "rabbitmq",
+                            "rabbitmq_upgrade", "cosign",
                         ),
                     )
                 ),
@@ -1121,13 +1121,22 @@ validate_persisted_evidence "$3"
             manifest.chmod(0o600)
             manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
             descriptor = (
-                "BACKUPSHEEP-SIGNED-RELEASE-V1\n"
+                "BACKUPSHEEP-SIGNED-RELEASE-V2\n"
                 f"release_tag={tag}\n"
                 f"source_commit={commit}\n"
                 f"release_manifest_sha256=sha256:{manifest_digest}\n"
                 f"app_image=ghcr.io/bilal414/backupsheep@sha256:{'1' * 64}\n"
                 f"postgres_image=ghcr.io/bilal414/backupsheep-postgres@sha256:{'2' * 64}\n"
                 f"egress_image=ghcr.io/bilal414/backupsheep-egress@sha256:{'3' * 64}\n"
+                f"rabbitmq_image=ghcr.io/bilal414/backupsheep-rabbitmq@sha256:{'4' * 64}\n"
+                f"rabbitmq_upgrade_image=ghcr.io/bilal414/backupsheep-rabbitmq-upgrade@sha256:{'5' * 64}\n"
+                "release_verifier_image=ghcr.io/bilal414/backupsheep-release-verifier@sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e\n"
+                "release_verifier_runtime_contract_version=1\n"
+                "release_verifier_linux_amd64_manifest=sha256:29c25a1a2bcbe8190166f65e0914fbd4c904968be5a615f59421dc8fd4526f06\n"
+                "release_verifier_linux_amd64_config=sha256:6feeb7c97d6b7b709f2dc6b33723de442205437694fd3679461d78635745349d\n"
+                "release_verifier_linux_arm64_manifest=sha256:2d0bfa77e828bff3c198039763f05f44017e6c2cd75572fce8f61431a95b927d\n"
+                "release_verifier_linux_arm64_config=sha256:9a6ceeac0bc63631bd168417839d56e01a2ee157411daef235df13e0c8d04c01\n"
+                "trusted_root_sha256=sha256:6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66\n"
             )
             descriptor_path = root / "descriptor.txt"
             command = (
@@ -1135,8 +1144,10 @@ validate_persisted_evidence "$3"
             )
             cases = (
                 (descriptor, True),
+                (descriptor.replace("SIGNED-RELEASE-V2", "SIGNED-RELEASE-V1", 1), False),
                 (descriptor.replace("release_tag=", "source_commit=", 1), False),
                 (descriptor.replace("ghcr.io/bilal414/backupsheep@", "ghcr.io/attacker/backupsheep@", 1), False),
+                (descriptor.replace("release_verifier_runtime_contract_version=1", "release_verifier_runtime_contract_version=2", 1), False),
                 (descriptor + "app_image=duplicate\n", False),
                 (descriptor.rstrip("\n"), False),
                 (descriptor.replace("\n", "\r\n", 1), False),
@@ -1169,8 +1180,8 @@ validate_persisted_evidence "$3"
             "app_image_id",
             "postgres_image_id",
             "egress_image_id",
-            "rabbit_current_image_id",
-            "rabbit_upgrade_image_id",
+            "rabbitmq_image_id",
+            "rabbitmq_upgrade_image_id",
             "cosign_image_id",
         )
         canonical = "".join(
@@ -1251,11 +1262,11 @@ attest_docker_daemon_platform
             source,
         )
 
-    def test_signed_release_overlay_removes_all_three_builds_and_never_pulls(self):
+    def test_signed_release_overlay_removes_all_release_builds_and_never_pulls(self):
         overlay = (ROOT / "deploy/release/signed-release.compose.yml").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(overlay.count("build: !reset null"), 3)
+        self.assertEqual(overlay.count("build: !reset null"), 6)
         self.assertEqual(overlay.count("pull_policy: never"), 6)
         self.assertIn("signed-release.compose.yml", self.installer)
         self.assertIn("Signed-release Compose model contains a build definition", self.installer)

@@ -558,7 +558,7 @@ services:
   rabbitmq-volume-init:
     <<: *stateful-runtime
     user: "100:101"
-    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
     environment:
       BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
       BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:?BACKUPSHEEP_RABBITMQ_DATA_GENERATION is required}"
@@ -580,7 +580,7 @@ services:
   rabbitmq:
     <<: *stateful-runtime
     user: "100:101"
-    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
     # RabbitMQ derives its durable node database path from the node hostname.
     # Container IDs change on recreation, so keep the hostname stable or the same
     # named volume will appear to contain a brand-new, empty broker.
@@ -647,7 +647,7 @@ services:
   rabbitmq-provision:
     <<: *stateful-runtime
     user: "100:101"
-    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
     environment:
       HOME: /var/lib/rabbitmq
       RABBITMQ_LEGACY_USER: "${RABBITMQ_LEGACY_USER:-backupsheep}"
