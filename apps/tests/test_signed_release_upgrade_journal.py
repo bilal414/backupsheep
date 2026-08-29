@@ -1724,6 +1724,34 @@ publish_authorized_source_receipt "$4"
         ):
             upgrade.export_checkpoint(install_dir=self.install)
 
+    def test_lineage_sequence_rejects_json_boolean_even_when_head_is_rehashed(self):
+        self._initialize()
+        root = self.install / upgrade.JOURNAL_ROOT_NAME
+        lineage_path = root / upgrade.LINEAGE_NAME / upgrade._lineage_filename(1)
+        record = json.loads(lineage_path.read_text())
+        record["sequence"] = True
+        body = dict(record)
+        body.pop("history_sha256")
+        record["history_sha256"] = upgrade._domain_digest(
+            "BackupSheep/upgrade-lineage-history/v1", body
+        )
+        lineage_path.chmod(0o600)
+        lineage_path.write_bytes(canonical(record))
+        lineage_path.chmod(0o400)
+
+        head_path = root / upgrade.HEAD_NAME
+        head = json.loads(head_path.read_text())
+        head["record_sha256"] = upgrade._sha256_bytes(lineage_path.read_bytes())
+        head["history_sha256"] = record["history_sha256"]
+        head_path.chmod(0o600)
+        head_path.write_bytes(canonical(head))
+        head_path.chmod(0o400)
+
+        with self.assertRaisesRegex(
+            upgrade.UpgradeJournalError, "nonnegative bounded integer"
+        ):
+            upgrade.validate_journal(self.install)
+
     def test_checkpoint_export_refuses_a_missing_retained_operation(self):
         intents, _ = self._complete_version_chain(5)
         self.assertTrue(
