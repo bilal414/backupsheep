@@ -307,6 +307,108 @@ def validate_transition_record(
     return expected
 
 
+def validate_embedded_transition_record(value: Any) -> dict[str, Any]:
+    """Validate the self-contained transition record retained in a manifest.
+
+    Release consumers do not download the workflow's private intermediate
+    artifacts.  The signed manifest therefore has to remain independently
+    checkable: it embeds the reviewed predecessor policy and the complete
+    migration contract while retaining the intermediate artifact digests for
+    audit correlation.
+    """
+
+    record = _mapping(value, "manifest transition record")
+    _exact_keys(
+        record,
+        {
+            "schema_version",
+            "release_epoch",
+            "reviewed_policy",
+            "migration_contract",
+            "accepted_predecessors",
+        },
+        "manifest transition record",
+    )
+    if record["schema_version"] != TRANSITION_RECORD_SCHEMA:
+        raise TransitionContractError("unsupported manifest transition-record schema")
+    release_epoch = _positive_integer(
+        record["release_epoch"], "manifest transition record release_epoch"
+    )
+
+    reviewed_artifact = _mapping(
+        record["reviewed_policy"], "manifest reviewed-policy artifact"
+    )
+    _exact_keys(
+        reviewed_artifact,
+        {"file", "sha256"},
+        "manifest reviewed-policy artifact",
+    )
+    if reviewed_artifact["file"] != "transition/reviewed-policy.json":
+        raise TransitionContractError("manifest reviewed-policy artifact path is not canonical")
+    _string(
+        reviewed_artifact["sha256"],
+        "manifest reviewed-policy artifact digest",
+        DIGEST_RE,
+    )
+
+    migration_record = _mapping(
+        record["migration_contract"], "manifest migration-contract artifact"
+    )
+    _exact_keys(
+        migration_record,
+        {
+            "file",
+            "sha256",
+            "schema_version",
+            "all_migrations_atomic",
+            "migrations",
+            "migration_set_sha256",
+            "leaves",
+            "leaf_set_sha256",
+        },
+        "manifest migration-contract artifact",
+    )
+    if migration_record["file"] != "transition/django-migrations.json":
+        raise TransitionContractError("manifest migration-contract artifact path is not canonical")
+    _string(
+        migration_record["sha256"],
+        "manifest migration-contract artifact digest",
+        DIGEST_RE,
+    )
+    migration_contract = validate_migration_contract(
+        {
+            key: migration_record[key]
+            for key in (
+                "schema_version",
+                "all_migrations_atomic",
+                "migrations",
+                "migration_set_sha256",
+                "leaves",
+                "leaf_set_sha256",
+            )
+        }
+    )
+
+    policy = validate_transition_policy(
+        {
+            "schema_version": TRANSITION_POLICY_SCHEMA,
+            "release_epoch": release_epoch,
+            "accepted_predecessors": record["accepted_predecessors"],
+        }
+    )
+    return {
+        "schema_version": TRANSITION_RECORD_SCHEMA,
+        "release_epoch": release_epoch,
+        "reviewed_policy": dict(reviewed_artifact),
+        "migration_contract": {
+            "file": migration_record["file"],
+            "sha256": migration_record["sha256"],
+            **migration_contract,
+        },
+        "accepted_predecessors": policy["accepted_predecessors"],
+    }
+
+
 def load_json(path: Path) -> Any:
     file_stat = path.stat()
     if file_stat.st_size <= 0 or file_stat.st_size > MAX_JSON_BYTES:
@@ -342,6 +444,7 @@ __all__ = [
     "migration_digest",
     "sha256_path",
     "validate_migration_contract",
+    "validate_embedded_transition_record",
     "validate_transition_policy",
     "validate_transition_record",
 ]

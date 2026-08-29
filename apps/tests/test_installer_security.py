@@ -574,6 +574,8 @@ while [[ ! -e "$4" ]]; do sleep 0.05; done
                 "backupsheep-release-descriptor-v2.txt",
                 "backupsheep-release-descriptor-v2.sigstore.json",
                 "release-manifest.json",
+                "sigstore-trusted-root.json",
+                "signature-verification.json",
             ):
                 path = staging / name
                 path.write_text("authenticated\n", encoding="utf-8")
@@ -726,6 +728,8 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
                 "deploy/release/signed-release.compose.yml",
                 "deploy/release-policy.json",
                 "deploy/runtime/compose-json.awk",
+                "scripts/release_transition.py",
+                "scripts/signed_release_upgrade.py",
             ):
                 target = checkout / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -1062,6 +1066,7 @@ if containers_mounting_path /wanted/source 1; then exit 1; else test "$?" -eq 12
                 "backupsheep-release-descriptor-v2.sigstore.json",
                 "release-manifest.json",
                 "sigstore-trusted-root.json",
+                "signature-verification.json",
             ):
                 path = residue / name
                 path.write_text("x\n", encoding="utf-8")
@@ -1070,9 +1075,16 @@ if containers_mounting_path /wanted/source 1; then exit 1; else test "$?" -eq 12
                 "backupsheep-release-descriptor-v2.txt",
                 "backupsheep-release-descriptor-v2.sigstore.json",
                 "release-manifest.json",
+                "sigstore-trusted-root.json",
+                "signature-verification.json",
             ):
                 path = evidence / name
-                path.write_text("x\n", encoding="utf-8")
+                if name == "sigstore-trusted-root.json":
+                    path.write_bytes(
+                        (ROOT / "deploy/release/sigstore-trusted-root.json").read_bytes()
+                    )
+                else:
+                    path.write_text("x\n", encoding="utf-8")
                 path.chmod(0o600)
             receipt = evidence / "local-images.txt"
             receipt.write_text(
@@ -1229,7 +1241,13 @@ validate_persisted_evidence "$3"
 source "$1"
 MOCK_PLATFORM="$2"
 INSTALL_DIR="$3"
-docker_client() { printf '%s\n' "$MOCK_PLATFORM"; }
+docker_client() {
+    if [[ "$1" == version ]]; then
+        printf '%s\n' "$MOCK_PLATFORM"
+    else
+        printf '%s\n' 'daemon-test-id'
+    fi
+}
 attest_docker_daemon_platform
 '''
         with tempfile.TemporaryDirectory(prefix="backupsheep-platform-capture-") as directory:

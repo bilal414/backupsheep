@@ -26,6 +26,7 @@ readonly CONSUMER_ASSET_NAME="backupsheep-consume-signed-release-v2.sh"
 readonly CONSUMER_BUNDLE_NAME="backupsheep-consume-signed-release-v2.sigstore.json"
 readonly MANIFEST_NAME="release-manifest.json"
 readonly TRUSTED_ROOT_NAME="sigstore-trusted-root.json"
+readonly VERIFICATION_RECEIPT_NAME="signature-verification.json"
 readonly TRUSTED_ROOT_SHA256="6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66"
 readonly APP_REPOSITORY="ghcr.io/bilal414/backupsheep"
 readonly POSTGRES_REPOSITORY="ghcr.io/bilal414/backupsheep-postgres"
@@ -56,6 +57,7 @@ WORKFLOW_IDENTITY=""
 RUNTIME_JSON_PARSER=""
 DAEMON_OS=""
 DAEMON_ARCH=""
+DAEMON_IDENTITY_SHA256=""
 MUTATION_LOCK_DIR=""
 MUTATION_LOCK_OWNER_FILE=""
 MUTATION_LOCK_TOKEN=""
@@ -69,6 +71,10 @@ POSTGRES_IMAGE=""
 EGRESS_IMAGE=""
 RABBITMQ_IMAGE=""
 RABBITMQ_UPGRADE_IMAGE=""
+RELEASE_EPOCH=""
+MIGRATION_SET_SHA256=""
+MIGRATION_LEAF_SET_SHA256=""
+VERIFIER_MANIFEST_DIGEST=""
 declare -a DOCKER_ENV=()
 
 die() { printf 'Signed release refused: %s\n' "$*" >&2; exit 1; }
@@ -313,7 +319,7 @@ docker_client() {
 }
 
 attest_docker_daemon_platform() {
-    local platform=""
+    local platform="" daemon_id=""
     run_bounded_capture 30 "Docker daemon platform attestation" docker_client \
         version --format '{{.Server.Os}}|{{.Server.Arch}}' \
         || die "could not attest Docker daemon platform"
@@ -324,6 +330,14 @@ attest_docker_daemon_platform() {
     esac
     DAEMON_OS="${platform%%|*}"
     DAEMON_ARCH="${platform#*|}"
+    run_bounded_capture 30 "Docker daemon identity attestation" docker_client \
+        info --format '{{.ID}}' \
+        || die "could not attest Docker daemon identity"
+    daemon_id="$BOUNDED_CAPTURE_VALUE"
+    [[ -n "$daemon_id" && ${#daemon_id} -le 256 \
+        && "$daemon_id" =~ ^[A-Za-z0-9:._-]+$ ]] \
+        || die "Docker daemon identity is not canonical"
+    DAEMON_IDENTITY_SHA256="sha256:$(sha256_text "BackupSheep/docker-daemon/v1|${daemon_id}|${DAEMON_OS}|${DAEMON_ARCH}")"
 }
 
 attest_local_image_platform() {
@@ -373,7 +387,7 @@ validate_source_checkout() {
     git_client -C "$INSTALL_DIR" fsck --strict --no-dangling >/dev/null || die "release checkout object verification failed"
     git_client -C "$INSTALL_DIR" diff --no-ext-diff --no-textconv --quiet -- || die "release checkout has modified tracked files"
     git_client -C "$INSTALL_DIR" diff --cached --no-ext-diff --no-textconv --quiet -- || die "release checkout has staged changes"
-    for relative in deploy/release/consume-signed-release.sh deploy/release/sigstore-trusted-root.json deploy/release-policy.json deploy/release/signed-release.compose.yml deploy/runtime/compose-json.awk; do
+    for relative in deploy/release/consume-signed-release.sh deploy/release/sigstore-trusted-root.json deploy/release-policy.json deploy/release/signed-release.compose.yml deploy/runtime/compose-json.awk scripts/release_transition.py scripts/signed_release_upgrade.py; do
         validate_checkout_control_file "$relative"
     done
 }
@@ -591,8 +605,64 @@ validate_descriptor() {
     [[ "$(file_identity "$path")" == "$before_descriptor" && "$(file_identity "$manifest_path")" == "$before_manifest" ]] || die "release input changed while it was parsed"
 }
 
+json_string_scalar() {
+    local value="$1" pattern="$2" label="$3"
+    [[ "$value" =~ ^\"([^\"\\]*)\"$ ]] \
+        || die "${label} is not a canonical unescaped JSON string"
+    value="${BASH_REMATCH[1]}"
+    [[ "$value" =~ $pattern ]] || die "${label} is malformed"
+    printf '%s' "$value"
+}
+
+validate_signed_transition_metadata() {
+    local path="$1" document="" keys="" transition="" migration="" value=""
+    validate_regular_file "$path" 1048576
+    document="$(<"$path")"
+    keys="$(strict_json_object_keys "$document" | LC_ALL=C sort)" \
+        || die "release manifest top-level keys are not strict JSON"
+    [[ "$keys" == $'"consumer"\n"images"\n"release"\n"schema_version"\n"transition"\n"vulnerability_database"' ]] \
+        || die "release manifest top-level contract is not exact schema 4"
+    [[ "$(strict_json_path "$document" schema_version)" == 4 ]] \
+        || die "release manifest schema is not 4"
+    transition="$(strict_json_path "$document" transition)" \
+        || die "release manifest transition record is absent"
+    keys="$(strict_json_object_keys "$transition" | LC_ALL=C sort)" \
+        || die "release transition keys are malformed"
+    [[ "$keys" == $'"accepted_predecessors"\n"migration_contract"\n"release_epoch"\n"reviewed_policy"\n"schema_version"' ]] \
+        || die "release transition contract has unexpected keys"
+    [[ "$(strict_json_path "$transition" schema_version)" == 1 ]] \
+        || die "release transition schema is unsupported"
+    RELEASE_EPOCH="$(strict_json_path "$transition" release_epoch)" \
+        || die "release epoch is absent"
+    [[ "$RELEASE_EPOCH" =~ ^[1-9][0-9]{0,9}$ ]] \
+        && (( 10#$RELEASE_EPOCH <= 2147483647 )) \
+        || die "release epoch is not a positive bounded integer"
+    migration="$(strict_json_path "$transition" migration_contract)" \
+        || die "release migration contract is absent"
+    keys="$(strict_json_object_keys "$migration" | LC_ALL=C sort)" \
+        || die "release migration-contract keys are malformed"
+    [[ "$keys" == $'"all_migrations_atomic"\n"file"\n"leaf_set_sha256"\n"leaves"\n"migration_set_sha256"\n"migrations"\n"schema_version"\n"sha256"' ]] \
+        || die "release migration contract has unexpected keys"
+    [[ "$(strict_json_path "$migration" schema_version)" == 1 \
+        && "$(strict_json_path "$migration" all_migrations_atomic)" == true ]] \
+        || die "release migrations are not the supported all-transactional contract"
+    value="$(strict_json_path "$migration" migration_set_sha256)" \
+        || die "release migration-set digest is absent"
+    MIGRATION_SET_SHA256="$(json_string_scalar "$value" '^sha256:[0-9a-f]{64}$' 'release migration-set digest')"
+    value="$(strict_json_path "$migration" leaf_set_sha256)" \
+        || die "release migration leaf-set digest is absent"
+    MIGRATION_LEAF_SET_SHA256="$(json_string_scalar "$value" '^sha256:[0-9a-f]{64}$' 'release migration leaf-set digest')"
+    if [[ "$DAEMON_ARCH" == amd64 ]]; then
+        VERIFIER_MANIFEST_DIGEST="$COSIGN_AMD64_MANIFEST"
+    elif [[ "$DAEMON_ARCH" == arm64 ]]; then
+        VERIFIER_MANIFEST_DIGEST="$COSIGN_ARM64_MANIFEST"
+    else
+        die "release transition metadata requires an attested daemon architecture"
+    fi
+}
+
 validate_residue_dir() {
-    local path="$1" entry="" base="" count=0 mode="" size="" expected_mode="700" maximum_entries=4
+    local path="$1" entry="" base="" count=0 mode="" size="" expected_mode="700" maximum_entries=7
     base="$(basename -- "$path")"
     [[ "$base" =~ ^\.release-evidence\.(download|verify)\.[A-Za-z0-9]{8}$ ]] || die "release residue has a noncanonical name"
     if [[ "$base" == .release-evidence.verify.* ]]; then
@@ -606,7 +676,7 @@ validate_residue_dir() {
     while IFS= read -r -d '' entry; do
         count=$((count + 1)); (( count <= maximum_entries )) || die "release residue contains too many entries"
         base="$(basename -- "$entry")"
-        case "$base" in "$DESCRIPTOR_NAME"|"$BUNDLE_NAME"|"$MANIFEST_NAME"|"$TRUSTED_ROOT_NAME"|local-images.txt|.verifier-container-id) ;; *) die "release residue contains an unexpected entry: ${base}" ;; esac
+        case "$base" in "$DESCRIPTOR_NAME"|"$BUNDLE_NAME"|"$MANIFEST_NAME"|"$TRUSTED_ROOT_NAME"|"$VERIFICATION_RECEIPT_NAME"|"$VERIFICATION_RECEIPT_NAME.new"|local-images.txt|.verifier-container-id) ;; *) die "release residue contains an unexpected entry: ${base}" ;; esac
         [[ -f "$entry" && ! -L "$entry" && "$(file_uid "$entry")" == "$EUID" && "$(file_links "$entry")" == "1" ]] || die "release residue entry has an unsafe identity: ${base}"
         mode="$(file_mode "$entry")"; [[ "$mode" == "600" || "$mode" == "444" || "$mode" == "400" ]] || die "release residue entry has unsafe permissions: ${base}"
         size="$(file_size "$entry")"; [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) || die "release residue entry is too large: ${base}"
@@ -1231,6 +1301,35 @@ verify_signatures() {
     cosign verify-blob --offline --trusted-root "/evidence/${TRUSTED_ROOT_NAME}" --bundle "/evidence/${BUNDLE_NAME}" "${identity_args[@]}" "/evidence/${DESCRIPTOR_NAME}" >/dev/null || die "Cosign rejected signed release descriptor"
 }
 
+write_signature_verification_receipt() {
+    local destination="${STAGING_DIR}/${VERIFICATION_RECEIPT_NAME}"
+    local candidate="${destination}.new"
+    local verifier_config=""
+    [[ ! -e "$destination" && ! -L "$destination" && ! -e "$candidate" && ! -L "$candidate" ]] \
+        || die "signature-verification receipt destination is not fresh"
+    ( set -o noclobber; : > "$candidate" ) \
+        || die "could not allocate signature-verification receipt"
+    chmod 0600 "$candidate"
+    if [[ "$DAEMON_ARCH" == amd64 ]]; then
+        verifier_config="$COSIGN_AMD64_IMAGE_ID"
+    elif [[ "$DAEMON_ARCH" == arm64 ]]; then
+        verifier_config="$COSIGN_ARM64_IMAGE_ID"
+    else
+        die "signature-verification receipt requires an attested daemon platform"
+    fi
+    # Every interpolated value has already passed a strict lowercase digest,
+    # SemVer, commit, platform, or fixed identity grammar.  Keep the bytes in a
+    # canonical, sorted-key JSON form so future upgrade journals can hash and
+    # retain this exact successful offline-verification witness.
+    printf '%s\n' \
+        "{\"daemon_identity_sha256\":\"${DAEMON_IDENTITY_SHA256}\",\"descriptor_bundle_sha256\":\"sha256:${VERIFIED_BUNDLE_SHA256}\",\"descriptor_sha256\":\"sha256:${VERIFIED_DESCRIPTOR_SHA256}\",\"manifest_sha256\":\"sha256:${VERIFIED_MANIFEST_SHA256}\",\"migration_leaf_set_sha256\":\"${MIGRATION_LEAF_SET_SHA256}\",\"migration_set_sha256\":\"${MIGRATION_SET_SHA256}\",\"oidc_issuer\":\"${OIDC_ISSUER}\",\"platform\":\"${DAEMON_OS}/${DAEMON_ARCH}\",\"purpose\":\"target\",\"release_epoch\":${RELEASE_EPOCH},\"release_tag\":\"${RELEASE_TAG}\",\"runtime_contract_version\":${COSIGN_RUNTIME_CONTRACT_VERSION},\"schema_version\":2,\"source_commit\":\"${SOURCE_COMMIT}\",\"trigger\":\"push\",\"trusted_root_sha256\":\"sha256:${TRUSTED_ROOT_SHA256}\",\"verifier_config_digest\":\"${verifier_config}\",\"verifier_manifest_digest\":\"${VERIFIER_MANIFEST_DIGEST}\",\"verifier_reference\":\"${COSIGN_IMAGE}\",\"workflow_identity\":\"${WORKFLOW_IDENTITY}\",\"workflow_ref\":\"refs/tags/${RELEASE_TAG}\"}" \
+        > "$candidate" || die "could not render signature-verification receipt"
+    durable_sync
+    mv -- "$candidate" "$destination" \
+        || die "could not publish signature-verification receipt"
+    durable_sync
+}
+
 attest_release_image() {
     local role="$1" reference="$2" repository="${2%@*}" image_id="" source_label="" revision_label="" version_label=""
     image_repo_digest_present "$reference" "$reference" || die "${role} image does not expose exact official RepoDigest"
@@ -1269,11 +1368,12 @@ validate_persisted_evidence() {
     [[ -d "$evidence" && ! -L "$evidence" && "$(file_uid "$evidence")" == "$EUID" && "$(file_mode "$evidence")" == "700" ]] || die "persisted release evidence directory is unsafe"
     while IFS= read -r -d '' entry; do
         count=$((count + 1)); base="$(basename -- "$entry")"
-        case "$base" in "$DESCRIPTOR_NAME"|"$BUNDLE_NAME"|"$MANIFEST_NAME"|local-images.txt) ;; *) die "persisted release evidence contains unexpected entry" ;; esac
+        case "$base" in "$DESCRIPTOR_NAME"|"$BUNDLE_NAME"|"$MANIFEST_NAME"|"$TRUSTED_ROOT_NAME"|"$VERIFICATION_RECEIPT_NAME"|local-images.txt) ;; *) die "persisted release evidence contains unexpected entry" ;; esac
         validate_regular_file "$entry" 1048576
         [[ "$(file_mode "$entry")" == "600" ]] || die "persisted release evidence must be owner-only"
     done < <(find "$evidence" -mindepth 1 -maxdepth 1 -print0)
-    [[ "$count" -eq 4 ]] || die "persisted release evidence is incomplete"
+    [[ "$count" -eq 6 ]] || die "persisted release evidence is incomplete"
+    validate_trusted_root "$evidence/$TRUSTED_ROOT_NAME"
     validate_local_image_receipt "$evidence/local-images.txt"
 }
 
@@ -1510,6 +1610,7 @@ main() {
         copy_trusted_root "$trusted_root" "$VERIFIER_DIR/$TRUSTED_ROOT_NAME"
     fi
     validate_descriptor "$VERIFIER_DIR/$DESCRIPTOR_NAME" "$RELEASE_TAG" "$SOURCE_COMMIT" "$VERIFIER_DIR/$MANIFEST_NAME"
+    validate_signed_transition_metadata "$VERIFIER_DIR/$MANIFEST_NAME"
     APP_IMAGE="$(descriptor_value "$VERIFIER_DIR/$DESCRIPTOR_NAME" app_image)"
     POSTGRES_IMAGE="$(descriptor_value "$VERIFIER_DIR/$DESCRIPTOR_NAME" postgres_image)"
     EGRESS_IMAGE="$(descriptor_value "$VERIFIER_DIR/$DESCRIPTOR_NAME" egress_image)"
@@ -1527,6 +1628,7 @@ main() {
     run_bounded 60 "Cosign verifier attestation" attest_cosign_image \
         || die "Cosign verifier failed exact attestation"
     verify_signatures
+    write_signature_verification_receipt
     attest_verified_release_inputs
 
     for image_tuple in "app|$APP_IMAGE" "postgres|$POSTGRES_IMAGE" "egress|$EGRESS_IMAGE" \
@@ -1549,6 +1651,8 @@ main() {
         || die "could not capture Cosign verifier image receipt"
     cosign_id="$BOUNDED_CAPTURE_VALUE"
     printf 'cosign_image_id=%s\n' "$cosign_id" >> "$STAGING_DIR/local-images.txt"
+    install -m 0600 "$VERIFIER_DIR/$TRUSTED_ROOT_NAME" "$STAGING_DIR/$TRUSTED_ROOT_NAME" \
+        || die "could not retain the exact trusted root with signed release evidence"
     chmod 0600 "$STAGING_DIR"/*
     validate_local_image_receipt "$STAGING_DIR/local-images.txt"
     attest_verified_release_inputs
@@ -1556,7 +1660,7 @@ main() {
     assert_installation_ancestor_identity
 
     if [[ -d "$EVIDENCE_DIR" ]]; then
-        for role in "$DESCRIPTOR_NAME" "$BUNDLE_NAME" "$MANIFEST_NAME"; do cmp -s -- "$STAGING_DIR/$role" "$EVIDENCE_DIR/$role" || die "persisted release evidence conflicts with requested release"; done
+        for role in "$DESCRIPTOR_NAME" "$BUNDLE_NAME" "$MANIFEST_NAME" "$TRUSTED_ROOT_NAME" "$VERIFICATION_RECEIPT_NAME"; do cmp -s -- "$STAGING_DIR/$role" "$EVIDENCE_DIR/$role" || die "persisted release evidence conflicts with requested release"; done
         # The receipt is an expected-current witness, not a cache hint. A
         # different local image ID (including the bootstrap verifier) requires
         # an explicit journaled release transition instead of silent refresh.

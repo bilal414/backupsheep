@@ -1189,9 +1189,16 @@ validate_checkout_cleanliness() {
                 || [[ "$relative_path" == .secrets/* ]] \
                 || [[ "$relative_path" == ".release-evidence/" ]] \
                 || [[ "$relative_path" == .release-evidence/* ]] \
+                || [[ "$relative_path" == ".release-evidence.target/" ]] \
+                || [[ "$relative_path" == .release-evidence.target/* ]] \
+                || [[ "$relative_path" == ".release-evidence.source-verification.json" ]] \
+                || [[ "$relative_path" == ".release-transition-journal/" ]] \
+                || [[ "$relative_path" == .release-transition-journal/* ]] \
                 || [[ "$relative_path" =~ ^\.release-evidence\.(download|verify)\.[A-Za-z0-9]{8}/ ]] \
                 || [[ "$relative_path" == ".env.image-source.new" ]] \
                 || [[ "$relative_path" == ".env.fresh.new" ]] \
+                || [[ "$relative_path" == ".env.signed-upgrade.target" ]] \
+                || [[ "$relative_path" == ".signed-upgrade-witness.json" ]] \
                 || [[ "$relative_path" =~ ^\.env-(update|artifact-policy)\.[A-Za-z0-9]{8}$ ]] \
                 || [[ "$relative_path" == ".release-request" ]] \
                 || [[ "$relative_path" == ".release-request.new" ]] \
@@ -1246,6 +1253,8 @@ validate_checkout() {
     require_regular_checkout_file deploy/release/sigstore-trusted-root.json
     require_regular_checkout_file deploy/runtime/compose-json.awk
     require_regular_checkout_file deploy/release-policy.json
+    require_regular_checkout_file scripts/release_transition.py
+    require_regular_checkout_file scripts/signed_release_upgrade.py
     require_regular_checkout_file deploy/postgres/entrypoint.sh
     require_regular_checkout_file deploy/postgres/storage-witness.sh
     require_regular_checkout_file deploy/postgres/source-identity-contract.sh
@@ -3261,6 +3270,8 @@ validate_release_evidence_files() {
         backupsheep-release-descriptor-v2.txt \
         backupsheep-release-descriptor-v2.sigstore.json \
         release-manifest.json \
+        sigstore-trusted-root.json \
+        signature-verification.json \
         local-images.txt; do
         path="${evidence_dir}/${name}"
         [[ -f "$path" && ! -L "$path" \
@@ -3272,11 +3283,11 @@ validate_release_evidence_files() {
     while IFS= read -r -d '' entry; do
         count=$((count + 1))
         case "$(basename -- "$entry")" in
-            backupsheep-release-descriptor-v2.txt|backupsheep-release-descriptor-v2.sigstore.json|release-manifest.json|local-images.txt) ;;
+            backupsheep-release-descriptor-v2.txt|backupsheep-release-descriptor-v2.sigstore.json|release-manifest.json|sigstore-trusted-root.json|signature-verification.json|local-images.txt) ;;
             *) die "Signed-release evidence contains an unexpected entry." ;;
         esac
     done < <(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print0)
-    [[ "$count" -eq 4 ]] || die "Signed-release evidence must contain exactly four control files."
+    [[ "$count" -eq 6 ]] || die "Signed-release evidence must contain exactly six control files."
 }
 
 validate_requested_image_mode_against_existing() {

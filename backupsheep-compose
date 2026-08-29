@@ -811,6 +811,8 @@ validate_signed_release_source_checkout() {
         deploy/rabbitmq/entrypoint.sh \
         deploy/rabbitmq/provision.sh \
         deploy/runtime/compose-json.awk \
+        scripts/release_transition.py \
+        scripts/signed_release_upgrade.py \
         deploy/release-policy.json; do
         path="$root_dir/$relative"
         validate_private_file "$path" "signed-release runtime file ${relative}"

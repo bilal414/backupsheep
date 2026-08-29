@@ -21,6 +21,9 @@
 !deploy/
 !deploy/staging/
 !deploy/staging/provision-volumes.sh
+!scripts/
+!scripts/release_transition.py
+!scripts/signed_release_upgrade.py
 
 # Runtime Python packages, templates, and committed static source assets.
 !apps/
