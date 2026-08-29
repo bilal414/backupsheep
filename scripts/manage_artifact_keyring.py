@@ -66,6 +66,7 @@ from backupsheep.artifact_crypto.providers.local_file import (  # noqa: E402
     MAX_KEYRING_KEYS,
     LocalFileKeyProvider,
     canonical_keyring_bytes,
+    open_keyring_parent_directory,
 )
 
 
@@ -88,10 +89,8 @@ def _installation_id(value: str) -> str:
 
 
 def _open_locked_parent(path: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    flags |= getattr(os, "O_DIRECTORY", 0)
     try:
-        descriptor = os.open(path.parent, flags)
+        descriptor = open_keyring_parent_directory(path)
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISDIR(metadata.st_mode)
@@ -104,8 +103,16 @@ def _open_locked_parent(path: Path) -> int:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return descriptor
     except BlockingIOError:
+        if "descriptor" in locals():
+            os.close(descriptor)
         raise KeyringLifecycleError(
             "another keyring mutation holds the parent-directory lock"
+        ) from None
+    except OSError:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise KeyringLifecycleError(
+            "the keyring path contains an unsafe or unavailable ancestor"
         ) from None
     except BaseException:
         if "descriptor" in locals():

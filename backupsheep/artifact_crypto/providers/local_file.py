@@ -41,6 +41,30 @@ _WRAPPED_BYTES = len(_WRAP_MAGIC) + _NONCE_BYTES + _DATA_KEY_BYTES + _TAG_BYTES
 _AAD_DOMAIN = b"BackupSheep/BSE1/local-file-wrap/v1\x00"
 
 
+def open_keyring_parent_directory(path: Path) -> int:
+    """Open an absolute keyring parent without following any path component."""
+
+    path = Path(path)
+    if not path.is_absolute() or not path.name or ".." in path.parts:
+        raise OSError("The local-file keyring path is not canonical.")
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise OSError("Safe local-file keyring path traversal is unavailable.")
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
+    descriptor = os.open(os.path.sep, flags)
+    try:
+        for component in path.parent.parts[1:]:
+            if component in {"", ".", ".."}:
+                raise OSError("The local-file keyring path is not canonical.")
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def canonical_keyring_bytes(
     *,
     installation_id: str,
@@ -104,12 +128,12 @@ class LocalFileKeyProvider:
         self._require_live()
         return tuple(self._keys)
 
-    def _secure_metadata(self, metadata: os.stat_result) -> bool:
+    def _secure_metadata(
+        self,
+        metadata: os.stat_result,
+        parent_metadata: os.stat_result,
+    ) -> bool:
         mode = stat.S_IMODE(metadata.st_mode)
-        try:
-            parent_metadata = os.stat(self.path.parent, follow_symlinks=False)
-        except OSError:
-            return False
         protected_owner_directory = bool(
             stat.S_ISDIR(parent_metadata.st_mode)
             and parent_metadata.st_uid == os.geteuid()
@@ -155,16 +179,21 @@ class LocalFileKeyProvider:
 
     def _load(self) -> None:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        parent_descriptor = None
         try:
-            descriptor = os.open(self.path, flags)
+            parent_descriptor = open_keyring_parent_directory(self.path)
+            parent_metadata = os.fstat(parent_descriptor)
+            descriptor = os.open(self.path.name, flags, dir_fd=parent_descriptor)
         except OSError:
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
             raise KeyProviderConfigurationError(
                 "The local-file keyring cannot be opened safely."
             ) from None
         raw = bytearray()
         try:
             metadata = os.fstat(descriptor)
-            if not self._secure_metadata(metadata):
+            if not self._secure_metadata(metadata, parent_metadata):
                 raise KeyProviderConfigurationError(
                     "The local-file keyring metadata is unsafe."
                 )
@@ -183,6 +212,7 @@ class LocalFileKeyProvider:
                 )
         finally:
             os.close(descriptor)
+            os.close(parent_descriptor)
 
         decoded_keys: dict[str, bytearray] = {}
         try:

@@ -379,6 +379,10 @@ file_identity() {
         || stat -f '%d:%i:%z:%l:%u:%Lp' -- "$1"
 }
 
+file_inode_identity() {
+    stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' -- "$1"
+}
+
 directory_inode_identity() {
     stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' -- "$1"
 }
@@ -1658,8 +1662,72 @@ reconcile_fresh_env_candidate() {
     sync || die "Could not durably reconcile fresh configuration candidate."
 }
 
+reconcile_linked_artifact_publication_residue() {
+    local entry="$1"
+    local base="$2"
+    local destination=""
+    local expected_mode=""
+    local artifact_kind=""
+    local entry_identity=""
+    local destination_identity=""
+    local destination_inode=""
+
+    case "$base" in
+        .artifact-keyring-database.*)
+            destination="$(artifact_keyring_path database)"
+            expected_mode=444
+            artifact_kind=database-keyring
+            ;;
+        .artifact-keyring-files.*)
+            destination="$(artifact_keyring_path files)"
+            expected_mode=444
+            artifact_kind=files-keyring
+            ;;
+        .artifact-provider-rollback.*)
+            destination="$(artifact_provider_rollback_path)"
+            expected_mode=400
+            artifact_kind=provider-rollback
+            ;;
+        *)
+            die "Internal artifact publication residue classification failed."
+            ;;
+    esac
+
+    [[ -f "$entry" && ! -L "$entry" && -f "$destination" && ! -L "$destination" \
+        && "$(file_uid "$entry")" == "$EUID" \
+        && "$(file_uid "$destination")" == "$EUID" \
+        && "$(file_mode "$entry")" == "$expected_mode" \
+        && "$(file_mode "$destination")" == "$expected_mode" \
+        && "$(file_links "$entry")" == 2 \
+        && "$(file_links "$destination")" == 2 ]] \
+        || die "Interrupted artifact publication residue does not have the exact safe linked identity."
+    entry_identity="$(file_identity "$entry")"
+    destination_identity="$(file_identity "$destination")"
+    [[ "$entry_identity" == "$destination_identity" ]] \
+        || die "Interrupted artifact publication residue is not linked to its exact destination."
+    destination_inode="$(file_inode_identity "$destination")"
+    case "$artifact_kind" in
+        database-keyring) validate_artifact_keyring_content "$entry" database ;;
+        files-keyring) validate_artifact_keyring_content "$entry" files ;;
+    esac
+
+    rm -f -- "$entry" \
+        || die "Could not remove the attested interrupted artifact publication name."
+    [[ ! -e "$entry" && ! -L "$entry" \
+        && -f "$destination" && ! -L "$destination" \
+        && "$(file_inode_identity "$destination")" == "$destination_inode" \
+        && "$(file_links "$destination")" == 1 ]] \
+        || die "Interrupted artifact publication reconciliation changed its destination identity."
+    case "$artifact_kind" in
+        database-keyring) validate_secret_file "$destination" ;;
+        files-keyring) validate_secret_file "$destination" ;;
+        provider-rollback) validate_artifact_provider_rollback "$destination" ;;
+        *) die "Internal artifact publication validation classification failed." ;;
+    esac
+}
+
 reconcile_installer_temp_residues() {
-    local path="" base="" entry="" count=0 size="" mode=""
+    local path="" base="" entry="" count=0 size="" mode="" links=""
     for path in "${INSTALL_DIR}"/.env-update.* "${INSTALL_DIR}"/.env-artifact-policy.*; do
         [[ -e "$path" || -L "$path" ]] || continue
         base="$(basename -- "$path")"
@@ -1694,8 +1762,17 @@ reconcile_installer_temp_residues() {
             [[ "$base" =~ \.[A-Za-z0-9]{8}$ ]] \
                 || die "Installer secret residue has a noncanonical name."
             count=$((count + 1)); (( count <= 64 )) || die "Too many installer residues exist."
+            links="$(file_links "$entry")"
+            case "$base" in
+                .artifact-keyring-database.*|.artifact-keyring-files.*|.artifact-provider-rollback.*)
+                    if [[ "$links" == 2 ]]; then
+                        reconcile_linked_artifact_publication_residue "$entry" "$base"
+                        continue
+                    fi
+                    ;;
+            esac
             [[ -f "$entry" && ! -L "$entry" && "$(file_uid "$entry")" == "$EUID" \
-                && "$(file_links "$entry")" == "1" ]] \
+                && "$links" == "1" ]] \
                 || die "Installer secret residue has an unsafe identity."
             mode="$(file_mode "$entry")"; [[ "$mode" == "600" || "$mode" == "444" ]] \
                 || die "Installer secret residue has unsafe permissions."
@@ -5863,6 +5940,11 @@ print_next_steps() {
     printf '  cd %q && cat .secrets/onboarding_token\n' "$INSTALL_DIR"
     printf '\nInstallation directory: %s\n' "$INSTALL_DIR"
     printf 'Compose project: %s\n' "$PROJECT_NAME"
+    printf '\nRecovery warning: PostgreSQL and both artifact keyrings are one cryptographic recovery set.\n'
+    printf 'Back up these exact protected files together with PostgreSQL:\n'
+    printf '  %s\n' "${INSTALL_DIR}/.secrets/artifact_local_file_database_keyring"
+    printf '  %s\n' "${INSTALL_DIR}/.secrets/artifact_local_file_files_keyring"
+    printf 'Loss, replacement, or regeneration of either keyring is unrecoverable for retained backups in that lane.\n'
     if [[ "$ALLOW_ROOT_INSTALL" == true ]]; then
         printf 'This is a root-owned installation. Every wrapper invocation must run as effective UID 0 and begin with --allow-root-install.\n'
         printf '  %q/backupsheep-compose --allow-root-install ps --all\n' "$INSTALL_DIR"

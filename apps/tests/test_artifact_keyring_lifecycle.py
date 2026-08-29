@@ -24,7 +24,7 @@ INSTALLATION_ID = "a" * 64
 class ArtifactKeyringLifecycleTests(SimpleTestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.root.chmod(0o700)
         self.path = self.root / "database.keyring"
 
@@ -191,6 +191,22 @@ class ArtifactKeyringLifecycleTests(SimpleTestCase):
                 lifecycle.create(other, "files", INSTALLATION_ID)
         finally:
             os.close(descriptor)
+
+    def test_lifecycle_refuses_a_symlinked_ancestor_before_creation(self):
+        real_ancestor = self.root / "real-ancestor"
+        real_ancestor.mkdir(mode=0o700)
+        protected_parent = real_ancestor / "protected"
+        protected_parent.mkdir(mode=0o700)
+        linked_ancestor = self.root / "linked-ancestor"
+        linked_ancestor.symlink_to(real_ancestor, target_is_directory=True)
+        destination = linked_ancestor / "protected" / "database.keyring"
+
+        with self.assertRaisesRegex(
+            lifecycle.KeyringLifecycleError,
+            "unsafe or unavailable ancestor",
+        ):
+            lifecycle.create(destination, "database", INSTALLATION_ID)
+        self.assertFalse((protected_parent / "database.keyring").exists())
 
     def test_cli_reports_only_metadata_and_never_root_key_material(self):
         output = io.StringIO()

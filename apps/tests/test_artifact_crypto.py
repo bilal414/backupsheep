@@ -690,7 +690,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
 class KeyProviderTests(SimpleTestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary_directory.name)
+        self.root = Path(self.temporary_directory.name).resolve()
         self.context = artifact_context()
 
     def tearDown(self):
@@ -1011,12 +1011,35 @@ class KeyProviderTests(SimpleTestCase):
             st_mode=stat.S_IFDIR | 0o755,
             st_uid=0,
         )
-        with mock.patch.object(os, "stat", return_value=parent_metadata):
-            self.assertTrue(provider._secure_metadata(file_metadata))
+        self.assertTrue(provider._secure_metadata(file_metadata, parent_metadata))
 
         provider.path = Path("/tmp/copied-database.keyring")
-        with mock.patch.object(os, "stat", return_value=parent_metadata):
-            self.assertFalse(provider._secure_metadata(file_metadata))
+        self.assertFalse(provider._secure_metadata(file_metadata, parent_metadata))
+
+    def test_local_file_rejects_a_symlinked_ancestor(self):
+        real_ancestor = self.root / "real-ancestor"
+        real_ancestor.mkdir(mode=0o700)
+        protected_parent = real_ancestor / "protected"
+        protected_parent.mkdir(mode=0o700)
+        keyring = protected_parent / "database.keyring"
+        keyring.write_bytes(
+            canonical_keyring_bytes(
+                installation_id=INSTALLATION_ID,
+                lane="database",
+                active_key_id=LOCAL_KEY_V1,
+                keys=[(LOCAL_KEY_V1, "11" * 32)],
+            )
+        )
+        keyring.chmod(0o400)
+        linked_ancestor = self.root / "linked-ancestor"
+        linked_ancestor.symlink_to(real_ancestor, target_is_directory=True)
+
+        with self.assertRaises(KeyProviderConfigurationError):
+            LocalFileKeyProvider(
+                linked_ancestor / "protected" / "database.keyring",
+                lane="database",
+                installation_id=INSTALLATION_ID,
+            )
 
     def test_local_file_rejects_wrong_lane_and_noncanonical_content(self):
         path = self._write_keyring(lane="files")
