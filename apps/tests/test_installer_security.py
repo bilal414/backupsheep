@@ -342,67 +342,122 @@ reconcile_installer_temp_residues
             self.assertEqual(destination.stat().st_nlink, 1)
 
     def test_provider_rollback_publication_link_kill_resumes_safely(self):
-        with tempfile.TemporaryDirectory(
-            prefix="backupsheep-provider-rollback-kill-"
-        ) as root:
-            install_dir = Path(root)
-            install_dir.chmod(0o700)
-            secret_dir = install_dir / ".secrets"
-            secret_dir.mkdir(mode=0o700)
-            env_file = install_dir / ".env"
-            env_file.write_text(
-                (
-                    f"BACKUPSHEEP_INSTALLATION_ID='{'a' * 64}'\n"
-                    "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='aws-kms'\n"
-                    "BACKUPSHEEP_ARTIFACT_KMS_KEY_ARN='retired-key'\n"
-                ),
-                encoding="utf-8",
-            )
-            env_file.chmod(0o600)
-            interrupt = r'''
+        interrupt_template = r'''
 source "$1"
 INSTALL_DIR="$2"
 ENV_FILE="$2/.env"
 SECRETS_DIR="$2/.secrets"
-atomic_publish_new_file() {
-    ln -- "$1" "$2" && kill -KILL "$$"
-}
+atomic_publish_new_file() {{
+    source_path="$1"
+    destination_path="$2"
+    {publication}
+}}
 preserve_artifact_provider_rollback
 exit 97
 '''
-            interrupted = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    interrupt,
-                    "provider-rollback-kill-test",
-                    str(INSTALLER),
-                    str(install_dir),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            self.assertEqual(
-                interrupted.returncode,
-                -signal.SIGKILL,
-                interrupted.stderr,
-            )
-            resume = r'''
+        resume = r'''
 source "$1"
 INSTALL_DIR="$2"
 ENV_FILE="$2/.env"
 SECRETS_DIR="$2/.secrets"
 reconcile_installer_temp_residues
+rollback="$(artifact_provider_rollback_path)"
+if [[ ! -e "$rollback" && ! -L "$rollback" ]]; then
+    preserve_artifact_provider_rollback
+fi
 validate_artifact_provider_rollback
 '''
-            recovered = subprocess.run(
+        phases = {
+            "before-link": 'kill -KILL "$$"',
+            "after-link": 'ln -- "$source_path" "$destination_path" && kill -KILL "$$"',
+            "after-unlink": (
+                'ln -- "$source_path" "$destination_path" '
+                '&& rm -f -- "$source_path" && kill -KILL "$$"'
+            ),
+        }
+        for phase, publication in phases.items():
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(
+                prefix="backupsheep-provider-rollback-kill-"
+            ) as root:
+                install_dir = Path(root)
+                install_dir.chmod(0o700)
+                secret_dir = install_dir / ".secrets"
+                secret_dir.mkdir(mode=0o700)
+                env_file = install_dir / ".env"
+                env_file.write_text(
+                    (
+                        f"BACKUPSHEEP_INSTALLATION_ID='{'a' * 64}'\n"
+                        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER='aws-kms'\n"
+                        "BACKUPSHEEP_ARTIFACT_KMS_KEY_ARN='retired-key'\n"
+                    ),
+                    encoding="utf-8",
+                )
+                env_file.chmod(0o600)
+                interrupted = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        interrupt_template.format(publication=publication),
+                        "provider-rollback-kill-test",
+                        str(INSTALLER),
+                        str(install_dir),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(
+                    interrupted.returncode,
+                    -signal.SIGKILL,
+                    interrupted.stderr,
+                )
+                recovered = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        resume,
+                        "provider-rollback-resume-test",
+                        str(INSTALLER),
+                        str(install_dir),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                rollback = secret_dir / "artifact_provider_transition_rollback"
+                self.assertTrue(rollback.is_file())
+                self.assertEqual(rollback.stat().st_nlink, 1)
+                self.assertEqual(
+                    list(secret_dir.glob(".artifact-provider-rollback.*")),
+                    [],
+                )
+
+    def test_unrelated_mode_0400_residue_remains_a_hard_failure(self):
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-unrelated-residue-"
+        ) as root:
+            install_dir = Path(root)
+            install_dir.chmod(0o700)
+            secret_dir = install_dir / ".secrets"
+            secret_dir.mkdir(mode=0o700)
+            residue = secret_dir / ".managed-key-check.ABC12345"
+            residue.write_text("unrelated\n", encoding="utf-8")
+            residue.chmod(0o400)
+            command = r'''
+source "$1"
+INSTALL_DIR="$2"
+SECRETS_DIR="$2/.secrets"
+reconcile_installer_temp_residues
+'''
+            refused = subprocess.run(
                 [
                     "bash",
                     "-c",
-                    resume,
-                    "provider-rollback-resume-test",
+                    command,
+                    "unrelated-residue-test",
                     str(INSTALLER),
                     str(install_dir),
                 ],
@@ -411,14 +466,9 @@ validate_artifact_provider_rollback
                 text=True,
                 timeout=30,
             )
-            self.assertEqual(recovered.returncode, 0, recovered.stderr)
-            rollback = secret_dir / "artifact_provider_transition_rollback"
-            self.assertTrue(rollback.is_file())
-            self.assertEqual(rollback.stat().st_nlink, 1)
-            self.assertEqual(
-                list(secret_dir.glob(".artifact-provider-rollback.*")),
-                [],
-            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertTrue(residue.is_file())
+            self.assertEqual(stat.S_IMODE(residue.stat().st_mode), 0o400)
 
     def test_next_steps_warns_that_both_keyrings_and_postgres_are_one_recovery_set(self):
         command = r'''

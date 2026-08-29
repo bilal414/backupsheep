@@ -1764,9 +1764,31 @@ reconcile_installer_temp_residues() {
             count=$((count + 1)); (( count <= 64 )) || die "Too many installer residues exist."
             links="$(file_links "$entry")"
             case "$base" in
-                .artifact-keyring-database.*|.artifact-keyring-files.*|.artifact-provider-rollback.*)
+                .artifact-keyring-database.*|.artifact-keyring-files.*)
                     if [[ "$links" == 2 ]]; then
                         reconcile_linked_artifact_publication_residue "$entry" "$base"
+                        continue
+                    fi
+                    ;;
+                .artifact-provider-rollback.*)
+                    if [[ "$links" == 2 ]]; then
+                        reconcile_linked_artifact_publication_residue "$entry" "$base"
+                        continue
+                    fi
+                    # preserve_artifact_provider_rollback changes its fully written,
+                    # validated candidate to owner-mode 0400 before publication. A
+                    # kill before link(2) leaves that exact unpublished state. Only
+                    # its canonical name and bounded, owner-controlled single-link
+                    # identity receive this recovery path; other 0400 residues fail.
+                    if [[ "$links" == 1 && -f "$entry" && ! -L "$entry" \
+                        && "$(file_uid "$entry")" == "$EUID" \
+                        && "$(file_mode "$entry")" == 400 ]]; then
+                        size="$(file_size "$entry")"
+                        [[ "$size" =~ ^[0-9]+$ ]] \
+                            && (( 10#$size > 0 && 10#$size <= 32768 )) \
+                            || die "Unpublished artifact-provider rollback residue has an invalid size."
+                        rm -f -- "$entry" \
+                            || die "Could not reconcile unpublished artifact-provider rollback residue."
                         continue
                     fi
                     ;;
