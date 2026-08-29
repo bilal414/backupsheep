@@ -23,7 +23,10 @@ from .serializers import CoreConnectionSerializer
 from .view_helpers import connection_error_response
 from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
-from backupsheep.source_recovery_policy import require_source_backup_creation
+from backupsheep.source_recovery_policy import (
+    RETIRED_SOURCE_FAMILIES,
+    require_source_backup_creation,
+)
 
 
 def _log_activity(request, log_type, data):
@@ -54,7 +57,7 @@ class CoreConnectionView(viewsets.ModelViewSet):
         queryset = CoreConnection.objects.filter(
             query_partners,
             integration__enabled=True,
-        )
+        ).exclude(integration__code__in=RETIRED_SOURCE_FAMILIES)
         if not member.is_primary_account:
             queryset = queryset.filter(nodes__in=visible_nodes(member)).distinct()
         return queryset
@@ -183,7 +186,9 @@ class CoreConnectionView(viewsets.ModelViewSet):
             }
         }
 
-        for integration in CoreIntegration.objects.filter(enabled=True):
+        for integration in CoreIntegration.objects.filter(enabled=True).exclude(
+            code__in=RETIRED_SOURCE_FAMILIES
+        ):
             all_totals[integration.code] = {
                 "connections": connections.filter(integration=integration).count(),
                 "paused": connections.filter(

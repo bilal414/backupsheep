@@ -637,6 +637,7 @@ def visible_nodes(member):
     from apps.console.account.models import CoreAccountGroup
     from apps.console.node.models import CoreNode
     from apps.api.v1.utils.api_permissions import active_current_membership
+    from backupsheep.source_recovery_policy import RETIRED_SOURCE_FAMILIES
 
     membership = active_current_membership(member)
     if membership is None:
@@ -645,7 +646,7 @@ def visible_nodes(member):
     nodes = CoreNode.objects.filter(
         connection__account=account,
         connection__integration__enabled=True,
-    )
+    ).exclude(connection__integration__code__in=RETIRED_SOURCE_FAMILIES)
     if membership.primary:
         return nodes
     account_groups = CoreAccountGroup.objects.filter(
@@ -669,6 +670,7 @@ def visible_connections(member):
     from apps.api.v1.utils.api_permissions import active_current_membership
     from apps.console.account.models import CoreAccountGroup
     from apps.console.connection.models import CoreConnection
+    from backupsheep.source_recovery_policy import RETIRED_SOURCE_FAMILIES
 
     membership = active_current_membership(member)
     if membership is None:
@@ -676,7 +678,7 @@ def visible_connections(member):
     connections = CoreConnection.objects.filter(
         account=membership.account,
         integration__enabled=True,
-    )
+    ).exclude(integration__code__in=RETIRED_SOURCE_FAMILIES)
     if membership.primary:
         return connections
 

@@ -15,6 +15,10 @@ from rest_framework.exceptions import APIException
 
 
 RECOVERY_INCOMPLETE_SOURCE_FAMILIES = frozenset({"basecamp"})
+RETIRED_SOURCE_FAMILIES = frozenset({"wordpress"})
+SOURCE_CREATION_POLICY_FAMILIES = (
+    RECOVERY_INCOMPLETE_SOURCE_FAMILIES | RETIRED_SOURCE_FAMILIES
+)
 
 SOURCE_RECOVERY_UNAVAILABLE_MESSAGE = (
     "New protection and backup runs for this source are unavailable because this "
@@ -48,6 +52,8 @@ def source_backup_creation_available(integration_code: str | None) -> bool:
     """
 
     code = str(integration_code or "").strip().lower()
+    if code in RETIRED_SOURCE_FAMILIES:
+        return False
     if code not in RECOVERY_INCOMPLETE_SOURCE_FAMILIES:
         return True
 

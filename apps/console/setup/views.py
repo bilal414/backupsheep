@@ -17,6 +17,7 @@ from apps.api.v1.utils.oauth_security import (
     validated_https_endpoint,
 )
 from backupsheep.source_recovery_policy import (
+    RETIRED_SOURCE_FAMILIES,
     SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
     source_backup_creation_available,
 )
@@ -51,6 +52,9 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
         integration_code = self.kwargs.get("integration_code")
         i_name = self.request.GET.get("i_name")
         member = self.request.user.member
+
+        if integration_code in RETIRED_SOURCE_FAMILIES:
+            return redirect("console:setup:integration_select")
 
         if CoreIntegration.objects.filter(
             code=integration_code,
@@ -369,6 +373,9 @@ class IntegrationModifyNodeView(LoginRequiredMixin, TemplateView):
         integration_code = self.kwargs.get("integration_code")
         connection_id = self.kwargs.get("connection_id")
         node_id = self.kwargs.get("node_id")
+
+        if integration_code in RETIRED_SOURCE_FAMILIES:
+            return redirect("console:setup:integration_select")
 
         member = self.request.user.member
 

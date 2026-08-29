@@ -5,16 +5,21 @@ runtime model, route, task, or tenant-visible row may remain usable.
 """
 
 from importlib import import_module
+from unittest import mock
 
 from django.apps import apps as django_apps
 from django.conf import settings
 from django.db import connection
 from django.db.migrations import SeparateDatabaseAndState
+from django.test import override_settings
+from django.utils import timezone
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from apps._tasks import backup_dispatch
 from apps.api.v1.utils.api_helpers import visible_connections, visible_nodes
+from apps.console.backup.models import CoreBackupRequest
 from apps.console.connection.models import CoreConnection, CoreIntegration
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.setting.models import CoreSiteSettings
@@ -22,6 +27,10 @@ from apps.tests import factories
 from apps.tests.base import BaseTestCase
 from backupsheep.celery_task_manifest import TASK_POLICIES
 from backupsheep.database_lane_policy import LANE_TABLE_POLICY, RETIRED_TABLES
+from backupsheep.source_recovery_policy import (
+    RETIRED_SOURCE_FAMILIES,
+    source_backup_creation_available,
+)
 from utils.middleware import OnboardingMiddleware
 
 
@@ -129,6 +138,68 @@ class WordPressRemovalTests(BaseTestCase):
             self.client.get(f"/api/v1/nodes/{retired_node.pk}/").status_code,
             status.HTTP_404_NOT_FOUND,
         )
+
+    @override_settings(
+        BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="legacy-only",
+        BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+        WORDPRESS_INTEGRATION_ENABLED=True,
+    )
+    def test_retired_source_cannot_be_reenabled_or_dispatched(self):
+        integration = CoreIntegration.objects.create(
+            code="wordpress",
+            name="Retired source",
+            type=CoreIntegration.Type.SAAS,
+            enabled=True,
+        )
+        retired_connection = CoreConnection.objects.create(
+            account=self.account,
+            integration=integration,
+            location=factories.make_location("reenabled-wordpress"),
+            name="Historical source",
+            status=CoreConnection.Status.ACTIVE,
+            added_by=self.member,
+        )
+        retired_node = CoreNode.objects.create(
+            connection=retired_connection,
+            type=CoreNode.Type.SAAS,
+            name="Historical source",
+            status=CoreNode.Status.ACTIVE,
+            added_by=self.member,
+        )
+        request = CoreBackupRequest.objects.create(
+            request_key=f"retired-wordpress-{retired_node.pk}",
+            task_id=f"retired-wordpress-{retired_node.pk}",
+            task_name="backup_wordpress",
+            node=retired_node,
+            payload={"node_id": retired_node.pk, "storage_ids": []},
+            next_dispatch_at=timezone.now(),
+        )
+
+        self.assertEqual(RETIRED_SOURCE_FAMILIES, frozenset({"wordpress"}))
+        self.assertFalse(source_backup_creation_available("wordpress"))
+        self.assertNotIn(retired_connection, visible_connections(self.member))
+        self.assertNotIn(retired_node, visible_nodes(self.member))
+        self.assertEqual(
+            self.client.get(
+                f"/api/v1/connections/{retired_connection.pk}/"
+            ).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.get(f"/api/v1/nodes/{retired_node.pk}/").status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+        with mock.patch.object(backup_dispatch.current_app, "send_task") as send_task:
+            self.assertFalse(backup_dispatch.publish_backup_request(request.pk))
+        request.refresh_from_db()
+        self.assertEqual(request.status, CoreBackupRequest.Status.CANCELLED)
+        self.assertEqual(
+            request.last_error_code,
+            "SOURCE_RECOVERY_UNAVAILABLE",
+        )
+        send_task.assert_not_called()
 
     def test_retirement_migration_pauses_existing_dispatch_rows(self):
         integration = CoreIntegration.objects.create(
