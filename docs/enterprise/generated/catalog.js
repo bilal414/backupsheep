@@ -9,9 +9,9 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "unique_paths": 510
     },
     "generatedFrom": "Django root URL resolver on the checked-out branch",
-    "configurationVariables": 284,
+    "configurationVariables": 296,
     "provenance": {
-      "sourceRevision": "5c40ac81c6a0",
+      "sourceRevision": "41788d914990",
       "catalogSource": "git-ref",
       "workingTreeApiChanges": false,
       "includesWorkingTreeApiChanges": false,
@@ -14369,7 +14369,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "default": "bse1",
       "sensitive": false,
       "required": false,
-      "description": "Enterprise artifact custody. install.sh creates independent database and files keyrings under the protected .secrets directory. Compose mounts each keyring only into its matching source/restore worker; no root key or keyring path belongs here. Back up both keyrings separately from backup ciphertext: losing either keyring makes that lane's BSE1 artifacts cryptographically unrecoverable. install.sh seals the generation/witness pair. A direct production deployment must derive generation 1 with scripts/manage_artifact_keyring.py policy-witness before importing Django settings.",
+      "description": "Enterprise artifact custody. install.sh creates independent database and files keyrings under the protected .secrets directory. Compose mounts each keyring only into its matching source/restore worker; no root key or keyring path belongs here. This stock provider is fully local: it requires no AWS account, credentials, or KMS. The only current runtime providers are local-file and development/test-only local-development. Historical aws-kms values are migration/rollback inputs only, not a selectable runtime provider. AWS credentials are optional only for an explicitly configured AWS source, storage destination, or Amazon SES email integration. Back up both keyrings separately from backup ciphertext: losing either keyring makes that lane's BSE1 artifacts cryptographically unrecoverable. install.sh seals the generation/witness pair. A direct production deployment must derive generation 1 with scripts/manage_artifact_keyring.py policy-witness before importing Django settings.",
       "source": ".env_sample"
     },
     {
@@ -14634,6 +14634,24 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "source": ".env_sample"
     },
     {
+      "name": "BACKUPSHEEP_IMAGE_MODE",
+      "category": "Advanced and integration settings",
+      "default": "local-build",
+      "sensitive": false,
+      "required": false,
+      "description": "Installer-owned image-source mode. Stock installs use `local-build`; the signed release workflow changes this only after authenticating the complete release set.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Installer-owned first-run lifecycle marker. Leave blank for a fresh install and do not edit an existing installation's value by hand.",
+      "source": ".env_sample"
+    },
+    {
       "name": "BACKUPSHEEP_INSTALLATION_ID",
       "category": "Advanced and integration settings",
       "default": "Not set",
@@ -14766,6 +14784,96 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "sensitive": false,
       "required": false,
       "description": "Installer-owned identity/task-auth witnesses. Existing stock installs must use the explicit broker migration flag; never set these by hand to bypass provisioning.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RABBITMQ_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7",
+      "sensitive": false,
+      "required": false,
+      "description": "The local-build path uses the reviewed upstream pins until the installer builds the repository's patched RabbitMQ runtime derivative. Signed-release mode replaces this with an authenticated first-party digest reference from descriptor V2.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095",
+      "sensitive": false,
+      "required": false,
+      "description": "Reviewed intermediate RabbitMQ image used only for the supported data upgrade hop. Signed-release mode replaces it with the descriptor's authenticated digest reference.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RELEASE_APP_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Digest-pinned application image from the authenticated descriptor. Keep blank manually.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "SHA-256 identity of the authenticated release descriptor. Keep blank manually.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RELEASE_EGRESS_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Digest-pinned egress-guard image from the authenticated descriptor. Keep blank manually.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RELEASE_POSTGRES_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Digest-pinned PostgreSQL image from the authenticated descriptor. Keep blank manually.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Digest-pinned RabbitMQ runtime image from the authenticated descriptor. Keep blank manually.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Digest-pinned RabbitMQ transition image from the authenticated descriptor. Keep blank manually.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RELEASE_SOURCE_COMMIT",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Exact signed source commit bound to the release descriptor. Keep blank manually.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RELEASE_TAG",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Authenticated signed-release tag selected by install.sh. Keep blank manually.",
       "source": ".env_sample"
     },
     {
