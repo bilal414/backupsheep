@@ -900,7 +900,8 @@ else
         || die "signed-release evidence directory must have mode 0700."
     for evidence_name in backupsheep-release-descriptor-v2.txt \
         backupsheep-release-descriptor-v2.sigstore.json \
-        release-manifest.json local-images.txt; do
+        release-manifest.json sigstore-trusted-root.json \
+        signature-verification.json local-images.txt; do
         validate_private_file "$release_evidence_dir/$evidence_name" "signed-release evidence ${evidence_name}"
         [[ "$(file_mode "$release_evidence_dir/$evidence_name")" == "600" ]] \
             || die "signed-release evidence ${evidence_name} must have mode 0600."
@@ -909,12 +910,12 @@ else
     while IFS= read -r -d '' evidence_path; do
         evidence_count=$((evidence_count + 1))
         case "$(basename -- "$evidence_path")" in
-            backupsheep-release-descriptor-v2.txt|backupsheep-release-descriptor-v2.sigstore.json|release-manifest.json|local-images.txt) ;;
+            backupsheep-release-descriptor-v2.txt|backupsheep-release-descriptor-v2.sigstore.json|release-manifest.json|sigstore-trusted-root.json|signature-verification.json|local-images.txt) ;;
             *) die "signed-release evidence contains an unexpected entry." ;;
         esac
     done < <(find "$release_evidence_dir" -mindepth 1 -maxdepth 1 -print0)
-    [[ "$evidence_count" -eq 4 ]] \
-        || die "signed-release evidence must contain exactly four control files."
+    [[ "$evidence_count" -eq 6 ]] \
+        || die "signed-release evidence must contain exactly six control files."
     descriptor="$release_evidence_dir/backupsheep-release-descriptor-v2.txt"
     descriptor_lines=()
     while IFS= read -r descriptor_line; do

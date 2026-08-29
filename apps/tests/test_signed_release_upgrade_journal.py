@@ -666,6 +666,22 @@ publish_authorized_source_receipt "$4"
         runtime["records_sha256"] = upgrade._domain_digest(
             "BackupSheep/upgrade-runtime-records/v1", runtime["records"]
         )
+        for network_record in networks["records"]:
+            if network_record["state"] == "absent":
+                continue
+            endpoint_ids = sorted(
+                record["container_id"]
+                for record in runtime["records"]
+                if record["state"] != "absent"
+                and network_record["network"]
+                in upgrade.SERVICE_NETWORK_ENDPOINTS.get(record["service"], ())
+            )
+            network_record["endpoint_container_ids"] = endpoint_ids
+            network_record[
+                "endpoint_container_ids_sha256"
+            ] = upgrade._domain_digest(
+                "BackupSheep/upgrade-network-endpoints/v1", endpoint_ids
+            )
         networks["records_sha256"] = upgrade._domain_digest(
             "BackupSheep/upgrade-network-records/v1", networks["records"]
         )
@@ -746,12 +762,21 @@ publish_authorized_source_receipt "$4"
                 ),
             }
 
-        def networks(side: str, present):
+        def networks(side: str, present, runtime_value: dict):
             records = []
             for network in upgrade.NETWORK_ROLES:
                 if network not in present:
                     records.append({"network": network, "state": "absent"})
                     continue
+                endpoint_ids = sorted(
+                    record["container_id"]
+                    for record in runtime_value["records"]
+                    if record["state"] != "absent"
+                    and network
+                    in upgrade.SERVICE_NETWORK_ENDPOINTS.get(
+                        record["service"], ()
+                    )
+                )
                 records.append(
                     {
                         "network": network,
@@ -762,6 +787,11 @@ publish_authorized_source_receipt "$4"
                         "compose_config_sha256": intent["compose"][side][
                             "network_config_sha256"
                         ][network],
+                        "endpoint_container_ids": endpoint_ids,
+                        "endpoint_container_ids_sha256": upgrade._domain_digest(
+                            "BackupSheep/upgrade-network-endpoints/v1",
+                            endpoint_ids,
+                        ),
                         "state": "present",
                     }
                 )
@@ -850,14 +880,25 @@ publish_authorized_source_receipt "$4"
             else set(upgrade.CORE_NETWORK_ROLES)
         )
         source_runtime = runtime("source", source_running)
-        source_networks = networks("source", source_networks_present)
+        source_networks = networks(
+            "source", source_networks_present, source_runtime
+        )
         source_stopped_runtime = runtime("source", set())
-        source_stopped_networks = networks("source", set())
+        source_stopped_networks = networks(
+            "source", set(), source_stopped_runtime
+        )
         target_empty_runtime = runtime("target", set())
-        target_empty_networks = networks("target", set())
+        target_empty_networks = networks("target", set(), target_empty_runtime)
         target_migrated_runtime = runtime("target", {"db", "rabbitmq"})
         target_core_runtime = runtime("target", set(upgrade.CORE_SERVICES))
-        target_core_networks = networks("target", set(upgrade.CORE_NETWORK_ROLES))
+        target_migrated_networks = networks(
+            "target",
+            set(upgrade.CORE_NETWORK_ROLES),
+            target_migrated_runtime,
+        )
+        target_core_networks = networks(
+            "target", set(upgrade.CORE_NETWORK_ROLES), target_core_runtime
+        )
 
         forward_binding = {
             "active_checkout_sha256": target_checkout_digest,
@@ -929,9 +970,9 @@ publish_authorized_source_receipt "$4"
                 "runner": runner("migrate"),
                 "target_migrations": migrations(intent["target"]),
                 "runtime": target_migrated_runtime,
-                "networks": target_core_networks,
+                "networks": target_migrated_networks,
                 "resources": resources(
-                    "target", target_migrated_runtime, target_core_networks
+                    "target", target_migrated_runtime, target_migrated_networks
                 ),
             },
             "60-core-accepted": {
@@ -1036,6 +1077,13 @@ publish_authorized_source_receipt "$4"
             if network not in present_networks:
                 network_records.append({"network": network, "state": "absent"})
                 continue
+            endpoint_ids = sorted(
+                record["container_id"]
+                for record in runtime["records"]
+                if record["state"] != "absent"
+                and network
+                in upgrade.SERVICE_NETWORK_ENDPOINTS.get(record["service"], ())
+            )
             network_records.append(
                 {
                     "network": network,
@@ -1046,6 +1094,10 @@ publish_authorized_source_receipt "$4"
                     "compose_config_sha256": intent["compose"]["source"][
                         "network_config_sha256"
                     ][network],
+                    "endpoint_container_ids": endpoint_ids,
+                    "endpoint_container_ids_sha256": upgrade._domain_digest(
+                        "BackupSheep/upgrade-network-endpoints/v1", endpoint_ids
+                    ),
                     "state": "present",
                 }
             )
@@ -1197,6 +1249,20 @@ publish_authorized_source_receipt "$4"
         self.request.chmod(0o600)
         second = self._initialize()
         self.assertNotEqual(second["operation_id"], first["operation_id"])
+
+    def test_same_nonce_is_an_idempotence_discriminator_not_global_authorization(self):
+        first = self._initialize()
+        self._append("10-prepared", first)
+        self._rollback(first)
+
+        second = self._initialize()
+        self.assertEqual(second["attempt_nonce"], first["attempt_nonce"])
+        self.assertNotEqual(second["operation_id"], first["operation_id"])
+        self.assertEqual(second["lineage"]["parent_outcome"], "rolled-back")
+        self.assertEqual(
+            second["lineage"]["source_release_sha256"],
+            first["lineage"]["source_release_sha256"],
+        )
 
     def test_rollback_is_forbidden_after_forward_only_boundary(self):
         intent = self._initialize()
@@ -1440,6 +1506,46 @@ publish_authorized_source_receipt "$4"
         self._append("10-prepared", intent)
         self.assertFalse(temporary.exists())
         self.assertEqual(receipt.stat().st_nlink, 1)
+
+    def test_interrupted_terminal_activation_hardlink_is_reconciled_before_lineage_read(self):
+        intent = self._initialize()
+        for phase in upgrade.PHASES:
+            self._append(phase, intent)
+        operation = self._operation_dir(intent)
+        receipt = operation / "70-activated.json"
+        temporary = operation / ".70-activated.json.new"
+        os.link(receipt, temporary)
+
+        self._append("70-activated", intent)
+
+        self.assertFalse(temporary.exists())
+        self.assertEqual(receipt.stat().st_nlink, 1)
+        self.assertEqual(
+            upgrade.journal_status(
+                install_dir=self.install, operation_id=intent["operation_id"]
+            )["state"],
+            "activated",
+        )
+
+    def test_interrupted_terminal_rollback_hardlink_is_reconciled_before_lineage_read(self):
+        intent = self._initialize()
+        self._append("10-prepared", intent)
+        self._rollback(intent)
+        operation = self._operation_dir(intent)
+        receipt = operation / upgrade.ROLLBACK_RECEIPT_NAME
+        temporary = operation / f".{upgrade.ROLLBACK_RECEIPT_NAME}.new"
+        os.link(receipt, temporary)
+
+        self._rollback(intent)
+
+        self.assertFalse(temporary.exists())
+        self.assertEqual(receipt.stat().st_nlink, 1)
+        self.assertEqual(
+            upgrade.journal_status(
+                install_dir=self.install, operation_id=intent["operation_id"]
+            )["state"],
+            "rolled-back",
+        )
 
     def test_truncated_unpublished_temporary_is_safely_recreated(self):
         intent = self._initialize()
@@ -2035,6 +2141,68 @@ publish_authorized_source_receipt "$4"
                 operation_id=intent["operation_id"],
                 phase="10-prepared",
                 payload_path=path,
+            )
+
+    def test_network_endpoint_membership_is_bound_to_complete_runtime(self):
+        intent = self._initialize()
+        path = self.install / ".10-prepared.payload.json"
+
+        for mutation in ("missing", "extra", "swapped", "duplicate"):
+            bad = self._payload("10-prepared", intent)
+            networks = bad["source_networks"]
+            record = next(
+                item
+                for item in networks["records"]
+                if item.get("network") == "app-database"
+            )
+            endpoint_ids = list(record["endpoint_container_ids"])
+            if mutation == "missing":
+                endpoint_ids.pop()
+            elif mutation == "extra":
+                endpoint_ids.append("f" * 64)
+                endpoint_ids.sort()
+            elif mutation == "swapped":
+                rabbit = bad["source_runtime"]["records"][
+                    upgrade.ALL_SERVICES.index("rabbitmq")
+                ]["container_id"]
+                endpoint_ids[0] = rabbit
+                endpoint_ids.sort()
+            else:
+                endpoint_ids.append(endpoint_ids[0])
+                endpoint_ids.sort()
+            record["endpoint_container_ids"] = endpoint_ids
+            record["endpoint_container_ids_sha256"] = upgrade._domain_digest(
+                "BackupSheep/upgrade-network-endpoints/v1", endpoint_ids
+            )
+            networks["records_sha256"] = upgrade._domain_digest(
+                "BackupSheep/upgrade-network-records/v1", networks["records"]
+            )
+            bad["resources"]["network_records_sha256"] = networks[
+                "records_sha256"
+            ]
+            aggregate = {
+                key: bad["resources"][key]
+                for key in sorted(
+                    set(bad["resources"]) - {"aggregate_sha256"}
+                )
+            }
+            bad["resources"]["aggregate_sha256"] = upgrade._domain_digest(
+                "BackupSheep/upgrade-resource-set/v1", aggregate
+            )
+            path.write_bytes(canonical(bad))
+            path.chmod(0o600)
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(
+                upgrade.UpgradeJournalError,
+                "endpoint set is malformed|complete runtime topology",
+            ):
+                upgrade.append_receipt(
+                    install_dir=self.install,
+                    operation_id=intent["operation_id"],
+                    phase="10-prepared",
+                    payload_path=path,
+                )
+            self.assertFalse(
+                (self._operation_dir(intent) / "10-prepared.json").exists()
             )
 
         bad = self._payload("10-prepared", intent)

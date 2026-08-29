@@ -1575,7 +1575,7 @@ build_authorized_source_receipt() {
         --pull never --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges:true --pids-limit 64 \
         --memory 256m --memory-swap 256m --cpus 0.5 --shm-size 16m \
-        --user 0:0 --workdir / --entrypoint /usr/local/bin/python --log-driver none \
+        --user "${EUID}:${EGID}" --workdir / --entrypoint /usr/local/bin/python --log-driver none \
         --env PYTHONDONTWRITEBYTECODE=1 --env PYTHONHASHSEED=0 \
         --env HTTP_PROXY= --env HTTPS_PROXY= --env FTP_PROXY= --env ALL_PROXY= --env NO_PROXY= \
         --env http_proxy= --env https_proxy= --env ftp_proxy= --env all_proxy= --env no_proxy= \

@@ -6,6 +6,20 @@ executes it from an already authenticated application image in a networkless,
 read-only container.  It never decides whether a Docker or database operation
 succeeded; it only accepts exact installer-produced evidence and commits a
 strict, hash-chained phase record.
+
+The attempt nonce distinguishes idempotent initialization beneath one exact
+lineage parent; it is not a globally unique authorization token.  A durable
+rollback may therefore start the same authorized source-to-target request
+again under the new rolled-back parent, while an activated target cannot be
+replayed because the active-release and epoch gates have advanced.
+
+The journal assumes its owner-controlled filesystem remains the trusted local
+state boundary.  Hashes, no-clobber publication, and compare-and-swap detect
+partial deletion, forks, and torn writes, but cannot detect restoration of the
+entire journal and installation to one older coherent filesystem snapshot.
+That stronger threat model requires an external monotonic anchor (for example,
+a remote transparency witness or TPM-backed counter) and is deliberately not
+claimed here.
 """
 
 from __future__ import annotations
@@ -150,6 +164,30 @@ EGRESS_NETWORK_ROLES = (
 )
 NETWORK_ROLES = INTERNAL_NETWORK_ROLES + EGRESS_NETWORK_ROLES
 CORE_NETWORK_ROLES = INTERNAL_NETWORK_ROLES + ("app-egress",)
+SERVICE_NETWORK_ENDPOINTS = {
+    "db": tuple(network for network in INTERNAL_NETWORK_ROLES if network.endswith("-database")),
+    "rabbitmq": tuple(network for network in INTERNAL_NETWORK_ROLES if network.endswith("-broker")),
+    "rabbitmq-provision": ("provision-broker",),
+    "db-provision": ("provision-database",),
+    "db-seal": ("provision-database",),
+    "migrate": ("migrate-database",),
+    "preflight": ("preflight-database", "preflight-broker"),
+    "app-egress-guard": ("app-database", "app-broker", "app-egress"),
+    "cloud-egress-guard": ("cloud-database", "cloud-broker", "cloud-egress"),
+    "database-egress-guard": (
+        "database-database",
+        "database-broker",
+        "database-egress",
+    ),
+    "files-egress-guard": ("files-database", "files-broker", "files-egress"),
+    "storage-egress-guard": (
+        "storage-database",
+        "storage-broker",
+        "storage-egress",
+    ),
+    "logs-egress-guard": ("logs-database", "logs-broker", "logs-egress"),
+    "beat": ("beat-database", "beat-broker"),
+}
 ZERO_HEX = "0" * 64
 ZERO_DIGEST = "sha256:" + ZERO_HEX
 TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$")
@@ -2036,6 +2074,7 @@ def _validate_network_records(
     *,
     intent: dict[str, Any],
     compose: dict[str, Any],
+    runtime: dict[str, Any],
     required_present: set[str],
     required_absent: set[str],
     label: str,
@@ -2065,6 +2104,8 @@ def _validate_network_records(
                 "name",
                 "network_id",
                 "compose_config_sha256",
+                "endpoint_container_ids",
+                "endpoint_container_ids_sha256",
                 "state",
             },
             f"{label} {network}",
@@ -2080,6 +2121,15 @@ def _validate_network_records(
                 DIGEST_RE,
                 f"{label} {network} Compose config",
             ),
+            "endpoint_container_ids": _list(
+                record["endpoint_container_ids"],
+                f"{label} {network} endpoint container IDs",
+            ),
+            "endpoint_container_ids_sha256": _string(
+                record["endpoint_container_ids_sha256"],
+                DIGEST_RE,
+                f"{label} {network} endpoint set",
+            ),
             "state": record["state"],
         }
         if (
@@ -2091,6 +2141,32 @@ def _validate_network_records(
         ):
             raise UpgradeJournalError(
                 f"{label} {network} differs from the exact Compose network"
+            )
+        endpoint_ids = normalized["endpoint_container_ids"]
+        if any(
+            not isinstance(container_id, str)
+            or HEX_RE.fullmatch(container_id) is None
+            for container_id in endpoint_ids
+        ) or endpoint_ids != sorted(set(endpoint_ids)):
+            raise UpgradeJournalError(
+                f"{label} {network} endpoint set is malformed or repeated"
+            )
+        expected_endpoint_ids = sorted(
+            runtime_record["container_id"]
+            for runtime_record in runtime["records"]
+            if runtime_record["state"] != "absent"
+            and network
+            in SERVICE_NETWORK_ENDPOINTS.get(runtime_record["service"], ())
+        )
+        endpoint_digest = _domain_digest(
+            "BackupSheep/upgrade-network-endpoints/v1", endpoint_ids
+        )
+        if (
+            endpoint_ids != expected_endpoint_ids
+            or normalized["endpoint_container_ids_sha256"] != endpoint_digest
+        ):
+            raise UpgradeJournalError(
+                f"{label} {network} endpoints differ from the complete runtime topology"
             )
         records.append(normalized)
     present_ids = [
@@ -2317,6 +2393,7 @@ def _validate_phase_payload(phase: str, payload: Any, intent: dict[str, Any]) ->
             payload["source_networks"],
             intent=intent,
             compose=source_compose,
+            runtime=source_runtime,
             required_present=source_network_present,
             required_absent=set(NETWORK_ROLES) - source_network_present,
             label="prepared source networks",
@@ -2373,6 +2450,7 @@ def _validate_phase_payload(phase: str, payload: Any, intent: dict[str, Any]) ->
             payload["networks"],
             intent=intent,
             compose=source_compose,
+            runtime=runtime,
             required_present=set(),
             required_absent=set(NETWORK_ROLES),
             label="stopped networks",
@@ -2416,6 +2494,7 @@ def _validate_phase_payload(phase: str, payload: Any, intent: dict[str, Any]) ->
             payload["networks"],
             intent=intent,
             compose=target_compose,
+            runtime=runtime,
             required_present=set(),
             required_absent=set(NETWORK_ROLES),
             label="switched networks",
@@ -2459,6 +2538,7 @@ def _validate_phase_payload(phase: str, payload: Any, intent: dict[str, Any]) ->
             payload["networks"],
             intent=intent,
             compose=target_compose,
+            runtime=runtime,
             required_present=set(),
             required_absent=set(NETWORK_ROLES),
             label="forward-only networks",
@@ -2512,6 +2592,7 @@ def _validate_phase_payload(phase: str, payload: Any, intent: dict[str, Any]) ->
             payload["networks"],
             intent=intent,
             compose=target_compose,
+            runtime=runtime,
             required_present=set(CORE_NETWORK_ROLES),
             required_absent=set(NETWORK_ROLES) - set(CORE_NETWORK_ROLES),
             label="migrated networks",
@@ -2550,6 +2631,7 @@ def _validate_phase_payload(phase: str, payload: Any, intent: dict[str, Any]) ->
             payload["networks"],
             intent=intent,
             compose=target_compose,
+            runtime=runtime,
             required_present=set(CORE_NETWORK_ROLES),
             required_absent=set(NETWORK_ROLES) - set(CORE_NETWORK_ROLES),
             label="core networks",
@@ -2618,6 +2700,7 @@ def _validate_phase_payload(phase: str, payload: Any, intent: dict[str, Any]) ->
             payload["networks"],
             intent=intent,
             compose=target_compose,
+            runtime=runtime,
             required_present=present_networks,
             required_absent=set(NETWORK_ROLES) - present_networks,
             label="activated networks",
@@ -2696,6 +2779,7 @@ def _validate_rollback_payload(payload: Any, intent: dict[str, Any]) -> dict[str
         payload["networks"],
         intent=intent,
         compose=source_compose,
+        runtime=runtime,
         required_present=present_networks,
         required_absent=set(NETWORK_ROLES) - present_networks,
         label="rollback source networks",
@@ -4445,6 +4529,16 @@ def _validate_operation_directory(
             raise UpgradeJournalError(
                 "one-shot acceptance container ID collides with runtime inventory"
             )
+        if (
+            phase == allow_interrupted_phase
+            and f".{receipt_name}.new" in present_temporaries
+        ):
+            # A crash after link(2) but before unlink(2) leaves the durable
+            # receipt and its temporary name pointing at the same inode.  The
+            # global lineage validator below deliberately rereads terminal
+            # receipts with the normal single-link contract, so finish this
+            # exact, caller-authorized publication before that reread.
+            _reconcile_exclusive(path, payload, mode=0o400)
         if phase == "70-activated":
             core_phase = normalized_phases.get("60-core-accepted", {})
             core_runtime = core_phase.get("runtime")
@@ -4513,6 +4607,15 @@ def _validate_operation_directory(
         ):
             raise UpgradeJournalError("rollback receipt identity or hash chain changed")
         _validate_rollback_payload(rollback_receipt["payload"], intent)
+        if (
+            allow_interrupted_phase == "rolled-back"
+            and f".{ROLLBACK_RECEIPT_NAME}.new" in present_temporaries
+        ):
+            _reconcile_exclusive(
+                active / ROLLBACK_RECEIPT_NAME,
+                rollback_payload,
+                mode=0o400,
+            )
         for retired in (rollback_path, target_environment_path):
             if retired.exists() or retired.is_symlink():
                 os.unlink(retired)
