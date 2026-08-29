@@ -157,9 +157,11 @@ jobs:
             --policy deploy/release-policy.json \
             --destination "$CI_SOURCE_SCAN_TOOL_DIR" \
             --tool actionlint \
-            --tool trivy
+            --tool trivy \
+            --tool oras
           test "$("$CI_SOURCE_SCAN_TOOL_DIR/actionlint" -version | sed -n '1p')" = "1.7.12"
           "$CI_SOURCE_SCAN_TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          test "$("$CI_SOURCE_SCAN_TOOL_DIR/oras" version | sed -n '1s/^Version: *//p')" = '1.3.3'
           echo 'ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356  '"$CI_SOURCE_SCAN_TOOL_DIR/empty-actionlint.yaml" \
             | sha256sum -c -
           echo '1ac8b7ca6758d27c826f2e2389d315d2449b636596ca15557871d9992e47bb04  '"$CI_SOURCE_SCAN_TOOL_DIR/empty-bandit.ini" \
@@ -306,6 +308,7 @@ jobs:
           CI_SOURCE_SCAN_EVIDENCE_DIR: "${{ runner.temp }}/backupsheep-source-scan-evidence"
           CI_SOURCE_SCAN_CACHE_DIR: "${{ runner.temp }}/backupsheep-source-scan-cache"
           CI_SOURCE_SCAN_HOME: "${{ runner.temp }}/backupsheep-source-scan-home"
+          CI_SOURCE_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-source-trivy-db-evidence.json"
         run: |
           set -euo pipefail
           export LC_ALL=C
@@ -317,7 +320,8 @@ jobs:
             "$CI_SOURCE_SCAN_PRIVATE_DIR" \
             "$CI_SOURCE_SCAN_EVIDENCE_DIR" \
             "$CI_SOURCE_SCAN_CACHE_DIR" \
-            "$CI_SOURCE_SCAN_HOME"; do
+            "$CI_SOURCE_SCAN_HOME" \
+            "$CI_SOURCE_TRIVY_DB_EVIDENCE"; do
             if [ -e "$path" ] || [ -L "$path" ]; then
               printf '%s\n' 'Refusing a pre-existing source-scan evidence path.' >&2
               exit 1
@@ -326,8 +330,12 @@ jobs:
           install -d -m 0700 \
             "$CI_SOURCE_SCAN_PRIVATE_DIR" \
             "$CI_SOURCE_SCAN_EVIDENCE_DIR" \
-            "$CI_SOURCE_SCAN_CACHE_DIR" \
             "$CI_SOURCE_SCAN_HOME"
+          python3 scripts/prepare_trivy_db.py prepare \
+            --lock deploy/trivy-db-lock.json \
+            --oras "$CI_SOURCE_SCAN_TOOL_DIR/oras" \
+            --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+            --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           private_report="$CI_SOURCE_SCAN_PRIVATE_DIR/vulnerability-misconfiguration.json"
           secret_report="$CI_SOURCE_SCAN_PRIVATE_DIR/all-severity-secrets.json"
           canary_report="$CI_SOURCE_SCAN_PRIVATE_DIR/secret-canaries.json"
@@ -348,6 +356,10 @@ jobs:
               --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
               --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
               --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+              --skip-db-update \
+              --skip-java-db-update \
+              --skip-check-update \
+              --offline-scan \
               --scanners vuln,misconfig \
               --severity HIGH,CRITICAL \
               --ignore-unfixed=false \
@@ -363,6 +375,10 @@ jobs:
               --output "$private_report" \
               . \
             || trivy_status=$?
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+            --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           if [ "$trivy_status" -ne 0 ] && [ "$trivy_status" -ne 7 ]; then
             printf '%s\n' "Trivy returned unexpected scanner status $trivy_status." >&2
             exit 1
@@ -379,6 +395,7 @@ jobs:
               --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
               --secret-config "$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml" \
               --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+              --skip-check-update \
               --scanners secret \
               --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
               --disable-telemetry \
@@ -430,6 +447,7 @@ jobs:
                 --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
                 --secret-config "$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml" \
                 --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+                --skip-check-update \
                 --scanners secret \
                 --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
                 --disable-telemetry \
@@ -453,6 +471,10 @@ jobs:
           test ! -L "$secret_report"
           test -f "$canary_report"
           test ! -L "$canary_report"
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+            --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           chmod 0600 "$private_report" "$secret_report" "$canary_report"
           python3 scripts/validate_source_scan.py \
             --report "$private_report" \
@@ -461,6 +483,8 @@ jobs:
             --policy deploy/source-scan-policy.json \
             --repository-root "$GITHUB_WORKSPACE" \
             --source-revision "$GITHUB_SHA" \
+            --trivy-db-lock deploy/trivy-db-lock.json \
+            --trivy-db-evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE" \
             --summary "$summary"
           test "$trivy_status" -eq 7
           test "$secret_status" -eq 0
@@ -575,7 +599,7 @@ jobs:
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \
             "$TEST_RELEASE_VERIFIER_IMAGE" version | grep -Fq 'v3.1.3-backupsheep.1'
 
-      - name: Install hash-verified Syft 1.51.0 and Trivy 0.74.0
+      - name: Install hash-verified Syft, Trivy, and ORAS
         shell: bash
         env:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
@@ -586,18 +610,42 @@ jobs:
             --policy deploy/release-policy.json \
             --destination "$CI_SCAN_TOOL_DIR" \
             --tool syft \
-            --tool trivy
+            --tool trivy \
+            --tool oras
           "$CI_SCAN_TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
           "$CI_SCAN_TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          test "$("$CI_SCAN_TOOL_DIR/oras" version | sed -n '1s/^Version: *//p')" = '1.3.3'
           grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-syft.yaml"
           grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-trivy.yaml"
           test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"
+
+      - name: Prepare the exact reviewed Trivy vulnerability database
+        shell: bash
+        env:
+          CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
+          CI_TRIVY_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-trivy-cache"
+          CI_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-trivy-db-evidence.json"
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/prepare_trivy_db.py prepare \
+            --lock deploy/trivy-db-lock.json \
+            --oras "$CI_SCAN_TOOL_DIR/oras" \
+            --cache-dir "$CI_TRIVY_CACHE_DIR" \
+            --evidence "$CI_TRIVY_DB_EVIDENCE"
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$CI_TRIVY_CACHE_DIR" \
+            --evidence "$CI_TRIVY_DB_EVIDENCE"
 
       - name: Generate SBOMs and reject HIGH or CRITICAL findings in exact images
         shell: bash
         env:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
           CI_SCAN_DIR: "${{ runner.temp }}/backupsheep-ci-image-evidence"
+          CI_TRIVY_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-trivy-cache"
+          CI_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-trivy-db-evidence.json"
+          CI_TRIVY_HOME: "${{ runner.temp }}/backupsheep-ci-trivy-home"
         run: |
           set -euo pipefail
           export LC_ALL=C
@@ -629,7 +677,14 @@ jobs:
             printf '%s\n' 'Refusing a pre-existing exact-image evidence path.' >&2
             exit 1
           fi
+          if [ -e "$CI_TRIVY_HOME" ] || [ -L "$CI_TRIVY_HOME" ]; then
+            printf '%s\n' 'Refusing a pre-existing Trivy home path.' >&2
+            exit 1
+          fi
           install -d -m 0700 "$CI_SCAN_DIR"
+          install -d -m 0700 "$CI_TRIVY_HOME"
+          install -m 0600 deploy/trivy-db-lock.json "$CI_SCAN_DIR/trivy-db-lock.json"
+          install -m 0600 "$CI_TRIVY_DB_EVIDENCE" "$CI_SCAN_DIR/trivy-db-evidence.json"
           cleanup_archives() {
             find "$CI_SCAN_DIR" -maxdepth 1 -type f -name '*.tar' -delete
           }
@@ -654,12 +709,20 @@ jobs:
                 --output "syft-json=$syft_report"
 
             trivy_status=0
-            XDG_CACHE_HOME="$RUNNER_TEMP/backupsheep-ci-trivy-cache" \
+            env -i \
+              HOME="$CI_TRIVY_HOME" \
+              PATH="$CI_SCAN_TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
               TRIVY_SKIP_VERSION_CHECK=true \
               "$CI_SCAN_TOOL_DIR/trivy" \
+                --cache-dir "$CI_TRIVY_CACHE_DIR" \
                 --config "$CI_SCAN_TOOL_DIR/empty-trivy.yaml" image \
                 --input "$archive" \
                 --ignorefile "$CI_SCAN_TOOL_DIR/empty-trivy.ignore" \
+                --skip-db-update \
+                --skip-java-db-update \
+                --skip-check-update \
+                --offline-scan \
                 --quiet \
                 --scanners vuln \
                 --pkg-types os,library \
@@ -671,6 +734,10 @@ jobs:
                 --output "$trivy_report" \
               || trivy_status=$?
 
+            python3 scripts/prepare_trivy_db.py verify \
+              --lock deploy/trivy-db-lock.json \
+              --cache-dir "$CI_TRIVY_CACHE_DIR" \
+              --evidence "$CI_TRIVY_DB_EVIDENCE"
             python3 deploy/ci/validate-image-scan.py \
               --image-kind "$image_kind" \
               --image-id "$image_id" \
@@ -678,6 +745,8 @@ jobs:
               --syft "$syft_report" \
               --trivy "$trivy_report" \
               --requirements-lock "$GITHUB_WORKSPACE/requirements.lock" \
+              --trivy-db-lock "$CI_SCAN_DIR/trivy-db-lock.json" \
+              --trivy-db-evidence "$CI_SCAN_DIR/trivy-db-evidence.json" \
               --summary "$summary"
             [[ "$trivy_status" -eq 0 ]]
             chmod 0600 "$syft_report" "$trivy_report" "$summary"

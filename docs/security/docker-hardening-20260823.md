@@ -58,6 +58,19 @@ image ID, and requires exact cross-scanner OS package-name parity. A scanner/sch
 upgrade therefore fails closed until reviewed. No ignore file, ignored-unfixed
 relaxation or vulnerability allowlist was used.
 
+The current recurring source and exact-image gates additionally remove Trivy's mutable
+database download from the trusted scan path. They prepare only the exact
+manifest/layer/database in
+`deploy/trivy-db-lock.json`, using the hash-pinned ORAS tool with isolated credential
+state; validates the two-member archive without general extraction; runs Trivy with
+all database/check updates disabled and offline scanning enabled; and binds the lock
+and DB identity into every retained image summary. The prepared DB is rehashed after
+each scan. Freshness fails closed at the lock's exact `NextUpdate`, so a reviewer must
+verify and commit a new manifest, layer, extracted-file hashes, sizes, and timestamps.
+The official artifact is digest locked but is not represented here as independently
+signed. See `docs/guides/signed-container-releases.md` for the refresh procedure and
+the current lock's bounded validity window.
+
 | Image | Docker outer ID | Archive config ID | Archive SHA-256 | Syft packages | Trivy packages | High/Critical |
 | --- | --- | --- | --- | ---: | ---: | ---: |
 | Application | `sha256:f74c087440e6d7b0af8b4eff0e21f92c0713c8f80d581279cdb0b10282a6e8b1` | `sha256:20334bdbe6f7df2889b17d7b76f7a4d93fe2e6fe11dcb5fc5d5b09dff09e62bf` | `8b10b40493b14b9feca8a358872651a2f3dc98704e66055cb0147cc4b06daa3c` | 279 | 270 | 0 |

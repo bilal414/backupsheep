@@ -3,6 +3,7 @@ import importlib.util
 import io
 import os
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -19,6 +20,8 @@ IMAGE_SCAN_SPEC = importlib.util.spec_from_file_location(
 image_scan = importlib.util.module_from_spec(IMAGE_SCAN_SPEC)
 sys.modules[IMAGE_SCAN_SPEC.name] = image_scan
 IMAGE_SCAN_SPEC.loader.exec_module(image_scan)
+
+import prepare_trivy_db as trivy_db  # noqa: E402
 
 
 class CISecurityTopologyContractTests(TestCase):
@@ -69,15 +72,24 @@ class CISecurityTopologyContractTests(TestCase):
             "scripts/install_release_tools.py",
             "--tool syft",
             "--tool trivy",
+            "--tool oras",
             "1\\.51\\.0",
             "0\\.74\\.0",
+            "scripts/prepare_trivy_db.py prepare",
+            "scripts/prepare_trivy_db.py verify",
+            "deploy/trivy-db-lock.json",
             'docker image save --output "$archive" "$image_id"',
             'owner="$(ci_image_ownership_label "$image_id")"',
             '[[ "$owner" == "$TEST_OWNERSHIP_VALUE" ]]',
             'scan "docker-archive:$archive"',
             '--config "$CI_SCAN_TOOL_DIR/empty-syft.yaml"',
             '--config "$CI_SCAN_TOOL_DIR/empty-trivy.yaml" image',
+            '--cache-dir "$CI_TRIVY_CACHE_DIR"',
             '--ignorefile "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"',
+            "--skip-db-update",
+            "--skip-java-db-update",
+            "--skip-check-update",
+            "--offline-scan",
             "--scanners vuln",
             "--pkg-types os,library",
             "--list-all-pkgs",
@@ -85,6 +97,8 @@ class CISecurityTopologyContractTests(TestCase):
             "--exit-code 1",
             "deploy/ci/validate-image-scan.py",
             '--requirements-lock "$GITHUB_WORKSPACE/requirements.lock"',
+            '--trivy-db-lock "$CI_SCAN_DIR/trivy-db-lock.json"',
+            '--trivy-db-evidence "$CI_SCAN_DIR/trivy-db-evidence.json"',
             "app\t$TEST_APP_IMAGE",
             "postgres\t$TEST_POSTGRES_IMAGE",
             "egress\t$TEST_EGRESS_IMAGE",
@@ -98,7 +112,6 @@ class CISecurityTopologyContractTests(TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, gate)
         self.assertNotIn("--ignore-unfixed", gate)
-        self.assertNotIn("--skip-db-update", gate)
         self.assertIn('test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"', gate)
 
     def test_rabbitmq_scan_requires_exact_patched_openssl_packages(self):
@@ -122,12 +135,121 @@ class CISecurityTopologyContractTests(TestCase):
             "golang.org/x/mod": {"v0.40.0"},
             "golang.org/x/text": {"v0.41.0"},
             "google.golang.org/grpc": {"v1.82.1"},
+            "github.com/sigstore/cosign/v3": {"UNKNOWN"},
         }
         image_scan.validate_verifier_go_packages(syft, "Syft")
         vulnerable = dict(syft)
         vulnerable["stdlib"] = {"go1.26.4"}
         with self.assertRaises(SystemExit):
             image_scan.validate_verifier_go_packages(vulnerable, "Syft")
+
+    def test_release_verifier_allows_only_the_exact_main_module_placeholders(self):
+        syft_artifact = {
+            "name": "github.com/sigstore/cosign/v3",
+            "version": "UNKNOWN",
+            "type": "go-module",
+            "foundBy": "go-module-binary-cataloger",
+            "language": "go",
+            "purl": "pkg:golang/github.com/sigstore/cosign/v3",
+            "locations": [{"path": "/ko-app/cosign", "accessPath": "/ko-app/cosign"}],
+            "metadata": {"mainModule": "github.com/sigstore/cosign/v3"},
+        }
+        image_scan.validate_syft_verifier_main_module(syft_artifact)
+        wrong_syft = json.loads(json.dumps(syft_artifact))
+        wrong_syft["locations"][0]["path"] = "/tmp/cosign"
+        with self.assertRaises(SystemExit):
+            image_scan.validate_syft_verifier_main_module(wrong_syft)
+
+        trivy_package = {
+            "ID": "github.com/sigstore/cosign/v3",
+            "Name": "github.com/sigstore/cosign/v3",
+            "Relationship": "root",
+            "AnalyzedBy": "gobinary",
+            "Identifier": {"PURL": "pkg:golang/github.com/sigstore/cosign/v3"},
+        }
+        image_scan.validate_trivy_verifier_main_module(
+            trivy_package, "lang-pkgs", "gobinary"
+        )
+        wrong_trivy = dict(trivy_package, Version="v3.1.3")
+        with self.assertRaises(SystemExit):
+            image_scan.validate_trivy_verifier_main_module(
+                wrong_trivy, "lang-pkgs", "gobinary"
+            )
+
+        exact = {
+            "stdlib": {"v1.26.6"},
+            "golang.org/x/mod": {"v0.40.0"},
+            "golang.org/x/text": {"v0.41.0"},
+            "google.golang.org/grpc": {"v1.82.1"},
+            "github.com/sigstore/cosign/v3": {"<unversioned-main-module>"},
+        }
+        image_scan.validate_verifier_go_packages(exact, "Trivy", 1)
+        with self.assertRaises(SystemExit):
+            image_scan.validate_verifier_go_packages(exact, "Trivy", 2)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "verifier.tar"
+            archive.write_bytes(b"fixture")
+            image_id = "sha256:" + "a" * 64
+            syft_report = {
+                "schema": {
+                    "version": "16.1.10",
+                    "url": (
+                        "https://raw.githubusercontent.com/anchore/syft/main/"
+                        "schema/json/schema-16.1.10.json"
+                    ),
+                },
+                "descriptor": {"name": "syft", "version": "1.51.0"},
+                "artifacts": [
+                    syft_artifact,
+                    {"name": "stdlib", "version": "go1.26.6", "type": "go-module"},
+                    {"name": "golang.org/x/mod", "version": "v0.40.0", "type": "go-module"},
+                    {"name": "golang.org/x/text", "version": "v0.41.0", "type": "go-module"},
+                    {"name": "google.golang.org/grpc", "version": "v1.82.1", "type": "go-module"},
+                ],
+                "source": {
+                    "type": "image",
+                    "metadata": {"userInput": str(archive), "imageID": image_id},
+                },
+            }
+            trivy_report = {
+                "SchemaVersion": 2,
+                "Trivy": {"Version": "0.74.0"},
+                "ArtifactID": image_id,
+                "ArtifactName": str(archive),
+                "ArtifactType": "container_image",
+                "Metadata": {"ImageID": image_id},
+                "Results": [
+                    {
+                        "Class": "lang-pkgs",
+                        "Type": "gobinary",
+                        "Packages": [
+                            trivy_package,
+                            {"Name": "stdlib", "Version": "v1.26.6"},
+                            {"Name": "golang.org/x/mod", "Version": "v0.40.0"},
+                            {"Name": "golang.org/x/text", "Version": "v0.41.0"},
+                            {"Name": "google.golang.org/grpc", "Version": "v1.82.1"},
+                        ],
+                    }
+                ],
+            }
+            image_scan.validate_syft(
+                syft_report, "release-verifier", image_id, archive, {}
+            )
+            image_scan.validate_trivy(
+                trivy_report, "release-verifier", image_id, archive, (), {}
+            )
+            duplicate_main = json.loads(json.dumps(trivy_report))
+            duplicate_main["Results"][0]["Packages"].append(trivy_package)
+            with self.assertRaises(SystemExit):
+                image_scan.validate_trivy(
+                    duplicate_main,
+                    "release-verifier",
+                    image_id,
+                    archive,
+                    (),
+                    {},
+                )
 
         validator = (
             ROOT / "deploy" / "ci" / "validate-image-scan.py"
@@ -168,6 +290,34 @@ class CISecurityTopologyContractTests(TestCase):
             trivy = root / "app.trivy.json"
             requirements_lock = root / "requirements.lock"
             summary = root / "app.summary.json"
+            trivy_db_lock = root / "trivy-db-lock.json"
+            trivy_db_evidence = root / "trivy-db-evidence.json"
+            lock = json.loads(
+                (ROOT / "deploy" / "trivy-db-lock.json").read_text(encoding="utf-8")
+            )
+            now = datetime.now(timezone.utc)
+            lock["database"]["updated_at"] = (
+                now - timedelta(hours=2)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            lock["manifest"]["created_at"] = (
+                now - timedelta(hours=1)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            lock["database"]["next_update"] = (
+                now + timedelta(days=1)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            lock_payload = (
+                json.dumps(lock, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii")
+            trivy_db_lock.write_bytes(lock_payload)
+            evidence = trivy_db.evidence_for(
+                lock,
+                hashlib.sha256(lock_payload).hexdigest(),
+                now - timedelta(minutes=1),
+            )
+            trivy_db_evidence.write_text(
+                json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="ascii",
+            )
             locked_requirements = (
                 "django==6.0.8 \\\n"
                 f"    --hash=sha256:{'1' * 64}\n"
@@ -363,6 +513,10 @@ class CISecurityTopologyContractTests(TestCase):
                         str(trivy),
                         "--requirements-lock",
                         str(requirements_lock),
+                        "--trivy-db-lock",
+                        str(trivy_db_lock),
+                        "--trivy-db-evidence",
+                        str(trivy_db_evidence),
                         "--summary",
                         str(summary),
                     ],
@@ -402,6 +556,27 @@ class CISecurityTopologyContractTests(TestCase):
                 hashlib.sha256(
                     b"django==6.0.8\ntyping-extensions==4.16.0\n"
                 ).hexdigest(),
+            )
+            self.assertEqual(
+                valid_summary["trivy_database"]["manifest_digest"],
+                evidence["manifest_digest"],
+            )
+            tampered_evidence = dict(evidence)
+            tampered_evidence["db_sha256"] = "0" * 64
+            trivy_db_evidence.write_text(
+                json.dumps(tampered_evidence, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="ascii",
+            )
+            tampered_database_identity = run_validator(valid_syft, valid_trivy)
+            self.assertNotEqual(tampered_database_identity.returncode, 0)
+            self.assertIn(
+                "Trivy database evidence is invalid",
+                tampered_database_identity.stderr,
+            )
+            trivy_db_evidence.write_text(
+                json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="ascii",
             )
 
             syft_without_schema = json.loads(json.dumps(valid_syft))

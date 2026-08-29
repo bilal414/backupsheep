@@ -81,6 +81,40 @@ files. Trivy also receives an explicit empty ignore file. Repository-local
 `.syft.yaml`, `trivy.yaml`, `.trivyignore`, environment overrides, and a hidden
 `--ignore-unfixed` flag cannot silently weaken the gate.
 
+The recurring source and exact-image gates do not let Trivy resolve or update its
+mutable default vulnerability database. `deploy/trivy-db-lock.json` records one reviewed
+`ghcr.io/aquasecurity/trivy-db` OCI manifest, its only layer, the compressed layer
+size/hash, both extracted file sizes/hashes, and the database timestamps. The pinned
+ORAS binary fetches the manifest and blob by those digests with an empty home and
+Docker configuration. `scripts/prepare_trivy_db.py` then rejects links, paths other
+than `trivy.db` and `metadata.json`, duplicate/archive-extension records, unexpected
+types, size drift, hash drift, metadata drift, and a stale `NextUpdate`. Trivy runs
+against that isolated cache with database, Java-database, and check updates disabled
+and with offline scanning enabled. The cache is rehashed after every image scan, and
+each retained source/image summary binds the lock, manifest, layer, database, and
+preparation evidence hashes.
+
+The upstream database artifact is digest-locked; this control does not claim that
+upstream signs it. A lock refresh is therefore a deliberate reviewed change, never an
+automatic acceptance of whatever `:2` points to:
+
+1. Resolve the current official `trivy-db:2` manifest and review its raw OCI structure,
+   media types, creation time, single layer, and schema-2 metadata using the policy-
+   pinned ORAS version and the official
+   [Trivy database documentation](https://github.com/aquasecurity/trivy/blob/main/docs/guide/configuration/db.md)
+   and [database repository](https://github.com/aquasecurity/trivy-db).
+2. Independently hash the raw manifest, compressed layer, `metadata.json`, and
+   `trivy.db`; record the exact byte sizes and `UpdatedAt`/`NextUpdate` values in the
+   lock. Never copy only a mutable tag or a digest printed by an unreviewed script.
+3. Review the lock diff and focused archive/freshness tests in a pull request. Until a
+   fresh lock is merged, the scan is intentionally red once its exact `NextUpdate` is
+   reached.
+
+The lock checked in on 2026-08-29 uses manifest
+`sha256:b494387b91d0e201f9a8945709a02eb66558cba454efa265b4638e7edde45132`
+and expires at `2026-08-30T13:02:57.331758258Z`. It is evidence for that bounded
+window, not a permanent vulnerability result.
+
 Every exact platform child must have:
 
 - a Syft source catalog whose input and manifest digest match the quarantine
