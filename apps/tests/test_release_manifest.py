@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -25,6 +26,8 @@ import install_release_tools as installer  # noqa: E402
 import normalize_local_scan_evidence as normalizer  # noqa: E402
 import prepare_trivy_db as trivy_db  # noqa: E402
 import promote_release_images as promoter  # noqa: E402
+import release_transition as transition  # noqa: E402
+import release_subprocess  # noqa: E402
 import push_quarantine_layouts as quarantine_pusher  # noqa: E402
 import stage_release_images as stager  # noqa: E402
 import verify_release as verifier  # noqa: E402
@@ -42,6 +45,7 @@ class ReleaseFixtureMixin:
             "provenance",
             "bundles",
             "vulnerability",
+            "transition",
         ):
             (self.artifacts / directory).mkdir(parents=True, mode=0o700, exist_ok=True)
         self.policy = json.loads((ROOT / "deploy" / "release-policy.json").read_text(encoding="utf-8"))
@@ -65,6 +69,24 @@ class ReleaseFixtureMixin:
         self._write_vulnerability_database_evidence()
         self._write_consumer_evidence()
         self._write_evidence()
+        shutil.copyfile(
+            ROOT / "deploy" / "release-transition-policy.json",
+            self.artifacts / "transition" / "reviewed-policy.json",
+        )
+        (self.artifacts / "transition" / "reviewed-policy.json").chmod(0o600)
+        migrations = ["apps.0001_initial", "apps.0002_next"]
+        leaves = ["apps.0002_next"]
+        self._json(
+            self.artifacts / "transition" / "django-migrations.json",
+            {
+                "schema_version": 1,
+                "all_migrations_atomic": True,
+                "migrations": migrations,
+                "migration_set_sha256": transition.migration_digest(migrations),
+                "leaves": leaves,
+                "leaf_set_sha256": transition.migration_digest(leaves, leaves=True),
+            },
+        )
         self.manifest = self._build_manifest()
 
     def tearDown(self):
@@ -361,6 +383,7 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
         result = verifier.validate_release(self.policy, self.manifest, self.artifacts)
         self.assertEqual(tuple(result["manifest"]["images"]), verifier.RELEASE_IMAGE_NAMES)
         self.assertEqual(result["manifest"]["images"]["app"]["digest"], self.index_digests["app"])
+        self.assertEqual(result["transition"]["release_epoch"], 1)
         self.assertEqual(
             set(result["attestation_predicates"]["postgres"]["provenance"]),
             {"linux/amd64", "linux/arm64"},
@@ -514,6 +537,70 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
         self._json(path, catalog)
         record["sha256"] = self._hash(path)
         with self.assertRaisesRegex(verifier.ReleaseVerificationError, "config-digest bound"):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+    def test_manifest_cli_requires_and_accepts_the_complete_five_image_set(self):
+        output = self.artifacts / "cli-release-manifest.json"
+        arguments = [
+            "--policy",
+            str(ROOT / "deploy" / "release-policy.json"),
+            "--artifacts-dir",
+            str(self.artifacts),
+            "--output",
+            str(output),
+            "--tag",
+            self.tag,
+            "--source-commit",
+            self.commit,
+            "--workflow-run",
+            "https://github.com/bilal414/backupsheep/actions/runs/123/attempts/1",
+            "--created-at",
+            "2026-08-29T13:14:00Z",
+        ]
+        for image in ("app", "postgres", "egress", "rabbitmq", "rabbitmq-upgrade"):
+            arguments.extend(
+                (
+                    f"--{image}-digest",
+                    self.index_digests[image],
+                    f"--{image}-index",
+                    str(self.artifacts / "oci" / f"{image}.index.json"),
+                )
+            )
+        self.assertEqual(builder.main(arguments), 0)
+        generated = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(tuple(generated["images"]), tuple(self.policy["images"]))
+        self.assertEqual(generated["transition"], self.manifest["transition"])
+
+    def test_signed_transition_record_and_reviewed_source_are_mandatory(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["transition"]["migration_contract"]["leaf_set_sha256"] = (
+            "sha256:" + "f" * 64
+        )
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError,
+            "manifest transition authorization is invalid",
+        ):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+        reviewed_path = self.artifacts / "transition" / "reviewed-policy.json"
+        self._json(
+            reviewed_path,
+            {"schema_version": 1, "release_epoch": 2, "accepted_predecessors": []},
+        )
+        migration_path = self.artifacts / "transition" / "django-migrations.json"
+        manifest = copy.deepcopy(self.manifest)
+        manifest["transition"] = transition.build_transition_record(
+            reviewed_policy=transition.load_json(reviewed_path),
+            migration_contract=transition.load_json(migration_path),
+            reviewed_policy_file="transition/reviewed-policy.json",
+            reviewed_policy_sha256=self._hash(reviewed_path),
+            migration_contract_file="transition/django-migrations.json",
+            migration_contract_sha256=self._hash(migration_path),
+        )
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError,
+            "does not byte-match the reviewed source input",
+        ):
             verifier.validate_release(self.policy, manifest, self.artifacts)
 
     def test_raw_index_hash_and_every_child_membership_are_mandatory(self):
@@ -1178,6 +1265,27 @@ class ReleaseWorkflowContractTests(TestCase):
             with self.subTest(action=action):
                 self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
 
+    def test_python_release_subprocess_timeout_kills_descendant_group(self):
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-python-tool-tree-"
+        ) as directory:
+            descendant = Path(directory) / "descendant.pid"
+            with self.assertRaises(subprocess.TimeoutExpired):
+                release_subprocess.run_text(
+                    [
+                        "sh",
+                        "-c",
+                        'trap "" TERM; printf "%s\\n" "$$" > "$1"; sleep 30',
+                        "child",
+                        str(descendant),
+                    ],
+                    environment={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+                    timeout=1,
+                )
+            descendant_pid = int(descendant.read_text(encoding="ascii").strip())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+
     def test_every_release_checkout_is_detached_at_the_event_sha(self):
         self.assertEqual(
             self.workflow.count(
@@ -1284,11 +1392,40 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertEqual(self.workflow.count("provenance: mode=max,version=v1,builder-id="), 5)
         self.assertEqual(
             self.workflow.count("context: https://github.com/${{ github.repository }}.git#${{ github.sha }}"),
-            5,
+            6,
         )
         self.assertIn("scripts/collect_release_evidence.py", self.workflow)
         self.assertIn("--statement \"$ARTIFACT_DIR/$statement\"", self.workflow)
         self.assertNotIn("mobyproject.org/buildkit@v1", self.workflow)
+
+    def test_transition_migrations_are_emitted_by_the_exact_built_child_and_archived(self):
+        app_build = self.workflow.index("Build application candidate from exact remote commit")
+        materialize = self.workflow.index(
+            "Materialize the exact amd64 application child for migration inventory"
+        )
+        collect = self.workflow.index("Collect raw OCI indexes and actual BuildKit provenance")
+        transition = self.workflow.index(
+            "Generate the exact transactional migration transition evidence"
+        )
+        manifest = self.workflow.index("Build and verify the digest-bound candidate manifest")
+        archive = self.workflow.index(
+            "Create and verify the complete signed publication"
+        )
+        self.assertLess(app_build, materialize)
+        self.assertLess(materialize, collect)
+        self.assertLess(collect, transition)
+        self.assertLess(transition, manifest)
+        self.assertLess(manifest, archive)
+        transition_step = self.workflow[transition:manifest]
+        self.assertIn("scripts/collect_release_transition.py", transition_step)
+        collector_source = (ROOT / "scripts/collect_release_transition.py").read_text()
+        self.assertIn('"--network",\n            "none"', collector_source)
+        self.assertIn('"--read-only"', collector_source)
+        self.assertIn("transition/reviewed-policy.json", self.workflow[transition:archive])
+        self.assertIn("transition/django-migrations.json", self.workflow[transition:archive])
+        archive_step = self.workflow[archive:]
+        self.assertIn("grep -Fx './transition/reviewed-policy.json'", archive_step)
+        self.assertIn("grep -Fx './transition/django-migrations.json'", archive_step)
 
     def test_scanners_cannot_auto_load_repository_config_or_ignore_files(self):
         self.assertGreaterEqual(self.workflow.count("env -i"), 2)
@@ -1425,7 +1562,7 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertLess(promotion_position, upload_position)
 
     def test_consumer_policy_pins_first_party_cosign_verifier_by_version_and_digest(self):
-        self.assertEqual(self.policy["schema_version"], 3)
+        self.assertEqual(self.policy["schema_version"], 4)
         reference = self.policy["consumer"]["cosign_image"]["reference"]
         self.assertRegex(
             reference,

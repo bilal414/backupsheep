@@ -79,6 +79,37 @@ blob. It does not synthesize a replacement predicate. The verifier requires:
 These fields follow BuildKit's documented [SLSA provenance
 definition](https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md).
 
+## Signed transition authorization
+
+Manifest schema 4 carries a bounded transition record; a SemVer comparison is never
+upgrade authorization. The reviewed source input is
+`deploy/release-transition-policy.json`. It assigns one positive, monotonically increasing
+release epoch and either an empty predecessor list (fresh installs only) or at most eight
+exact predecessor tuples. Each tuple binds the source tag, epoch, commit, manifest,
+descriptor and descriptor-bundle digests, complete migration-set and leaf-set digests, and
+the source verifier's immutable index, platform/config, runtime-contract and trusted-root
+identity. Ranges, wildcards, mutable references, equal/higher source epochs, duplicates and
+unknown keys are rejected.
+
+The build job materializes the release application's exact amd64 child from the same
+content-addressed BuildKit cache as the retained multi-platform OCI layout. Before running
+it, the collector requires the local image configuration ID to equal the config digest in
+that exact OCI child and checks the release source/revision/version labels. It then executes
+the immutable image ID—not its mutable local tag—with no network, a read-only root,
+dropped capabilities, `no-new-privileges`, bounded memory/CPU/PIDs and a private hardened
+tmpfs. The model-free inventory command loads Django's complete migration graph without a
+database, refuses replacement or non-transactional migrations, and emits canonical sorted
+complete and leaf sets with domain-separated SHA-256 digests.
+
+The reviewed policy bytes and generated migration contract are private, no-clobber files
+under `transition/`. Their hashes and normalized content are embedded in the manifest and
+revalidated before signing; both files are also required members of the deterministic
+signed evidence archive. Editing the reviewed policy or migration artifact after generation
+therefore invalidates the release. The initial checked-in epoch has no accepted predecessor,
+so it authorizes fresh installation only. Adding a predecessor requires explicit security
+review of every exact field. The runtime still refuses signed-to-signed mutation until the
+separate crash-safe source/target journal is complete.
+
 ## Scanner and SBOM policy
 
 Trivy and Syft run in a cleared environment with explicit trusted empty config

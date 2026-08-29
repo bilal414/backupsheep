@@ -23,6 +23,9 @@ from prepare_trivy_db import (
     validate_evidence_document as validate_trivy_db_evidence,
     validate_lock_document as validate_trivy_db_lock,
 )
+import release_transition
+
+from release_subprocess import run_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -210,6 +213,7 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
             "release_tag_regex",
             "identity",
             "consumer",
+            "transition",
             "attestations",
             "tools",
             "vulnerability_policy",
@@ -217,7 +221,7 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         },
         "policy",
     )
-    if _integer(policy["schema_version"], "policy.schema_version") != 3:
+    if _integer(policy["schema_version"], "policy.schema_version") != 4:
         raise ReleaseVerificationError("unsupported release policy schema")
 
     source_repository = _string(policy["source_repository"], "policy.source_repository")
@@ -412,23 +416,29 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
     if len(verifier_digests) != len(set(verifier_digests)):
         raise ReleaseVerificationError("consumer verifier index, manifest, and config digests must all be distinct")
 
-    expected_verifier_index = (
-        "sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e"
+    transition_policy = _mapping(policy["transition"], "policy.transition")
+    _exact_keys(
+        transition_policy,
+        {
+            "schema_version",
+            "policy_path",
+            "migration_contract_command",
+            "maximum_predecessors",
+        },
+        "policy.transition",
     )
-    expected_verifier_platforms = {
-        "linux/amd64": {
-            "manifest_digest": "sha256:29c25a1a2bcbe8190166f65e0914fbd4c904968be5a615f59421dc8fd4526f06",
-            "config_digest": "sha256:6feeb7c97d6b7b709f2dc6b33723de442205437694fd3679461d78635745349d",
-        },
-        "linux/arm64": {
-            "manifest_digest": "sha256:2d0bfa77e828bff3c198039763f05f44017e6c2cd75572fce8f61431a95b927d",
-            "config_digest": "sha256:9a6ceeac0bc63631bd168417839d56e01a2ee157411daef235df13e0c8d04c01",
-        },
-    }
-    if verifier_index != expected_verifier_index:
-        raise ReleaseVerificationError("consumer verifier index digest is not approved")
-    if verifier_platforms != expected_verifier_platforms:
-        raise ReleaseVerificationError("consumer verifier platform digests are not approved")
+    if transition_policy != {
+        "schema_version": 1,
+        "policy_path": "deploy/release-transition-policy.json",
+        "migration_contract_command": ["python", "-m", "apps.release_migration_contract"],
+        "maximum_predecessors": release_transition.MAX_PREDECESSORS,
+    }:
+        raise ReleaseVerificationError("policy.transition is not the reviewed schema-4 contract")
+    try:
+        reviewed_transition = release_transition.load_json(ROOT / transition_policy["policy_path"])
+        release_transition.validate_transition_policy(reviewed_transition)
+    except (OSError, release_transition.TransitionContractError) as exc:
+        raise ReleaseVerificationError(f"reviewed transition policy is invalid: {exc}") from exc
 
     attestations = _mapping(policy["attestations"], "policy.attestations")
     _exact_keys(
@@ -1064,10 +1074,17 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
     manifest = _mapping(manifest, "manifest")
     _exact_keys(
         manifest,
-        {"schema_version", "release", "vulnerability_database", "consumer", "images"},
+        {
+            "schema_version",
+            "release",
+            "transition",
+            "vulnerability_database",
+            "consumer",
+            "images",
+        },
         "manifest",
     )
-    if _integer(manifest["schema_version"], "manifest.schema_version") != 3:
+    if _integer(manifest["schema_version"], "manifest.schema_version") != 4:
         raise ReleaseVerificationError("unsupported release manifest schema")
     release = _mapping(manifest["release"], "manifest.release")
     _exact_keys(
@@ -1095,12 +1112,38 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
         raise ReleaseVerificationError("manifest workflow run URL is invalid")
     _timestamp(release["created_at"], "manifest.release.created_at")
 
+    try:
+        reviewed_path = _safe_artifact(
+            artifacts_dir,
+            "transition/reviewed-policy.json",
+            "reviewed transition policy",
+        )
+        migration_path = _safe_artifact(
+            artifacts_dir,
+            "transition/django-migrations.json",
+            "Django migration contract",
+        )
+        reviewed_transition = release_transition.load_json(reviewed_path)
+        migration_contract = release_transition.load_json(migration_path)
+        verified_transition = release_transition.validate_transition_record(
+            manifest["transition"],
+            reviewed_policy=reviewed_transition,
+            migration_contract=migration_contract,
+            reviewed_policy_sha256=_sha256_path(reviewed_path),
+            migration_contract_sha256=_sha256_path(migration_path),
+        )
+    except (OSError, release_transition.TransitionContractError) as exc:
+        raise ReleaseVerificationError(f"manifest transition authorization is invalid: {exc}") from exc
+    if reviewed_path.read_bytes() != (ROOT / policy["transition"]["policy_path"]).read_bytes():
+        raise ReleaseVerificationError("archived transition policy does not byte-match the reviewed source input")
+
     images = _mapping(manifest["images"], "manifest.images")
     if tuple(images) != tuple(policy["images"]):
         raise ReleaseVerificationError("manifest image set and order do not match policy")
     verified: dict[str, Any] = {
         "policy": policy,
         "manifest": manifest,
+        "transition": verified_transition,
         "vulnerability_database": _validate_vulnerability_database(
             policy,
             manifest["vulnerability_database"],
@@ -1299,12 +1342,9 @@ def _run_tool(executable: str, arguments: list[str], env_prefixes: tuple[str, ..
         if name.startswith(env_prefixes):
             environment.pop(name, None)
     try:
-        result = subprocess.run(
+        result = run_text(
             [executable, *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=environment,
+            environment=environment,
             timeout=300,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -1351,6 +1391,23 @@ def _statements_from_cosign(output: str) -> list[dict[str, Any]]:
     if not statements:
         raise ReleaseVerificationError("Cosign returned no verified attestation statements")
     return statements
+
+
+def _require_one_verified_signature(output: str, *, digest: str) -> None:
+    values = _json_stream(output)
+    if len(values) == 1 and isinstance(values[0], list):
+        values = values[0]
+    if len(values) != 1:
+        raise ReleaseVerificationError(
+            f"expected exactly one verified image signature for {digest}"
+        )
+    signature = _mapping(values[0], "Cosign signature output")
+    critical = _mapping(signature.get("critical"), "Cosign signature critical data")
+    image = _mapping(critical.get("image"), "Cosign signature image data")
+    if image.get("docker-manifest-digest") != digest:
+        raise ReleaseVerificationError(
+            f"verified image signature does not bind exact digest {digest}"
+        )
 
 
 def _require_matching_attestation(
@@ -1418,10 +1475,24 @@ def verify_registry_evidence(
         for repository in repositories:
             index_reference = f"{repository}@{image['digest']}"
             _fetch_and_match_index(oras, index_reference, index_path, image["digest"])
-            _run_tool(cosign, ["verify", *identity_args, index_reference], ("COSIGN_", "SIGSTORE_"))
+            signature_output = _run_tool(
+                cosign,
+                ["verify", *identity_args, index_reference],
+                ("COSIGN_", "SIGSTORE_"),
+            )
+            _require_one_verified_signature(
+                signature_output, digest=image["digest"]
+            )
             for platform, child_digest in image["platforms"].items():
                 child_reference = f"{repository}@{child_digest}"
-                _run_tool(cosign, ["verify", *identity_args, child_reference], ("COSIGN_", "SIGSTORE_"))
+                signature_output = _run_tool(
+                    cosign,
+                    ["verify", *identity_args, child_reference],
+                    ("COSIGN_", "SIGSTORE_"),
+                )
+                _require_one_verified_signature(
+                    signature_output, digest=child_digest
+                )
                 provenance_output = _run_tool(
                     cosign,
                     ["verify-attestation", "--type", "slsaprovenance1", *identity_args, child_reference],

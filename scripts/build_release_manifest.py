@@ -25,6 +25,7 @@ from verify_release import (
     _validate_policy,
     validate_release,
 )
+import release_transition
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -268,9 +269,30 @@ def build_manifest(
             "sboms": sboms,
             "vulnerability_reports": reports,
         }
+    reviewed_path = _safe_artifact(
+        artifacts_dir,
+        "transition/reviewed-policy.json",
+        "reviewed transition policy",
+    )
+    migration_path = _safe_artifact(
+        artifacts_dir,
+        "transition/django-migrations.json",
+        "Django migration contract",
+    )
+    reviewed_transition = release_transition.load_json(reviewed_path)
+    migration_contract = release_transition.load_json(migration_path)
+    transition_record = release_transition.build_transition_record(
+        reviewed_policy=reviewed_transition,
+        migration_contract=migration_contract,
+        reviewed_policy_file="transition/reviewed-policy.json",
+        reviewed_policy_sha256=_sha256_path(reviewed_path),
+        migration_contract_file="transition/django-migrations.json",
+        migration_contract_sha256=_sha256_path(migration_path),
+    )
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "release": release,
+        "transition": transition_record,
         "vulnerability_database": _vulnerability_database_record(artifacts_dir),
         "consumer": _consumer_record(policy, artifacts_dir),
         "images": images,

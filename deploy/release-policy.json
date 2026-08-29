@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "source_repository": "bilal414/backupsheep",
   "release_workflow": ".github/workflows/release-images.yml",
   "registry": "ghcr.io",
@@ -70,6 +70,16 @@
         }
       }
     }
+  },
+  "transition": {
+    "schema_version": 1,
+    "policy_path": "deploy/release-transition-policy.json",
+    "migration_contract_command": [
+      "python",
+      "-m",
+      "apps.release_migration_contract"
+    ],
+    "maximum_predecessors": 8
   },
   "attestations": {
     "provenance_predicate_type": "https://slsa.dev/provenance/v1",

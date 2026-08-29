@@ -156,6 +156,21 @@ jobs:
           provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
           sbom: true
 
+      - name: Materialize the exact amd64 application child for migration inventory
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: backupsheep-release-migration-inventory:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: false
+          sbom: false
+
       - name: Build PostgreSQL candidate from exact remote commit
         id: build-postgres
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -284,6 +299,30 @@ jobs:
             --image rabbitmq-upgrade \
             --digest "$RABBITMQ_UPGRADE_DIGEST" \
             --oci-layout "$LAYOUT_DIR/rabbitmq-upgrade"
+
+      - name: Generate the exact transactional migration transition evidence
+        shell: bash
+        env:
+          BACKUPSHEEP_RELEASE_DOCKER_HOME: ${{ runner.temp }}/backupsheep-release-docker-home
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test ! -e "$BACKUPSHEEP_RELEASE_DOCKER_HOME"
+          install -d -m 0700 "$BACKUPSHEEP_RELEASE_DOCKER_HOME"
+          docker_bin="$(command -v docker)"
+          test -n "$docker_bin"
+          python3 scripts/collect_release_transition.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --oci-layout "$LAYOUT_DIR/app" \
+            --image "backupsheep-release-migration-inventory:$SOURCE_COMMIT" \
+            --docker "$docker_bin" \
+            --source-commit "$SOURCE_COMMIT" \
+            --release-tag "$RELEASE_TAG"
+          test -s "$ARTIFACT_DIR/transition/reviewed-policy.json"
+          test -s "$ARTIFACT_DIR/transition/django-migrations.json"
 
       - name: Scan exact child digests and generate complete SBOMs
         shell: bash
@@ -795,6 +834,10 @@ jobs:
             --mode='u+rw,go-rwx' \
             -C "$ARTIFACT_DIR" -cf - . \
             | gzip -n > "$PUBLICATION_DIR/signed-release-evidence.tar.gz"
+          tar -tzf "$PUBLICATION_DIR/signed-release-evidence.tar.gz" \
+            | grep -Fx './transition/reviewed-policy.json'
+          tar -tzf "$PUBLICATION_DIR/signed-release-evidence.tar.gz" \
+            | grep -Fx './transition/django-migrations.json'
           (
             cd "$PUBLICATION_DIR"
             sha256sum signed-release-evidence.tar.gz > signed-release-evidence.tar.gz.sha256
