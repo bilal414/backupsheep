@@ -1088,3 +1088,31 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
                 with self.subTest(path=path.name, action=action):
                     self.assertIn(f"uses: {action}@{commit} # {version}", document)
                     self.assertNotRegex(document, rf"uses: {re.escape(action)}@(?!{commit})")
+            self.assertNotIn("          install: true", document)
+
+    def test_bootstrap_pins_the_consumer_trusted_root(self):
+        trusted_root = ROOT / "deploy" / "release" / "sigstore-trusted-root.json"
+        self.assertTrue(trusted_root.is_file())
+        self.assertFalse(trusted_root.is_symlink())
+        self.assertEqual(
+            hashlib.sha256(trusted_root.read_bytes()).hexdigest(),
+            "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
+        )
+        document = json.loads(trusted_root.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(document),
+            {
+                "mediaType",
+                "tlogs",
+                "certificateAuthorities",
+                "ctlogs",
+                "timestampAuthorities",
+            },
+        )
+        workflow = (
+            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("      - deploy/release/sigstore-trusted-root.json", workflow)
+        self.assertIn(
+            "--trusted-root deploy/release/sigstore-trusted-root.json", workflow
+        )

@@ -141,7 +141,6 @@ jobs:
           version: v0.29.1
           driver-opts: >-
             image=moby/buildkit:v0.26.2@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa
-          install: true
           use: true
 
       - name: Prepare private layout and evidence roots
