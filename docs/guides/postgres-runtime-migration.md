@@ -128,8 +128,12 @@ source-or-target-only mount boundary are exact. Any drift is refused.
 
 Before stale migration credentials are unlinked, every exact
 `.migration-bootstrap.*` or `.migration-restore.*` residue must have the canonical
-eight-character suffix, regular non-symlink type, expected owner, mode `0444`, one
-link, exact 64-hex content, and no Docker bind attachment. Other paths are never swept.
+eight-character suffix, regular non-symlink type, expected owner and one link. A
+completed credential must be mode `0444` with exact 64-hex-plus-newline content. A
+mode-`0600` construction residue may contain only the bounded zero-to-65-byte prefix
+that `mktemp` and `openssl` can leave before the final chmod. Every candidate is
+refused while any Docker container still has it bind-mounted. Other paths are never
+swept.
 
 A partial target is reset only when its canonical name and project, installation,
 logical-volume and migration-witness labels all match. A completed target reconciles
@@ -145,6 +149,37 @@ Generation-2 has two bounded configuration crash windows:
 
 An already-generation-3 source always uses only the runtime flag. Foreign, attached,
 unlabeled, unexpectedly nonempty or stale-image targets fail closed.
+
+## Release-blocking runtime proof
+
+The supply-chain workflow builds a test-only source image from the digest-pinned
+PostgreSQL `18.6-trixie` base used by the retired UID/GID-999 runtime. It then runs
+`deploy/ci/run-postgres-runtime-migration-e2e.sh` against the exact locally built
+UID/GID-70 release-candidate database image. The fixture image is never published.
+
+The bounded E2E gate creates unique, run-labeled source and target volumes and proves
+both accepted source contracts against real PostgreSQL 18.6 servers:
+
+- an exact generation-2 bootstrap/migrator/runtime identity and an exact
+  generation-3 identity with the one permitted retired-v2 role;
+- rows plus public enum, domain and composite types, canonical schema/data hashes,
+  target ownership by the configured migrator and the exact ten-role target roster;
+- zero non-owner database, schema, relation, routine, type and column ACLs, zero
+  default/parameter/security-label/large-object state, and effective denial for an
+  application role after the unprivileged restore; and
+- independent refusals for an extra login role, a large object and a parameter ACL.
+
+The same real migration is SIGKILLed after credential creation, after both isolated
+migration servers exist, and immediately after the receipt is durably published.
+Each next invocation must remove or reconcile only the exact witnessed residue. The
+last invocation must use the completed receipt instead of copying again. A 45-minute
+outer deadline and five-minute Docker-command deadlines prevent a stuck migration
+from consuming the runner indefinitely.
+
+Cleanup enumerates only the generated project names and exact installation/witness
+labels. A foreign label or an unexpected attachment is a gate failure, not permission
+to prune Docker globally. This CI proof complements, but does not replace, release
+signature verification and deployment-specific restore rehearsal.
 
 ## Rollback boundary
 

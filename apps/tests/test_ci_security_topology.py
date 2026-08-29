@@ -25,18 +25,22 @@ class CISecurityTopologyContractTests(TestCase):
             ROOT / "deploy" / "ci" / "docker-compose.security-topology.yml"
         ).read_text(encoding="utf-8")
 
-    def test_workflow_builds_and_exercises_the_exact_three_local_images(self):
+    def test_workflow_builds_and_exercises_product_images_and_pinned_pg_fixture(self):
         for expected in (
             'TEST_APP_IMAGE: "backupsheep-ci-app:',
             'TEST_POSTGRES_IMAGE: "backupsheep-ci-postgres:',
+            'TEST_LEGACY_POSTGRES_IMAGE: "backupsheep-ci-postgres-legacy:',
             'TEST_EGRESS_IMAGE: "backupsheep-ci-egress:',
             '--file Dockerfile --tag "$TEST_APP_IMAGE"',
             '--file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE"',
+            '--file deploy/ci/Dockerfile.postgres-runtime-source',
+            '--tag "$TEST_LEGACY_POSTGRES_IMAGE"',
             '--file Dockerfile.egress --tag "$TEST_EGRESS_IMAGE"',
             'BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION: "1"',
             'BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION: "2"',
             'BACKUPSHEEP_EGRESS_POLICY_GENERATION: "2"',
             "run: deploy/ci/run-security-topology.sh",
+            "run: timeout --signal=TERM --kill-after=30s 45m deploy/ci/run-postgres-runtime-migration-e2e.sh",
             'run: deploy/egress/test-policy.sh "$TEST_EGRESS_IMAGE"',
         ):
             with self.subTest(expected=expected):

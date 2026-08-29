@@ -82,7 +82,7 @@ jobs:
           sed -i "s/^DJANGO_SECRET_KEY=.*/DJANGO_SECRET_KEY='ci-only-not-a-secret'/" .env
           sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD='ci-only-not-a-secret'/" .env
           sed -i "s/^RABBITMQ_PASSWORD=.*/RABBITMQ_PASSWORD='ci-only-not-a-secret'/" .env
-          bash -n install.sh init.sh deploy/postgres/migrate-runtime.sh deploy/staging/provision-volumes.sh deploy/staging/test-provision-volumes.sh deploy/staging/test-cross-uid.sh
+          bash -n install.sh init.sh deploy/postgres/migrate-runtime.sh deploy/ci/run-postgres-runtime-migration-e2e.sh deploy/staging/provision-volumes.sh deploy/staging/test-provision-volumes.sh deploy/staging/test-cross-uid.sh
           sh -n deploy/postgres/entrypoint.sh deploy/postgres/storage-witness.sh
           node -e 'for (const f of ["package.json", "package-lock.json"]) JSON.parse(require("fs").readFileSync(f, "utf8"))'
           docker compose config --quiet
@@ -486,11 +486,13 @@ jobs:
     env:
       TEST_APP_IMAGE: "backupsheep-ci-app:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_POSTGRES_IMAGE: "backupsheep-ci-postgres:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_LEGACY_POSTGRES_IMAGE: "backupsheep-ci-postgres-legacy:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_EGRESS_IMAGE: "backupsheep-ci-egress:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_NETWORK: "backupsheep-ci-net-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_POSTGRES_CONTAINER: "backupsheep-ci-postgres-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_APPLICATION_CONTAINER: "backupsheep-ci-tests-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_TOPOLOGY_PROJECT: "bs-ci-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_POSTGRES_MIGRATION_PREFIX: "bs-pgm-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_OWNERSHIP_VALUE: "${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
     steps:
       - name: Check out the exact source under test
@@ -524,7 +526,7 @@ jobs:
             printf '%s\n' "Refusing a pre-existing CI network-name collision: $TEST_NETWORK" >&2
             exit 1
           fi
-          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE"; do
+          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE"; do
             if docker image inspect "$image" >/dev/null 2>&1; then
               printf '%s\n' "Refusing a pre-existing CI image-tag collision: $image" >&2
               exit 1
@@ -536,6 +538,10 @@ jobs:
           docker build --pull --no-cache \
             --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
             --file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE" .
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file deploy/ci/Dockerfile.postgres-runtime-source \
+            --tag "$TEST_LEGACY_POSTGRES_IMAGE" .
           docker build --pull --no-cache \
             --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
             --file Dockerfile.egress --tag "$TEST_EGRESS_IMAGE" .
@@ -1045,6 +1051,10 @@ jobs:
         shell: bash
         run: deploy/ci/run-security-topology.sh
 
+      - name: Exercise witnessed PostgreSQL runtime migration and crash recovery
+        shell: bash
+        run: timeout --signal=TERM --kill-after=30s 45m deploy/ci/run-postgres-runtime-migration-e2e.sh
+
       - name: Attack the exact built egress-policy image
         shell: bash
         run: deploy/egress/test-policy.sh "$TEST_EGRESS_IMAGE"
@@ -1109,6 +1119,9 @@ jobs:
           fi
           if owned_image "$TEST_POSTGRES_IMAGE"; then
             docker image rm --force "$TEST_POSTGRES_IMAGE" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_LEGACY_POSTGRES_IMAGE"; then
+            docker image rm --force "$TEST_LEGACY_POSTGRES_IMAGE" >/dev/null 2>&1 || true
           fi
           if owned_image "$TEST_EGRESS_IMAGE"; then
             docker image rm --force "$TEST_EGRESS_IMAGE" >/dev/null 2>&1 || true

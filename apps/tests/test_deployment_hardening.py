@@ -411,6 +411,9 @@ raise SystemExit(99)
             "--env DB_HOST=db",
             '--file Dockerfile --tag "$TEST_APP_IMAGE"',
             '--file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE"',
+            '--file deploy/ci/Dockerfile.postgres-runtime-source',
+            '--tag "$TEST_LEGACY_POSTGRES_IMAGE"',
+            "run: timeout --signal=TERM --kill-after=30s 45m deploy/ci/run-postgres-runtime-migration-e2e.sh",
             "docker network create --driver bridge --internal",
             'docker create \\\n',
             "--tmpfs /code/_storage:rw,noexec,nosuid,nodev",
@@ -445,7 +448,7 @@ raise SystemExit(99)
         self.assertNotIn("--network-alias database", gate)
         self.assertNotIn("--env DB_HOST=database", gate)
 
-        self.assertEqual(gate.count("docker build --pull --no-cache"), 3)
+        self.assertEqual(gate.count("docker build --pull --no-cache"), 4)
         self.assertNotIn("continue-on-error", gate)
         self.assertNotIn("--privileged", gate)
         self.assertNotIn("docker.sock", gate)
