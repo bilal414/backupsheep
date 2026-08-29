@@ -1193,16 +1193,9 @@ validate_checkout_cleanliness() {
                 || [[ "$relative_path" == .secrets/* ]] \
                 || [[ "$relative_path" == ".release-evidence/" ]] \
                 || [[ "$relative_path" == .release-evidence/* ]] \
-                || [[ "$relative_path" == ".release-evidence.target/" ]] \
-                || [[ "$relative_path" == .release-evidence.target/* ]] \
-                || [[ "$relative_path" == ".release-evidence.source-verification.json" ]] \
-                || [[ "$relative_path" == ".release-transition-journal/" ]] \
-                || [[ "$relative_path" == .release-transition-journal/* ]] \
                 || [[ "$relative_path" =~ ^\.release-evidence\.(download|verify)\.[A-Za-z0-9]{8}/ ]] \
                 || [[ "$relative_path" == ".env.image-source.new" ]] \
                 || [[ "$relative_path" == ".env.fresh.new" ]] \
-                || [[ "$relative_path" == ".env.signed-upgrade.target" ]] \
-                || [[ "$relative_path" == ".signed-upgrade-witness.json" ]] \
                 || [[ "$relative_path" =~ ^\.env-(update|artifact-policy)\.[A-Za-z0-9]{8}$ ]] \
                 || [[ "$relative_path" == ".release-request" ]] \
                 || [[ "$relative_path" == ".release-request.new" ]] \
@@ -1258,7 +1251,6 @@ validate_checkout() {
     require_regular_checkout_file deploy/runtime/compose-json.awk
     require_regular_checkout_file deploy/release-policy.json
     require_regular_checkout_file scripts/release_transition.py
-    require_regular_checkout_file scripts/signed_release_upgrade.py
     require_regular_checkout_file deploy/postgres/entrypoint.sh
     require_regular_checkout_file deploy/postgres/storage-witness.sh
     require_regular_checkout_file deploy/postgres/source-identity-contract.sh

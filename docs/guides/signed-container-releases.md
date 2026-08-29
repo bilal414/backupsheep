@@ -107,8 +107,9 @@ revalidated before signing; both files are also required members of the determin
 signed evidence archive. Editing the reviewed policy or migration artifact after generation
 therefore invalidates the release. The initial checked-in epoch has no accepted predecessor,
 so it authorizes fresh installation only. Adding a predecessor requires explicit security
-review of every exact field. The runtime still refuses signed-to-signed mutation until the
-separate crash-safe source/target journal is complete.
+review of every exact field. This publication metadata does not enable runtime mutation.
+Automatic signed-to-signed upgrade and rollback are intentionally unsupported, and the
+application image contains no staged-upgrade controller or source/target journal.
 
 ## Scanner and SBOM policy
 
@@ -235,14 +236,16 @@ The default local-build path still delegates `compose build --pull` to the opera
 daemon and has no portable installer-side deadline for a daemon-side base-image transfer;
 operators must enforce Docker/build network timeouts at the host or CI layer.
 
-Rollback is not an `.env` image edit. The current consumer intentionally refuses every
-in-place mode or tag change. It does **not** yet provide the signed, journaled checkout +
-evidence + configuration + database-compatible transition needed for a safe signed-to-signed
-upgrade or rollback. Do not apply the generic source-upgrade procedure to a signed-release
-installation and do not edit the provenance fields. Until that release blocker is closed,
-use signed-release mode only for a fresh project whose recovery plan is a separately verified
-restore into another fresh project; preserve the old project intact. This limitation means
-the signed consumer is not yet an enterprise security-patching channel.
+Rollback is not an `.env` image edit. The consumer accepts only the exact fresh-install
+interface. Former stage/upgrade forms and every other argument shape are rejected before a
+mutation lock is created, Docker is contacted, or installation files are changed. BackupSheep
+does not ship an automatic signed-upgrade controller or journal because an incomplete
+checkout + evidence + configuration + database transition would create an unsafe recovery
+boundary. Do not apply the generic source-upgrade procedure to a signed-release installation
+and do not edit the provenance fields. Use signed-release mode only for a fresh project whose
+recovery plan is a separately verified restore into another fresh project; preserve the old
+project intact. This limitation means the signed consumer is not an enterprise
+security-patching channel.
 
 ### Sigstore trust-root rotation
 

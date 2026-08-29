@@ -160,9 +160,13 @@ duplicate line, existing evidence collision, missing image, or model override fa
 An installation cannot change between `local-build` and `signed-release`, or between
 signed release tags. The current generic [upgrade and rollback runbook](upgrades.md) is
 not a signed-release transition: it cannot atomically bind a new checkout, evidence,
-configuration and database migration or restore the prior state after a crash. Use signed
-mode only for a fresh project until the journaled signed-to-signed lifecycle is implemented.
-Preserve `.release-evidence` with the complete control-plane recovery set.
+configuration and database migration or restore the prior state after a crash. Automatic
+signed-to-signed upgrade and rollback are intentionally unsupported: the signed consumer
+accepts only its exact fresh-install arguments and rejects stage/upgrade options before it
+contacts Docker or changes installation files. No dormant upgrade controller is shipped in
+the application image. Use signed mode only for a fresh project; move to another signed
+release through a separately verified restore into another fresh project while preserving
+the old project. Preserve `.release-evidence` with the complete control-plane recovery set.
 
 ### Explicit rootful-daemon mode
 

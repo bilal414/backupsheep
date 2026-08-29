@@ -59,8 +59,8 @@ The KMS replacement assumes an attacker may:
    file deliberately mounted into a compromised role;
 3. tamper with a keyring, substitute another installation's keyring, swap lanes, reuse a
    wrapped data key, alter an envelope, or remove a legacy rotation key;
-4. interrupt installation, migration, rotation, encryption, upload, restore, or signed
-   upgrade at an arbitrary instruction boundary;
+4. interrupt installation, migration, rotation, encryption, upload, or restore at an
+   arbitrary instruction boundary;
 5. supply hostile settings, paths, symlinks, hard links, filesystems, Git objects,
    Compose controls, image references, or release evidence;
 6. compromise storage without first compromising a source/restore lane.
@@ -180,6 +180,21 @@ OSS integration; it is not used as the BackupSheep artifact key provider. Provid
 specific images could reduce this dormant dependency surface in a future release, but
 it is not an AWS-account dependency in the stock encryption path.
 
+## Signed-release lifecycle boundary
+
+Fresh signed-release installation remains supported: the consumer authenticates the exact
+release descriptor, manifest, image digests, provenance labels, verifier identity and local
+image receipts before the installer mutates the runtime. Automatic signed-to-signed upgrade
+and rollback are intentionally unsupported. The unfinished controller, journal tests,
+source/target evidence states, runtime image copy, and stage-upgrade consumer branch were
+removed rather than exposing an unaudited partial recovery protocol.
+
+The consumer now accepts only the exact fresh-install argument shape. Former stage/upgrade
+forms fail before the mutation lock, Docker access, downloads, or installation writes. A
+signed deployment must move releases through a separately verified restore into a fresh
+project while the old project remains intact. This is a material enterprise patching gap,
+but the fail-closed boundary is safer than shipping dormant privileged orchestration code.
+
 ## Evidence at this snapshot
 
 | Evidence | Result | Scope |
@@ -189,6 +204,7 @@ it is not an AWS-account dependency in the stock encryption path.
 | Independent macOS provider/lifecycle rerun | 24 passed | provider wrapping, normative vector, keyring lifecycle; excludes Linux-only anonymous-file tests |
 | Static runtime-provider audit | Pass | no AWS KMS provider export, factory branch, client construction, or dynamic provider import |
 | Rendered Compose mount review | Pass | only matching source workers receive matching keyrings; storage receives neither |
+| Signed-upgrade refusal contract | Pass | former stage/upgrade forms made no Docker call, mutation lock, or installation byte/metadata change |
 | Shell syntax and whitespace checks | Pass | candidate snapshot |
 
 The complete BSE1 envelope suite depends on Linux `O_TMPFILE`/`linkat` behavior and is
@@ -200,8 +216,8 @@ final merged commit.
 
 This addendum is not release approval. At the initial evidence snapshot:
 
-- signed cross-version upgrade crash recovery and secret-free Compose comparison were
-  still being integrated;
+- signed cross-version in-place upgrade is intentionally unsupported; an enterprise
+  patching strategy based on separately verified fresh-project restore remains required;
 - the final full application, installer, image, topology, migration, and adversarial
   suites had not yet run against one frozen final commit;
 - the current branch had not been pushed to the pull request, approved, or merged into
@@ -227,8 +243,8 @@ Close this addendum only when one exact commit has all of the following evidence
 6. successful restore with the correct lane, denied restore with the other lane,
    denied tampered/swapped artifact, and denied missing-key restore;
 7. key rotation followed by successful restore of both pre- and post-rotation backups;
-8. interruption/resume proof around encryption, upload, restore, migration, and every
-   signed-upgrade mutation boundary;
+8. interruption/resume proof around encryption, upload, restore, and migration, plus proof
+   that unsupported signed upgrade forms fail before Docker or filesystem mutation;
 9. exact live container identity, image digest, mount, capability, namespace, network,
    resource, health, and preflight evidence;
 10. rollback proof that preserves volumes, keyrings, and recoverability without

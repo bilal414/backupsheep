@@ -5,6 +5,11 @@ The verified installer deliberately never changes an existing checkout to anothe
 this runbook is the operator-controlled manual upgrade path. The `migrate` and security
 `preflight` one-shots must complete before the new app, workers or Beat can start.
 
+This runbook applies to local-build installations only. Signed-release installations do not
+support in-place upgrade or rollback: their consumer rejects stage/upgrade options before
+Docker or installation mutation. Move a signed deployment by restoring into another fresh,
+independently verified signed-release project while preserving the old project.
+
 ## Before the change
 
 1. Read release notes and compare the exact current and target revisions.

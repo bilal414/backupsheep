@@ -8,11 +8,6 @@
 /.release-evidence/
 /.release-evidence.download.*/
 /.release-evidence.verify.*/
-/.release-evidence.target/
-/.release-evidence.source-verification.json
-/.release-transition-journal/
-/.env.signed-upgrade.target
-/.signed-upgrade-witness.json
 /.env.image-source.new
 /.env.fresh.new
 /.env-update.*

@@ -1085,37 +1085,71 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
         self.assertNotIn("docker.sock", consumer)
         self.assertNotRegex(consumer, r"(?m)^\s*(?:eval|source)\s")
 
-    def test_stage_upgrade_authenticates_both_evidence_sets_without_runtime_mutation(self):
-        consumer = (
-            ROOT / "deploy/release/consume-signed-release.sh"
-        ).read_text(encoding="utf-8")
-        self.assertIn('CONSUMER_MODE="stage-upgrade"', consumer)
-        self.assertIn('CHECKOUT_COMMIT="$SOURCE_RELEASE_COMMIT"', consumer)
-        self.assertIn('EVIDENCE_DIR="$TARGET_EVIDENCE_DIR"', consumer)
-        self.assertIn('stage_authorized_predecessor_verification', consumer)
-        self.assertIn('signed_release_upgrade.py authorize-source', consumer)
-        self.assertIn('--mount "type=bind,src=${SOURCE_EVIDENCE_DIR},dst=/source-evidence,readonly', consumer)
-        self.assertIn('--mount "type=bind,src=${TARGET_EVIDENCE_DIR},dst=/target-evidence,readonly', consumer)
-        self.assertIn('"$app_config" /usr/local/lib/backupsheep-release/signed_release_upgrade.py', consumer)
-        self.assertIn('VERIFIER_PURPOSE="authorized-predecessor"', consumer)
-        self.assertIn('com.backupsheep.authorizing-target-descriptor-sha256', consumer)
-        self.assertIn('publish_authorized_source_receipt "$receipt"', consumer)
-        self.assertIn('no runtime mutation was performed', consumer)
-        stage_body = consumer.split(
-            "stage_authorized_predecessor_verification() {", 1
-        )[1].split("\n}\n\nattest_verified_release_inputs()", 1)[0]
-        for forbidden in (
-            "docker compose",
-            " compose up",
-            " compose run",
-            " compose down",
-            " migrate ",
-            "start_core",
-            "start_operations",
-            "set_env_value",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, stage_body)
+    def test_automatic_signed_upgrade_options_fail_before_docker_or_filesystem_mutation(self):
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        source = consumer.read_text(encoding="utf-8")
+        self.assertNotIn("stage-upgrade", source)
+        self.assertNotIn("signed_release_upgrade.py", source)
+        self.assertIn("automatic signed upgrades are unsupported", source)
+
+        with tempfile.TemporaryDirectory(prefix="backupsheep-upgrade-refusal-") as directory:
+            root = Path(directory)
+            install_dir = root / "installation"
+            install_dir.mkdir(mode=0o700)
+            sentinel = install_dir / "operator-state"
+            sentinel.write_bytes(b"must remain byte-identical\n")
+            sentinel.chmod(0o600)
+            docker_marker = root / "docker-was-called"
+            fake_docker = root / "docker"
+            fake_docker.write_text(
+                '#!/bin/sh\n: > "$BACKUPSHEEP_DOCKER_CALLED"\nexit 99\n',
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+
+            def snapshot():
+                metadata = sentinel.stat()
+                return (
+                    sorted(str(path.relative_to(install_dir)) for path in install_dir.rglob("*")),
+                    sentinel.read_bytes(),
+                    metadata.st_ino,
+                    metadata.st_nlink,
+                    stat.S_IMODE(metadata.st_mode),
+                    metadata.st_mtime_ns,
+                )
+
+            old_stage_arguments = [
+                "--mode", "stage-upgrade",
+                "--source-tag", "v1.0.0",
+                "--source-commit", "a" * 40,
+                "--target-tag", "v1.1.0",
+                "--target-commit", "b" * 40,
+                "--install-dir", str(install_dir),
+                "--docker", str(fake_docker),
+            ]
+            rejected_forms = (
+                old_stage_arguments,
+                ["--mode", "upgrade", *old_stage_arguments[2:]],
+                ["--upgrade", *old_stage_arguments[2:]],
+            )
+            expected = snapshot()
+            environment = os.environ.copy()
+            environment["BACKUPSHEEP_DOCKER_CALLED"] = str(docker_marker)
+            for arguments in rejected_forms:
+                with self.subTest(arguments=arguments[:2]):
+                    result = subprocess.run(
+                        [str(consumer), *arguments],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("automatic signed upgrades are unsupported", result.stderr)
+                    self.assertFalse(docker_marker.exists())
+                    self.assertFalse(Path(f"{install_dir}.backupsheep-mutation-lock").exists())
+                    self.assertEqual(snapshot(), expected)
 
     def test_signed_consumer_attests_exact_clean_source_checkout_even_with_skip_worktree(self):
         consumer = ROOT / "deploy/release/consume-signed-release.sh"
@@ -1128,7 +1162,6 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
                 "deploy/release-policy.json",
                 "deploy/runtime/compose-json.awk",
                 "scripts/release_transition.py",
-                "scripts/signed_release_upgrade.py",
             ):
                 target = checkout / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
