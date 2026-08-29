@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import tarfile
@@ -1040,3 +1041,50 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
         self.assertIn('SOURCE_DATE_EPOCH: "1787961600"', build_step)
         self.assertIn("BUILDKIT_MULTI_PLATFORM=1", build_step)
         self.assertIn("rewrite-timestamp=true", build_step)
+
+    def test_bootstrap_uses_cosign_v3_image_verification_contract(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
+        ).read_text(encoding="utf-8")
+        signing_step = workflow.split(
+            "      - name: Sign and verify the official index and both child manifests\n",
+            1,
+        )[1].split(
+            "      - name: Execute both published verifier binaries under the consumer sandbox\n",
+            1,
+        )[0]
+        verify_invocation = signing_step.split('"$TOOL_DIR/cosign" verify', 1)[1]
+        verify_command = verify_invocation.split('"$reference" >"$verification"', 1)[0]
+        self.assertIn("--trusted-root deploy/release/sigstore-trusted-root.json", verify_command)
+        self.assertIn("--output json", verify_command)
+        self.assertNotIn('--bundle "$bundle"', verify_command)
+        self.assertIn("python3 scripts/validate_cosign_image_verification.py", signing_step)
+        self.assertIn('--verification "$verification"', signing_step)
+        self.assertIn('--bundle "$bundle"', signing_step)
+        self.assertIn('--digest "$digest"', signing_step)
+
+    def test_docker_build_actions_are_commit_pinned_node24_releases(self):
+        workflows = (
+            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml",
+            ROOT / ".github" / "workflows" / "release-images.yml",
+        )
+        expected = {
+            "docker/setup-qemu-action": (
+                "96fe6ef7f33517b61c61be40b68a1882f3264fb8",
+                "v4.2.0",
+            ),
+            "docker/setup-buildx-action": (
+                "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+                "v4.2.0",
+            ),
+            "docker/build-push-action": (
+                "53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+                "v7.3.0",
+            ),
+        }
+        for path in workflows:
+            document = path.read_text(encoding="utf-8")
+            for action, (commit, version) in expected.items():
+                with self.subTest(path=path.name, action=action):
+                    self.assertIn(f"uses: {action}@{commit} # {version}", document)
+                    self.assertNotRegex(document, rf"uses: {re.escape(action)}@(?!{commit})")
