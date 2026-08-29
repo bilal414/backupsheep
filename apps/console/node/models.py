@@ -12494,7 +12494,11 @@ class CoreSchedule(TimeStampedModel):
         )
 
     def crontab_display(self):
-        return f"{self.minute} {self.hour} {self.day_of_month} {self.month_of_year} {self.day_of_week}"
+        return (
+            f"{self.minute or '*'} {self.hour or '*'} "
+            f"{self.day_of_month or '*'} {self.month_of_year or '*'} "
+            f"{self.day_of_week or '*'}"
+        )
 
     def delete_requested(self):
         self.status = CoreSchedule.Status.DELETE_REQUESTED

@@ -48,14 +48,14 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
             self.source,
         )
         self.assertIn(
-            "openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '3')",
+            "openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid|default_if_none:''|escapejs }}', '3')",
             self.source,
         )
         self.assertIn(
             "loaded ? Boolean(view && view.category === 'complete')",
             self.source,
         )
-        self.assertIn("if (String(backupStatus) !== '3') return;", self.source)
+        self.assertIn("String(backupStatus) !== '3' ||", self.source)
         self.assertIn("this.nativeRestoreStarted ||", self.source)
 
     def test_post_contract_is_explicit_and_uses_provider_minimal_fields(self):
@@ -78,14 +78,18 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertIn("this.nativeRestore.requestTargetName = targetName", self.source)
         self.assertIn("if (this.nativeRestore.recoveryId && this.nativeRestore.recoveryTargetName === targetName)", self.source)
         self.assertIn("this.nativeRestore.recoveryTargetName = targetName", self.source)
-        self.assertGreaterEqual(self.source.count("requestId: null"), 3)
-        self.assertGreaterEqual(self.source.count("recoveryId: null"), 3)
+        self.assertGreaterEqual(self.source.count("requestId: null"), 2)
+        self.assertGreaterEqual(self.source.count("recoveryId: null"), 2)
+        self.assertIn("requestId: pendingRequest ? pendingRequest.request_id : null", self.source)
+        self.assertIn("recoveryId: pendingRequest ? pendingRequest.recovery_id : null", self.source)
         # A fetch failure reconciles the existing durable row; it does not call
         # openNativeCloudRestoreModal or reset requestId before the next attempt.
-        retry_block = self.source.split("async startNativeCloudRestore()", 1)[1].split(
+        retry_block = self.source.split("async startNativeCloudRestore(exactRetry = false)", 1)[1].split(
             "clearRestorePoll()", 1
         )[0]
-        self.assertIn("await this.getNativeCloudRestores(false)", retry_block)
+        self.assertIn("await this.getNativeCloudRestores(", retry_block)
+        self.assertIn("backupId", retry_block)
+        self.assertIn("generation", retry_block)
         self.assertNotIn("requestId = null", retry_block)
 
     def test_reload_recovery_and_polling_use_node_restore_list(self):
@@ -93,7 +97,14 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
             "`/api/v1/nodes/${encodeURIComponent(this.node_id || nativeRestoreConfig.nodeId)}/restores/`",
             self.source,
         )
-        self.assertIn("String(item.backup_id) === String(this.nativeRestore.backupId)", self.source)
+        self.assertIn(
+            "String(this.nativeRestoreBackupId(item)) === String(backupId)",
+            self.source,
+        )
+        self.assertIn(
+            "item.backup_id !== undefined ? item.backup_id : item.backup",
+            self.source,
+        )
         self.assertIn("adoptNativeRestoreTargetIfPresent()", self.source)
         self.assertIn("startNativeRestorePolling()", self.source)
         self.assertIn("clearNativeRestorePoll()", self.source)
@@ -102,14 +113,16 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
 
     def test_existing_backup_promotes_latest_restore_but_lost_post_stays_exact(self):
         restore_block = self.source.split(
-            "async getNativeCloudRestores(showErrors = false, allowNameRecovery = false)",
+            "async getNativeCloudRestores(",
             1,
-        )[1].split("async startNativeCloudRestore()", 1)[0]
+        )[1].split("async reconcileNativeRestoreSubmission", 1)[0]
         self.assertIn("const recoveringAcceptedRequest = Boolean(", restore_block)
         self.assertIn(
-            "this.nativeRestore.recoveryId && this.nativeRestore.recoveryTargetName",
+            "const pendingRequest = this.nativeRestorePendingRequestBody",
             restore_block,
         )
+        self.assertIn("String(pendingRequest.recovery_id || '').trim()", restore_block)
+        self.assertIn("String(pendingRequest.name || '').trim()", restore_block)
         self.assertIn(
             "String((item.execution_status || {}).recovery_id || '').trim() === recoveryId",
             restore_block,
@@ -117,9 +130,113 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertIn("String(item.name || '').trim() === targetName", restore_block)
         self.assertIn("matches.length === 1 ? matches[0] : null", restore_block)
         self.assertNotIn("correlation_id", restore_block)
+        self.assertIn("else if (!this.nativeRestoreSubmissionUncertain)", restore_block)
         self.assertIn("exact = records.reduce((latest, item) =>", restore_block)
         self.assertIn("return itemId > latestId ? item : latest", restore_block)
         self.assertIn("the newest durable attempt instead of pinning", restore_block)
+
+    def test_unknown_submission_is_locked_to_exact_request_until_reconciled(self):
+        start_block = self.source.split(
+            "async startNativeCloudRestore(exactRetry = false)",
+            1,
+        )[1].split("async resumeNativeCloudRestore(item)", 1)[0]
+        submit_guard = self.source.split("nativeRestoreCanSubmit() {", 1)[1].split(
+            "nativeRestoreCanRetryExact() {", 1
+        )[0]
+        close_block = self.source.split(
+            "closeNativeCloudRestoreModal() {",
+            1,
+        )[1].split("cancelNativeRestoreLedgerRequest() {", 1)[0]
+
+        for marker in (
+            "nativeRestoreSubmissionUncertain: false",
+            "nativeRestorePendingRequestBody: null",
+            "nativeRestoreReconciliationLoading: false",
+            "Restore outcome not yet confirmed",
+            "Check durable ledger",
+            "Retry exact request",
+            "reconcileNativeRestoreSubmission(true)",
+            "retryNativeRestoreSubmission()",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.source)
+
+        self.assertIn("this.nativeRestoreSubmissionUncertain", submit_guard)
+        self.assertIn("this.nativeRestoreReconciliationLoading", submit_guard)
+        self.assertIn("this.nativeRestoreSubmissionUncertain", close_block)
+        self.assertIn("this.nativeRestoreReconciliationLoading", close_block)
+        self.assertIn(':disabled="!nativeRestoreCanReconcileExact()"', self.source)
+        self.assertIn("let acceptedResponseSeen = false", start_block)
+        self.assertIn(
+            "acceptedResponseSeen = response.status === 200 || response.status === 201",
+            start_block,
+        )
+        self.assertIn("malformedAcceptedResponse.outcomeUnknown = acceptedResponseSeen", start_block)
+        self.assertIn("this.persistNativeRestorePendingRequest(requestBody)", start_block)
+        self.assertIn("? this.nativeRestorePendingRequestBody", start_block)
+        self.assertIn("this.nativeRestoreSubmissionUncertain = outcomeMayBeUnknown", start_block)
+        self.assertIn("if (!outcomeMayBeUnknown) this.clearNativeRestorePendingRequest()", start_block)
+        self.assertIn("responseRecoveryId !== String(requestBody.recovery_id || '').trim()", start_block)
+        self.assertIn(
+            "String(this.nativeRestoreBackupId(json)) !== String(requestBody.backup_id)",
+            start_block,
+        )
+        self.assertIn(
+            "String(json.name || '').trim() !== String(requestBody.name || '').trim()",
+            start_block,
+        )
+        self.assertIn(
+            ':disabled="nativeRestoreSubmissionUncertain || nativeRestoreSubmitting || nativeRestoreReconciliationLoading"',
+            self.source,
+        )
+
+    def test_unknown_submission_survives_reload_before_any_network_request(self):
+        persistence_block = self.source.split(
+            "nativeRestoreSubmissionStorageKey(backupId) {",
+            1,
+        )[1].split("nativeRestoreDestinationBucketValid() {", 1)[0]
+        open_block = self.source.split(
+            "openNativeCloudRestoreModal(backupId, backupUuid, backupStatus) {",
+            1,
+        )[1].split("closeNativeCloudRestoreModal() {", 1)[0]
+        start_block = self.source.split(
+            "async startNativeCloudRestore(exactRetry = false)",
+            1,
+        )[1].split("async resumeNativeCloudRestore(item)", 1)[0]
+
+        for marker in (
+            "backupsheep.native-restore.pending.v1",
+            "window.sessionStorage.getItem(storageKey)",
+            "window.sessionStorage.setItem(storageKey, serialized)",
+            "window.sessionStorage.removeItem(storageKey)",
+            "nativeRestorePendingRequestValid(requestBody, backupId)",
+            "return {requestBody: null, storageKey, blocked: true}",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, persistence_block)
+
+        self.assertIn("const pendingState = this.loadNativeRestorePendingRequest(backupId)", open_block)
+        self.assertIn("this.nativeRestoreSubmissionUncertain = Boolean(pendingRequest || pendingBlocked)", open_block)
+        self.assertIn("requestId: pendingRequest ? pendingRequest.request_id : null", open_block)
+        self.assertIn("recoveryId: pendingRequest ? pendingRequest.recovery_id : null", open_block)
+        self.assertIn("destinationBucketName: pendingRequest && this.nativeRestoreResourceKind === 'aws_s3'", open_block)
+        self.assertIn("!pendingBlocked", open_block)
+        self.assertIn("if (pendingBlocked)", open_block)
+        self.assertIn("else if (pendingRequest)", open_block)
+        self.assertIn(
+            "if (!this.nativeRestorePendingRequestValid(",
+            self.source.split("async reconcileNativeRestoreSubmission", 1)[1].split(
+                "retryNativeRestoreSubmission()",
+                1,
+            )[0],
+        )
+
+        persist_index = start_block.index("this.persistNativeRestorePendingRequest(requestBody)")
+        network_index = start_block.index("this.requestWithTimeout(url")
+        self.assertLess(persist_index, network_index)
+        self.assertIn("No restore request was submitted", start_block)
+        self.assertIn("this.nativeRestoreSubmissionUncertain = outcomeMayBeUnknown", start_block)
+        self.assertIn("if (!outcomeMayBeUnknown) this.clearNativeRestorePendingRequest()", start_block)
 
     def test_terminal_restore_can_start_another_unique_copy(self):
         self.assertIn("Restore another copy", self.source)

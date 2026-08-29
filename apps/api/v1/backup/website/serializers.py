@@ -59,6 +59,7 @@ class CoreWebsiteBackupTransferSerializer(serializers.Serializer):
 class CoreWebsiteBackupStoragePointsSerializer(SafeProviderMetadataMixin, serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
+    direct_download_permitted = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = CoreWebsiteBackupStoragePoints
@@ -67,6 +68,10 @@ class CoreWebsiteBackupStoragePointsSerializer(SafeProviderMetadataMixin, serial
     @staticmethod
     def get_status_display(obj):
         return obj.get_status_display()
+
+    @staticmethod
+    def get_direct_download_permitted(obj):
+        return obj.direct_download_permitted()
 
 
 class CoreWebsiteBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):

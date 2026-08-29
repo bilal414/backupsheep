@@ -3,15 +3,20 @@ from urllib.parse import urlencode
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.core.exceptions import PermissionDenied
 from django.db.models import Q
-from django.shortcuts import redirect
+from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views.generic import TemplateView, DetailView
 from django.core.paginator import Paginator
 from apps.console.connection.models import CoreConnection, CoreIntegration
 from apps.console.storage.models import CoreStorage, CoreStorageType
 from requests_oauthlib import OAuth2Session
-from apps.api.v1.utils.api_permissions import member_has_perm
+from apps.api.v1.utils.api_helpers import visible_nodes
+from apps.api.v1.utils.api_permissions import (
+    member_has_perm,
+    member_has_perm_for_node,
+)
 from apps.api.v1.utils.oauth_security import (
     get_or_issue_oauth_state,
     validated_https_endpoint,
@@ -318,6 +323,14 @@ class IntegrationCreateNodeView(LoginRequiredMixin, TemplateView):
     template_name = "console/setup/3_integration_create_node.html"
 
     def get(self, request, *args, **kwargs):
+        if not (
+            member_has_perm(request, "node_changes")
+            and member_has_perm(request, "integration_changes")
+        ):
+            raise PermissionDenied(
+                "You don't have permission to configure sources."
+            )
+
         context = self.get_context_data(**kwargs)
         context["active_url"] = "setup"
         integration_code = self.kwargs.get("integration_code")
@@ -332,20 +345,21 @@ class IntegrationCreateNodeView(LoginRequiredMixin, TemplateView):
 
         member = self.request.user.member
 
-        integration = CoreIntegration.objects.get(code=integration_code)
+        integration = get_object_or_404(CoreIntegration, code=integration_code)
 
         query = Q(
             account=member.get_current_account(),
             integration=integration,
-            status=CoreStorage.Status.ACTIVE,
+            status=CoreConnection.Status.ACTIVE,
             id=connection_id,
         )
-        connection = CoreConnection.objects.get(query)
+        connection = get_object_or_404(CoreConnection, query)
 
         context["heading"] = f"Setup Node - {integration.name} - {connection.name}"
 
         context["integration"] = integration
         context["connection"] = connection
+        context["can_browse_source"] = True
         context["show_link_icon"] = True
         context["show_link_url"] = reverse(
             "console:setup:integration_open",
@@ -359,30 +373,41 @@ class IntegrationModifyNodeView(LoginRequiredMixin, TemplateView):
 
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
-        context["active_url"] = "setup"
+        context["active_url"] = "nodes"
         integration_code = self.kwargs.get("integration_code")
         connection_id = self.kwargs.get("connection_id")
         node_id = self.kwargs.get("node_id")
 
         member = self.request.user.member
 
-        integration = CoreIntegration.objects.get(code=integration_code)
+        integration = get_object_or_404(CoreIntegration, code=integration_code)
 
         query = Q(
             account=member.get_current_account(),
             integration=integration,
-            status=CoreStorage.Status.ACTIVE,
+            status=CoreConnection.Status.ACTIVE,
             id=connection_id,
         )
-        connection = CoreConnection.objects.get(query)
+        connection = get_object_or_404(CoreConnection, query)
 
-        node = connection.nodes.get(id=node_id)
+        node = get_object_or_404(
+            visible_nodes(member),
+            id=node_id,
+            connection=connection,
+        )
+        if not member_has_perm_for_node(request, "node_changes", node):
+            raise PermissionDenied(
+                "You don't have permission to configure this source."
+            )
 
         context["heading"] = f"Modify Node - {integration.name} - {connection.name} - {node.name}"
 
         context["integration"] = integration
         context["connection"] = connection
         context["node"] = node
+        context["can_browse_source"] = member_has_perm(
+            request, "integration_changes"
+        )
         context["show_link_icon"] = True
         context["show_link_url"] = reverse(
             "console:node:detail",

@@ -22,9 +22,11 @@ from apps.api.v1.backup.database.serializers import (
 from apps.api.v1.backup.database.views import CoreDatabaseBackupView
 from apps.console.backup.models import (
     CoreDatabaseBackup,
+    CoreDatabaseBackupStoragePoints,
     CoreDatabaseRestore,
 )
 from apps.console.connection.models import CoreAuthDatabase, CoreIntegration
+from apps.console.storage.models import CoreStorageLocal, CoreStorageType
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.test_backup_engine import make_database_node
@@ -279,6 +281,14 @@ class DatabaseRestoreResumeApiTests(TransactionTestCase):
             "importing",
         )
 
+        # Complete the successfully resumed fixture before independently
+        # evaluating malformed checkpoint evidence. Destination-level
+        # serialization correctly rejects any second request while the first
+        # restore remains active.
+        restore.status = CoreDatabaseRestore.Status.COMPLETE
+        restore.execution_phase = "complete"
+        restore.save(update_fields=["status", "execution_phase", "modified"])
+
         malformed = self._safe_restore(execution_phase="failed")
         malformed_metadata = dict(malformed.execution_metadata)
         malformed_metadata["target_checkpoints"] = {}
@@ -392,6 +402,92 @@ class DatabaseRestoreResumeApiTests(TransactionTestCase):
         self.assertEqual(restore.execution_metadata["manual_resume_count"], 1)
         self.assertEqual(len(restore.execution_metadata["manual_resume_history"]), 1)
 
+    def test_restore_create_and_manual_resume_share_one_destination_lane(self):
+        failed_restore = self._safe_restore()
+        CoreStorageType.objects.get_or_create(
+            code="local",
+            defaults={"name": "Local", "is_enabled": True},
+        )
+        storage = factories.make_storage(
+            self.account, self.member, code="local"
+        )
+        CoreStorageLocal.objects.create(storage=storage, path="")
+        newer_backup = CoreDatabaseBackup.objects.create(
+            database=self.node.database,
+            uuid=f"t{uuid.uuid4().hex}",
+            status=UtilBackup.Status.COMPLETE,
+            attempt_no=2,
+            type=UtilBackup.Type.ON_DEMAND,
+            all_tables=True,
+        )
+        point = CoreDatabaseBackupStoragePoints.objects.create(
+            backup=newer_backup,
+            storage=storage,
+            status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="restore-race/newer-database.zip",
+        )
+        barrier = Barrier(2)
+
+        def resume_failed_restore():
+            close_old_connections()
+            try:
+                user = type(self.user).objects.get(pk=self.user.pk)
+                barrier.wait(timeout=10)
+                return self._post(failed_restore.id, user=user)
+            finally:
+                close_old_connections()
+
+        def create_new_restore():
+            close_old_connections()
+            try:
+                user = type(self.user).objects.get(pk=self.user.pk)
+                barrier.wait(timeout=10)
+                request = APIRequestFactory().post(
+                    f"/api/v1/backups/database/{newer_backup.id}/restore/",
+                    {
+                        "confirm": True,
+                        "storage_point_id": point.id,
+                        "request_id": str(uuid.uuid4()),
+                    },
+                    format="json",
+                )
+                force_authenticate(request, user=user)
+                view = CoreDatabaseBackupView.as_view({"post": "restore"})
+                return view(request, pk=newer_backup.id)
+            finally:
+                close_old_connections()
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_database_backup.apply_async"
+        ) as dispatch:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                resume_future = executor.submit(resume_failed_restore)
+                create_future = executor.submit(create_new_restore)
+                responses = [resume_future.result(), create_future.result()]
+
+        conflict = next(
+            response for response in responses if response.status_code == 409
+        )
+        accepted = next(
+            response for response in responses if response.status_code != 409
+        )
+        self.assertEqual(conflict.data["code"], "active_restore_exists")
+        self.assertIn(accepted.status_code, {201, 202})
+        self.assertEqual(
+            CoreDatabaseRestore.objects.filter(
+                backup__database=self.node.database
+            )
+            .exclude(
+                status__in={
+                    CoreDatabaseRestore.Status.COMPLETE,
+                    CoreDatabaseRestore.Status.FAILED,
+                }
+            )
+            .count(),
+            1,
+        )
+        dispatch.assert_called_once()
+
     def test_broker_error_is_redacted_and_durable_state_is_recoverable(self):
         restore = self._safe_restore()
         with mock.patch(
@@ -468,7 +564,12 @@ class DatabaseRestoreResumeTemplateTests(SimpleTestCase):
             / "node"
             / "detail.html"
         )
-        cls.source = cls.template_path.read_text(encoding="utf-8")
+        detail_source = cls.template_path.read_text(encoding="utf-8")
+        dialog_source = (cls.template_path.parent / "_recovery_dialogs.html").read_text(
+            encoding="utf-8"
+        )
+        cls.dialog_source = dialog_source
+        cls.source = f"{detail_source}\n{dialog_source}"
 
     def test_template_compiles_and_exposes_database_resume_control(self):
         get_template("console/node/detail.html")
@@ -476,12 +577,20 @@ class DatabaseRestoreResumeTemplateTests(SimpleTestCase):
             "databaseRestoreCanResume",
             "resumeDatabaseRestore",
             "item.can_resume_verification === true",
-            'x-show="!loading && restoreList.length > 0"',
+            'x-show="restoreList.length > 0"',
+            'x-show="databaseRestoreCanResume(restoreItem)"',
+            '@click="resumeDatabaseRestore(restoreItem)"',
+            "Resume verification",
             "/resume_restore/",
             "No second restore was created.",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.source)
+
+        self.assertIn(
+            "This does not create a second restore.",
+            self.dialog_source,
+        )
 
     def test_database_resume_posts_only_restore_id_and_never_infers_provider_safety(self):
         resume_block = self.source.split("async resumeDatabaseRestore(item)", 1)[1].split(
@@ -493,6 +602,18 @@ class DatabaseRestoreResumeTemplateTests(SimpleTestCase):
         self.assertIn("item.can_resume_verification === true", predicate_block)
         self.assertIn("body: JSON.stringify({restore_id: restoreId})", resume_block)
         self.assertIn("response.status !== 200 && response.status !== 202", resume_block)
+        self.assertIn("this.requestWithTimeout", resume_block)
+        self.assertIn("const backupId = this.backup.id", resume_block)
+        self.assertIn("const generation = this.restoreContextGeneration", resume_block)
+        self.assertIn(
+            "this.restoreContextMatches(backupId, generation)",
+            resume_block,
+        )
+        self.assertIn(
+            "this.getBackupRestores(false, backupId, generation)",
+            resume_block,
+        )
+        self.assertIn("this.restoreStarted = false;", resume_block)
         self.assertNotIn("resource_id", resume_block)
         self.assertNotIn("provider_job_id", resume_block)
         self.assertNotIn("status_display", predicate_block)

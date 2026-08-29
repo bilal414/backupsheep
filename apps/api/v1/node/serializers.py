@@ -295,6 +295,10 @@ class CoreVultrDatabaseRestoreSerializer(
 ):
     """Expose Vultr fork restores through the same safe UI status contract."""
 
+    # Keep the model's conventional ``backup`` relation for compatibility and
+    # expose the same scalar identity used by every other native restore API.
+    # The browser's durable reconciliation contract must not branch by provider.
+    backup_id = serializers.IntegerField(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

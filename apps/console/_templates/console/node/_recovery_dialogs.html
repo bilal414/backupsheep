@@ -1,0 +1,269 @@
+{% if can_download_backups %}
+<!-- Download recovery point -->
+<div x-cloak x-show="openBackupDownload" class="fixed inset-0 z-50 overflow-y-auto"
+     aria-labelledby="download-recovery-title" aria-describedby="download-recovery-description"
+     role="dialog" aria-modal="true" @keydown.escape.prevent="!loading && closeBackupDownloadModal()">
+    <div x-show="openBackupDownload" x-transition.opacity class="fixed inset-0 bg-ink-950/55" aria-hidden="true"></div>
+    <div class="flex min-h-full items-end justify-center p-0 sm:items-center sm:p-4">
+        <div x-show="openBackupDownload" x-transition x-ref="downloadDialog" tabindex="-1"
+             @keydown.tab="trapFocus($event, $refs.downloadDialog)"
+             class="relative flex max-h-[100dvh] w-full flex-col overflow-hidden rounded-t-xl border border-rule-200 bg-paper shadow-lifted sm:max-h-[calc(100vh-2rem)] sm:max-w-3xl sm:rounded-xl">
+            <header class="flex items-start justify-between gap-4 border-b border-rule-200 px-5 py-5 sm:px-6">
+                <div class="min-w-0">
+                    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Recovery point access</p>
+                    <h2 id="download-recovery-title" class="mt-1 text-lg font-semibold text-ink-950">Download recovery point</h2>
+                    <p id="download-recovery-description" class="mt-2 text-sm leading-6 text-ink-650">Choose a completed destination copy. Secure links expire automatically and should be handled as credentials.</p>
+                    <code class="mt-2 block break-all font-mono text-xs text-ink-500" x-text="backup.uuid || 'Identifier not recorded'"></code>
+                </div>
+                <button type="button" @click="closeBackupDownloadModal()" :disabled="loading"
+                        class="inline-flex h-11 w-11 flex-none items-center justify-center rounded-lg text-ink-500 hover:bg-wool-50 hover:text-ink-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:opacity-50"
+                        aria-label="Close download recovery point dialog">
+                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></svg>
+                </button>
+            </header>
+
+            <div class="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+                <div x-show="loading" class="flex min-h-48 flex-col items-center justify-center text-center" role="status" aria-live="polite">
+                    <svg class="h-7 w-7 animate-spin text-evidence-600" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"/></svg>
+                    <p class="mt-3 text-sm font-semibold text-ink-950">Checking destination copies…</p>
+                </div>
+
+                <div x-show="!loading" class="space-y-3">
+                    <template x-for="storagePoint in (backup.storagePoints || []).filter(point => point.status === 3 && point.storage_file_id && point.direct_download_permitted === true)" :key="storagePoint.id">
+                        <article class="grid gap-4 rounded-lg border border-rule-200 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+                            <div class="min-w-0">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <h3 class="break-words text-sm font-semibold text-ink-950" x-text="storagePoint.storage.name"></h3>
+                                    <span class="inline-flex items-center gap-1.5 text-xs font-semibold text-verified-700">
+                                        <span class="h-2 w-2 rounded-full bg-verified-600" aria-hidden="true"></span>
+                                        <span x-text="storagePoint.status_display"></span>
+                                    </span>
+                                </div>
+                                <p class="mt-1 text-xs text-ink-650"><span x-text="storagePoint.storage.type.name"></span> · Destination copy</p>
+                            </div>
+                            <div class="flex flex-wrap gap-2 md:justify-end">
+                                <button @click="downloadBackup(storagePoint, 'copy')" type="button" :disabled="loading"
+                                        class="inline-flex min-h-11 items-center justify-center rounded-lg border border-rule-200 px-3 text-sm font-semibold text-ink-800 hover:bg-wool-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-50">
+                                    Copy secure link
+                                </button>
+                                <button @click="downloadBackup(storagePoint)" type="button" :disabled="loading"
+                                        class="inline-flex min-h-11 items-center justify-center rounded-lg bg-evidence-600 px-4 text-sm font-semibold text-white hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-50">
+                                    Download copy
+                                </button>
+                            </div>
+                        </article>
+                    </template>
+
+                    <div x-show="(backup.storagePoints || []).filter(point => point.status === 3 && point.storage_file_id && point.direct_download_permitted === true).length === 0" class="rounded-lg border border-dashed border-rule-200 px-5 py-10 text-center">
+                        <p class="text-sm font-semibold text-ink-950">No direct browser export is available</p>
+                        <p class="mt-1 text-sm leading-6 text-ink-650">Completed encrypted or enterprise-protected copies, if present, require a supported recovery or controlled export workflow before browser download.</p>
+                    </div>
+                </div>
+            </div>
+
+            <footer class="flex justify-end border-t border-rule-200 bg-wool-50 px-5 py-4 sm:px-6">
+                <button @click="closeBackupDownloadModal()" type="button" :disabled="loading"
+                        class="inline-flex min-h-11 items-center justify-center rounded-lg border border-rule-200 bg-paper px-4 text-sm font-semibold text-ink-800 hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:opacity-50">Close</button>
+            </footer>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if can_run_backups %}
+<!-- Restore recovery point -->
+<div x-cloak x-show="openBackupRestore" class="fixed inset-0 z-50 overflow-y-auto"
+     aria-labelledby="restore-recovery-title" aria-describedby="restore-recovery-description"
+     role="dialog" aria-modal="true" @keydown.escape.prevent="!loading && !restoreReconciliationLoading && !restoreResumeSubmitting && closeRestoreModal()">
+    <div x-show="openBackupRestore" x-transition.opacity class="fixed inset-0 bg-ink-950/55" aria-hidden="true"></div>
+    <div class="flex min-h-full items-end justify-center p-0 sm:items-center sm:p-4">
+        <div x-show="openBackupRestore" x-transition x-ref="restoreDialog" tabindex="-1"
+             @keydown.tab="trapFocus($event, $refs.restoreDialog)"
+             class="relative flex max-h-[100dvh] w-full flex-col overflow-hidden rounded-t-xl border border-rule-200 bg-paper shadow-lifted sm:max-h-[calc(100vh-2rem)] sm:max-w-3xl sm:rounded-xl">
+            <header class="flex items-start justify-between gap-4 border-b border-rule-200 px-5 py-5 sm:px-6">
+                <div class="min-w-0">
+                    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-attention-600">Controlled recovery</p>
+                    <h2 id="restore-recovery-title" class="mt-1 text-lg font-semibold text-ink-950">Restore recovery point</h2>
+                    <p id="restore-recovery-description" class="mt-2 text-sm leading-6 text-ink-650">Review the copy, target, and impact before starting. This creates a durable recovery operation that can be tracked after the dialog closes.</p>
+                    <code class="mt-2 block break-all font-mono text-xs text-ink-500" x-text="backup.uuid || 'Identifier not recorded'"></code>
+                </div>
+                <button type="button" @click="closeRestoreModal()" :disabled="loading || restoreReconciliationLoading || restoreResumeSubmitting"
+                        class="inline-flex h-11 w-11 flex-none items-center justify-center rounded-lg text-ink-500 hover:bg-wool-50 hover:text-ink-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:opacity-50"
+                        aria-label="Close restore recovery point dialog">
+                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></svg>
+                </button>
+            </header>
+
+            <div class="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+                <div x-show="loading" class="flex min-h-48 flex-col items-center justify-center text-center" role="status" aria-live="polite">
+                    <svg class="h-7 w-7 animate-spin text-evidence-600" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"/></svg>
+                    <p class="mt-3 text-sm font-semibold text-ink-950">Preparing recovery controls…</p>
+                </div>
+
+                <div x-show="!loading && !restoreStarted" class="space-y-6">
+                    <div x-show="restoreSubmissionUncertain" class="rounded-lg border border-attention-200 bg-attention-50 p-4" role="alert">
+                        <p class="text-sm font-semibold text-attention-700">The last submission outcome is not yet confirmed</p>
+                        <p class="mt-1 text-sm leading-6 text-attention-700">Do not create a different restore. Check the durable ledger, or safely retry the exact same request identity; the server will replay one matching operation instead of creating a duplicate.</p>
+                        <div class="mt-3 flex flex-col gap-2 sm:flex-row">
+                            <button type="button" @click="reconcileRestoreSubmission(true)" :disabled="loading || restoreLedgerLoading || restoreReconciliationLoading"
+                                    class="inline-flex min-h-11 items-center justify-center rounded-lg border border-attention-200 bg-paper px-4 text-sm font-semibold text-attention-700 hover:bg-white disabled:opacity-50">
+                                <span x-text="restoreReconciliationLoading ? 'Checking ledger…' : 'Check durable ledger'"></span>
+                            </button>
+                            <button type="button" @click="retryUncertainRestore()" :disabled="loading || restoreLedgerLoading || restoreReconciliationLoading || !restoreRequestId"
+                                    class="inline-flex min-h-11 items-center justify-center rounded-lg bg-attention-600 px-4 text-sm font-semibold text-white hover:bg-attention-700 disabled:opacity-50">Retry same request safely</button>
+                        </div>
+                    </div>
+                    <div x-show="restoreLedgerLoading && !restoreSubmissionUncertain" class="rounded-lg border border-rule-200 bg-wool-50 px-4 py-3 text-sm leading-6 text-ink-650" role="status" aria-live="polite">Checking the durable restore ledger before enabling recovery controls…</div>
+                    <div x-show="!restoreLedgerReady && !restoreLedgerLoading && !restoreSubmissionUncertain" class="rounded-lg border border-incident-200 bg-incident-50 p-4" role="alert">
+                        <p class="text-sm font-semibold text-incident-700">Restore ledger unavailable</p>
+                        <p class="mt-1 text-sm leading-6 text-incident-700">Starting a restore is disabled until current durable operations can be verified. An unavailable ledger is never treated as an empty ledger.</p>
+                        <button type="button" @click="reloadRestoreLedger()" :disabled="restoreLedgerLoading"
+                                class="mt-3 inline-flex min-h-11 items-center justify-center rounded-lg border border-incident-200 bg-paper px-4 text-sm font-semibold text-incident-700 hover:bg-white disabled:opacity-50">Retry ledger check</button>
+                    </div>
+                    <div x-show="hasActiveLogicalRestore()" class="rounded-lg border border-evidence-200 bg-evidence-50 px-4 py-3 text-sm leading-6 text-evidence-700" role="status">
+                        <p class="font-semibold">An accepted recovery operation is already active for this protected source.</p>
+                        <p class="mt-1">Track it below before requesting another.<span x-show="activeLogicalRestoreIsFromAnotherPoint()"> It was started from another recovery point in this source-wide recovery lane.</span></p>
+                    </div>
+                    <section aria-labelledby="restore-copy-heading">
+                        <div class="flex items-center justify-between gap-3">
+                            <div><p class="text-xs font-semibold uppercase tracking-wider text-ink-500">Step 1</p><h3 id="restore-copy-heading" class="mt-1 text-sm font-semibold text-ink-950">Choose a completed copy</h3></div>
+                            <span class="text-xs text-ink-500" x-text="`${(backup.storagePoints || []).filter(point => point.status === 3 && point.storage_file_id).length} available`"></span>
+                        </div>
+                        <div class="mt-3 space-y-2">
+                            <template x-for="storagePoint in (backup.storagePoints || []).filter(point => point.status === 3 && point.storage_file_id)" :key="storagePoint.id">
+                                <label
+                                       class="grid min-h-16 cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-start gap-3 rounded-lg border border-rule-200 p-4 transition hover:border-evidence-200 hover:bg-evidence-50/40">
+                                    <input type="radio" name="restore_storage_point" x-model="restore.storage_point_id" :value="storagePoint.id" :disabled="restoreSubmissionUncertain"
+                                           class="mt-0.5 h-5 w-5 border-rule-200 text-evidence-600 focus:ring-2 focus:ring-evidence-600/20">
+                                    <span class="min-w-0">
+                                        <span class="block break-words text-sm font-semibold text-ink-950" x-text="storagePoint.storage.name"></span>
+                                        <span class="mt-1 block text-xs text-ink-650"><span x-text="storagePoint.storage.type.name"></span> · Upload complete</span>
+                                    </span>
+                                </label>
+                            </template>
+                            <p x-show="(backup.storagePoints || []).filter(point => point.status === 3 && point.storage_file_id).length === 0" class="rounded-lg border border-attention-200 bg-attention-50 px-4 py-3 text-sm text-attention-700">No completed destination copy is available for restore.</p>
+                        </div>
+                    </section>
+
+                    <section class="rounded-lg border border-rule-200" aria-labelledby="restore-impact-heading">
+                        <div class="border-b border-rule-200 px-4 py-3">
+                            <p class="text-xs font-semibold uppercase tracking-wider text-ink-500">Step 2</p>
+                            <h3 id="restore-impact-heading" class="mt-1 text-sm font-semibold text-ink-950">Review target and impact</h3>
+                        </div>
+                        <dl class="grid gap-px bg-rule-100 sm:grid-cols-2">
+                            <div class="bg-paper p-4"><dt class="text-xs text-ink-500">Target source</dt><dd class="mt-1 break-words text-sm font-semibold text-ink-950">{{ object.name }}</dd></div>
+                            <div class="bg-paper p-4"><dt class="text-xs text-ink-500">Connection</dt><dd class="mt-1 break-words text-sm font-semibold text-ink-950">{{ object.connection.name }}</dd></div>
+                            <div class="bg-paper p-4"><dt class="text-xs text-ink-500">Recovery point</dt><dd class="mt-1 break-all font-mono text-xs font-semibold text-ink-800" x-text="backup.uuid || 'Identifier not recorded'"></dd></div>
+                            <div class="bg-paper p-4"><dt class="text-xs text-ink-500">Recovery behavior</dt><dd class="mt-1 text-sm font-semibold text-ink-950">{% if object.type == 3 %}Overwrite matching files{% else %}Create a separate database{% endif %}</dd></div>
+                        </dl>
+                    </section>
+
+                    {% if object.type == 3 %}
+                        <div class="rounded-lg border border-attention-200 bg-attention-50 p-4">
+                            <div class="flex gap-3">
+                                <svg class="mt-0.5 h-5 w-5 flex-none text-attention-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10 3.6L2.7 16.2A2 2 0 004.4 19h15.2a2 2 0 001.7-2.8L14 3.6a2.3 2.3 0 00-4 0z"/></svg>
+                                <div><p class="text-sm font-semibold text-attention-700">This overwrites matching website files</p><p class="mt-1 text-sm leading-6 text-attention-700">Files absent from the recovery point remain in place unless you enable the destructive mirror option below.</p></div>
+                            </div>
+                            <label class="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-attention-200 bg-paper p-3">
+                                <input type="checkbox" x-model="restore.delete" :disabled="restoreSubmissionUncertain" class="mt-0.5 h-5 w-5 rounded border-rule-200 text-incident-600 focus:ring-incident-600/20 disabled:cursor-not-allowed disabled:opacity-50">
+                                <span><span class="block text-sm font-semibold text-incident-700">Also delete files absent from this recovery point</span><span class="mt-1 block text-xs leading-5 text-ink-650">Permanent and off by default. Use only when the destination must exactly mirror the selected recovery point.</span></span>
+                            </label>
+                        </div>
+                    {% else %}
+                        <div class="rounded-lg border border-verified-200 bg-verified-50 px-4 py-3 text-sm leading-6 text-verified-700"><strong>Safe fork:</strong> the restore creates a separate database; the source database remains unchanged.</div>
+                    {% endif %}
+
+                    <section aria-labelledby="restore-confirm-heading">
+                        <p class="text-xs font-semibold uppercase tracking-wider text-ink-500">Step 3</p>
+                        <h3 id="restore-confirm-heading" class="mt-1 text-sm font-semibold text-ink-950">Confirm the reviewed operation</h3>
+                        <label class="mt-3 flex cursor-pointer items-start gap-3 rounded-lg border border-rule-200 p-4">
+                            <input type="checkbox" x-model="restore.confirm" :disabled="restoreSubmissionUncertain" class="mt-0.5 h-5 w-5 rounded border-rule-200 text-evidence-600 focus:ring-evidence-600/20 disabled:cursor-not-allowed disabled:opacity-50">
+                            <span class="text-sm leading-6 text-ink-800">I reviewed the recovery point, destination copy, target, and overwrite behavior above.</span>
+                        </label>
+                    </section>
+
+                    <details x-show="restoreList.length > 0" class="rounded-lg border border-rule-200">
+                        <summary class="cursor-pointer px-4 py-3 text-sm font-semibold text-ink-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Recent restore attempts <span class="font-normal text-ink-500" x-text="restoreList.length"></span></summary>
+                        <ul class="divide-y divide-rule-100 border-t border-rule-200 px-4">
+                            <template x-for="restoreItem in restoreList.slice(0, 5)" :key="restoreItem.id">
+                                <li class="py-3">
+                                    <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-medium text-ink-800" x-text="restoreCreatedLabel(restoreItem)"></p>
+                                            <p x-show="!logicalRestoreBelongsToSelectedPoint(restoreItem)" class="mt-1 text-xs font-semibold text-evidence-700">Another recovery point for this source</p>
+                                            <p x-show="restoreExecutionSummary(restoreItem)" class="mt-1 text-xs leading-5 text-ink-650" x-text="restoreExecutionSummary(restoreItem)"></p>
+                                            <p x-show="restoreExecutionErrorMessage(restoreItem)" class="mt-1 text-xs font-medium leading-5 text-incident-700" role="alert" x-text="restoreExecutionErrorMessage(restoreItem)"></p>
+                                            <p x-show="!restoreExecutionSummary(restoreItem) && safeLegacyRestoreError(restoreItem)" class="mt-1 text-xs leading-5 text-incident-700" x-text="safeLegacyRestoreError(restoreItem)"></p>
+                                        </div>
+                                        <span class="flex-none text-xs font-semibold" :class="restoreStatusToneClass(restoreItem)" x-text="restoreStatusLabel(restoreItem)"></span>
+                                    </div>
+                                    <details x-show="restoreExecutionCorrelationId(restoreItem) || restoreExecutionErrorCode(restoreItem) || restoreExecutionAttemptHistory(restoreItem).length" class="mt-2 rounded-lg bg-wool-50 px-3 py-2">
+                                        <summary class="cursor-pointer text-xs font-semibold text-ink-650">Technical details</summary>
+                                        <div x-show="restoreExecutionCorrelationId(restoreItem)" class="mt-2 flex items-start justify-between gap-3">
+                                            <code class="min-w-0 break-all font-mono text-xs text-ink-800" x-text="restoreExecutionCorrelationId(restoreItem)"></code>
+                                            <button type="button" @click="$clipboard(restoreExecutionCorrelationId(restoreItem))"
+                                                    class="flex-none text-xs font-semibold text-evidence-700"
+                                                    aria-label="Copy historical restore correlation ID">Copy</button>
+                                        </div>
+                                        <p x-show="restoreExecutionErrorCode(restoreItem)" class="mt-2 text-xs text-ink-650">Error code <code class="font-mono font-semibold text-ink-800" x-text="restoreExecutionErrorCode(restoreItem)"></code></p>
+                                        <ol x-show="restoreExecutionAttemptHistory(restoreItem).length" class="mt-3 space-y-2">
+                                            <template x-for="(attempt, index) in restoreExecutionAttemptHistory(restoreItem)" :key="`${attempt.correlationId}-${attempt.attempt}-${index}`">
+                                                <li class="rounded border border-rule-200 bg-paper px-3 py-2 text-xs text-ink-650">
+                                                    <p class="font-semibold text-ink-800">Attempt <span x-text="attempt.attempt"></span> · <span x-text="attempt.stageLabel"></span></p>
+                                                    <p>Started <span x-text="attempt.startedAtLabel"></span><span x-show="attempt.finishedAtLabel"> · Finished <span x-text="attempt.finishedAtLabel"></span></span></p>
+                                                    <p>Decision <span x-text="attempt.retryDecisionLabel"></span><span x-show="attempt.code"> · Code <span class="font-mono" x-text="attempt.code"></span></span></p>
+                                                </li>
+                                            </template>
+                                        </ol>
+                                    </details>
+                                    {% if object.type == 4 and not is_vultr_managed_database %}
+                                        <div x-show="databaseRestoreCanResume(restoreItem)" class="mt-3 flex flex-col gap-3 rounded-lg border border-attention-200 bg-attention-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+                                            <p class="text-xs leading-5 text-attention-700">Continue verification on this exact durable restore record and target mapping. This does not create a second restore.</p>
+                                            <button type="button" @click="resumeDatabaseRestore(restoreItem)"
+                                                    :disabled="restoreResumeSubmitting || loading || restoreLedgerLoading"
+                                                    class="inline-flex min-h-10 flex-none items-center justify-center gap-2 rounded-lg border border-attention-300 bg-paper px-3 text-xs font-semibold text-attention-700 hover:bg-attention-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-50">
+                                                <svg x-show="restoreResumeSubmitting" class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle class="opacity-25" cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3"></circle><path class="opacity-75" fill="currentColor" d="M12 3a9 9 0 00-9 9h3a6 6 0 016-6V3z"></path></svg>
+                                                <span x-text="restoreResumeSubmitting ? 'Resuming verification…' : 'Resume verification'"></span>
+                                            </button>
+                                        </div>
+                                    {% endif %}
+                                </li>
+                            </template>
+                        </ul>
+                    </details>
+                </div>
+
+                <div x-show="!loading && restoreStarted" class="space-y-5" aria-live="polite">
+                    <div class="rounded-lg border border-evidence-200 bg-evidence-50 px-5 py-5 text-center">
+                        <span class="mx-auto grid h-11 w-11 place-items-center rounded-full bg-paper text-evidence-600"><svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4 4L19 6.5"/></svg></span>
+                        <h3 class="mt-3 text-sm font-semibold text-ink-950">Recovery request recorded</h3>
+                        <p class="mt-1 text-sm leading-6 text-ink-650">The durable request is recorded. Its latest evidenced execution state appears below; this banner does not claim that recovery completed.</p>
+                    </div>
+                    <div x-show="restoreExecutionStatus" class="rounded-lg border border-rule-200 p-4">
+                        <div class="flex flex-wrap items-center justify-between gap-2"><p class="text-sm font-semibold text-ink-950" x-text="restoreExecutionStatus ? restoreExecutionStatus.label : ''"></p><span class="text-xs text-ink-500" x-text="restoreExecutionStatus ? restoreExecutionStatus.phaseLabel : ''"></span></div>
+                        <p x-show="restoreExecutionStatus && restoreExecutionStatus.progressLabel" class="mt-2 text-xs text-ink-650">Progress: <span x-text="restoreExecutionStatus ? restoreExecutionStatus.progressLabel : ''"></span></p>
+                        <p x-show="restoreExecutionStatus && restoreExecutionStatus.errorMessage" class="mt-2 text-sm font-medium text-incident-700" x-text="restoreExecutionStatus ? restoreExecutionStatus.errorMessage : ''"></p>
+                        <details x-show="restoreExecutionStatus && restoreExecutionStatus.correlationId" class="mt-3 rounded-lg bg-wool-50 px-3 py-2">
+                            <summary class="cursor-pointer text-xs font-semibold text-ink-650">Technical details</summary>
+                            <div class="mt-2 flex items-start justify-between gap-3">
+                                <code class="min-w-0 break-all font-mono text-xs text-ink-800" x-text="restoreExecutionStatus ? restoreExecutionStatus.correlationId : ''"></code>
+                                <button type="button" @click="$clipboard(restoreExecutionStatus ? restoreExecutionStatus.correlationId : '')"
+                                        class="flex-none text-xs font-semibold text-evidence-700"
+                                        aria-label="Copy restore correlation ID">Copy</button>
+                            </div>
+                        </details>
+                    </div>
+                </div>
+            </div>
+
+            <footer class="flex flex-col-reverse gap-2 border-t border-rule-200 bg-wool-50 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+                <button @click="closeRestoreModal()" type="button" :disabled="loading || restoreReconciliationLoading || restoreResumeSubmitting"
+                        class="inline-flex min-h-11 items-center justify-center rounded-lg border border-rule-200 bg-paper px-4 text-sm font-semibold text-ink-800 hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:opacity-50"><span x-text="restoreStarted ? 'Close' : 'Cancel'"></span></button>
+                <button x-show="!restoreStarted" @click="startRestore()" type="button"
+                        :disabled="loading || restoreLedgerLoading || !restoreLedgerReady || restoreReconciliationLoading || restoreSubmissionUncertain || hasActiveLogicalRestore() || !restore.confirm || !restore.storage_point_id"
+                        class="inline-flex min-h-11 items-center justify-center rounded-lg bg-attention-600 px-4 text-sm font-semibold text-white hover:bg-attention-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-attention-600 disabled:cursor-not-allowed disabled:opacity-50">Start restore</button>
+            </footer>
+        </div>
+    </div>
+</div>
+{% endif %}

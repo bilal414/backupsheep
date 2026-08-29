@@ -339,7 +339,7 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
         ):
             point, node = self._local_point(root)
             self.current_group.nodes.add(node)
-            url = f"/api/v1/storage/local/file/{point.pk}/"
+            url = f"/api/v1/storage/local/file/website/{point.pk}/"
 
             self.assertEqual(self.team_client.get(url).status_code, 403)
 
@@ -350,6 +350,27 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
 
             hidden_node = factories.make_website_node(self.account, self.member)
             self.current_group.nodes.set([hidden_node])
+            self.assertEqual(self.team_client.get(url).status_code, 404)
+
+    def test_local_download_permission_must_cover_the_backup_node(self):
+        with tempfile.TemporaryDirectory() as root, override_settings(
+            LOCAL_STORAGE_ROOT=root,
+            BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+            BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        ):
+            point, visibility_only_node = self._local_point(root)
+            self.current_group.nodes.add(visibility_only_node)
+
+            permission_group = _account_group(
+                self.account,
+                "download-other-node",
+                self.team_user,
+                permissions=("backup_download",),
+            )
+            permitted_node = factories.make_website_node(self.account, self.member)
+            permission_group.nodes.add(permitted_node)
+
+            url = f"/api/v1/storage/local/file/website/{point.pk}/"
             self.assertEqual(self.team_client.get(url).status_code, 404)
 
     def _set_pcloud_state(self, browser, state="expected-state"):

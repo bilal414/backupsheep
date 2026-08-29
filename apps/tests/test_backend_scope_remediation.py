@@ -353,6 +353,50 @@ class RestrictedBackendScopeTests(BaseTestCase):
         )
         self.assertEqual(allowed_response.status_code, status.HTTP_201_CREATED, allowed_response.content)
 
+    def test_schedule_create_and_reassignment_require_permission_for_selected_node(self):
+        visibility_auth_group = Group.objects.create(
+            name=slugify(f"visibility-only-{self.account.id}")
+        )
+        visibility_group = CoreAccountGroup.objects.create(
+            account=self.account,
+            group=visibility_auth_group,
+            name="visibility only",
+            type=CoreAccountGroup.Type.Client,
+            default=False,
+        )
+        self.client_user.groups.add(visibility_auth_group)
+        visibility_group.nodes.add(self.hidden_node)
+
+        storage = factories.make_storage(self.account, self.member)
+        hidden_response = self.client.post(
+            "/api/v1/schedules/",
+            self._schedule_payload(self.hidden_node, [storage.id]),
+            format="json",
+        )
+        self.assertEqual(hidden_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("node", hidden_response.json())
+
+        allowed_response = self.client.post(
+            "/api/v1/schedules/",
+            self._schedule_payload(self.allowed_node, [storage.id]),
+            format="json",
+        )
+        self.assertEqual(
+            allowed_response.status_code,
+            status.HTTP_201_CREATED,
+            allowed_response.content,
+        )
+
+        schedule_id = allowed_response.json()["id"]
+        reassign_response = self.client.patch(
+            f"/api/v1/schedules/{schedule_id}/",
+            {"node": self.hidden_node.id},
+            format="json",
+        )
+        self.assertEqual(reassign_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("node", reassign_response.json())
+        self.assertEqual(CoreSchedule.objects.get(pk=schedule_id).node, self.allowed_node)
+
     def test_one_time_schedule_uses_at_datetime_and_partial_patch_is_safe(self):
         storage = factories.make_storage(self.account, self.member)
         response = self.client.post(

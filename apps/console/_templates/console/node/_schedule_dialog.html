@@ -1,0 +1,180 @@
+{% if can_manage_schedules and source_backup_creation_available %}
+<div x-cloak x-show="openSchedule" class="fixed inset-0 z-50 overflow-y-auto"
+     aria-labelledby="protection-policy-dialog-title" aria-describedby="protection-policy-dialog-description"
+     role="dialog" aria-modal="true" @keydown.escape.prevent="!loading && closeScheduleModal()">
+    <div x-show="openSchedule" x-transition.opacity class="fixed inset-0 bg-ink-950/55" aria-hidden="true"></div>
+    <div class="flex min-h-full items-end justify-center p-0 sm:items-center sm:p-4">
+        <form x-show="openSchedule" x-transition x-ref="scheduleDialog" tabindex="-1"
+              @submit.prevent="saveSchedule()" @keydown.tab="trapFocus($event, $refs.scheduleDialog)"
+              class="relative flex max-h-[100dvh] w-full flex-col overflow-hidden rounded-t-xl border border-rule-200 bg-paper shadow-lifted sm:max-h-[calc(100vh-2rem)] sm:max-w-5xl sm:rounded-xl">
+            <header class="flex items-start justify-between gap-4 border-b border-rule-200 px-5 py-5 sm:px-6">
+                <div class="min-w-0">
+                    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Automatic protection</p>
+                    <h2 id="protection-policy-dialog-title" class="mt-1 text-lg font-semibold text-ink-950">
+                        <span x-text="schedule.id ? 'Edit protection policy' : 'Create protection policy'"></span>
+                    </h2>
+                    <p id="protection-policy-dialog-description" class="mt-2 max-w-3xl text-sm leading-6 text-ink-650">Set cadence, retention, timezone, and destination copies for <strong class="font-semibold text-ink-800">{{ object.name }}</strong>.</p>
+                </div>
+                <button type="button" @click="closeScheduleModal()" :disabled="loading"
+                        class="inline-flex h-11 w-11 flex-none items-center justify-center rounded-lg text-ink-500 hover:bg-wool-50 hover:text-ink-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:opacity-50"
+                        aria-label="Close protection policy dialog">
+                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></svg>
+                </button>
+            </header>
+
+            <div class="flex-1 overflow-y-auto">
+                <div x-show="loading" class="flex min-h-80 flex-col items-center justify-center px-6 text-center" role="status" aria-live="polite">
+                    <svg class="h-7 w-7 animate-spin text-evidence-600" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"/></svg>
+                    <p class="mt-3 text-sm font-semibold text-ink-950">Loading protection policy…</p>
+                </div>
+
+                <div x-show="!loading" class="grid xl:grid-cols-[minmax(0,1fr)_20rem]">
+                    <div class="space-y-8 px-5 py-6 sm:px-6">
+                        <section aria-labelledby="policy-identity-heading">
+                            <p class="text-xs font-semibold uppercase tracking-wider text-ink-500">1 · Identity</p>
+                            <h3 id="policy-identity-heading" class="mt-1 text-sm font-semibold text-ink-950">Name this policy</h3>
+                            <label for="policy-name" class="mt-4 block text-sm font-medium text-ink-800">Policy name</label>
+                            <input x-model.trim="schedule.name" id="policy-name" name="policy-name" type="text" autocomplete="off"
+                                   :aria-invalid="Boolean(scheduleErrors.name)" aria-describedby="policy-name-help policy-name-error"
+                                   placeholder="Production website — every 6 hours"
+                                   class="mt-1.5 block min-h-11 w-full rounded-lg border border-rule-200 bg-paper px-3 text-sm text-ink-950 shadow-sm placeholder:text-ink-500 focus:border-evidence-600 focus:ring-2 focus:ring-evidence-600/20">
+                            <p id="policy-name-help" class="mt-1.5 text-xs leading-5 text-ink-650">Use a name that identifies the environment and intent in audit records.</p>
+                            <p x-show="scheduleErrors.name" id="policy-name-error" class="mt-1.5 text-xs font-semibold text-incident-700" x-text="scheduleErrors.name"></p>
+                        </section>
+
+                        <section class="border-t border-rule-200 pt-8" aria-labelledby="policy-cadence-heading">
+                            <p class="text-xs font-semibold uppercase tracking-wider text-ink-500">2 · When to run</p>
+                            <h3 id="policy-cadence-heading" class="mt-1 text-sm font-semibold text-ink-950">Choose a cadence</h3>
+                            <div class="mt-4 grid gap-3 sm:grid-cols-2">
+                                <label class="cursor-pointer rounded-lg border border-rule-200 p-4 transition hover:border-evidence-200 hover:bg-evidence-50/40">
+                                    <span class="flex items-center gap-3"><input id="policy-rate" value="rate" x-model="schedule.type" name="policy-schedule-type" type="radio" class="h-5 w-5 border-rule-200 text-evidence-600 focus:ring-evidence-600/20"><span class="text-sm font-semibold text-ink-950">Repeat every</span></span>
+                                    <span class="mt-2 block pl-8 text-xs leading-5 text-ink-650">Simple interval for predictable recurring protection.</span>
+                                </label>
+                                <label class="cursor-pointer rounded-lg border border-rule-200 p-4 transition hover:border-evidence-200 hover:bg-evidence-50/40">
+                                    <span class="flex items-center gap-3"><input id="policy-cron" value="cron" x-model="schedule.type" name="policy-schedule-type" type="radio" class="h-5 w-5 border-rule-200 text-evidence-600 focus:ring-evidence-600/20"><span class="text-sm font-semibold text-ink-950">Advanced cron</span></span>
+                                    <span class="mt-2 block pl-8 text-xs leading-5 text-ink-650">Five-field cron for controlled calendar-based execution.</span>
+                                </label>
+                            </div>
+
+                            <div x-show="schedule.type === 'rate'" class="mt-4 grid gap-4 sm:grid-cols-2">
+                                <div><label for="policy-rate-value" class="block text-sm font-medium text-ink-800">Repeat every</label><input x-model.number="schedule.rate_value" id="policy-rate-value" type="number" min="1" step="1" class="mt-1.5 min-h-11 w-full rounded-lg border border-rule-200 px-3 text-sm focus:border-evidence-600 focus:ring-2 focus:ring-evidence-600/20"></div>
+                                <div><label for="policy-rate-unit" class="block text-sm font-medium text-ink-800">Unit</label><select x-model="schedule.rate_unit" id="policy-rate-unit" class="mt-1.5 min-h-11 w-full rounded-lg border border-rule-200 bg-paper px-3 text-sm focus:border-evidence-600 focus:ring-2 focus:ring-evidence-600/20"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option></select></div>
+                            </div>
+
+                            <div x-show="schedule.type === 'cron'" class="mt-4 rounded-lg border border-rule-200 bg-wool-50 p-4">
+                                <div class="grid gap-3 sm:grid-cols-5">
+                                    <div><label for="policy-cron-minute" class="block text-xs font-medium text-ink-650">Minute</label><input x-model.trim="schedule.minute" id="policy-cron-minute" placeholder="0" class="mt-1.5 min-h-11 w-full rounded-lg border border-rule-200 bg-paper px-3 font-mono text-sm"></div>
+                                    <div><label for="policy-cron-hour" class="block text-xs font-medium text-ink-650">Hour</label><input x-model.trim="schedule.hour" id="policy-cron-hour" placeholder="2" class="mt-1.5 min-h-11 w-full rounded-lg border border-rule-200 bg-paper px-3 font-mono text-sm"></div>
+                                    <div><label for="policy-cron-day" class="block text-xs font-medium text-ink-650">Day</label><input x-model.trim="schedule.day_of_month" id="policy-cron-day" placeholder="*" class="mt-1.5 min-h-11 w-full rounded-lg border border-rule-200 bg-paper px-3 font-mono text-sm"></div>
+                                    <div><label for="policy-cron-month" class="block text-xs font-medium text-ink-650">Month</label><input x-model.trim="schedule.month_of_year" id="policy-cron-month" placeholder="*" class="mt-1.5 min-h-11 w-full rounded-lg border border-rule-200 bg-paper px-3 font-mono text-sm"></div>
+                                    <div><label for="policy-cron-weekday" class="block text-xs font-medium text-ink-650">Weekday</label><input x-model.trim="schedule.day_of_week" id="policy-cron-weekday" placeholder="*" class="mt-1.5 min-h-11 w-full rounded-lg border border-rule-200 bg-paper px-3 font-mono text-sm"></div>
+                                </div>
+                                <p class="mt-3 text-xs leading-5 text-ink-650">Example: <code class="font-mono text-ink-800">0 2 * * *</code> runs daily at 02:00 in the selected timezone.</p>
+                            </div>
+
+                            <label for="policy-timezone" class="mt-4 block text-sm font-medium text-ink-800">Timezone</label>
+                            <select x-model="schedule.timezone" id="policy-timezone" :aria-invalid="Boolean(scheduleErrors.timezone)" aria-describedby="policy-timezone-help policy-timezone-error"
+                                    class="mt-1.5 min-h-11 w-full rounded-lg border border-rule-200 bg-paper px-3 text-sm text-ink-950 focus:border-evidence-600 focus:ring-2 focus:ring-evidence-600/20">
+                                <option value="">Select a timezone</option>
+                                {% for timezone in timezones %}<option value="{{ timezone }}">{{ timezone }}</option>{% endfor %}
+                            </select>
+                            <p id="policy-timezone-help" class="mt-1.5 text-xs leading-5 text-ink-650">Calendar schedules follow this timezone, including daylight-saving transitions.</p>
+                            <p x-show="scheduleErrors.timezone" id="policy-timezone-error" class="mt-1.5 text-xs font-semibold text-incident-700" x-text="scheduleErrors.timezone"></p>
+                        </section>
+
+                        <section class="border-t border-rule-200 pt-8" aria-labelledby="policy-retention-heading">
+                            <p class="text-xs font-semibold uppercase tracking-wider text-ink-500">3 · Retention</p>
+                            <h3 id="policy-retention-heading" class="mt-1 text-sm font-semibold text-ink-950">Define the recovery-point window</h3>
+                            <label for="policy-keep-last" class="mt-4 block text-sm font-medium text-ink-800">Keep the latest</label>
+                            <div class="mt-1.5 flex max-w-sm items-center gap-3"><input x-model.number="schedule.keep_last" id="policy-keep-last" type="number" min="1" step="1" placeholder="Unlimited" class="min-h-11 w-full rounded-lg border border-rule-200 px-3 text-sm focus:border-evidence-600 focus:ring-2 focus:ring-evidence-600/20"><span class="text-sm text-ink-650">points</span></div>
+                            <p class="mt-1.5 text-xs leading-5 text-ink-650">Leave empty for unlimited retention. Storage-provider lifecycle policies may still apply independently.</p>
+                        </section>
+
+                        {% if object.type == 3 or object.type == 4 or object.type == 5 %}
+                            <section class="border-t border-rule-200 pt-8" aria-labelledby="policy-destinations-heading">
+                                <div class="flex items-start justify-between gap-4"><div><p class="text-xs font-semibold uppercase tracking-wider text-ink-500">4 · Destinations</p><h3 id="policy-destinations-heading" class="mt-1 text-sm font-semibold text-ink-950">Select protected copies</h3></div><span class="text-xs font-semibold text-evidence-700"><span x-text="schedule.storage_point_ids.length"></span> selected</span></div>
+                                <div class="mt-4 max-h-64 overflow-y-auto rounded-lg border border-rule-200">
+                                    {% for storage in storage_list %}
+                                        <label class="flex min-h-16 cursor-pointer items-start gap-3 border-b border-rule-100 px-4 py-3 last:border-b-0 hover:bg-wool-50">
+                                            <input id="policy-storage-{{ storage.id }}" name="policy-storage-{{ storage.id }}" type="checkbox" value="{{ storage.id }}" x-model="schedule.storage_point_ids" class="mt-0.5 h-5 w-5 rounded border-rule-200 text-evidence-600 focus:ring-evidence-600/20">
+                                            <span class="min-w-0 flex-1"><span class="block break-words text-sm font-semibold text-ink-950">{{ storage.name }}</span><span class="mt-1 block text-xs text-ink-650">{{ storage.type.name }} · Active destination</span></span>
+                                            {% if can_validate_storage and storage.type.code != "bs" %}<button type="button" @click.prevent="validateStorage('{{ storage.id }}', '{{ storage.type.code }}')" class="inline-flex min-h-11 items-center text-xs font-semibold text-evidence-700">Validate</button>{% endif %}
+                                        </label>
+                                    {% empty %}
+                                        <p class="px-4 py-8 text-center text-sm text-attention-700">No active destinations are available in this account.</p>
+                                    {% endfor %}
+                                </div>
+                                <p x-show="scheduleErrors.storage_point_ids" id="policy-storage-error" class="mt-1.5 text-xs font-semibold text-incident-700" x-text="scheduleErrors.storage_point_ids"></p>
+                                <label class="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-rule-200 p-4"><input x-model="schedule.require_air_gapped_copy" type="checkbox" id="policy-air-gap" class="mt-0.5 h-5 w-5 rounded border-rule-200 text-verified-600 focus:ring-verified-600/20"><span><span class="block text-sm font-semibold text-ink-950">Require a selected immutable protected copy</span><span class="mt-1 block text-xs leading-5 text-ink-650">BackupSheep will not start the policy unless a selected destination carries the configured protected-copy classification. For S3, this means Object Lock Compliance; it does not by itself evidence offline or separate-account custody.</span></span></label>
+                            </section>
+                        {% endif %}
+
+                        <section class="border-t border-rule-200 pt-8" aria-labelledby="policy-notes-heading">
+                            <p class="text-xs font-semibold uppercase tracking-wider text-ink-500">5 · Change context</p>
+                            <h3 id="policy-notes-heading" class="mt-1 text-sm font-semibold text-ink-950">Operator notes</h3>
+                            <label for="policy-notes" class="sr-only">Operator notes</label>
+                            <textarea x-model="schedule.notes" id="policy-notes" rows="3" placeholder="Reason, ticket, or maintenance context"
+                                      class="mt-4 block w-full rounded-lg border border-rule-200 px-3 py-2 text-sm text-ink-950 placeholder:text-ink-500 focus:border-evidence-600 focus:ring-2 focus:ring-evidence-600/20"></textarea>
+                            <p x-show="scheduleErrors.notes" id="policy-notes-error" class="mt-1.5 text-xs font-semibold text-incident-700" x-text="scheduleErrors.notes"></p>
+                        </section>
+                    </div>
+
+                    <aside class="border-t border-rule-200 bg-wool-50 px-5 py-6 xl:border-l xl:border-t-0" aria-labelledby="policy-review-heading">
+                        <div class="xl:sticky xl:top-6">
+                            <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Policy preview</p>
+                            <h3 id="policy-review-heading" class="mt-1 text-sm font-semibold text-ink-950">Review before saving</h3>
+                            <dl class="mt-5 space-y-4 text-sm">
+                                <div><dt class="text-xs text-ink-500">Policy</dt><dd class="mt-1 break-words font-semibold text-ink-950" x-text="schedule.name || 'Unnamed policy'"></dd></div>
+                                <div><dt class="text-xs text-ink-500">Cadence</dt><dd class="mt-1 font-semibold text-ink-950" x-text="schedule.type === 'rate' ? (schedule.rate_value ? `Every ${schedule.rate_value} ${schedule.rate_unit}` : 'Interval not complete') : `${schedule.minute || '—'} ${schedule.hour || '—'} ${schedule.day_of_month || '—'} ${schedule.month_of_year || '—'} ${schedule.day_of_week || '—'}`"></dd></div>
+                                <div><dt class="text-xs text-ink-500">Timezone</dt><dd class="mt-1 break-words font-semibold text-ink-950" x-text="schedule.timezone || 'Not selected'"></dd></div>
+                                <div><dt class="text-xs text-ink-500">Retention</dt><dd class="mt-1 font-semibold text-ink-950" x-text="schedule.keep_last ? `Latest ${schedule.keep_last} points` : 'Unlimited'"></dd></div>
+                                {% if object.type == 3 or object.type == 4 or object.type == 5 %}<div><dt class="text-xs text-ink-500">Destination copies</dt><dd class="mt-1 font-semibold text-ink-950" x-text="`${schedule.storage_point_ids.length} selected`"></dd></div>{% endif %}
+                                <div><dt class="text-xs text-ink-500">Immutable-copy requirement</dt><dd class="mt-1 font-semibold text-ink-950" x-text="schedule.require_air_gapped_copy ? 'Required' : 'Not required'"></dd></div>
+                            </dl>
+                            <div class="mt-6 rounded-lg border border-evidence-200 bg-paper px-4 py-3 text-xs leading-5 text-ink-650">This preview describes the saved policy. It does not claim that a recovery point or recovery proof exists.</div>
+                        </div>
+                    </aside>
+                </div>
+            </div>
+
+            <footer x-show="!loading" class="flex flex-col gap-3 border-t border-rule-200 bg-paper px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+                <p class="text-xs leading-5 text-ink-650">Required fields{% if object.type == 3 or object.type == 4 or object.type == 5 %} and at least one destination{% endif %} must be complete before saving.</p>
+                <div class="flex flex-col-reverse gap-2 sm:flex-row">
+                    <button @click="closeScheduleModal()" type="button" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-rule-200 px-4 text-sm font-semibold text-ink-800 hover:bg-wool-50">Cancel</button>
+                    <button type="submit"
+                            :disabled="loading || !schedule.name || !schedule.timezone || (schedule.type === 'rate' && (!schedule.rate_value || schedule.rate_value < 1)) || (schedule.type === 'cron' && (!schedule.minute || !schedule.hour || !schedule.day_of_month || !schedule.month_of_year || !schedule.day_of_week)){% if object.type == 3 or object.type == 4 or object.type == 5 %} || schedule.storage_point_ids.length === 0{% endif %}"
+                            class="inline-flex min-h-11 items-center justify-center rounded-lg bg-evidence-600 px-4 text-sm font-semibold text-white hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-text="schedule.id ? 'Save policy changes' : 'Create policy'"></span>
+                    </button>
+                </div>
+            </footer>
+        </form>
+    </div>
+</div>
+{% endif %}
+
+{% if can_manage_schedules %}
+<div x-cloak x-show="openScheduleDelete" class="fixed inset-0 z-50 overflow-y-auto"
+     aria-labelledby="delete-policy-dialog-title" aria-describedby="delete-policy-dialog-description"
+     role="dialog" aria-modal="true" @keydown.escape.prevent="!loading && closeScheduleDeleteModal()">
+    <div x-show="openScheduleDelete" x-transition.opacity class="fixed inset-0 bg-ink-950/55" aria-hidden="true"></div>
+    <div class="flex min-h-full items-end justify-center p-0 sm:items-center sm:p-4">
+        <div x-show="openScheduleDelete" x-transition x-ref="scheduleDeleteDialog" tabindex="-1"
+             @keydown.tab="trapFocus($event, $refs.scheduleDeleteDialog)"
+             class="relative flex max-h-[100dvh] w-full flex-col overflow-hidden rounded-t-xl border border-rule-200 bg-paper shadow-lifted sm:max-w-lg sm:rounded-xl">
+            <header class="border-b border-rule-200 px-5 py-5 sm:px-6">
+                <p class="text-xs font-semibold uppercase tracking-[0.14em] text-incident-700">Policy removal</p>
+                <h2 id="delete-policy-dialog-title" class="mt-1 text-lg font-semibold text-ink-950">Delete protection policy?</h2>
+                <p id="delete-policy-dialog-description" class="mt-2 text-sm leading-6 text-ink-650">Automatic runs from <strong class="font-semibold text-ink-950" x-text="scheduleDelete.name || 'this policy'"></strong> will stop. Existing recovery points are not deleted by this action.</p>
+            </header>
+            <div class="px-5 py-5 sm:px-6">
+                <div class="rounded-lg border border-attention-200 bg-attention-50 px-4 py-3 text-sm leading-6 text-attention-700">This source will rely on its remaining policies and authorized on-demand runs. The policy cannot be restored after deletion.</div>
+            </div>
+            <footer class="flex flex-col-reverse gap-2 border-t border-rule-200 bg-wool-50 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+                <button @click="closeScheduleDeleteModal()" type="button" :disabled="loading" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-rule-200 bg-paper px-4 text-sm font-semibold text-ink-800 hover:bg-white disabled:opacity-50">Keep policy</button>
+                <button @click="deleteSchedule()" type="button" :disabled="loading" class="inline-flex min-h-11 items-center justify-center rounded-lg bg-incident-600 px-4 text-sm font-semibold text-white hover:bg-incident-700 disabled:cursor-not-allowed disabled:opacity-50"><span x-text="loading ? 'Deleting policy…' : 'Delete policy'"></span></button>
+            </footer>
+        </div>
+    </div>
+</div>
+{% endif %}

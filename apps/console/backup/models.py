@@ -5869,8 +5869,18 @@ class BaseBackupStoragePoints(TimeStampedModel):
             return response
         elif self.storage.type.code == "local":
             # Local Storage files never leave this server; the download view streams
-            # them through the app (session-authenticated, account-scoped).
-            return f"/api/v1/storage/local/file/{self.id}/"
+            # them through the app (session-authenticated, account-scoped). The
+            # family is part of the identity because each storage-point table
+            # has its own integer primary-key sequence.
+            family = {
+                "corewebsitebackupstoragepoints": "website",
+                "coredatabasebackupstoragepoints": "database",
+                "corewordpressbackupstoragepoints": "wordpress",
+                "corebasecampbackupstoragepoints": "basecamp",
+            }.get(self._meta.model_name)
+            if not family:
+                raise RuntimeError("Local backup family is not supported for download.")
+            return f"/api/v1/storage/local/file/{family}/{self.id}/"
 
 
     def delete_requested(self):

@@ -10,8 +10,8 @@ from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
     CurrentAccountDefault,
     CurrentMemberDefault,
-    visible_nodes,
 )
+from apps.api.v1.utils.api_permissions import permitted_nodes
 from apps.console.connection.models import (
     CoreConnection,
     CoreIntegration,
@@ -140,14 +140,14 @@ class AccountFilteredPrimaryKeyRelatedField(serializers.PrimaryKeyRelatedField):
 
 
 class VisibleNodePrimaryKeyRelatedField(serializers.PrimaryKeyRelatedField):
-    """Only allow schedule nodes visible to the requesting member."""
+    """Only allow nodes covered by the member's schedule permission."""
 
     def get_queryset(self):
         request = self.context.get("request")
         queryset = super().get_queryset()
         if request is None or queryset is None:
             return None
-        return visible_nodes(request.user.member)
+        return permitted_nodes(request, "schedule_changes")
 
 
 class CoreScheduleSerializer(serializers.ModelSerializer):

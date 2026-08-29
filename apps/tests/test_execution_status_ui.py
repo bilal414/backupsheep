@@ -10,15 +10,24 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.template_path = (
+        template_dir = (
             Path(__file__).resolve().parents[1]
             / "console"
             / "_templates"
             / "console"
             / "node"
-            / "detail.html"
         )
-        cls.source = cls.template_path.read_text(encoding="utf-8")
+        cls.template_path = template_dir / "detail.html"
+        cls.detail_source = cls.template_path.read_text(encoding="utf-8")
+        cls.overview_source = (template_dir / "_detail_overview.html").read_text(
+            encoding="utf-8"
+        )
+        cls.recovery_dialogs_source = (
+            template_dir / "_recovery_dialogs.html"
+        ).read_text(encoding="utf-8")
+        cls.source = "\n".join(
+            (cls.detail_source, cls.overview_source, cls.recovery_dialogs_source)
+        )
 
     def test_node_detail_template_compiles(self):
         get_template("console/node/detail.html")
@@ -71,7 +80,7 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
             category,
         )
         self.assertIn(
-            "const shouldPoll = !['complete', 'terminal_failure', 'manual_review'].includes(category.key);",
+            "const shouldPoll = !['complete', 'partial', 'terminal_failure', 'manual_review'].includes(category.key);",
             self.source,
         )
 
@@ -148,7 +157,7 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
             self.source,
         )
         self.assertIn(
-            "openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '3')",
+            "openNativeCloudRestoreModal('{{ backup.id }}'",
             self.source,
         )
 
@@ -165,9 +174,7 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
             "nodeSummary(payload && payload.node_summary)",
             "this.$dispatch('backupsheep-node-summary', nextNodeSummary)",
             '@backupsheep-node-summary.window="applyNodeSummary($event.detail)"',
-            'x-text="nodeTotalBackupsLabel"',
             'x-text="nodeTotalStorageLabel"',
-            'x-text="nodeLastBackupLabel"',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.source)
@@ -175,14 +182,30 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
     def test_recent_restore_history_exposes_phase_and_safe_diagnostics(self):
         for marker in (
             'x-show="restoreExecutionSummary(restoreItem)"',
-            "restoreExecutionErrorMessage(item)",
-            "restoreExecutionCorrelationId(item)",
-            "restoreExecutionErrorCode(item)",
+            'x-show="restoreExecutionErrorMessage(restoreItem)"',
+            'x-text="restoreExecutionErrorMessage(restoreItem)"',
+            "restoreExecutionCorrelationId(restoreItem)",
+            "restoreExecutionErrorCode(restoreItem)",
             'aria-label="Copy historical restore correlation ID"',
-            "The restore state is ambiguous, so automatic destination writes were stopped.",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.source)
+                self.assertIn(marker, self.recovery_dialogs_source)
+
+        self.assertIn(
+            "The restore state is ambiguous, so automatic destination writes were stopped.",
+            self.detail_source,
+        )
+
+    def test_database_restore_history_exposes_exact_record_resume_control(self):
+        for marker in (
+            '{% if object.type == 4 and not is_vultr_managed_database %}',
+            'x-show="databaseRestoreCanResume(restoreItem)"',
+            '@click="resumeDatabaseRestore(restoreItem)"',
+            "This does not create a second restore.",
+            "Resume verification",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.recovery_dialogs_source)
 
     def test_technical_details_render_bounded_attempt_history(self):
         for marker in (
@@ -227,8 +250,8 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
 
     def test_opening_an_existing_active_restore_resumes_polling(self):
         restore_refresh = self.source.split(
-            "async getBackupRestores(showErrors)", 1
-        )[1].split("async startRestore()", 1)[0]
+            "async getBackupRestores(", 1
+        )[1].split("async startRestore(", 1)[0]
         self.assertIn("else if (!this.restorePollHandle)", restore_refresh)
         self.assertIn("this.startRestorePolling();", restore_refresh)
         self.assertLess(

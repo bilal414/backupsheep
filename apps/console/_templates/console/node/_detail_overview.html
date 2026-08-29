@@ -1,0 +1,292 @@
+{% load humanize %}
+<header class="space-y-5" aria-labelledby="source-title">
+    <a href="{% url 'console:node:index' %}"
+       class="inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-ink-650 transition hover:text-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-evidence-600">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
+        </svg>
+        All sources
+    </a>
+
+    <div class="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+        <div class="flex min-w-0 items-start gap-4">
+            <span class="grid h-12 w-12 flex-none place-items-center rounded-lg border border-evidence-200 bg-evidence-50 text-evidence-600">
+                {% if object.type == 3 %}
+                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9 9 0 100-18 9 9 0 000 18zm0 0c2.5 0 4.5-4 4.5-9S14.5 3 12 3m0 18c-2.5 0-4.5-4-4.5-9S9.5 3 12 3m-8.7 6h17.4M3.3 15h17.4"/>
+                    </svg>
+                {% elif object.type == 4 %}
+                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M20 6c0 2.2-3.6 4-8 4S4 8.2 4 6s3.6-4 8-4 8 1.8 8 4zm0 0v12c0 2.2-3.6 4-8 4s-8-1.8-8-4V6m16 6c0 2.2-3.6 4-8 4s-8-1.8-8-4"/>
+                    </svg>
+                {% else %}
+                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.3-7.3 3 3 0 00-3.7-3.8 5.25 5.25 0 00-10.3 2.3A4.5 4.5 0 003 15z"/>
+                    </svg>
+                {% endif %}
+            </span>
+            <div class="min-w-0">
+                <p class="text-xs font-semibold uppercase tracking-[0.14em] text-ink-500">{{ object.get_type_display }} source</p>
+                <h1 id="source-title" class="mt-1 break-words text-2xl font-semibold tracking-tight text-ink-950 sm:text-3xl">{{ object.name }}</h1>
+                <p class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-650">
+                    <span>{{ object.connection.integration.name }}</span>
+                    <span aria-hidden="true" class="text-rule-200">/</span>
+                    <span>{{ object.connection.name }}</span>
+                    <span aria-hidden="true" class="text-rule-200">/</span>
+                    <span class="font-mono text-xs">Source {{ object.id }}</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 xl:justify-end">
+            {% if can_run_backups and source_backup_creation_available %}
+                <button @click="openBackupModal()" type="button"
+                        class="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-evidence-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m6-6H6"/>
+                    </svg>
+                    Run backup
+                </button>
+            {% endif %}
+
+            {% if can_manage_source %}
+                {% if object.type == 1 or object.type == 2 %}
+                    <button @click="openModifyModal()" type="button"
+                            class="inline-flex min-h-11 items-center justify-center rounded-lg border border-rule-200 bg-paper px-4 py-2.5 text-sm font-semibold text-ink-800 transition hover:border-evidence-200 hover:bg-evidence-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                        Configure source
+                    </button>
+                {% elif object.type == 3 or object.type == 4 %}
+                    <a href="{% url 'console:setup:integration_modify_node' integration_code=object.get_type_display|lower connection_id=object.connection.id object_code='objects' node_id=object.id %}"
+                       class="inline-flex min-h-11 items-center justify-center rounded-lg border border-rule-200 bg-paper px-4 py-2.5 text-sm font-semibold text-ink-800 transition hover:border-evidence-200 hover:bg-evidence-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                        Configure source
+                    </a>
+                {% elif object.type == 5 and source_backup_creation_available %}
+                    <a href="{% url 'console:setup:integration_modify_node' integration_code=object.get_integration_alt_code|lower connection_id=object.connection.id object_code='objects' node_id=object.id %}"
+                       class="inline-flex min-h-11 items-center justify-center rounded-lg border border-rule-200 bg-paper px-4 py-2.5 text-sm font-semibold text-ink-800 transition hover:border-evidence-200 hover:bg-evidence-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                        Configure source
+                    </a>
+                {% endif %}
+
+                <details class="relative">
+                    <summary class="inline-flex min-h-11 cursor-pointer list-none items-center justify-center gap-2 rounded-lg border border-rule-200 bg-paper px-4 py-2.5 text-sm font-semibold text-ink-800 transition marker:hidden hover:border-evidence-200 hover:bg-evidence-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                        More
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/></svg>
+                    </summary>
+                    <div class="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-rule-200 bg-paper p-1.5 shadow-lifted">
+                        {% if object.status == 1 %}
+                            <button @click="openPauseBackupsModal()" type="button" class="flex min-h-11 w-full items-center rounded-md px-3 text-left text-sm font-medium text-ink-800 hover:bg-wool-50">Pause protection</button>
+                        {% elif source_backup_creation_available %}
+                            {% if object.status == 6 or object.status == 8 %}
+                                <button @click="openResumeBackupsModal()" type="button" class="flex min-h-11 w-full items-center rounded-md px-3 text-left text-sm font-medium text-ink-800 hover:bg-wool-50">Resume protection</button>
+                            {% endif %}
+                        {% endif %}
+                        <button @click="openDeleteNodeModal()" type="button" class="flex min-h-11 w-full items-center rounded-md px-3 text-left text-sm font-semibold text-incident-700 hover:bg-incident-50">Delete source…</button>
+                    </div>
+                </details>
+            {% endif %}
+        </div>
+    </div>
+</header>
+
+<nav class="-mx-1 flex gap-1 overflow-x-auto border-b border-rule-200 px-1" aria-label="Source sections">
+    <a href="#recovery-summary" class="whitespace-nowrap border-b-2 border-evidence-600 px-3 py-3 text-sm font-semibold text-evidence-700">Recovery</a>
+    <a href="#section-backup" class="whitespace-nowrap border-b-2 border-transparent px-3 py-3 text-sm font-medium text-ink-650 transition hover:border-rule-200 hover:text-ink-950">Runs</a>
+    <a href="#protection-policies" class="whitespace-nowrap border-b-2 border-transparent px-3 py-3 text-sm font-medium text-ink-650 transition hover:border-rule-200 hover:text-ink-950">Protection</a>
+    <a href="#source-configuration" class="whitespace-nowrap border-b-2 border-transparent px-3 py-3 text-sm font-medium text-ink-650 transition hover:border-rule-200 hover:text-ink-950">Configuration</a>
+</nav>
+
+<section id="recovery-summary" class="overflow-hidden rounded-lg border border-rule-200 bg-paper" aria-labelledby="recovery-heading">
+    <div class="flex flex-col gap-4 border-b border-rule-200 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+            <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Recovery ledger</p>
+            <h2 id="recovery-heading" class="mt-1 text-base font-semibold text-ink-950">Evidence at a glance</h2>
+            <p class="mt-1 max-w-3xl text-sm leading-6 text-ink-650">Connection, policy, operation completion, and recovery proof are independent signals. A completed backup is not presented as proof of a successful recovery.</p>
+        </div>
+        <time datetime="{{ object.modified|date:'c' }}" class="whitespace-nowrap text-xs text-ink-500">Source updated {{ object.modified|naturaltime }}</time>
+    </div>
+
+    <ol class="grid divide-y divide-rule-200 md:grid-cols-2 md:divide-y-0 xl:grid-cols-4 xl:divide-x" aria-label="Recovery evidence stages">
+        <li class="p-5">
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-xs font-semibold uppercase tracking-wider text-ink-500">1 · Connection</span>
+                <span class="inline-flex items-center gap-1.5 text-xs font-semibold {% if connection_state_tone == 'available' %}text-verified-700{% elif connection_state_tone == 'attention' %}text-attention-700{% elif connection_state_tone == 'incident' %}text-incident-700{% else %}text-ink-650{% endif %}">
+                    <span class="h-2 w-2 rounded-full {% if connection_state_tone == 'available' %}bg-verified-600{% elif connection_state_tone == 'attention' %}bg-attention-600{% elif connection_state_tone == 'incident' %}bg-incident-600{% else %}bg-ink-500{% endif %}" aria-hidden="true"></span>
+                    {{ object.connection.get_status_display }}
+                </span>
+            </div>
+            <p class="mt-3 text-sm font-semibold text-ink-950">{{ object.connection.integration.name }}</p>
+            <p class="mt-1 text-xs leading-5 text-ink-650">Credentials and source reachability are a separate control plane.</p>
+        </li>
+
+        <li class="border-rule-200 p-5 md:border-l xl:border-l-0">
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-xs font-semibold uppercase tracking-wider text-ink-500">2 · Protection policy</span>
+                {% if active_schedule_count > 0 %}
+                    <span class="text-xs font-semibold text-verified-700">{{ active_schedule_count }} enabled</span>
+                {% else %}
+                    <span class="text-xs font-semibold text-attention-700">Not scheduled</span>
+                {% endif %}
+            </div>
+            <p class="mt-3 text-sm font-semibold text-ink-950">{% if active_schedule_count > 0 %}Automatic protection configured{% else %}Manual runs only{% endif %}</p>
+            <p class="mt-1 text-xs leading-5 text-ink-650">{{ schedule_count }} total polic{{ schedule_count|pluralize:"y,ies" }} in this source scope.</p>
+        </li>
+
+        <li class="border-rule-200 p-5 xl:border-l">
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-xs font-semibold uppercase tracking-wider text-ink-500">3 · Complete record</span>
+                {% if last_complete_backup %}<span class="text-xs font-semibold text-verified-700">Recorded</span>{% else %}<span class="text-xs font-semibold text-attention-700">None</span>{% endif %}
+            </div>
+            {% if last_complete_backup %}
+                <p class="mt-3 text-sm font-semibold text-ink-950"><time datetime="{{ last_complete_backup.created|date:'c' }}">{{ last_complete_backup.created|naturaltime }}</time></p>
+                <p class="mt-1 break-all font-mono text-xs leading-5 text-ink-650">{{ last_complete_backup.uuid|default:"Legacy record · identifier not recorded" }}</p>
+            {% else %}
+                <p class="mt-3 text-sm font-semibold text-ink-950">No completed recovery point</p>
+                <p class="mt-1 text-xs leading-5 text-ink-650">Run and validate a backup before relying on this source.</p>
+            {% endif %}
+        </li>
+
+        <li class="border-rule-200 p-5 md:border-l">
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-xs font-semibold uppercase tracking-wider text-ink-500">4 · Recovery proof</span>
+                <span class="text-xs font-semibold text-ink-650">Not recorded</span>
+            </div>
+            <p class="mt-3 text-sm font-semibold text-ink-950">No isolated recovery evidence</p>
+            <p class="mt-1 text-xs leading-5 text-ink-650">Completion records storage work; recovery proof requires a separately verified restore.</p>
+        </li>
+    </ol>
+
+    {% if not source_backup_creation_available %}
+        <div class="border-t border-attention-200 bg-attention-50 px-5 py-4 text-sm leading-6 text-attention-700" role="status">{{ source_recovery_unavailable_message }}</div>
+    {% elif active_schedule_count == 0 %}
+        <div class="flex flex-col gap-3 border-t border-attention-200 bg-attention-50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <p class="text-sm leading-6 text-attention-700"><strong>No automatic protection policy.</strong> This source currently depends on manual backup runs.</p>
+            {% if can_manage_schedules %}
+                <button type="button" @click="openScheduleModal()" class="inline-flex min-h-11 flex-none items-center justify-center rounded-lg border border-attention-200 bg-paper px-4 py-2 text-sm font-semibold text-attention-700 hover:bg-attention-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-attention-600">Create policy</button>
+            {% endif %}
+        </div>
+    {% elif latest_operation_tone == 'incident' or latest_operation_tone == 'attention' %}
+        <div class="border-t border-attention-200 bg-attention-50 px-5 py-4 text-sm leading-6 text-attention-700" role="status"><strong>Latest operation needs review.</strong> Its status is {{ latest_operation.get_status_display|lower }}; the earlier completed record remains listed separately.</div>
+    {% endif %}
+</section>
+
+<div class="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(22rem,0.65fr)]">
+    <section class="overflow-hidden rounded-lg border border-rule-200 bg-paper" aria-labelledby="protection-summary-heading">
+        <div class="border-b border-rule-200 px-5 py-4">
+            <h2 id="protection-summary-heading" class="text-sm font-semibold text-ink-950">Protection summary</h2>
+            <p class="mt-1 text-xs text-ink-650">Source state and the latest recorded operation.</p>
+        </div>
+        <dl class="grid gap-px bg-rule-100 sm:grid-cols-2">
+            <div class="bg-paper p-5">
+                <dt class="text-xs font-medium text-ink-500">Source state</dt>
+                <dd class="mt-2 flex items-center gap-2 text-sm font-semibold {% if source_state_tone == 'available' %}text-verified-700{% elif source_state_tone == 'attention' %}text-attention-700{% elif source_state_tone == 'incident' %}text-incident-700{% else %}text-ink-800{% endif %}"><span class="h-2 w-2 rounded-full {% if source_state_tone == 'available' %}bg-verified-600{% elif source_state_tone == 'attention' %}bg-attention-600{% elif source_state_tone == 'incident' %}bg-incident-600{% else %}bg-ink-500{% endif %}" aria-hidden="true"></span>{{ object.get_status_display }}</dd>
+            </div>
+            <div class="bg-paper p-5">
+                <dt class="text-xs font-medium text-ink-500">Latest operation</dt>
+                <dd class="mt-2 text-sm font-semibold text-ink-950">{% if latest_operation %}{{ latest_operation.get_status_display }}{% else %}No operation recorded{% endif %}</dd>
+                {% if latest_operation %}<dd class="mt-1 text-xs text-ink-650">{{ latest_operation.created|naturaltime }}</dd>{% endif %}
+            </div>
+            <div class="bg-paper p-5">
+                <dt class="text-xs font-medium text-ink-500">Stored data</dt>
+                <dd class="mt-2 text-sm font-semibold text-ink-950"><span x-show="nodeTotalStorageLabel === null">{{ object.total_storage|default:"Not available" }}</span><span x-show="nodeTotalStorageLabel !== null" x-cloak x-text="nodeTotalStorageLabel"></span></dd>
+            </div>
+            <div class="bg-paper p-5">
+                <dt class="text-xs font-medium text-ink-500">Source added</dt>
+                <dd class="mt-2 text-sm font-semibold text-ink-950">{{ object.created|naturaltime }}</dd>
+            </div>
+        </dl>
+    </section>
+
+    <section id="source-configuration" class="overflow-hidden rounded-lg border border-rule-200 bg-paper" aria-labelledby="connection-heading">
+        <div class="border-b border-rule-200 px-5 py-4">
+            <h2 id="connection-heading" class="text-sm font-semibold text-ink-950">Connection</h2>
+            <p class="mt-1 text-xs text-ink-650">Where this source is discovered and executed.</p>
+        </div>
+        <dl class="space-y-4 p-5 text-sm">
+            <div class="flex items-start justify-between gap-4"><dt class="text-ink-500">Provider</dt><dd class="text-right font-semibold text-ink-950">{{ object.connection.integration.name }}</dd></div>
+            <div class="flex items-start justify-between gap-4"><dt class="text-ink-500">Connection</dt><dd class="min-w-0 break-words text-right font-semibold text-ink-950">{{ object.connection.name }}</dd></div>
+            <div class="flex items-start justify-between gap-4"><dt class="text-ink-500">Execution location</dt><dd class="text-right font-semibold text-ink-950">{{ object.connection.location.location|default:"Not recorded" }}</dd></div>
+            <div class="flex items-start justify-between gap-4"><dt class="text-ink-500">IPv4</dt><dd><button type="button" @click="$clipboard('{{ object.connection.location.ip_address }}')" class="break-all text-right font-mono text-xs font-semibold text-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600" title="Copy IPv4 address">{{ object.connection.location.ip_address|default:"Not assigned" }}</button></dd></div>
+        </dl>
+    </section>
+</div>
+
+<section class="overflow-hidden rounded-lg border border-rule-200 bg-paper" aria-labelledby="notification-policy-heading">
+    <div class="grid gap-px bg-rule-100 lg:grid-cols-[1fr_1fr_1fr]">
+        <div class="bg-paper px-5 py-4">
+            <h2 id="notification-policy-heading" class="text-sm font-semibold text-ink-950">Alert delivery</h2>
+            <p class="mt-1 text-xs leading-5 text-ink-650">Email preferences for backup outcomes on this source.</p>
+        </div>
+        <div class="flex min-h-20 items-center justify-between gap-4 bg-paper px-5 py-4">
+            <label id="notify-success-label" class="text-sm font-medium text-ink-800">Email when a backup succeeds</label>
+            <button type="button" {% if can_manage_source %}@click="toggleNotification('success')"{% else %}disabled{% endif %}
+                    :class="{ 'bg-verified-600': notify_on_success, 'bg-rule-200': !notify_on_success }"
+                    class="relative inline-flex h-7 w-12 flex-none rounded-full border-2 border-transparent transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-60"
+                    role="switch" :aria-checked="notify_on_success" aria-labelledby="notify-success-label">
+                <span :class="{ 'translate-x-5': notify_on_success, 'translate-x-0': !notify_on_success }" class="pointer-events-none inline-block h-6 w-6 rounded-full bg-paper shadow-sm transition"></span>
+            </button>
+        </div>
+        <div class="flex min-h-20 items-center justify-between gap-4 bg-paper px-5 py-4">
+            <label id="notify-failure-label" class="text-sm font-medium text-ink-800">Email when a backup needs attention</label>
+            <button type="button" {% if can_manage_source %}@click="toggleNotification('fail')"{% else %}disabled{% endif %}
+                    :class="{ 'bg-verified-600': notify_on_fail, 'bg-rule-200': !notify_on_fail }"
+                    class="relative inline-flex h-7 w-12 flex-none rounded-full border-2 border-transparent transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-60"
+                    role="switch" :aria-checked="notify_on_fail" aria-labelledby="notify-failure-label">
+                <span :class="{ 'translate-x-5': notify_on_fail, 'translate-x-0': !notify_on_fail }" class="pointer-events-none inline-block h-6 w-6 rounded-full bg-paper shadow-sm transition"></span>
+            </button>
+        </div>
+    </div>
+</section>
+
+<section id="protection-policies" class="overflow-hidden rounded-lg border border-rule-200 bg-paper" aria-labelledby="protection-policies-heading">
+    <div class="flex flex-col gap-3 border-b border-rule-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+            <h2 id="protection-policies-heading" class="text-sm font-semibold text-ink-950">Protection policies <span class="font-normal text-ink-500">{{ schedule_count }}</span></h2>
+            <p class="mt-1 text-xs text-ink-650">Cadence, retention, timezone, and destinations for automatic backups.</p>
+        </div>
+        {% if can_manage_schedules and source_backup_creation_available %}
+            <button type="button" @click="openScheduleModal()" class="inline-flex min-h-11 flex-none items-center justify-center rounded-lg border border-rule-200 bg-paper px-4 py-2 text-sm font-semibold text-evidence-700 transition hover:border-evidence-200 hover:bg-evidence-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Create protection policy</button>
+        {% endif %}
+    </div>
+
+    {% if schedule_count > 0 %}
+        <ul class="divide-y divide-rule-100">
+            {% for schedule in schedule_list %}
+                <li class="grid gap-4 px-5 py-4 lg:grid-cols-[minmax(12rem,1.2fr)_minmax(9rem,0.8fr)_minmax(8rem,0.7fr)_auto] lg:items-center">
+                    <div class="min-w-0">
+                        <p class="break-words text-sm font-semibold text-ink-950">{{ schedule.name }}</p>
+                        <p class="mt-1 text-xs text-ink-650">{% if schedule.type == 'rate' %}Every {{ schedule.rate_value }} {{ schedule.rate_unit }}{% elif schedule.type == 'cron' %}<span class="font-mono">{{ schedule.crontab_display }}</span>{% else %}{{ schedule.at_datetime }}{% endif %}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-ink-500">Policy state</p>
+                        <p class="mt-1 text-sm font-semibold {% if schedule.status == 1 %}text-verified-700{% else %}text-attention-700{% endif %}">{{ schedule.get_status_display }}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-ink-500">Timezone · retention</p>
+                        <p class="mt-1 text-sm font-medium text-ink-800">{{ schedule.timezone }} · {% if schedule.keep_last %}latest {{ schedule.keep_last }}{% else %}unlimited{% endif %}</p>
+                    </div>
+                    {% if can_manage_schedules %}
+                        <div class="flex flex-wrap gap-2 lg:justify-end">
+                            {% if source_backup_creation_available %}
+                                <button @click="openScheduleModal('{{ schedule.id }}')" type="button" :disabled="loading" class="inline-flex min-h-11 items-center rounded-lg border border-rule-200 px-3 text-sm font-semibold text-ink-800 hover:bg-wool-50 disabled:cursor-not-allowed disabled:opacity-50">Edit</button>
+                            {% endif %}
+                            {% if schedule.status == 1 %}
+                                <button @click="pauseSchedule('{{ schedule.id }}')" type="button" :disabled="loading" class="inline-flex min-h-11 items-center rounded-lg border border-rule-200 px-3 text-sm font-semibold text-ink-800 hover:bg-wool-50 disabled:cursor-not-allowed disabled:opacity-50">Pause</button>
+                            {% elif source_backup_creation_available %}
+                                <button @click="resumeSchedule('{{ schedule.id }}')" type="button" :disabled="loading" class="inline-flex min-h-11 items-center rounded-lg border border-rule-200 px-3 text-sm font-semibold text-ink-800 hover:bg-wool-50 disabled:cursor-not-allowed disabled:opacity-50">Resume</button>
+                            {% endif %}
+                            <button @click="openScheduleDeleteModal('{{ schedule.id }}', '{{ schedule.name|escapejs }}')" type="button" :disabled="loading" class="inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-semibold text-incident-700 hover:bg-incident-50 disabled:cursor-not-allowed disabled:opacity-50">Delete</button>
+                        </div>
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <div class="px-5 py-10 text-center">
+            <span class="mx-auto grid h-11 w-11 place-items-center rounded-full bg-attention-50 text-attention-600">
+                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 9h18M5.25 5.25h13.5A2.25 2.25 0 0121 7.5v11.25A2.25 2.25 0 0118.75 21H5.25A2.25 2.25 0 013 18.75V7.5a2.25 2.25 0 012.25-2.25z"/></svg>
+            </span>
+            <h3 class="mt-3 text-sm font-semibold text-ink-950">No automatic protection policy</h3>
+            <p class="mx-auto mt-1 max-w-xl text-sm leading-6 text-ink-650">Backups run only when an authorized operator starts them manually.</p>
+        </div>
+    {% endif %}
+</section>

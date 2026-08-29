@@ -3,30 +3,32 @@
 {% block meta_title %}{{ heading }}{% endblock %}
 {% block meta_description %}{{ heading }}{% endblock %}
 {% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page{% endblock %}
+{% block page_class %}page_console console-page source-config-page{% endblock %}
 {% block heading %}false{% endblock %}
 {% block content %}
     <div class="space-y-6">
-        <!-- Wizard header -->
-        <div>
-            <a href="{% if show_link_url %}{{ show_link_url }}{% else %}{% url 'console:setup:integration_select' %}{% endif %}" class="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 transition hover:text-indigo-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+        <!-- Source workspace header -->
+        <header>
+            <a href="{% if show_link_url %}{{ show_link_url }}{% else %}{% url 'console:setup:integration_select' %}{% endif %}" class="inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-ink-650 transition hover:text-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-evidence-600">
                 <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
                 </svg>
-                {% if node %}Back to node{% else %}Back to {{ integration.name }}{% endif %}
+                {% if node %}Back to source{% else %}Back to {{ integration.name }}{% endif %}
             </a>
             <div class="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div class="min-w-0">
                     {% if node %}
-                        <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">{{ node.name }}</h2>
-                        <p class="mt-1 text-sm text-slate-500">{{ integration.name }} &middot; {{ connection.name }} &mdash; update this node's setup and save your changes.</p>
+                        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Source configuration</p>
+                        <h1 class="mt-1 break-words text-2xl font-semibold tracking-tight text-ink-950 sm:text-3xl">{{ node.name }}</h1>
+                        <p class="mt-2 text-sm leading-6 text-ink-650">{{ integration.name }} &middot; {{ connection.name }} &mdash; review what is protected and how source data is transferred.</p>
                     {% else %}
-                        <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Set up {{ integration.name }} node</h2>
-                        <p class="mt-1 text-sm text-slate-500">{{ connection.name }} &mdash; choose what to protect and how backups should run.</p>
+                        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Connect a source</p>
+                        <h1 class="mt-1 text-2xl font-semibold tracking-tight text-ink-950 sm:text-3xl">Set up {{ integration.name }}</h1>
+                        <p class="mt-2 text-sm leading-6 text-ink-650">{{ connection.name }} &mdash; choose what to protect and how source data is transferred.</p>
                     {% endif %}
                 </div>
                 {% if node %}
-                    <span class="inline-flex flex-none items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10"><span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>Modify node</span>
+                    <span class="inline-flex flex-none items-center gap-1.5 rounded-full bg-evidence-50 px-3 py-1 text-xs font-semibold text-evidence-700 ring-1 ring-inset ring-evidence-200"><span class="h-1.5 w-1.5 rounded-full bg-evidence-600"></span>Editing source</span>
                 {% else %}
                     <nav class="flex-none" aria-label="Setup progress">
                         <ol class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-medium">
@@ -60,7 +62,7 @@
                     </nav>
                 {% endif %}
             </div>
-        </div>
+        </header>
 
         {% if integration_code == "website" %}
             {% include "console/setup/_setup_website_node.html" %}

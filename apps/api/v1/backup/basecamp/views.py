@@ -34,7 +34,10 @@ from apps.api.v1.backup.basecamp.serializers import (
 )
 from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
-from apps.console.backup.models import CoreBasecampBackup
+from apps.console.backup.models import (
+    CoreBasecampBackup,
+    CoreBasecampBackupStoragePoints,
+)
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from rest_framework import status
@@ -90,8 +93,28 @@ class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
         if storage_point_id:
             backup = self.get_object()
             try:
-                if backup.stored_basecamp_backups.filter(id=storage_point_id).exists():
-                    storage_point = backup.stored_basecamp_backups.get(id=storage_point_id)
+                storage_point = (
+                    backup.stored_basecamp_backups.filter(
+                        id=storage_point_id,
+                        backup__status=CoreBasecampBackup.Status.COMPLETE,
+                        status=CoreBasecampBackupStoragePoints.Status.UPLOAD_COMPLETE,
+                        storage_file_id__isnull=False,
+                    )
+                    .exclude(storage_file_id="")
+                    .first()
+                )
+                if storage_point is not None:
+                    if not storage_point.direct_download_permitted():
+                        return Response(
+                            {
+                                "code": "direct_download_not_permitted",
+                                "detail": (
+                                    "Direct browser download is unavailable for this protected artifact. "
+                                    "Use an authenticated restore or controlled export workflow."
+                                ),
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
                     download_url = storage_point.generate_download_url()
                     _log_activity(
                         request,
@@ -109,8 +132,7 @@ class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                         },
                     )
                     return Response({"url": download_url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
-                else:
-                    raise DownloadStoragePointNotFound()
+                raise DownloadStoragePointNotFound()
             except Exception as e:
                 capture_exception(e)
                 raise DownloadStoragePointError(

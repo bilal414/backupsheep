@@ -41,6 +41,7 @@ class CoreWordPressSerializer(serializers.ModelSerializer):
 class CoreWordPressBackupStoragePointsSerializer(SafeProviderMetadataMixin, serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
+    direct_download_permitted = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = CoreWordPressBackupStoragePoints
@@ -49,6 +50,10 @@ class CoreWordPressBackupStoragePointsSerializer(SafeProviderMetadataMixin, seri
     @staticmethod
     def get_status_display(obj):
         return obj.get_status_display()
+
+    @staticmethod
+    def get_direct_download_permitted(obj):
+        return obj.direct_download_permitted()
 
 
 class CoreWordPressBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):

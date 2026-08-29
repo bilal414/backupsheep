@@ -224,6 +224,7 @@ class CoreDatabaseSerializer(serializers.ModelSerializer):
 class CoreDatabaseBackupStoragePointsSerializer(SafeProviderMetadataMixin, serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
+    direct_download_permitted = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = CoreDatabaseBackupStoragePoints
@@ -232,6 +233,10 @@ class CoreDatabaseBackupStoragePointsSerializer(SafeProviderMetadataMixin, seria
     @staticmethod
     def get_status_display(obj):
         return obj.get_status_display()
+
+    @staticmethod
+    def get_direct_download_permitted(obj):
+        return obj.direct_download_permitted()
 
 
 class CoreDatabaseBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
