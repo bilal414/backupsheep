@@ -961,6 +961,11 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
             '--no-tty',
             '"$LAYOUT_DIR:$CANDIDATE_TAG"',
             '"$scan_layout:scan-$architecture"',
+            'if [ -e "$scan_layout/ingest" ] || [ -L "$scan_layout/ingest" ]; then',
+            'test -z "$(find "$scan_layout/ingest" -mindepth 1 -print -quit)"',
+            'rmdir -- "$scan_layout/ingest"',
+            'test ! -e "$scan_layout/ingest"',
+            'test ! -L "$scan_layout/ingest"',
             "python3 scripts/preflight_release_verifier_scan.py",
             '--scan-layout-amd64 "$SCAN_ROOT/amd64"',
             '--scan-layout-arm64 "$SCAN_ROOT/arm64"',
@@ -972,6 +977,10 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
         self.assertLess(
             scan_step.index("--source-only"),
             scan_step.index('"$TOOL_DIR/oras" cp'),
+        )
+        self.assertLess(
+            scan_step.index('rmdir -- "$scan_layout/ingest"'),
+            scan_step.rindex("python3 scripts/preflight_release_verifier_scan.py"),
         )
         self.assertLess(
             scan_step.rindex("python3 scripts/preflight_release_verifier_scan.py"),

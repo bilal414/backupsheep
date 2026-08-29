@@ -229,6 +229,14 @@ jobs:
                 --no-tty \
                 "$LAYOUT_DIR:$CANDIDATE_TAG" \
                 "$scan_layout:scan-$architecture"
+            if [ -e "$scan_layout/ingest" ] || [ -L "$scan_layout/ingest" ]; then
+              test -d "$scan_layout/ingest"
+              test ! -L "$scan_layout/ingest"
+              test -z "$(find "$scan_layout/ingest" -mindepth 1 -print -quit)"
+              rmdir -- "$scan_layout/ingest"
+            fi
+            test ! -e "$scan_layout/ingest"
+            test ! -L "$scan_layout/ingest"
             test "$(stat -c '%a:%u' "$scan_layout")" = "700:$(id -u)"
           done
 
