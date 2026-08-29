@@ -119,6 +119,7 @@ EXPECTED_SYFT_SCHEMA = {
     ),
 }
 EXPECTED_TRIVY_VERSION = "0.74.0"
+EXPECTED_INDEX_CREATED = "2026-08-05T23:43:27Z"
 
 EXPECTED_HISTORY = (
     (
@@ -792,6 +793,7 @@ def _validate_layout(
         _fail("OCI root descriptor does not match --index-digest")
     if root_descriptor["annotations"] != {
         "io.containerd.image.name": f"{repository}:{tag}",
+        "org.opencontainers.image.created": EXPECTED_INDEX_CREATED,
         "org.opencontainers.image.ref.name": tag,
     }:
         _fail("OCI root descriptor is not bound to the requested repository and tag")

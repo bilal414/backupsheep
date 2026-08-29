@@ -56,6 +56,7 @@ class StableReleaseVerifierPublisherTests(unittest.TestCase):
                     "size": len(self.index),
                     "annotations": {
                         "io.containerd.image.name": f"{self.quarantine}:{self.candidate_tag}",
+                        "org.opencontainers.image.created": publisher.EXPECTED_INDEX_CREATED,
                         "org.opencontainers.image.ref.name": self.candidate_tag,
                     },
                 }
@@ -175,6 +176,16 @@ class StableReleaseVerifierPublisherTests(unittest.TestCase):
         document["manifests"][0]["annotations"]["io.containerd.image.name"] = (
             "ghcr.io/example/attacker:latest"
         )
+        root_path.write_text(json.dumps(document), encoding="ascii")
+        with self.assertRaisesRegex(publisher.PublicationError, "not bound"):
+            self.publish()
+
+    def test_root_descriptor_rejects_a_wall_clock_created_timestamp(self):
+        root_path = self.layout / "index.json"
+        document = json.loads(root_path.read_text(encoding="ascii"))
+        document["manifests"][0]["annotations"][
+            "org.opencontainers.image.created"
+        ] = "2026-08-29T15:55:04Z"
         root_path.write_text(json.dumps(document), encoding="ascii")
         with self.assertRaisesRegex(publisher.PublicationError, "not bound"):
             self.publish()

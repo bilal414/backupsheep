@@ -36,6 +36,7 @@ EXPECTED_QUARANTINE_REPOSITORY = (
 EXPECTED_OFFICIAL_REPOSITORY = "ghcr.io/bilal414/backupsheep-release-verifier"
 EXPECTED_STABLE_TAG = "v3.1.3-backupsheep.1"
 EXPECTED_ROOT_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
+EXPECTED_INDEX_CREATED = "2026-08-05T23:43:27Z"
 
 
 class PublicationError(RuntimeError):
@@ -243,6 +244,7 @@ def _validated_layout_index(
         or descriptor["annotations"]
         != {
             "io.containerd.image.name": f"{repository}:{tag}",
+            "org.opencontainers.image.created": EXPECTED_INDEX_CREATED,
             "org.opencontainers.image.ref.name": tag,
         }
     ):

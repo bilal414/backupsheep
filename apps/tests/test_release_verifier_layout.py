@@ -203,6 +203,7 @@ class VerifierFixture:
         index_descriptor["mediaType"] = verifier.OCI_INDEX
         index_descriptor["annotations"] = {
             "io.containerd.image.name": f"{self.repository}:{self.tag}",
+            "org.opencontainers.image.created": verifier.EXPECTED_INDEX_CREATED,
             "org.opencontainers.image.ref.name": self.tag,
         }
         self.index_digest = index_descriptor["digest"]
@@ -581,6 +582,15 @@ class ReleaseVerifierLayoutTests(TestCase):
         self.fixture._json(path, wrapper)
         self.assert_rejected("schema or media type")
 
+    def test_root_descriptor_created_timestamp_is_reproducibly_bound(self):
+        path = self.fixture.layout / "index.json"
+        wrapper = json.loads(path.read_text(encoding="ascii"))
+        wrapper["manifests"][0]["annotations"][
+            "org.opencontainers.image.created"
+        ] = "2026-08-29T15:55:04Z"
+        self.fixture._json(path, wrapper)
+        self.assert_rejected("not bound")
+
     def test_privileged_or_expanded_runtime_config_is_rejected(self):
         image = self.fixture.images["linux/amd64"]
         unsafe = copy.deepcopy(image["config"])
@@ -765,4 +775,25 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
         self.assertLess(
             scan_step.index('rmdir -- "$LAYOUT_DIR/ingest"'),
             scan_step.index('"$TOOL_DIR/syft"'),
+        )
+
+    def test_bootstrap_binds_export_name_and_reproducible_index_timestamp(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
+        ).read_text(encoding="utf-8")
+        build_step = workflow.split(
+            "      - name: Build the patched multi-platform verifier into a private OCI layout\n",
+            1,
+        )[1].split(
+            "      - name: Scan both exact child images and validate the complete layout\n",
+            1,
+        )[0]
+        self.assertIn(
+            "name=${{ env.QUARANTINE_REPOSITORY }}:${{ env.CANDIDATE_TAG }}",
+            build_step,
+        )
+        self.assertIn(
+            "index:org.opencontainers.image.created="
+            + verifier.EXPECTED_INDEX_CREATED,
+            build_step,
         )
