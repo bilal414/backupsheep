@@ -28,10 +28,16 @@ EXPECTED_APP_PACKAGES = {
     "backupsheep-postgresql-client-18",
 }
 EXPECTED_EGRESS_PACKAGES = {"iproute2-minimal", "nftables", "setpriv"}
+EXPECTED_RABBITMQ_SECURITY_PACKAGES = {
+    "libcrypto3": "3.5.8-r0",
+    "libssl3": "3.5.8-r0",
+}
 EXPECTED_OS_PACKAGE_TYPES = {
     "app": ("deb", "ubuntu"),
     "postgres": ("apk", "alpine"),
     "egress": ("apk", "alpine"),
+    "rabbitmq": ("apk", "alpine"),
+    "rabbitmq-upgrade": ("apk", "alpine"),
 }
 EXPECTED_SYFT_VERSION = "1.51.0"
 EXPECTED_SYFT_SCHEMA_VERSION = "16.1.10"
@@ -258,6 +264,19 @@ def formatted_python_identities(
     return sorted(f"{name}=={version}" for name, version in identities)
 
 
+def validate_rabbitmq_security_packages(
+    packages: dict[str, str], scanner: str
+) -> None:
+    observed = {
+        name: packages.get(name) for name in EXPECTED_RABBITMQ_SECURITY_PACKAGES
+    }
+    if observed != EXPECTED_RABBITMQ_SECURITY_PACKAGES:
+        die(
+            f"{scanner} RabbitMQ OpenSSL package identities are not the exact "
+            f"reviewed versions: {observed}"
+        )
+
+
 def validate_locked_python_inventory(
     observed: set[tuple[str, str]],
     expected: dict[str, str],
@@ -463,6 +482,7 @@ def validate_syft(
         die("Syft contains no package inventory")
     package_names: set[str] = set()
     os_package_names: set[str] = set()
+    os_package_versions: dict[str, str] = {}
     os_package_count = 0
     top_level_python_identities: set[tuple[str, str]] = set()
     python_package_count = 0
@@ -482,6 +502,7 @@ def validate_syft(
         if package_type == expected_os_type:
             os_package_count += 1
             os_package_names.add(name)
+            os_package_versions[name] = version
         if package_type == "python":
             python_package_count += 1
             locations = artifact.get("locations")
@@ -548,6 +569,8 @@ def validate_syft(
         missing = EXPECTED_EGRESS_PACKAGES - package_names
         if missing:
             die(f"egress SBOM is missing policy-runtime packages: {sorted(missing)}")
+    elif image_kind in {"rabbitmq", "rabbitmq-upgrade"}:
+        validate_rabbitmq_security_packages(os_package_versions, "Syft")
     else:  # pragma: no cover - argparse enforces the choices
         die("unknown image kind")
     return (
@@ -591,6 +614,7 @@ def validate_trivy(
     os_package_count = 0
     os_result_count = 0
     os_package_names: set[str] = set()
+    os_package_versions: dict[str, str] = {}
     python_package_count = 0
     top_level_python_package_count = 0
     top_level_python_identities: set[tuple[str, str]] = set()
@@ -621,6 +645,7 @@ def validate_trivy(
                 if result_class == "os-pkgs":
                     os_package_count += 1
                     os_package_names.add(name)
+                    os_package_versions[name] = version
                 if (
                     result_class == "lang-pkgs"
                     and result_type == "python-pkg"
@@ -655,6 +680,8 @@ def validate_trivy(
                 "application Trivy Python inventory contains duplicate top-level "
                 "package identities"
             )
+    elif image_kind in {"rabbitmq", "rabbitmq-upgrade"}:
+        validate_rabbitmq_security_packages(os_package_versions, "Trivy")
     if vulnerabilities:
         identities = sorted(
             {
@@ -688,7 +715,9 @@ def sha256_file(path: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--image-kind", choices=("app", "postgres", "egress"), required=True
+        "--image-kind",
+        choices=("app", "postgres", "egress", "rabbitmq", "rabbitmq-upgrade"),
+        required=True,
     )
     parser.add_argument("--image-id", required=True)
     parser.add_argument("--archive", type=Path, required=True)

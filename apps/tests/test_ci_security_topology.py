@@ -1,15 +1,24 @@
 import hashlib
+import importlib.util
 import io
 import os
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 from unittest import TestCase
 
 
 ROOT = Path(__file__).resolve().parents[2]
+IMAGE_SCAN_SPEC = importlib.util.spec_from_file_location(
+    "validate_image_scan",
+    ROOT / "deploy" / "ci" / "validate-image-scan.py",
+)
+image_scan = importlib.util.module_from_spec(IMAGE_SCAN_SPEC)
+sys.modules[IMAGE_SCAN_SPEC.name] = image_scan
+IMAGE_SCAN_SPEC.loader.exec_module(image_scan)
 
 
 class CISecurityTopologyContractTests(TestCase):
@@ -31,11 +40,15 @@ class CISecurityTopologyContractTests(TestCase):
             'TEST_POSTGRES_IMAGE: "backupsheep-ci-postgres:',
             'TEST_LEGACY_POSTGRES_IMAGE: "backupsheep-ci-postgres-legacy:',
             'TEST_EGRESS_IMAGE: "backupsheep-ci-egress:',
+            'TEST_RABBITMQ_IMAGE: "backupsheep-ci-rabbitmq:',
+            'TEST_RABBITMQ_UPGRADE_IMAGE: "backupsheep-ci-rabbitmq-upgrade:',
             '--file Dockerfile --tag "$TEST_APP_IMAGE"',
             '--file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE"',
             '--file deploy/ci/Dockerfile.postgres-runtime-source',
             '--tag "$TEST_LEGACY_POSTGRES_IMAGE"',
             '--file Dockerfile.egress --tag "$TEST_EGRESS_IMAGE"',
+            '--file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE"',
+            '--file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE"',
             'BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION: "1"',
             'BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION: "2"',
             'BACKUPSHEEP_EGRESS_POLICY_GENERATION: "2"',
@@ -73,6 +86,8 @@ class CISecurityTopologyContractTests(TestCase):
             "app\t$TEST_APP_IMAGE",
             "postgres\t$TEST_POSTGRES_IMAGE",
             "egress\t$TEST_EGRESS_IMAGE",
+            "rabbitmq\t$TEST_RABBITMQ_IMAGE",
+            "rabbitmq-upgrade\t$TEST_RABBITMQ_UPGRADE_IMAGE",
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             'CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"',
             "path: ${{ runner.temp }}/backupsheep-ci-image-evidence",
@@ -82,6 +97,21 @@ class CISecurityTopologyContractTests(TestCase):
         self.assertNotIn("--ignore-unfixed", gate)
         self.assertNotIn("--skip-db-update", gate)
         self.assertIn('test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"', gate)
+
+    def test_rabbitmq_scan_requires_exact_patched_openssl_packages(self):
+        expected = {"libcrypto3": "3.5.8-r0", "libssl3": "3.5.8-r0"}
+        image_scan.validate_rabbitmq_security_packages(expected, "fixture")
+        for package, vulnerable_version in (
+            ("libcrypto3", "3.5.7-r0"),
+            ("libssl3", "3.5.7-r0"),
+        ):
+            with self.subTest(package=package):
+                observed = dict(expected)
+                observed[package] = vulnerable_version
+                with self.assertRaises(SystemExit):
+                    image_scan.validate_rabbitmq_security_packages(
+                        observed, "fixture"
+                    )
 
         validator = (
             ROOT / "deploy" / "ci" / "validate-image-scan.py"
@@ -752,6 +782,11 @@ database_password=test-only-password
             ("bruno", "/code/bruno"),
             ("deploy", "/code/deploy"),
             ("docs", "/code/docs"),
+            ("Dockerfile.rabbitmq", "/code/Dockerfile.rabbitmq"),
+            (
+                "Dockerfile.rabbitmq-upgrade",
+                "/code/Dockerfile.rabbitmq-upgrade",
+            ),
             ("scripts", "/code/scripts"),
             ("Dockerfile", "/code/Dockerfile"),
             ("docker-compose.yml", "/code/docker-compose.yml"),

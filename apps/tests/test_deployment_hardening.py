@@ -155,6 +155,29 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertIn("postgres_data_v1:/var/lib/postgresql", database)
         self.assertNotIn("pgdata:/var/lib/postgresql", database)
 
+    def test_bundled_rabbitmq_derivatives_patch_exact_upstream_runtimes(self):
+        expected = {
+            "Dockerfile.rabbitmq": (
+                "rabbitmq:4.3.5-alpine@sha256:"
+                "d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7",
+                'runtime-generation="4.3.5-alpine3.23-openssl-v1"',
+            ),
+            "Dockerfile.rabbitmq-upgrade": (
+                "rabbitmq:4.2.9-alpine@sha256:"
+                "f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095",
+                'runtime-generation="4.2.9-alpine3.23-openssl-v1"',
+            ),
+        }
+        for path, (base, generation) in expected.items():
+            with self.subTest(path=path):
+                dockerfile = (ROOT / path).read_text(encoding="utf-8")
+                self.assertIn(f"FROM {base}", dockerfile)
+                self.assertIn(generation, dockerfile)
+                self.assertIn("'libcrypto3=3.5.8-r0'", dockerfile)
+                self.assertIn("'libssl3=3.5.8-r0'", dockerfile)
+                self.assertIn("USER 100:101", dockerfile)
+                self.assertNotIn("apk upgrade", dockerfile)
+
     def test_postgres_logical_runtime_migration_is_deterministic_and_fail_closed(self):
         migration = (
             ROOT / "deploy" / "postgres" / "migrate-runtime.sh"
@@ -414,6 +437,8 @@ raise SystemExit(99)
             '--file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE"',
             '--file deploy/ci/Dockerfile.postgres-runtime-source',
             '--tag "$TEST_LEGACY_POSTGRES_IMAGE"',
+            '--file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE"',
+            '--file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE"',
             "run: timeout --signal=TERM --kill-after=30s 45m deploy/ci/run-postgres-runtime-migration-e2e.sh",
             "docker network create --driver bridge --internal",
             'docker create \\\n',
@@ -449,7 +474,7 @@ raise SystemExit(99)
         self.assertNotIn("--network-alias database", gate)
         self.assertNotIn("--env DB_HOST=database", gate)
 
-        self.assertEqual(gate.count("docker build --pull --no-cache"), 4)
+        self.assertEqual(gate.count("docker build --pull --no-cache"), 6)
         self.assertNotIn("continue-on-error", gate)
         self.assertNotIn("--privileged", gate)
         self.assertNotIn("docker.sock", gate)

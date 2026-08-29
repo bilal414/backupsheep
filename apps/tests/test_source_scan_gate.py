@@ -157,6 +157,18 @@ class SourceScanGateTests(TestCase):
                     "MisconfSummary": {"Successes": 20, "Failures": 0},
                 },
                 {
+                    "Target": "Dockerfile.rabbitmq",
+                    "Class": "config",
+                    "Type": "dockerfile",
+                    "MisconfSummary": {"Successes": 20, "Failures": 0},
+                },
+                {
+                    "Target": "Dockerfile.rabbitmq-upgrade",
+                    "Class": "config",
+                    "Type": "dockerfile",
+                    "MisconfSummary": {"Successes": 20, "Failures": 0},
+                },
+                {
                     "Target": "deploy/ci/Dockerfile.postgres-runtime-source",
                     "Class": "config",
                     "Type": "dockerfile",
