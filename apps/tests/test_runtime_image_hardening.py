@@ -518,6 +518,8 @@ class RuntimeImageHardeningTests(TestCase):
         for excluded in ("install.sh", "docs", "scripts", ".git", "apps/tests"):
             with self.subTest(excluded=excluded):
                 self.assertNotIn(f"COPY {excluded}", self.runtime)
+        self.assertNotIn("scripts/release_transition.py", self.runtime)
+        self.assertNotIn("/usr/local/lib/backupsheep-release", self.runtime)
 
     def test_static_assets_are_built_offline_as_non_root(self):
         collect = "python manage.py collectstatic --noinput --clear"

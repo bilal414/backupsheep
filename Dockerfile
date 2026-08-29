@@ -716,7 +716,6 @@ COPY --link --chown=0:0 --chmod=0444 .env_sample manage.py /code/
 COPY --link --chown=0:0 apps /code/apps
 COPY --link --chown=0:0 backupsheep /code/backupsheep
 COPY --link --chown=0:0 utils /code/utils
-COPY --link --chown=0:0 --chmod=0444 scripts/release_transition.py /usr/local/lib/backupsheep-release/
 COPY --link --chown=0:0 --chmod=0555 init.sh /usr/local/bin/init.sh
 COPY --link --chown=0:0 --chmod=0555 deploy/staging/provision-volumes.sh /usr/local/bin/backupsheep-provision-staging-volumes
 COPY --link --chown=0:0 --chmod=0555 deploy/egress/workload-healthcheck.py /usr/local/bin/backupsheep-egress-workload-healthcheck
