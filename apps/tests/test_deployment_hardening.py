@@ -866,11 +866,32 @@ raise SystemExit(99)
         reviewed_keys.update(
             re.findall(r"^\s+([A-Z][A-Z0-9_]*):", self.compose, re.MULTILINE)
         )
+        # These values are installer/wrapper evidence, bootstrap state, or inputs to
+        # separately approved overlays. They must remain absent from the base
+        # application-container environment rather than being interpolated merely to
+        # satisfy this completeness check.
+        installer_only_keys = {
+            "BACKUPSHEEP_IMAGE_MODE",
+            "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE",
+            "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE",
+            "BACKUPSHEEP_RELEASE_APP_IMAGE",
+            "BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256",
+            "BACKUPSHEEP_RELEASE_EGRESS_IMAGE",
+            "BACKUPSHEEP_RELEASE_POSTGRES_IMAGE",
+            "BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE",
+            "BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE",
+            "BACKUPSHEEP_RELEASE_SOURCE_COMMIT",
+            "BACKUPSHEEP_RELEASE_TAG",
+        }
         # This compatibility-only path is deliberately unavailable in stock Compose;
         # managed SSH trust is materialized per operation from PostgreSQL instead.
         self.assertEqual(
             sample_keys - reviewed_keys,
-            {"SSH_KNOWN_HOSTS_PATH", "BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID"},
+            {
+                "SSH_KNOWN_HOSTS_PATH",
+                "BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID",
+                *installer_only_keys,
+            },
         )
         self.assertNotIn("BACKUPSHEEP_UNREVIEWED_SECRET", reviewed_keys)
 
