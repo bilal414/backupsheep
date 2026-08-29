@@ -3,8 +3,8 @@ from urllib.parse import urlencode
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.core.exceptions import PermissionDenied
-from django.db.models import Q
+from django.core.exceptions import ObjectDoesNotExist, PermissionDenied
+from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views.generic import TemplateView, DetailView
@@ -27,6 +27,23 @@ from backupsheep.source_recovery_policy import (
 )
 
 
+CONNECTION_PAGE_SIZES = (10, 25, 50)
+
+
+def _bounded_page_size(raw_value):
+    """Keep public pagination inputs predictable and inexpensive."""
+
+    try:
+        page_size = int(raw_value)
+    except (TypeError, ValueError):
+        return CONNECTION_PAGE_SIZES[0]
+    return (
+        page_size
+        if page_size in CONNECTION_PAGE_SIZES
+        else CONNECTION_PAGE_SIZES[0]
+    )
+
+
 class IntegrationSelectView(LoginRequiredMixin, TemplateView):
     template_name = "console/setup/1_integration_select.html"
 
@@ -35,6 +52,31 @@ class IntegrationSelectView(LoginRequiredMixin, TemplateView):
 
         context["heading"] = "Integrations"
         context["active_url"] = "setup"
+        context["content_owns_h1"] = True
+        context["shell_heading"] = "Add source"
+        member = request.user.member
+        account = member.get_current_account()
+        can_manage_integrations = member_has_perm(request, "integration_changes")
+        can_manage_storage = member_has_perm(request, "storage_changes")
+        connection_queryset = CoreConnection.objects.filter(account=account).exclude(
+            status=CoreConnection.Status.DELETE_REQUESTED
+        )
+        if not can_manage_integrations:
+            connection_queryset = connection_queryset.filter(
+                nodes__in=visible_nodes(member)
+            ).distinct()
+        context["connected_account_count"] = connection_queryset.count()
+        context["active_connection_count"] = connection_queryset.filter(
+            status=CoreConnection.Status.ACTIVE
+        ).count()
+        context["connected_storage_count"] = (
+            CoreStorage.objects.filter(account=account).count()
+            if can_manage_storage
+            else None
+        )
+        context["protected_source_count"] = visible_nodes(member).count()
+        context["can_manage_integrations"] = can_manage_integrations
+        context["can_manage_storage"] = can_manage_storage
         context["wordpress_source_protection_available"] = (
             source_backup_creation_available("wordpress")
         )
@@ -54,8 +96,10 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
         context["active_url"] = "setup"
+        context["content_owns_h1"] = True
+        context["shell_heading"] = "Provider accounts"
         p_no = self.request.GET.get("p_no", 1)
-        p_size = self.request.GET.get("p_size", 10)
+        p_size = _bounded_page_size(self.request.GET.get("p_size"))
         integration_code = self.kwargs.get("integration_code")
         i_name = self.request.GET.get("i_name")
         member = self.request.user.member
@@ -99,20 +143,90 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
                         }
                     )
 
+            can_manage_integrations = member_has_perm(
+                request, "integration_changes"
+            )
+            visible_node_queryset = visible_nodes(member)
             query = Q(
                 account=member.get_current_account(),
                 integration=integration,
             )
+            if not can_manage_integrations:
+                query &= Q(nodes__in=visible_node_queryset)
             if i_name:
                 query &= Q(name=i_name)
-            connections = CoreConnection.objects.filter(query).order_by("-created")
+            connections = CoreConnection.objects.filter(query).distinct().order_by(
+                "-created"
+            )
             context["connections_count"] = connections.count()
+
+            source_count = (
+                Count("nodes", distinct=True)
+                if can_manage_integrations
+                else Count(
+                    "nodes",
+                    filter=Q(nodes__in=visible_node_queryset),
+                    distinct=True,
+                )
+            )
+            summary = connections.aggregate(
+                active=Count(
+                    "id",
+                    filter=Q(status=CoreConnection.Status.ACTIVE),
+                    distinct=True,
+                ),
+                paused=Count(
+                    "id",
+                    filter=Q(status=CoreConnection.Status.PAUSED),
+                    distinct=True,
+                ),
+                review=Count(
+                    "id",
+                    filter=Q(
+                        status__in=(
+                            CoreConnection.Status.PENDING,
+                            CoreConnection.Status.SUSPENDED,
+                            CoreConnection.Status.TOKEN_REFRESH_FAIL,
+                        )
+                    ),
+                    distinct=True,
+                ),
+                protected_sources=source_count,
+            )
+            context["connection_summary"] = summary
+            context["can_manage_integrations"] = can_manage_integrations
+            context["can_create_sources"] = context[
+                "can_manage_integrations"
+            ] and member_has_perm(request, "node_changes")
 
             context["heading"] = f"Integrations - {integration.name}"
 
-            page = Paginator(connections, p_size).page(p_no)
+            attachment_count = (
+                Count("nodes", distinct=True)
+                if can_manage_integrations
+                else Count(
+                    "nodes",
+                    filter=Q(nodes__in=visible_node_queryset),
+                    distinct=True,
+                )
+            )
+            connections = connections.select_related(
+                "location",
+                "integration",
+                "added_by__user",
+                "auth_digitalocean",
+            ).annotate(
+                total_nodes_count=attachment_count
+            )
+            page = Paginator(connections, p_size).get_page(p_no)
+            for connection in page.object_list:
+                connection.provider_identity = self._provider_identity(connection)
+                connection.operator_name = self._operator_name(connection)
             context["page"] = page
-            context["elided_page_range"] = page.paginator.get_elided_page_range(p_no)
+            context["elided_page_range"] = page.paginator.get_elided_page_range(
+                page.number
+            )
+            context["page_sizes"] = CONNECTION_PAGE_SIZES
             context["i_name"] = i_name
             context["show_link_icon"] = True
             context["show_link_url"] = reverse("console:setup:integration_select")
@@ -146,6 +260,31 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
 
         return self.render_to_response(context)
 
+    @staticmethod
+    def _operator_name(connection):
+        """Return a safe, human-readable ownership label for the register."""
+
+        added_by = connection.added_by
+        if added_by is None:
+            return "Not recorded"
+        user = getattr(added_by, "user", None)
+        if user is None:
+            return "Not recorded"
+        full_name = user.get_full_name().strip()
+        return full_name or user.email
+
+    @staticmethod
+    def _provider_identity(connection):
+        """Expose a non-secret provider identity witness when one is available."""
+
+        if connection.integration.code != "digitalocean":
+            return ""
+        try:
+            auth = connection.auth_digitalocean
+        except ObjectDoesNotExist:
+            return ""
+        return auth.info_email or auth.info_name or auth.info_uuid or ""
+
 
 class StorageOpenView(LoginRequiredMixin, TemplateView):
     template_name = "console/setup/2_integration_open.html"
@@ -157,13 +296,18 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
         context["active_url"] = "setup"
+        context["content_owns_h1"] = True
+        context["shell_heading"] = "Destinations"
         p_no = self.request.GET.get("p_no", 1)
-        p_size = self.request.GET.get("p_size", 10)
+        p_size = _bounded_page_size(self.request.GET.get("p_size"))
         integration_code = self.kwargs.get("integration_code")
         i_name = self.request.GET.get("i_name")
         member = self.request.user.member
 
-        if CoreStorageType.objects.filter(code=integration_code).exists() and integration_code != "bs":
+        if (
+            CoreStorageType.objects.filter(code=integration_code).exists()
+            and integration_code != "bs"
+        ):
             storage_type = CoreStorageType.objects.get(code=integration_code)
 
             query = Q(
@@ -213,9 +357,12 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
             context["storage_count"] = len(storage_list)
             context["heading"] = f"Integrations - {storage_type.name}"
 
-            page = Paginator(storage_list, p_size).page(p_no)
+            page = Paginator(storage_list, p_size).get_page(p_no)
             context["page"] = page
-            context["elided_page_range"] = page.paginator.get_elided_page_range(p_no)
+            context["elided_page_range"] = page.paginator.get_elided_page_range(
+                page.number
+            )
+            context["page_sizes"] = CONNECTION_PAGE_SIZES
             context["storage"] = storage_type
 
             can_change_storage = member_has_perm(request, "storage_changes")

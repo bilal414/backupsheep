@@ -13,12 +13,16 @@
             </button>
             <div class="min-w-0">
                 <p class="hidden text-xs font-semibold uppercase tracking-wider text-slate-400 sm:block">{{ site.app_name }}</p>
-                <h1 class="truncate text-sm font-semibold text-slate-900 sm:text-base">{% if active_url == "dashboard" %}Overview{% elif active_url == "logs" %}Activity{% elif active_url == "nodes" %}Sources{% elif active_url == "setup" %}Add source{% elif active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}Settings{% else %}Operations{% endif %}</h1>
+                {% if content_owns_h1 %}
+                    <p class="truncate text-sm font-semibold text-slate-900 sm:text-base">{{ shell_heading }}</p>
+                {% else %}
+                    <h1 class="truncate text-sm font-semibold text-slate-900 sm:text-base">{% if active_url == "dashboard" %}Overview{% elif active_url == "logs" %}Activity{% elif active_url == "nodes" %}Sources{% elif active_url == "setup" %}Add source{% elif active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}Settings{% else %}Operations{% endif %}</h1>
+                {% endif %}
             </div>
         </div>
 
         <div class="flex flex-none items-center gap-2 sm:gap-3">
-            {% if can_manage_sources %}<a
+            {% if can_manage_sources and active_url != "setup" %}<a
                 href="{% url 'console:setup:integration_select' %}"
                 class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 sm:px-4"
             >
@@ -34,7 +38,7 @@
                     type="button"
                     @click="isOpen = !isOpen"
                     id="user-menu-button"
-                    aria-expanded="false"
+                    :aria-expanded="isOpen.toString()"
                     aria-haspopup="true"
                     class="flex items-center gap-2 rounded-full p-1 transition hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 sm:rounded-lg sm:px-2 sm:py-1.5"
                 >

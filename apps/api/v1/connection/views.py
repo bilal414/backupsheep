@@ -15,7 +15,7 @@ from apps.console.account.models import CoreAccount
 from apps.console.connection.managed_ssh import acquire_managed_ssh_mutation_lock
 from apps.console.connection.models import CoreConnection, CoreIntegration, CoreConnectionLocation
 from apps.api.v1.utils.api_helpers import visible_nodes
-from apps.api.v1.utils.api_permissions import MemberGroupPermissions
+from apps.api.v1.utils.api_permissions import MemberGroupPermissions, member_has_perm
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from .filters import CoreConnectionFilter
@@ -52,7 +52,7 @@ class CoreConnectionView(viewsets.ModelViewSet):
         member = self.request.user.member
         query_partners = Q(account=member.get_current_account())
         queryset = CoreConnection.objects.filter(query_partners)
-        if not member.is_primary_account:
+        if not member_has_perm(self.request, "integration_changes"):
             queryset = queryset.filter(nodes__in=visible_nodes(member)).distinct()
         return queryset
 
@@ -116,7 +116,7 @@ class CoreConnectionView(viewsets.ModelViewSet):
         return Response(
             {
                 "success": True,
-                "message": "Validation passed. Integration is good for backups.",
+                "message": "Provider credentials and account access were validated. No backup or recovery was tested.",
             },
             status=status.HTTP_200_OK,
         )

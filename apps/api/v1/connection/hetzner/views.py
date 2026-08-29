@@ -74,9 +74,9 @@ class CoreHetznerView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             connection = self.get_object()
             validation = connection.validate()
             if validation:
-                return Response({"detail": "Validation passed. Integration is good for backups."}, status=status.HTTP_200_OK)
+                return Response({"detail": "Provider credentials and account access were validated. No backup or recovery was tested."}, status=status.HTTP_200_OK)
             else:
-                return Response({"detail": "Validation failed. Backups will fail. Check integration details immediately."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Provider access validation failed. Review credentials and permissions before using this connection."}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             raise IntegrationValidationError(e.__str__())
 

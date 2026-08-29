@@ -307,6 +307,14 @@ class WordPressProtocolValidationTests(BaseTestCase):
     WORDPRESS_INTEGRATION_ENABLED=True,
 )
 class WordPressIntegrationKeyTests(SimpleTestCase):
+    def test_key_issuance_is_post_only_and_not_cacheable(self):
+        self.assertEqual(
+            CoreWordPressView.generate_key.mapping,
+            {"post": "generate_key"},
+        )
+        response = CoreWordPressView().generate_key(None)
+        self.assertEqual(response["Cache-Control"], "private, no-store")
+
     def test_generated_key_is_a_high_entropy_url_safe_string(self):
         first = CoreWordPressView().generate_key(None).data["key"]
         second = CoreWordPressView().generate_key(None).data["key"]

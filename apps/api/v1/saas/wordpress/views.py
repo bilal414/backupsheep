@@ -98,8 +98,10 @@ class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         }
         return Response(all_totals)
 
-    @action(detail=False)
+    @action(detail=False, methods=["post"])
     def generate_key(self, request):
         require_source_backup_creation("wordpress")
         key = secrets.token_urlsafe(32)
-        return Response({"key": key})
+        response = Response({"key": key})
+        response["Cache-Control"] = "private, no-store"
+        return response

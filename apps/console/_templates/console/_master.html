@@ -19,6 +19,7 @@
     <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
 </head>
 <body class="h-full bg-slate-50 text-slate-900 antialiased {% block page_class %}{% endblock %}">
+<a href="#main-content" class="sr-only fixed left-4 top-4 z-[100] rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white focus:not-sr-only focus:outline-none focus:ring-2 focus:ring-evidence-600 focus:ring-offset-2">Skip to main content</a>
 {% csrf_token %}
 <script>
     // Attach Django's CSRF token to every same-origin state-changing fetch() so the

@@ -134,19 +134,91 @@
 body.dashboard-page,
 body.sources-page,
 body.source-detail-page,
-body.source-config-page {
+body.source-config-page,
+body.integration-catalog-page,
+body.integration-operations-page {
   background: var(--color-wool-50);
 }
 
 body.dashboard-page #main-content > div,
 body.sources-page #main-content > div,
 body.source-detail-page #main-content > div,
-body.source-config-page #main-content > div {
+body.source-config-page #main-content > div,
+body.integration-catalog-page #main-content > div,
+body.integration-operations-page #main-content > div {
   max-width: 92rem;
 }
 
 body.source-detail-page #main-content,
-body.source-config-page #main-content {
+body.source-config-page #main-content,
+body.integration-catalog-page #main-content,
+body.integration-operations-page #main-content {
+  color: var(--color-ink-950);
+}
+
+/* Connection catalog — compact capability tiles instead of promotional cards. */
+#integration-catalog > section[x-show] {
+  margin-top: 0;
+}
+
+#integration-catalog section[x-show] > div:first-child + p {
+  max-width: 58rem;
+  color: var(--color-ink-650);
+  line-height: 1.5rem;
+}
+
+#integration-catalog [data-search] {
+  min-height: 10.75rem;
+  border-color: var(--color-rule-200);
+  border-radius: 0.5rem;
+  box-shadow: none;
+}
+
+#integration-catalog a[data-search],
+#integration-catalog button[data-search] {
+  position: relative;
+  overflow: hidden;
+}
+
+#integration-catalog a[data-search]:hover,
+#integration-catalog button[data-search]:hover {
+  border-color: var(--color-evidence-200);
+  background: var(--color-evidence-50);
+  box-shadow: none;
+}
+
+#integration-catalog a[data-search]::after,
+#integration-catalog button[data-search]::after {
+  content: "Open connector  \2192";
+  display: block;
+  margin-top: auto;
+  padding-top: 0.9rem;
+  color: var(--color-evidence-700);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+#integration-catalog [data-category="storage"]::after {
+  content: "Open destination  \2192";
+}
+
+#integration-catalog [data-search] > p.text-sm {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--color-ink-650);
+  line-height: 1.35rem;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+#integration-catalog [data-search] > div:first-child > span:first-child {
+  border-color: var(--color-rule-200);
+  border-radius: 0.375rem;
+  background: var(--color-wool-50);
+}
+
+#integration-catalog [data-search] > div:first-child > span:last-child {
   color: var(--color-ink-950);
 }
 
@@ -227,7 +299,9 @@ body.source-config-page .source-config-workspace section {
 
 @media (prefers-reduced-motion: reduce) {
   body.source-detail-page *,
-  body.source-config-page * {
+  body.source-config-page *,
+  body.integration-catalog-page *,
+  body.integration-operations-page * {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;

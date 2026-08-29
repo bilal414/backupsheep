@@ -193,7 +193,7 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             requested_by_member=request.user.member,
         )
         return Response(
-            {"detail": "Validation passed. Integration is good for backups."}
+            {"detail": "Provider credentials and account access were validated. No backup or recovery was tested."}
         )
 
     @action(detail=True, methods=["post"])

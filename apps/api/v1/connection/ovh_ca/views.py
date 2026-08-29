@@ -28,10 +28,10 @@ from ..ovh_oauth import (
 class CoreOVHCAView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, MemberGroupPermissions,)
     action_permissions = {
-        "*": "node_changes",
+        "*": "integration_changes",
         "oauth_url": "integration_changes",
-        "validate": "node_changes",
-        "objects": "node_changes",
+        "validate": "integration_changes",
+        "objects": "integration_changes",
     }
     read_serializer_class = CoreOVHCAConnectionReadSerializer
     write_serializer_class = CoreOVHCAConnectionWriteSerializer
@@ -113,9 +113,9 @@ class CoreOVHCAView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             connection = self.get_object()
             validation = connection.validate()
             if validation:
-                return Response({"detail": "Validation passed. Integration is good for backups."}, status=status.HTTP_200_OK)
+                return Response({"detail": "Provider credentials and account access were validated. No backup or recovery was tested."}, status=status.HTTP_200_OK)
             else:
-                return Response({"detail": "Validation failed. Backups will fail. Check integration details immediately."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Provider access validation failed. Review credentials and permissions before using this connection."}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             raise IntegrationValidationError(e.__str__())
 

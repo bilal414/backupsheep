@@ -145,7 +145,8 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
                     f"{view_class.__name__}.{action} unexpectedly allowed",
                 )
 
-        # Granting node management in this account authorizes the same actions.
+        # Source management alone must not authorize provider credential or
+        # connection changes.
         self.current_group.group.permissions.add(_permission("node_changes"))
         request = RequestFactory().get("/validate/")
         request.user = self.team_user
@@ -153,7 +154,39 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
             action="validate",
             action_permissions=CoreGoogleCloudView.action_permissions,
         )
+        self.assertFalse(permission.has_permission(request, view))
+
+        # Integration management is the explicit account-scoped boundary for
+        # provider credentials and connection operations.
+        self.current_group.group.permissions.add(
+            _permission("integration_changes")
+        )
         self.assertTrue(permission.has_permission(request, view))
+
+    def test_integration_manager_can_operate_an_empty_account_connection(self):
+        connection = factories.make_connection(
+            self.account,
+            self.member,
+            code="digitalocean",
+            name="Account-scoped empty connection",
+        )
+
+        denied = self.team_client.post(
+            f"/api/v1/connections/{connection.pk}/pause/",
+            {},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, 403, denied.content)
+
+        self.current_group.group.permissions.add(
+            _permission("integration_changes")
+        )
+        allowed = self.team_client.post(
+            f"/api/v1/connections/{connection.pk}/pause/",
+            {},
+            format="json",
+        )
+        self.assertEqual(allowed.status_code, 200, allowed.content)
 
     def test_team_member_cannot_escalate_or_administer_account(self):
         group_response = self.team_client.post(
