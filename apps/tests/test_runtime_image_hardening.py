@@ -52,6 +52,26 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertEqual(self.dockerfile.count(UBUNTU_IMAGE), 1)
         self.assertIn("COPY --from=python-runtime /usr/local /usr/local", self.runtime)
 
+    def test_artifact_provider_runtime_has_no_aws_kms_dependency(self):
+        provider_root = ROOT / "backupsheep" / "artifact_crypto" / "providers"
+        provider_files = {path.name for path in provider_root.glob("*.py")}
+        self.assertEqual(
+            provider_files,
+            {"__init__.py", "base.py", "local.py", "local_file.py", "registry.py"},
+        )
+        provider_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(provider_root.glob("*.py"))
+        )
+        self.assertNotIn("aws_kms", provider_source.lower())
+        self.assertNotIn("boto3", provider_source.lower())
+        self.assertNotIn("generatedatakey", provider_source.lower())
+        settings_source = (ROOT / "backupsheep" / "settings.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('"aws-kms"', settings_source)
+        self.assertIn('"local-file"', settings_source)
+
     def test_python_dependencies_are_built_then_installed_offline(self):
         self.assertIn("AS python-wheels", self.dockerfile)
         self.assertIn("python -m pip --isolated wheel", self.dockerfile)
