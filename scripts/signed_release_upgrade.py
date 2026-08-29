@@ -1662,21 +1662,10 @@ def build_intent(
         owner=os.geteuid(),
         modes={0o600},
     )
-    try:
-        source_verification_value = json.loads(
-            source_verification_bytes,
-            object_pairs_hook=_reject_duplicates,
-            parse_constant=lambda value: (_ for _ in ()).throw(
-                UpgradeJournalError(f"JSON contains non-finite number {value}")
-            ),
-            parse_float=lambda value: (_ for _ in ()).throw(
-                UpgradeJournalError(f"JSON contains unsupported float {value}")
-            ),
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise UpgradeJournalError(
-            "authorized-predecessor verification receipt is not strict JSON"
-        ) from exc
+    source_verification_value = _load_json_bytes(
+        source_verification_bytes,
+        "authorized-predecessor verification receipt",
+    )
     if source_verification_bytes != _canonical_bytes(source_verification_value):
         raise UpgradeJournalError(
             "authorized-predecessor verification receipt is not canonical"
@@ -4482,10 +4471,7 @@ def _load_intent(active: Path) -> tuple[dict[str, Any], bytes]:
         owner=os.geteuid(),
         modes={0o400},
     )
-    try:
-        value = json.loads(payload, object_pairs_hook=_reject_duplicates)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise UpgradeJournalError("upgrade intent is not strict JSON") from exc
+    value = _load_json_bytes(payload, "upgrade intent")
     if payload != _canonical_bytes(value):
         raise UpgradeJournalError("upgrade intent bytes are not canonical")
     return _validate_intent(value), payload
@@ -4590,10 +4576,7 @@ def _validate_operation_directory(
             modes={0o400},
             links={1, 2} if phase == allow_interrupted_phase else {1},
         )
-        try:
-            receipt = json.loads(payload, object_pairs_hook=_reject_duplicates)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise UpgradeJournalError(f"{receipt_name} is not strict JSON") from exc
+        receipt = _load_json_bytes(payload, receipt_name)
         if payload != _canonical_bytes(receipt):
             raise UpgradeJournalError(f"{receipt_name} is not canonical")
         receipt = _mapping(receipt, receipt_name)
@@ -4684,12 +4667,7 @@ def _validate_operation_directory(
             modes={0o400},
             links={1, 2} if allow_interrupted_phase == "rolled-back" else {1},
         )
-        try:
-            rollback_receipt = json.loads(
-                rollback_payload, object_pairs_hook=_reject_duplicates
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise UpgradeJournalError("rollback receipt is not strict JSON") from exc
+        rollback_receipt = _load_json_bytes(rollback_payload, "rollback receipt")
         if rollback_payload != _canonical_bytes(rollback_receipt):
             raise UpgradeJournalError("rollback receipt is not canonical")
         rollback_receipt = _mapping(rollback_receipt, "rollback receipt")
@@ -5354,10 +5332,7 @@ def _append_receipt_locked(
             modes={0o400},
             links={1, 2},
         )
-        try:
-            existing = json.loads(existing_bytes, object_pairs_hook=_reject_duplicates)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise UpgradeJournalError("existing receipt is not strict JSON") from exc
+        existing = _load_json_bytes(existing_bytes, "existing receipt")
         if existing.get("payload") != payload:
             raise UpgradeJournalError("existing receipt differs from retry payload")
         _reconcile_exclusive(path, _canonical_bytes(existing), mode=0o400)
@@ -5448,10 +5423,7 @@ def _append_rollback_locked(
             modes={0o400},
             links={1, 2},
         )
-        try:
-            existing = json.loads(existing_payload, object_pairs_hook=_reject_duplicates)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise UpgradeJournalError("existing rollback receipt is not strict JSON") from exc
+        existing = _load_json_bytes(existing_payload, "existing rollback receipt")
         if existing.get("payload") != payload:
             raise UpgradeJournalError("existing rollback receipt differs from retry payload")
         _reconcile_exclusive(path, _canonical_bytes(existing), mode=0o400)

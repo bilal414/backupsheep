@@ -1761,6 +1761,40 @@ publish_authorized_source_receipt "$4"
         ):
             upgrade._validate_intent(tampered)
 
+    def test_journal_control_files_reject_floating_point_schema_values(self):
+        intent = self._initialize()
+        operation = self._operation_dir(intent)
+        self._append("10-prepared", intent)
+
+        cases = (
+            (operation / upgrade.INTENT_NAME, "upgrade intent"),
+            (operation / "10-prepared.json", "10-prepared.json"),
+        )
+        for path, label in cases:
+            original = path.read_bytes()
+            value = json.loads(original)
+            value["schema_version"] = 2.0
+            path.chmod(0o600)
+            path.write_bytes(canonical(value))
+            path.chmod(0o400)
+            with self.subTest(label=label), self.assertRaisesRegex(
+                upgrade.UpgradeJournalError, "unsupported float"
+            ):
+                upgrade.validate_journal(self.install)
+            path.chmod(0o600)
+            path.write_bytes(original)
+            path.chmod(0o400)
+
+        self._rollback(intent)
+        rollback = operation / upgrade.ROLLBACK_RECEIPT_NAME
+        value = json.loads(rollback.read_bytes())
+        value["schema_version"] = 2.0
+        rollback.chmod(0o600)
+        rollback.write_bytes(canonical(value))
+        rollback.chmod(0o400)
+        with self.assertRaisesRegex(upgrade.UpgradeJournalError, "unsupported float"):
+            upgrade.validate_journal(self.install)
+
     def test_checkpoint_export_refuses_a_missing_retained_operation(self):
         intents, _ = self._complete_version_chain(5)
         self.assertTrue(
