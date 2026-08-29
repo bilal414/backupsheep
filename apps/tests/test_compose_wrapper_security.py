@@ -3171,6 +3171,156 @@ release_mutation_lock
             Path(f"{self.root.resolve()}.backupsheep-mutation-lock").exists()
         )
 
+    def test_direct_installer_child_inherits_exact_lock_without_releasing_it(self):
+        lock_dir = Path(f"{self.root.resolve()}.backupsheep-mutation-lock")
+        script = r'''
+source "$1"
+INSTALL_DIR="$2"
+acquire_installation_mutation_lock
+"$3" --inherit-installer-lock up --detach
+[[ -d "$MUTATION_LOCK_DIR" && "$(<"$MUTATION_LOCK_OWNER_FILE")" == "$MUTATION_LOCK_TOKEN" ]]
+release_mutation_lock
+'''
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "installer-inherited-lock",
+                str(INSTALLER),
+                str(self.root.resolve()),
+                str(self.wrapper),
+            ],
+            cwd=self.root,
+            env=self.wrapper_environment(),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr}")
+        self.assertFalse(lock_dir.exists())
+        self.assertEqual(len(self.compose_events("up")), 1)
+
+    def test_inherited_installer_lock_rejects_wrong_parent_and_extra_entries(self):
+        lock_dir = Path(f"{self.root.resolve()}.backupsheep-mutation-lock")
+        lock_dir.mkdir(mode=0o700)
+        owner = lock_dir / "owner"
+        owner.write_text(
+            f"version=1;tool=install.sh;pid={os.getpid() + 1000};uid={os.geteuid()}\n",
+            encoding="utf-8",
+        )
+        owner.chmod(0o600)
+        wrong_parent = self.run_wrapper(
+            "--inherit-installer-lock", "up", "--detach"
+        )
+        self.assertNotEqual(wrong_parent.returncode, 0)
+        self.assertIn("does not name this direct child", wrong_parent.stderr)
+        self.assertTrue(lock_dir.is_dir())
+
+        owner.write_text(
+            f"version=1;tool=install.sh;pid={os.getpid()};uid={os.geteuid()}\n",
+            encoding="utf-8",
+        )
+        owner.chmod(0o600)
+        extra = lock_dir / "unexpected"
+        extra.write_text("x\n", encoding="utf-8")
+        extra.chmod(0o600)
+        unexpected = self.run_wrapper(
+            "--inherit-installer-lock", "config", "--quiet"
+        )
+        self.assertNotEqual(unexpected.returncode, 0)
+        self.assertIn("unexpected entry", unexpected.stderr)
+        self.assertTrue(lock_dir.is_dir())
+
+    def test_interrupted_inherited_child_never_releases_parent_installer_lock(self):
+        lock_dir = Path(f"{self.root.resolve()}.backupsheep-mutation-lock")
+        wait_path = self.root / "hold-inherited-compose"
+        entered_path = self.root / "inherited-compose-entered"
+        child_pid_path = self.root / "inherited-wrapper-pid"
+        lock_survived_path = self.root / "inherited-lock-survived"
+        wait_path.write_text("hold\n", encoding="utf-8")
+        self.set_state(
+            blocked_compose_command="up",
+            compose_wait_path=str(wait_path),
+            compose_entered_path=str(entered_path),
+        )
+        script = r'''
+source "$1"
+INSTALL_DIR="$2"
+acquire_installation_mutation_lock
+set +e
+set -m
+"$3" --inherit-installer-lock up --detach &
+child=$!
+set +m
+printf '%s\n' "$child" > "$4"
+wait "$child"
+status=$?
+if [[ -d "$MUTATION_LOCK_DIR" && "$(<"$MUTATION_LOCK_OWNER_FILE")" == "$MUTATION_LOCK_TOKEN" ]]; then
+    : > "$5"
+fi
+release_mutation_lock
+exit "$status"
+'''
+        holder = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                script,
+                "installer-inherited-signal",
+                str(INSTALLER),
+                str(self.root.resolve()),
+                str(self.wrapper),
+                str(child_pid_path),
+                str(lock_survived_path),
+            ],
+            cwd=self.root,
+            env=self.wrapper_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 10
+        while (
+            not entered_path.exists() or not child_pid_path.exists()
+        ) and time.monotonic() < deadline:
+            if holder.poll() is not None:
+                stdout, stderr = holder.communicate()
+                self.fail(
+                    f"installer holder exited before inherited child signal: "
+                    f"{holder.returncode}\n{stdout}\n{stderr}"
+                )
+            time.sleep(0.02)
+        self.assertTrue(lock_dir.is_dir())
+        child_pid = int(child_pid_path.read_text(encoding="utf-8").strip())
+        os.killpg(child_pid, signal.SIGTERM)
+        try:
+            stdout, stderr = holder.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(child_pid, signal.SIGKILL)
+            holder.kill()
+            stdout, stderr = holder.communicate(timeout=5)
+            self.fail(f"inherited child did not terminate\n{stdout}\n{stderr}")
+        self.assertEqual(holder.returncode, 143, f"{stdout}\n{stderr}")
+        self.assertTrue(lock_survived_path.exists())
+        self.assertFalse(lock_dir.exists())
+        wait_path.unlink(missing_ok=True)
+
+    def test_inherited_installer_lock_flag_order_and_duplication_fail_closed(self):
+        for arguments in (
+            ("config", "--inherit-installer-lock", "--quiet"),
+            (
+                "--inherit-installer-lock",
+                "--inherit-installer-lock",
+                "config",
+                "--quiet",
+            ),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.run_wrapper(*arguments)
+                self.assertNotEqual(result.returncode, 0)
+
     def test_stale_or_malformed_mutation_lock_fails_closed_without_reaping(self):
         lock_dir = Path(f"{self.root.resolve()}.backupsheep-mutation-lock")
         lock_dir.mkdir(mode=0o700)

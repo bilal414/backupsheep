@@ -4758,13 +4758,26 @@ compose() {
     unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES
     unset COMPOSE_REMOVE_ORPHANS
     unset COMPOSE_PATH_SEPARATOR COMPOSE_DISABLE_ENV_FILE
-    run_installer_command 3600 "Docker Compose operation" \
-        "${compose_environment[@]}" "$DOCKER_BIN" compose \
-        --project-name "$PROJECT_NAME" \
-        --project-directory "$INSTALL_DIR" \
-        --env-file "$ENV_FILE" \
-        "${compose_model[@]}" \
-        "$@"
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        local -a wrapper_arguments=()
+        [[ -x "$INSTALL_DIR/backupsheep-compose" && ! -L "$INSTALL_DIR/backupsheep-compose" ]] \
+            || die "The signed-release Compose wrapper is absent or unsafe."
+        if [[ "$ALLOW_ROOT_INSTALL" == true ]]; then
+            wrapper_arguments+=(--allow-root-install)
+        fi
+        wrapper_arguments+=(--inherit-installer-lock)
+        run_installer_command 3600 "hardened signed-release Compose operation" \
+            "${compose_environment[@]}" "$INSTALL_DIR/backupsheep-compose" \
+            "${wrapper_arguments[@]}" "$@"
+    else
+        run_installer_command 3600 "Docker Compose operation" \
+            "${compose_environment[@]}" "$DOCKER_BIN" compose \
+            --project-name "$PROJECT_NAME" \
+            --project-directory "$INSTALL_DIR" \
+            --env-file "$ENV_FILE" \
+            "${compose_model[@]}" \
+            "$@"
+    fi
     assert_install_parent_identity
     assert_install_root_identity
 }
@@ -5656,6 +5669,17 @@ start_core() {
     wait_for_app
 }
 
+quiesce_failed_operations_start() {
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        # Egress guards share network namespaces with their workers and may not
+        # be stopped independently.  The signed wrapper therefore removes the
+        # complete container topology while preserving every named volume.
+        compose --profile operations down --timeout 300 >/dev/null 2>&1 || true
+    else
+        compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
+    fi
+}
+
 start_operations() {
     local service_name=""
     local service_container_ids=""
@@ -5679,14 +5703,14 @@ start_operations() {
     if ! compose --profile operations up --detach --no-build --no-deps \
         --force-recreate "${OPERATION_GUARD_SERVICES[@]}" \
         "${OPERATION_WORKER_SERVICES[@]}"; then
-        compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
+        quiesce_failed_operations_start
         show_failure_guidance
-        die "Operations startup failed."
+        die "Operations startup failed; complete-topology quiescence was requested."
     fi
     if ! compose --profile operations up --detach --no-build --no-deps beat; then
-        compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
+        quiesce_failed_operations_start
         show_failure_guidance
-        die "Beat startup failed after the guarded workers were recreated."
+        die "Beat startup failed after the guarded workers were recreated; complete-topology quiescence was requested."
     fi
 
     # A container is initially "running" while init.sh is still executing the
@@ -5701,8 +5725,8 @@ start_operations() {
         operation_service_names=()
         for service_name in "${OPERATION_SERVICES[@]}"; do
             if ! service_container_ids="$(compose --profile operations ps --all -q "$service_name")"; then
-                compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-                die "Could not inventory operations service ${service_name}; all operations services were stopped."
+                quiesce_failed_operations_start
+                die "Could not inventory operations service ${service_name}; complete-topology quiescence was requested."
             fi
             service_container_count=0
             while IFS= read -r container_id; do
@@ -5712,8 +5736,8 @@ start_operations() {
                 state="$("$DOCKER_BIN" inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
                 case "$state" in
                     exited|dead)
-                        compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-                        die "Operations service ${service_name} container ${container_id} terminated during startup; all operations services were stopped."
+                        quiesce_failed_operations_start
+                        die "Operations service ${service_name} container ${container_id} terminated during startup; complete-topology quiescence was requested."
                         ;;
                     running) ;;
                     *) container_ready=false ;;
@@ -5742,8 +5766,8 @@ start_operations() {
                 fi
                 if [[ "$container_ready" == true ]]; then
                     if ! restart_count="$("$DOCKER_BIN" inspect --format '{{.RestartCount}}' "$container_id")"; then
-                        compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-                        die "Could not inspect operations service ${service_name} container ${container_id}; all operations services were stopped."
+                        quiesce_failed_operations_start
+                        die "Could not inspect operations service ${service_name} container ${container_id}; complete-topology quiescence was requested."
                     fi
                     operation_container_ids+=("$container_id")
                     operation_service_names+=("$service_name")
@@ -5756,8 +5780,8 @@ start_operations() {
                 all_ready=false
             fi
             if [[ "$service_name" == "beat" && "$service_container_count" -gt 1 ]]; then
-                compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-                die "At most one Beat scheduler is allowed; found ${service_container_count}. All operations services were stopped."
+                quiesce_failed_operations_start
+                die "At most one Beat scheduler is allowed; found ${service_container_count}. Complete-topology quiescence was requested."
             fi
         done
         [[ "$all_ready" == true ]] && break
@@ -5765,8 +5789,8 @@ start_operations() {
         elapsed=$((elapsed + 3))
     done
     if [[ "$all_ready" != true ]]; then
-        compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-        die "Operations services did not finish preflight and exec their expected processes within three minutes; all were stopped."
+        quiesce_failed_operations_start
+        die "Operations services did not finish preflight and exec their expected processes within three minutes; complete-topology quiescence was requested."
     fi
 
     sleep 10
@@ -5776,8 +5800,8 @@ start_operations() {
     current_container_count=0
     for service_name in "${OPERATION_SERVICES[@]}"; do
         if ! service_container_ids="$(compose --profile operations ps --all -q "$service_name")"; then
-            compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-            die "Could not re-inventory operations service ${service_name}; all operations services were stopped."
+            quiesce_failed_operations_start
+            die "Could not re-inventory operations service ${service_name}; complete-topology quiescence was requested."
         fi
         service_container_count=0
         while IFS= read -r container_id; do
@@ -5795,22 +5819,22 @@ start_operations() {
                 index=$((index + 1))
             done
             if [[ "$found_container" != true ]]; then
-                compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-                die "Operations service ${service_name} changed container identity during its stability window; all operations services were stopped."
+                quiesce_failed_operations_start
+                die "Operations service ${service_name} changed container identity during its stability window; complete-topology quiescence was requested."
             fi
         done <<< "$service_container_ids"
         if [[ "$service_container_count" -eq 0 ]]; then
-            compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-            die "Operations service ${service_name} disappeared during its stability window; all operations services were stopped."
+            quiesce_failed_operations_start
+            die "Operations service ${service_name} disappeared during its stability window; complete-topology quiescence was requested."
         fi
         if [[ "$service_name" == "beat" && "$service_container_count" -gt 1 ]]; then
-            compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-            die "More than one Beat scheduler appeared during the stability window; all operations services were stopped."
+            quiesce_failed_operations_start
+            die "More than one Beat scheduler appeared during the stability window; complete-topology quiescence was requested."
         fi
     done
     if [[ "$current_container_count" -ne "${#operation_container_ids[@]}" ]]; then
-        compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-        die "The operations container set changed during its stability window; all operations services were stopped."
+        quiesce_failed_operations_start
+        die "The operations container set changed during its stability window; complete-topology quiescence was requested."
     fi
 
     index=0
@@ -5819,12 +5843,12 @@ start_operations() {
         container_id="${operation_container_ids[$index]}"
         if ! state="$("$DOCKER_BIN" inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null)" \
             || ! restart_count="$("$DOCKER_BIN" inspect --format '{{.RestartCount}}' "$container_id" 2>/dev/null)"; then
-            compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-            die "Could not verify operations service ${service_name} container ${container_id}; all operations services were stopped."
+            quiesce_failed_operations_start
+            die "Could not verify operations service ${service_name} container ${container_id}; complete-topology quiescence was requested."
         fi
         if [[ "$state" != "running" || "$restart_count" != "${operation_restart_counts[$index]}" ]]; then
-            compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
-            die "Operations service ${service_name} container ${container_id} was not stable after startup; all operations services were stopped."
+            quiesce_failed_operations_start
+            die "Operations service ${service_name} container ${container_id} was not stable after startup; complete-topology quiescence was requested."
         fi
         index=$((index + 1))
     done

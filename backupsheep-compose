@@ -30,6 +30,13 @@ if [[ "${1-}" == "--allow-root-install" ]]; then
     [[ "${1-}" != "--allow-root-install" ]] \
         || die "--allow-root-install may be specified only once."
 fi
+inherit_installer_lock=false
+if [[ "${1-}" == "--inherit-installer-lock" ]]; then
+    inherit_installer_lock=true
+    shift
+    [[ "${1-}" != "--inherit-installer-lock" ]] \
+        || die "--inherit-installer-lock may be specified only once."
+fi
 if ! root_install_mode_allowed "$EUID" "$allow_root_install"; then
     if (( EUID == 0 )); then
         die "effective UID 0 is refused by default; put --allow-root-install first only for an intentionally root-owned installation."
@@ -69,6 +76,7 @@ mutation_lock_dir="${root_dir}.backupsheep-mutation-lock"
 mutation_lock_owner_file="${mutation_lock_dir}/owner"
 mutation_lock_token=""
 mutation_lock_held=false
+inherited_installer_lock_token=""
 legacy_rabbitmq_image_defaults_unavailable=false
 active_compose_pid=""
 
@@ -262,6 +270,42 @@ acquire_mutation_lock() {
         && "$(file_links "$mutation_lock_owner_file")" == "1" \
         && "$(<"$mutation_lock_owner_file")" == "$mutation_lock_token" ]] \
         || die "the new mutation-lock ownership witness failed validation."
+}
+
+validate_inherited_installer_lock() {
+    local expected_token="version=1;tool=install.sh;pid=${PPID};uid=${EUID}"
+    local entry_count=0 entry=""
+
+    [[ "$inherit_installer_lock" == true ]] \
+        || die "internal installer-lock validation was requested without inheritance."
+    [[ "$PPID" =~ ^[1-9][0-9]*$ ]] \
+        || die "the inherited installer lock has no valid direct parent process."
+    [[ -d "$mutation_lock_dir" && ! -L "$mutation_lock_dir" \
+        && "$(file_uid "$mutation_lock_dir")" == "$EUID" \
+        && "$(file_mode "$mutation_lock_dir")" == "700" ]] \
+        || die "the inherited installer mutation-lock directory is unsafe."
+    [[ -f "$mutation_lock_owner_file" && ! -L "$mutation_lock_owner_file" \
+        && "$(file_uid "$mutation_lock_owner_file")" == "$EUID" \
+        && "$(file_mode "$mutation_lock_owner_file")" == "600" \
+        && "$(file_links "$mutation_lock_owner_file")" == "1" \
+        && "$(file_size "$mutation_lock_owner_file")" -le 128 \
+        && "$(<"$mutation_lock_owner_file")" == "$expected_token" ]] \
+        || die "the inherited installer mutation-lock witness does not name this direct child."
+    while IFS= read -r -d '' entry; do
+        entry_count=$((entry_count + 1))
+        [[ "$entry" == "$mutation_lock_owner_file" ]] \
+            || die "the inherited installer mutation lock contains an unexpected entry."
+    done < <(find "$mutation_lock_dir" -mindepth 1 -maxdepth 1 -print0)
+    [[ "$entry_count" -eq 1 ]] \
+        || die "the inherited installer mutation lock must contain exactly its owner witness."
+    inherited_installer_lock_token="$expected_token"
+}
+
+assert_inherited_installer_lock() {
+    [[ "$inherit_installer_lock" == true ]] || return 0
+    validate_inherited_installer_lock
+    [[ "$inherited_installer_lock_token" == "version=1;tool=install.sh;pid=${PPID};uid=${EUID}" ]] \
+        || die "the inherited installer mutation-lock parent changed."
 }
 
 validate_private_file() {
@@ -3960,10 +4004,31 @@ verify_and_record_completed_rabbitmq_43_transition() {
 # deliberately leave a stale fail-closed lock; it is never guessed away from a PID.
 # Read-only commands and structural Compose dry-runs remain concurrent.
 if [[ "$mutating_command" == true && "$dry_run_requested" == false ]]; then
-    acquire_mutation_lock
+    if [[ "$inherit_installer_lock" == true ]]; then
+        validate_inherited_installer_lock
+        # The direct installer child must still own its Compose client process
+        # group on HUP/INT/TERM.  The generic exit handler is safe here because
+        # mutation_lock_held remains false, so only the parent installer can
+        # release the inherited lock.
+        trap finish_wrapper EXIT
+        trap 'handle_wrapper_signal 129' HUP
+        trap 'handle_wrapper_signal 130' INT
+        trap 'handle_wrapper_signal 143' TERM
+    else
+        acquire_mutation_lock
+    fi
+elif [[ "$inherit_installer_lock" == true ]]; then
+    # Read-only probes made by the installer stay under the same exact parent
+    # lock even though they do not need to acquire or release it themselves.
+    validate_inherited_installer_lock
+    trap finish_wrapper EXIT
+    trap 'handle_wrapper_signal 129' HUP
+    trap 'handle_wrapper_signal 130' INT
+    trap 'handle_wrapper_signal 143' TERM
 fi
 
 # Validate the same fully rendered model immediately before every read or mutation.
+assert_inherited_installer_lock
 assert_installation_ancestor_identity
 assert_installation_root_identity
 "${compose_command[@]}" config --quiet
@@ -4024,7 +4089,9 @@ if [[ "$compose_subcommand" == "up" && "$up_broad_project" == true \
 fi
 assert_installation_ancestor_identity
 assert_installation_root_identity
+assert_inherited_installer_lock
 run_compose_in_isolated_group "${compose_command[@]}" "${compose_arguments[@]}"
+assert_inherited_installer_lock
 assert_installation_ancestor_identity
 assert_installation_root_identity
 if [[ "$dry_run_requested" == false ]]; then
@@ -4039,3 +4106,4 @@ fi
 if [[ "$rabbitmq_transition_target" == "4.3" ]]; then
     verify_and_record_completed_rabbitmq_43_transition
 fi
+assert_inherited_installer_lock

@@ -650,6 +650,47 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
         self.assertIn("DJANGO_SETTINGS_MODULE must be backupsheep.settings", self.installer)
         self.assertIn("contains BACKUPSHEEP_SECRETS", self.installer)
 
+    def test_signed_installer_routes_compose_through_exact_inherited_lock_wrapper(self):
+        compose_body = self.installer.split("\ncompose() {", 1)[1].split(
+            "\n}\n\nexpected_compose_config_files()", 1
+        )[0]
+        self.assertIn('if [[ "$IMAGE_MODE" == "signed-release" ]]', compose_body)
+        self.assertIn('wrapper_arguments+=(--inherit-installer-lock)', compose_body)
+        self.assertIn('"$INSTALL_DIR/backupsheep-compose"', compose_body)
+        self.assertIn(
+            'run_installer_command 3600 "hardened signed-release Compose operation"',
+            compose_body,
+        )
+        signed_branch = compose_body.split(
+            'if [[ "$IMAGE_MODE" == "signed-release" ]]', 1
+        )[1].split("\n    else", 1)[0]
+        self.assertNotIn('"$DOCKER_BIN" compose', signed_branch)
+        wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
+        self.assertIn(
+            'expected_token="version=1;tool=install.sh;pid=${PPID};uid=${EUID}"',
+            wrapper,
+        )
+        self.assertIn("validate_inherited_installer_lock", wrapper)
+
+    def test_signed_operations_failure_quiesces_complete_guarded_topology(self):
+        helper = self.installer.split(
+            "\nquiesce_failed_operations_start() {", 1
+        )[1].split("\n}\n\nstart_operations()", 1)[0]
+        self.assertIn('if [[ "$IMAGE_MODE" == "signed-release" ]]', helper)
+        signed = helper.split(
+            'if [[ "$IMAGE_MODE" == "signed-release" ]]', 1
+        )[1].split("\n    else", 1)[0]
+        self.assertIn("compose --profile operations down --timeout 300", signed)
+        self.assertNotIn(" compose --profile operations stop ", signed)
+        start_operations = self.installer.split("\nstart_operations() {", 1)[1].split(
+            "\n}\n\nprint_next_steps()", 1
+        )[0]
+        self.assertNotIn(
+            'compose --profile operations stop "${OPERATION_SERVICES[@]}"',
+            start_operations,
+        )
+        self.assertIn("quiesce_failed_operations_start", start_operations)
+
     def test_file_backed_secret_contract_is_fail_closed(self):
         self.assertIn('install -d -m 0700 -- "$SECRETS_DIR"', self.installer)
         self.assertIn('chmod 0444 "$temporary_file"', self.installer)
