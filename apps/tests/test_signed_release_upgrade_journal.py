@@ -1682,6 +1682,30 @@ publish_authorized_source_receipt "$4"
         next_intent = self._initialize()
         self.assertEqual(next_intent["source"]["release_tag"], "v5.0.0")
 
+    def test_compaction_refuses_symlinked_journal_root_without_mutating_target(self):
+        external = self.root / "external-journal"
+        external.mkdir(mode=0o700)
+        for name in (
+            upgrade.OPERATIONS_NAME,
+            upgrade.LINEAGE_NAME,
+            upgrade.PRUNING_NAME,
+        ):
+            (external / name).mkdir(mode=0o700)
+        lock = external / upgrade.LOCK_NAME
+        lock.write_bytes(b"")
+        lock.chmod(0o600)
+        candidate = external / upgrade.NEXT_CHECKPOINT_NAME
+        candidate.write_bytes(b"{")
+        candidate.chmod(0o400)
+        (self.install / upgrade.JOURNAL_ROOT_NAME).symlink_to(external)
+
+        with self.assertRaisesRegex(
+            upgrade.UpgradeJournalError, "must be a real directory"
+        ):
+            upgrade.compact_journal(install_dir=self.install)
+
+        self.assertEqual(candidate.read_bytes(), b"{")
+
     def test_checkpoint_count_is_derived_from_terminal_lineage_sequence(self):
         self._complete_version_chain(5)
         self.assertTrue(
@@ -1739,6 +1763,130 @@ publish_authorized_source_receipt "$4"
                 self._initialize()
         intent = self._initialize()
         self.assertEqual(upgrade.validate_journal(self.install)[0], intent)
+
+    def test_unpublished_operation_id_binds_every_base_intent_field(self):
+        source = upgrade.build_release_state(self.source_evidence, "linux/amd64")
+        target = upgrade.build_release_state(self.target_evidence, "linux/amd64")
+        mutations = {
+            "artifact provider": lambda request: request["artifact_provider"].update(
+                generation=2
+            ),
+            "volume witness": lambda request: request["volumes"][
+                "backup_workdir"
+            ].update(ownership_witness_sha256=digest("changed-volume-owner")),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                journal = self.install / upgrade.JOURNAL_ROOT_NAME
+                if journal.exists() or journal.is_symlink():
+                    shutil.rmtree(journal)
+                request = self._request()
+                self._set_request_pointers(request, source, target)
+                self.request.write_bytes(canonical(request))
+                self.request.chmod(0o600)
+                original = upgrade._write_exclusive
+                injected = {"done": False}
+
+                def fail_before_intent(path, payload, *, mode):
+                    if not injected["done"] and path.name == upgrade.INTENT_NAME:
+                        injected["done"] = True
+                        raise OSError("injected before intent publication")
+                    return original(path, payload, mode=mode)
+
+                with mock.patch.object(
+                    upgrade, "_write_exclusive", side_effect=fail_before_intent
+                ):
+                    with self.assertRaisesRegex(OSError, "before intent publication"):
+                        self._initialize()
+                operations = journal / upgrade.OPERATIONS_NAME
+                original_operation = next(operations.iterdir())
+                self.assertFalse((original_operation / upgrade.INTENT_NAME).exists())
+
+                changed = json.loads(self.request.read_text())
+                mutate(changed)
+                self.request.write_bytes(canonical(changed))
+                self.request.chmod(0o600)
+                with self.assertRaisesRegex(
+                    upgrade.UpgradeJournalError,
+                    "interrupted unstarted operation requires its exact retry",
+                ):
+                    self._initialize()
+                self.assertEqual(
+                    {entry.name for entry in operations.iterdir()},
+                    {original_operation.name},
+                )
+
+    def test_large_valid_intent_reconciles_after_publication_before_lineage(self):
+        names = sorted(
+            "a" * 64 + "." + str(index).zfill(6) + "x" * 121
+            for index in range(3000)
+        )
+        migration = {
+            "schema_version": 1,
+            "all_migrations_atomic": True,
+            "migrations": names,
+            "migration_set_sha256": release_transition.migration_digest(names),
+            "leaves": [names[-1]],
+            "leaf_set_sha256": release_transition.migration_digest(
+                [names[-1]], leaves=True
+            ),
+        }
+        shutil.rmtree(self.source_evidence)
+        shutil.rmtree(self.target_evidence)
+        with mock.patch.object(self, "_migration", return_value=migration):
+            source = self._make_evidence(
+                self.source_evidence,
+                tag="v1.0.0",
+                commit="1" * 40,
+                epoch=1,
+                accepted=[],
+                seed=1,
+            )
+            target = self._make_evidence(
+                self.target_evidence,
+                tag="v2.0.0",
+                commit="2" * 40,
+                epoch=2,
+                accepted=[upgrade._predecessor_projection(source)],
+                seed=8,
+            )
+        self._write_source_verification(source, target)
+        request = self._request()
+        self._set_request_pointers(request, source, target)
+        self.request.write_bytes(canonical(request))
+        self.request.chmod(0o600)
+
+        original = upgrade._publish_lineage_and_head
+        injected = {"done": False}
+
+        def fail_before_started_lineage(*, root, record, expected_head):
+            if not injected["done"] and record["event"] == "started":
+                injected["done"] = True
+                raise OSError("injected after large intent publication")
+            return original(root=root, record=record, expected_head=expected_head)
+
+        with mock.patch.object(
+            upgrade,
+            "_publish_lineage_and_head",
+            side_effect=fail_before_started_lineage,
+        ):
+            with self.assertRaisesRegex(OSError, "large intent publication"):
+                self._initialize()
+
+        operations = self.install / upgrade.JOURNAL_ROOT_NAME / upgrade.OPERATIONS_NAME
+        operation = next(operations.iterdir())
+        intent_path = operation / upgrade.INTENT_NAME
+        self.assertGreater(intent_path.stat().st_size, upgrade.MAX_CONTROL_BYTES)
+        expected_operation_id = operation.name
+
+        intent = self._initialize()
+        self.assertEqual(intent["operation_id"], expected_operation_id)
+        self.assertEqual(
+            upgrade.validate_journal(
+                self.install, operation_id=expected_operation_id
+            )[1],
+            None,
+        )
 
     def test_missing_genesis_head_and_torn_head_candidate_reconcile(self):
         original = upgrade._atomic_replace
@@ -2263,26 +2411,32 @@ publish_authorized_source_receipt "$4"
         intent = self._initialize()
         for phase in upgrade.PHASES[:5]:
             self._append(phase, intent)
-        bad = self._payload("60-core-accepted", intent)
-        bad["functional_probe"]["status_code"] = 503
-        bad["functional_probe"]["receipt_sha256"] = upgrade._domain_digest(
-            "BackupSheep/upgrade-functional-probe/v1",
-            {
-                key: value
-                for key, value in bad["functional_probe"].items()
-                if key != "receipt_sha256"
-            },
-        )
         path = self.install / ".60-core-accepted.payload.json"
-        path.write_bytes(canonical(bad))
-        path.chmod(0o600)
-        with self.assertRaisesRegex(upgrade.UpgradeJournalError, "acceptance probe"):
-            upgrade.append_receipt(
-                install_dir=self.install,
-                operation_id=intent["operation_id"],
-                phase="60-core-accepted",
-                payload_path=path,
+        for field, value, message in (
+            ("status_code", 503, "acceptance probe"),
+            ("schema_version", True, "positive bounded integer"),
+        ):
+            bad = self._payload("60-core-accepted", intent)
+            bad["functional_probe"][field] = value
+            bad["functional_probe"]["receipt_sha256"] = upgrade._domain_digest(
+                "BackupSheep/upgrade-functional-probe/v1",
+                {
+                    key: item
+                    for key, item in bad["functional_probe"].items()
+                    if key != "receipt_sha256"
+                },
             )
+            path.write_bytes(canonical(bad))
+            path.chmod(0o600)
+            with self.subTest(field=field), self.assertRaisesRegex(
+                upgrade.UpgradeJournalError, message
+            ):
+                upgrade.append_receipt(
+                    install_dir=self.install,
+                    operation_id=intent["operation_id"],
+                    phase="60-core-accepted",
+                    payload_path=path,
+                )
 
     def test_rollback_requires_complete_source_and_target_absence_inventory(self):
         intent = self._initialize()

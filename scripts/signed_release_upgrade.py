@@ -243,6 +243,13 @@ def _positive_integer(value: Any, label: str) -> int:
     return value
 
 
+def _exact_positive_integer(value: Any, expected: int, label: str) -> int:
+    normalized = _positive_integer(value, label)
+    if normalized != expected:
+        raise UpgradeJournalError(f"{label} is unsupported")
+    return normalized
+
+
 def _nonnegative_integer(value: Any, label: str, *, maximum: int = 2_147_483_647) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
         raise UpgradeJournalError(f"{label} must be a nonnegative bounded integer")
@@ -582,7 +589,15 @@ def _ensure_journal_layout(install_dir: Path) -> tuple[Path, Path]:
 
 @contextmanager
 def _journal_lock(install_dir: Path):
-    root, _ = _journal_paths(install_dir)
+    owner = os.geteuid()
+    root, operations = _journal_paths(install_dir)
+    lineage = root / LINEAGE_NAME
+    pruning = root / PRUNING_NAME
+    _validate_directory(install_dir, owner=owner)
+    _validate_ancestor_chain(install_dir, owner=owner)
+    _validate_directory(root, owner=owner)
+    for directory in (operations, lineage, pruning):
+        _validate_directory(directory, owner=owner)
     lock_path = root / LOCK_NAME
     flags = (
         os.O_RDWR
@@ -605,6 +620,13 @@ def _journal_lock(install_dir: Path):
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise UpgradeJournalError("another journal operation holds the lock") from exc
+        # Re-prove the canonical layout after serialization and before any
+        # caller performs recovery cleanup or publication.
+        _validate_directory(install_dir, owner=owner)
+        _validate_ancestor_chain(install_dir, owner=owner)
+        _validate_directory(root, owner=owner)
+        for directory in (operations, lineage, pruning):
+            _validate_directory(directory, owner=owner)
         yield
     finally:
         try:
@@ -641,6 +663,7 @@ def _write_exclusive(path: Path, payload: bytes, *, mode: int) -> None:
 
 def _reconcile_exclusive(path: Path, payload: bytes, *, mode: int) -> bool:
     temporary = path.with_name(f".{path.name}.new")
+    exact_maximum = max(1, len(payload))
     final_exists = path.exists() or path.is_symlink()
     temporary_exists = temporary.exists() or temporary.is_symlink()
     if not final_exists and not temporary_exists:
@@ -649,6 +672,7 @@ def _reconcile_exclusive(path: Path, payload: bytes, *, mode: int) -> bool:
     if temporary_exists:
         temporary_payload = _read_regular(
             temporary,
+            maximum=exact_maximum,
             owner=owner,
             modes={mode},
             links={1, 2},
@@ -665,7 +689,13 @@ def _reconcile_exclusive(path: Path, payload: bytes, *, mode: int) -> bool:
             else:
                 raise UpgradeJournalError(f"interrupted publication for {path.name} differs")
     if final_exists:
-        final_payload = _read_regular(path, owner=owner, modes={mode}, links={1, 2})
+        final_payload = _read_regular(
+            path,
+            maximum=exact_maximum,
+            owner=owner,
+            modes={mode},
+            links={1, 2},
+        )
         if final_payload != payload:
             raise UpgradeJournalError(f"existing {path.name} differs")
     if not final_exists:
@@ -681,7 +711,7 @@ def _reconcile_exclusive(path: Path, payload: bytes, *, mode: int) -> bool:
             raise UpgradeJournalError(f"interrupted publication for {path.name} is ambiguous")
         os.unlink(temporary)
         _fsync_directory(path.parent)
-    _read_regular(path, owner=owner, modes={mode})
+    _read_regular(path, maximum=exact_maximum, owner=owner, modes={mode})
     return True
 
 
@@ -781,8 +811,11 @@ def _verifier_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "platforms",
     }
     _exact_keys(verifier, expected, "manifest.consumer.cosign_image")
-    if verifier["runtime_contract_version"] != 1:
-        raise UpgradeJournalError("manifest verifier runtime contract is unsupported")
+    runtime_contract_version = _exact_positive_integer(
+        verifier["runtime_contract_version"],
+        1,
+        "manifest verifier runtime contract",
+    )
     reference = _string(
         verifier["reference"], release_transition.VERIFIER_REFERENCE_RE, "manifest verifier reference"
     )
@@ -815,7 +848,7 @@ def _verifier_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         }
     return {
         "reference": reference,
-        "runtime_contract_version": 1,
+        "runtime_contract_version": runtime_contract_version,
         "linux_amd64_manifest": platforms["linux/amd64"]["manifest_digest"],
         "linux_amd64_config": platforms["linux/amd64"]["config_digest"],
         "linux_arm64_manifest": platforms["linux/arm64"]["manifest_digest"],
@@ -859,8 +892,7 @@ def build_release_state(
         {"schema_version", "release", "vulnerability_database", "consumer", "transition", "images"},
         "release manifest",
     )
-    if manifest["schema_version"] != 4:
-        raise UpgradeJournalError("release manifest is not schema 4")
+    _exact_positive_integer(manifest["schema_version"], 4, "release manifest schema")
     if descriptor["release_manifest_sha256"] != _sha256_bytes(manifest_bytes):
         raise UpgradeJournalError("descriptor does not bind the release manifest")
     if descriptor["trusted_root_sha256"] != _sha256_bytes(root):
@@ -905,7 +937,9 @@ def build_release_state(
     )
     if verification_bytes != _canonical_bytes(verification):
         raise UpgradeJournalError("signature-verification receipt is not canonical")
-    verification = _mapping(verification, "signature-verification receipt")
+    verification = dict(
+        _mapping(verification, "signature-verification receipt")
+    )
     _exact_keys(
         verification,
         {
@@ -932,6 +966,17 @@ def build_release_state(
             "workflow_ref",
         },
         "signature-verification receipt",
+    )
+    verification["schema_version"] = _exact_positive_integer(
+        verification["schema_version"], 2, "signature-verification schema"
+    )
+    verification["runtime_contract_version"] = _exact_positive_integer(
+        verification["runtime_contract_version"],
+        1,
+        "signature-verification runtime contract",
+    )
+    verification["release_epoch"] = _positive_integer(
+        verification["release_epoch"], "signature-verification release epoch"
     )
     expected_verification = {
         "daemon_identity_sha256": verification["daemon_identity_sha256"],
@@ -1086,7 +1131,9 @@ def _validate_authorized_predecessor_verification(
     target: dict[str, Any],
     daemon: dict[str, Any],
 ) -> dict[str, Any]:
-    receipt = _mapping(value, "authorized-predecessor verification receipt")
+    receipt = dict(
+        _mapping(value, "authorized-predecessor verification receipt")
+    )
     _exact_keys(
         receipt,
         {
@@ -1116,6 +1163,18 @@ def _validate_authorized_predecessor_verification(
             "workflow_ref",
         },
         "authorized-predecessor verification receipt",
+    )
+    receipt["schema_version"] = _exact_positive_integer(
+        receipt["schema_version"], 3, "authorized-predecessor schema"
+    )
+    receipt["verifier_runtime_contract_version"] = _exact_positive_integer(
+        receipt["verifier_runtime_contract_version"],
+        1,
+        "authorized-predecessor verifier runtime contract",
+    )
+    receipt["source_release_epoch"] = _positive_integer(
+        receipt["source_release_epoch"],
+        "authorized-predecessor source release epoch",
     )
     expected = _authorized_predecessor_verification_receipt(
         source=source,
@@ -1180,7 +1239,7 @@ def _validate_verification_state(
     release: dict[str, Any],
     purpose: str,
 ) -> dict[str, Any]:
-    verification = _mapping(value, label)
+    verification = dict(_mapping(value, label))
     expected_keys = {
         "daemon_identity_sha256",
         "descriptor_bundle_sha256",
@@ -1205,6 +1264,17 @@ def _validate_verification_state(
         "workflow_ref",
     }
     _exact_keys(verification, expected_keys, label)
+    verification["schema_version"] = _exact_positive_integer(
+        verification["schema_version"], 2, f"{label} schema"
+    )
+    verification["runtime_contract_version"] = _exact_positive_integer(
+        verification["runtime_contract_version"],
+        1,
+        f"{label} runtime contract",
+    )
+    verification["release_epoch"] = _positive_integer(
+        verification["release_epoch"], f"{label} release epoch"
+    )
     platform = next(iter({item["platform"] for item in release["images"].values()}))
     manifest_key = "linux_amd64_manifest" if platform == "linux/amd64" else "linux_arm64_manifest"
     config_key = "linux_amd64_config" if platform == "linux/amd64" else "linux_arm64_config"
@@ -1440,8 +1510,11 @@ def _validate_witness_request(value: Any) -> dict[str, Any]:
         },
         "upgrade witness request",
     )
-    if request["schema_version"] != WITNESS_SCHEMA_VERSION:
-        raise UpgradeJournalError("unsupported upgrade witness schema")
+    _exact_positive_integer(
+        request["schema_version"],
+        WITNESS_SCHEMA_VERSION,
+        "upgrade witness schema",
+    )
     attempt_nonce = _string(request["attempt_nonce"], HEX_RE, "upgrade attempt nonce")
     installation_id = _string(request["installation_id"], HEX_RE, "installation ID")
     compose_project = _string(request["compose_project"], PROJECT_RE, "Compose project")
@@ -1715,6 +1788,21 @@ def _lineage_release_projection(release: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _operation_id_for_intent(
+    base_intent: dict[str, Any], *, parent_head_sha256: str
+) -> str:
+    _string(parent_head_sha256, DIGEST_RE, "operation parent head")
+    # attempt_nonce is an idempotence discriminator only within one exact
+    # parent and one exact request.  Bind every immutable request byte so a
+    # crash before intent publication cannot reinterpret the same operation
+    # directory as a changed daemon/model/environment/resource request.
+    return hashlib.sha256(
+        b"BackupSheep/signed-upgrade-operation/v3\0"
+        + _canonical_bytes(base_intent)
+        + parent_head_sha256.encode("ascii")
+    ).hexdigest()
+
+
 def _bind_intent_lineage(
     base_intent: dict[str, Any], *, parent_head: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1733,13 +1821,9 @@ def _bind_intent_lineage(
             "signed-upgrade target epoch does not advance global activated history"
         )
     parent_digest = _sha256_bytes(_canonical_bytes(parent_head))
-    operation_seed = (
-        "BackupSheep/signed-upgrade/v2|"
-        f"{base_intent['installation_id']}|{source_projection['state_sha256']}|"
-        f"{target_projection['state_sha256']}|{parent_head['record_sha256']}|"
-        f"{base_intent['attempt_nonce']}"
-    ).encode("ascii")
-    operation_id = hashlib.sha256(operation_seed).hexdigest()
+    operation_id = _operation_id_for_intent(
+        base_intent, parent_head_sha256=parent_digest
+    )
     intent = dict(base_intent)
     intent["operation_id"] = operation_id
     intent["lineage"] = {
@@ -2283,7 +2367,9 @@ def _validate_functional_probe(
         label,
     )
     normalized = {
-        "schema_version": probe["schema_version"],
+        "schema_version": _exact_positive_integer(
+            probe["schema_version"], 1, f"{label} schema"
+        ),
         "operation_id": _string(
             probe["operation_id"], HEX_RE, f"{label} operation ID"
         ),
@@ -2930,8 +3016,9 @@ def _validate_intent(value: Any) -> dict[str, Any]:
         },
         "upgrade intent",
     )
-    if intent["schema_version"] != SCHEMA_VERSION:
-        raise UpgradeJournalError("unsupported upgrade-intent schema")
+    _exact_positive_integer(
+        intent["schema_version"], SCHEMA_VERSION, "upgrade-intent schema"
+    )
     _string(intent["attempt_nonce"], HEX_RE, "upgrade attempt nonce")
     _string(intent["operation_id"], HEX_RE, "operation ID")
     _string(intent["installation_id"], HEX_RE, "installation ID")
@@ -3102,14 +3189,13 @@ def _validate_intent(value: Any) -> dict[str, Any]:
         or lineage["parent_terminal_receipt_sha256"] == ZERO_DIGEST
     ):
         raise UpgradeJournalError("intent terminal lineage parent is incomplete")
-    expected_operation = hashlib.sha256(
-        (
-            "BackupSheep/signed-upgrade/v2|"
-            f"{intent['installation_id']}|{_state_digest(source)}|"
-            f"{_state_digest(target)}|{lineage['parent_record_sha256']}|"
-            f"{intent['attempt_nonce']}"
-        ).encode("ascii")
-    ).hexdigest()
+    base_intent = dict(intent)
+    base_intent.pop("operation_id")
+    base_intent.pop("lineage")
+    expected_operation = _operation_id_for_intent(
+        base_intent,
+        parent_head_sha256=lineage["parent_head_sha256"],
+    )
     if intent["operation_id"] != expected_operation:
         raise UpgradeJournalError("intent operation ID changed")
     resource_digests = _mapping(intent["resource_digests"], "intent resource digests")
@@ -3249,8 +3335,7 @@ def _validate_head(value: Any, label: str = "journal head") -> dict[str, Any]:
         },
         label,
     )
-    if head["schema_version"] != SCHEMA_VERSION:
-        raise UpgradeJournalError(f"{label} schema is unsupported")
+    _exact_positive_integer(head["schema_version"], SCHEMA_VERSION, f"{label} schema")
     state = head["state"]
     if state not in {"genesis", "started", "activated", "rolled-back"}:
         raise UpgradeJournalError(f"{label} state is unsupported")
@@ -3327,14 +3412,24 @@ def _validate_lineage_record(
         },
         f"lineage record {expected_sequence}",
     )
-    if record["schema_version"] != SCHEMA_VERSION or record["sequence"] != expected_sequence:
+    sequence = _nonnegative_integer(
+        record["sequence"],
+        f"lineage record {expected_sequence} sequence",
+        maximum=10**18,
+    )
+    schema_version = _exact_positive_integer(
+        record["schema_version"],
+        SCHEMA_VERSION,
+        f"lineage record {expected_sequence} schema",
+    )
+    if sequence != expected_sequence:
         raise UpgradeJournalError("lineage record schema or sequence changed")
     event = record["event"]
     if event not in {"genesis", "started", "activated", "rolled-back"}:
         raise UpgradeJournalError("lineage event is unsupported")
     normalized = {
-        "schema_version": SCHEMA_VERSION,
-        "sequence": expected_sequence,
+        "schema_version": schema_version,
+        "sequence": sequence,
         "event": event,
         "previous_record_sha256": _string(
             record["previous_record_sha256"], DIGEST_RE, "lineage previous record"
@@ -3484,13 +3579,16 @@ def _validate_checkpoint_boundary(value: Any) -> dict[str, Any]:
         "checkpoint boundary record",
     )
     event = record["event"]
-    if record["schema_version"] != SCHEMA_VERSION or event not in {
+    schema_version = _exact_positive_integer(
+        record["schema_version"], SCHEMA_VERSION, "checkpoint boundary schema"
+    )
+    if event not in {
         "activated",
         "rolled-back",
     }:
         raise UpgradeJournalError("checkpoint boundary is not a terminal lineage record")
     normalized = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "sequence": _positive_integer(record["sequence"], "checkpoint boundary sequence"),
         "event": event,
         "previous_record_sha256": _string(
@@ -3613,8 +3711,9 @@ def _validate_checkpoint(
         },
         "journal checkpoint",
     )
-    if checkpoint["schema_version"] != SCHEMA_VERSION:
-        raise UpgradeJournalError("journal checkpoint schema is unsupported")
+    _exact_positive_integer(
+        checkpoint["schema_version"], SCHEMA_VERSION, "journal checkpoint schema"
+    )
     boundary = _validate_checkpoint_boundary(checkpoint["boundary_record"])
     boundary_bytes = _canonical_bytes(boundary)
     boundary_digest = _sha256_bytes(boundary_bytes)
@@ -4498,7 +4597,12 @@ def _validate_operation_directory(
             {"schema_version", "phase", "operation_id", "installation_id", "intent_sha256", "previous_receipt_sha256", "payload"},
             receipt_name,
         )
-        if receipt["schema_version"] != SCHEMA_VERSION or receipt["phase"] != phase:
+        _exact_positive_integer(
+            receipt["schema_version"],
+            SCHEMA_VERSION,
+            f"{receipt_name} schema",
+        )
+        if receipt["phase"] != phase:
             raise UpgradeJournalError(f"{receipt_name} phase or schema changed")
         if receipt["operation_id"] != intent["operation_id"] or receipt["installation_id"] != intent["installation_id"]:
             raise UpgradeJournalError(f"{receipt_name} belongs to another operation")
@@ -4597,9 +4701,13 @@ def _validate_operation_directory(
             },
             "rollback receipt",
         )
+        _exact_positive_integer(
+            rollback_receipt["schema_version"],
+            SCHEMA_VERSION,
+            "rollback receipt schema",
+        )
         if (
-            rollback_receipt["schema_version"] != SCHEMA_VERSION
-            or rollback_receipt["operation_id"] != intent["operation_id"]
+            rollback_receipt["operation_id"] != intent["operation_id"]
             or rollback_receipt["installation_id"] != intent["installation_id"]
             or rollback_receipt["outcome"] != "rolled-back"
             or rollback_receipt["intent_sha256"] != intent_digest
