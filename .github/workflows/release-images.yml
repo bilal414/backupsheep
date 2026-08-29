@@ -39,13 +39,20 @@ jobs:
       app_digest: ${{ steps.build-app.outputs.digest }}
       postgres_digest: ${{ steps.build-postgres.outputs.digest }}
       egress_digest: ${{ steps.build-egress.outputs.digest }}
+      rabbitmq_digest: ${{ steps.build-rabbitmq.outputs.digest }}
+      rabbitmq_upgrade_digest: ${{ steps.build-rabbitmq-upgrade.outputs.digest }}
     env:
       APP_QUARANTINE: ghcr.io/bilal414/backupsheep-quarantine
       POSTGRES_QUARANTINE: ghcr.io/bilal414/backupsheep-postgres-quarantine
       EGRESS_QUARANTINE: ghcr.io/bilal414/backupsheep-egress-quarantine
+      RABBITMQ_QUARANTINE: ghcr.io/bilal414/backupsheep-rabbitmq-quarantine
+      RABBITMQ_UPGRADE_QUARANTINE: ghcr.io/bilal414/backupsheep-rabbitmq-upgrade-quarantine
       ARTIFACT_DIR: release-candidate/release-artifacts
       LAYOUT_DIR: release-candidate/release-layouts
       TOOL_DIR: /tmp/backupsheep-release-tools
+      TRIVY_CACHE_DIR: ${{ runner.temp }}/backupsheep-release-trivy-cache
+      TRIVY_DB_EVIDENCE: ${{ runner.temp }}/backupsheep-release-trivy-db-evidence.json
+      TRIVY_HOME: ${{ runner.temp }}/backupsheep-release-trivy-home
       DOCKER_BUILD_RECORD_UPLOAD: "false"
       DOCKER_BUILD_SUMMARY: "false"
     steps:
@@ -83,9 +90,31 @@ jobs:
             --policy deploy/release-policy.json \
             --destination "$TOOL_DIR" \
             --tool syft \
-            --tool trivy
+            --tool trivy \
+            --tool oras
           "$TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
           "$TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          "$TOOL_DIR/oras" version | grep -Eq '1\.3\.3'
+
+      - name: Prepare the exact reviewed Trivy vulnerability database
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for path in "$TRIVY_CACHE_DIR" "$TRIVY_DB_EVIDENCE" "$TRIVY_HOME"; do
+            test ! -e "$path"
+            test ! -L "$path"
+          done
+          install -d -m 0700 "$TRIVY_HOME"
+          python3 scripts/prepare_trivy_db.py prepare \
+            --lock deploy/trivy-db-lock.json \
+            --oras "$TOOL_DIR/oras" \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --evidence "$TRIVY_DB_EVIDENCE"
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --evidence "$TRIVY_DB_EVIDENCE"
 
       - name: Install pinned QEMU emulation
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -165,20 +194,66 @@ jobs:
           provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
           sbom: true
 
+      - name: Build RabbitMQ runtime candidate from exact remote commit
+        id: build-rabbitmq
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.rabbitmq
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/release-candidate/release-layouts/rabbitmq,tar=false
+          tags: ghcr.io/bilal414/backupsheep-rabbitmq-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Build RabbitMQ compatibility-upgrade candidate from exact remote commit
+        id: build-rabbitmq-upgrade
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.rabbitmq-upgrade
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/release-candidate/release-layouts/rabbitmq-upgrade,tar=false
+          tags: ghcr.io/bilal414/backupsheep-rabbitmq-upgrade-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
       - name: Collect raw OCI indexes and actual BuildKit provenance
         shell: bash
         env:
           APP_DIGEST: ${{ steps.build-app.outputs.digest }}
           POSTGRES_DIGEST: ${{ steps.build-postgres.outputs.digest }}
           EGRESS_DIGEST: ${{ steps.build-egress.outputs.digest }}
+          RABBITMQ_DIGEST: ${{ steps.build-rabbitmq.outputs.digest }}
+          RABBITMQ_UPGRADE_DIGEST: ${{ steps.build-rabbitmq-upgrade.outputs.digest }}
         run: |
           set -euo pipefail
           umask 077
           [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$POSTGRES_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$EGRESS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          install -d -m 0700 "$ARTIFACT_DIR"/{oci,provenance,sbom,scans,bundles}
+          [[ "$RABBITMQ_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$RABBITMQ_UPGRADE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          install -d -m 0700 "$ARTIFACT_DIR"/{oci,provenance,sbom,scans,bundles,consumer,vulnerability}
           install -m 0600 deploy/release-policy.json "$ARTIFACT_DIR/release-policy.json"
+          install -m 0600 deploy/trivy-db-lock.json \
+            "$ARTIFACT_DIR/vulnerability/trivy-db-lock.json"
+          install -m 0600 "$TRIVY_DB_EVIDENCE" \
+            "$ARTIFACT_DIR/vulnerability/trivy-db-evidence.json"
           python3 scripts/collect_release_evidence.py \
             --policy deploy/release-policy.json \
             --artifacts-dir "$ARTIFACT_DIR" \
@@ -197,6 +272,18 @@ jobs:
             --image egress \
             --digest "$EGRESS_DIGEST" \
             --oci-layout "$LAYOUT_DIR/egress"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image rabbitmq \
+            --digest "$RABBITMQ_DIGEST" \
+            --oci-layout "$LAYOUT_DIR/rabbitmq"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image rabbitmq-upgrade \
+            --digest "$RABBITMQ_UPGRADE_DIGEST" \
+            --oci-layout "$LAYOUT_DIR/rabbitmq-upgrade"
 
       - name: Scan exact child digests and generate complete SBOMs
         shell: bash
@@ -209,13 +296,17 @@ jobs:
             platform_slug="${platform//\//-}"
 
             env -i \
-              HOME="$HOME" \
+              HOME="$TRIVY_HOME" \
               PATH="$TOOL_DIR:/usr/bin:/bin" \
-              DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
-              XDG_CACHE_HOME="$RUNNER_TEMP/trivy-cache" \
+              LC_ALL=C \
               TRIVY_SKIP_VERSION_CHECK=true \
               "$TOOL_DIR/trivy" --config "$TOOL_DIR/empty-trivy.yaml" image \
+                --cache-dir "$TRIVY_CACHE_DIR" \
                 --ignorefile "$TOOL_DIR/empty-trivy.ignore" \
+                --skip-db-update \
+                --skip-java-db-update \
+                --skip-check-update \
+                --offline-scan \
                 --quiet \
                 --scanners vuln \
                 --pkg-types os,library \
@@ -227,6 +318,11 @@ jobs:
                 --output "$ARTIFACT_DIR/scans/$image-$platform_slug.trivy.json" \
                 --platform "$platform" \
                 --input "$LAYOUT_DIR/$image"
+
+            python3 scripts/prepare_trivy_db.py verify \
+              --lock deploy/trivy-db-lock.json \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --evidence "$TRIVY_DB_EVIDENCE"
 
             env -i \
               HOME="$HOME" \
@@ -268,12 +364,100 @@ jobs:
           )
           find "$ARTIFACT_DIR" -type f -exec chmod 0600 {} +
 
+      - name: Freshly scan the separately bootstrapped consumer verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          verifier_home="$RUNNER_TEMP/backupsheep-release-verifier-scan-home"
+          test ! -e "$verifier_home"
+          test ! -L "$verifier_home"
+          install -d -m 0700 "$verifier_home"
+          install -m 0600 deploy/release/sigstore-trusted-root.json \
+            "$ARTIFACT_DIR/consumer/sigstore-trusted-root.json"
+
+          while IFS=$'\t' read -r platform child_digest config_digest; do
+            [[ "$platform" == "linux/amd64" || "$platform" == "linux/arm64" ]]
+            [[ "$child_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            slug="${platform//\//-}"
+            reference="ghcr.io/bilal414/backupsheep-release-verifier@$child_digest"
+            syft_report="$ARTIFACT_DIR/consumer/release-verifier-$slug.syft.json"
+            trivy_report="$ARTIFACT_DIR/consumer/release-verifier-$slug.trivy.json"
+
+            env -i \
+              HOME="$verifier_home" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              SYFT_CHECK_FOR_APP_UPDATE=false \
+              "$TOOL_DIR/syft" --config "$TOOL_DIR/empty-syft.yaml" \
+                scan "registry:$reference" \
+                --platform "$platform" \
+                --output "syft-json=$syft_report"
+
+            env -i \
+              HOME="$TRIVY_HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              TRIVY_SKIP_VERSION_CHECK=true \
+              "$TOOL_DIR/trivy" --config "$TOOL_DIR/empty-trivy.yaml" image \
+                --cache-dir "$TRIVY_CACHE_DIR" \
+                --image-src remote \
+                --ignorefile "$TOOL_DIR/empty-trivy.ignore" \
+                --skip-db-update \
+                --skip-java-db-update \
+                --skip-check-update \
+                --offline-scan \
+                --quiet \
+                --scanners vuln \
+                --pkg-types os,library \
+                --list-all-pkgs \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                --timeout 30m \
+                --format json \
+                --output "$trivy_report" \
+                --platform "$platform" \
+                "$reference"
+
+            python3 scripts/prepare_trivy_db.py verify \
+              --lock deploy/trivy-db-lock.json \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --evidence "$TRIVY_DB_EVIDENCE"
+
+            python3 scripts/normalize_local_scan_evidence.py \
+              --policy deploy/release-policy.json \
+              --image release-verifier \
+              --platform "$platform" \
+              --syft "$syft_report" \
+              --trivy "$trivy_report"
+          done < <(
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          verifier = json.loads(
+              Path("deploy/release-policy.json").read_text(encoding="utf-8")
+          )["consumer"]["cosign_image"]
+          for platform in ("linux/amd64", "linux/arm64"):
+              record = verifier["platforms"][platform]
+              print(
+                  platform,
+                  record["manifest_digest"],
+                  record["config_digest"],
+                  sep="\t",
+              )
+          PY
+          )
+          find "$ARTIFACT_DIR/consumer" -type f -exec chmod 0600 {} +
+
       - name: Build and verify the digest-bound candidate manifest
         shell: bash
         env:
           APP_DIGEST: ${{ steps.build-app.outputs.digest }}
           POSTGRES_DIGEST: ${{ steps.build-postgres.outputs.digest }}
           EGRESS_DIGEST: ${{ steps.build-egress.outputs.digest }}
+          RABBITMQ_DIGEST: ${{ steps.build-rabbitmq.outputs.digest }}
+          RABBITMQ_UPGRADE_DIGEST: ${{ steps.build-rabbitmq-upgrade.outputs.digest }}
           RELEASE_TAG: ${{ github.ref_name }}
           SOURCE_COMMIT: ${{ github.sha }}
           WORKFLOW_RUN: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
@@ -294,12 +478,21 @@ jobs:
             --postgres-digest "$POSTGRES_DIGEST" \
             --postgres-index "$ARTIFACT_DIR/oci/postgres.index.json" \
             --egress-digest "$EGRESS_DIGEST" \
-            --egress-index "$ARTIFACT_DIR/oci/egress.index.json"
+            --egress-index "$ARTIFACT_DIR/oci/egress.index.json" \
+            --rabbitmq-digest "$RABBITMQ_DIGEST" \
+            --rabbitmq-index "$ARTIFACT_DIR/oci/rabbitmq.index.json" \
+            --rabbitmq-upgrade-digest "$RABBITMQ_UPGRADE_DIGEST" \
+            --rabbitmq-upgrade-index "$ARTIFACT_DIR/oci/rabbitmq-upgrade.index.json"
           python3 scripts/verify_release.py \
             --policy deploy/release-policy.json \
             --manifest "$ARTIFACT_DIR/release-manifest.json" \
             --artifacts-dir "$ARTIFACT_DIR" \
             --offline
+          python3 scripts/build_release_descriptor.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --output "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt"
 
       - name: Retain candidate evidence
         if: ${{ always() }}
@@ -464,6 +657,9 @@ jobs:
           "$TOOL_DIR/cosign" sign-blob --yes --oidc-provider github-actions \
             --bundle "$ARTIFACT_DIR/release-manifest.bundle.json" \
             "$ARTIFACT_DIR/release-manifest.json"
+          "$TOOL_DIR/cosign" sign-blob --yes --oidc-provider github-actions \
+            --bundle "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.sigstore.json" \
+            "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt"
 
       - name: Verify quarantine before any official write
         shell: bash
@@ -477,6 +673,21 @@ jobs:
             --cosign "$TOOL_DIR/cosign" \
             --oras "$TOOL_DIR/oras" \
             --phase candidate
+          "$TOOL_DIR/cosign" verify-blob \
+            --bundle "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.sigstore.json" \
+            --certificate-identity-regexp '^https://github\.com/bilal414/backupsheep/\.github/workflows/release-images\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+            --certificate-github-workflow-sha "$GITHUB_SHA" \
+            --certificate-github-workflow-ref "$GITHUB_REF" \
+            --certificate-github-workflow-trigger push \
+            "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt"
+          python3 scripts/build_release_descriptor.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --output "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt" \
+            --verify
 
       - name: Stage exact verified indexes in official repositories without SemVer tags
         shell: bash
@@ -556,22 +767,26 @@ jobs:
             --oras "$TOOL_DIR/oras" \
             --phase final
 
-      - name: Publish signed official digests under SemVer tags last
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/promote_release_images.py \
-            --policy deploy/release-policy.json \
-            --manifest "$ARTIFACT_DIR/release-manifest.json" \
-            --artifacts-dir "$ARTIFACT_DIR" \
-            --oras "$TOOL_DIR/oras"
-
-      - name: Create deterministic signed evidence archive
+      - name: Create and verify the complete signed publication
         shell: bash
         run: |
           set -euo pipefail
           umask 077
           install -d -m 0700 "$PUBLICATION_DIR"
+          install -m 0600 deploy/release/consume-signed-release.sh \
+            "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sh"
+          "$TOOL_DIR/cosign" sign-blob --yes --oidc-provider github-actions \
+            --bundle "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sigstore.json" \
+            "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sh"
+          "$TOOL_DIR/cosign" verify-blob \
+            --bundle "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sigstore.json" \
+            --certificate-identity-regexp '^https://github\.com/bilal414/backupsheep/\.github/workflows/release-images\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+            --certificate-github-workflow-sha "$GITHUB_SHA" \
+            --certificate-github-workflow-ref "$GITHUB_REF" \
+            --certificate-github-workflow-trigger push \
+            "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sh"
           tar --sort=name \
             --mtime='UTC 1970-01-01' \
             --owner=0 \
@@ -587,9 +802,27 @@ jobs:
           "$TOOL_DIR/cosign" sign-blob --yes --oidc-provider github-actions \
             --bundle "$PUBLICATION_DIR/signed-release-evidence.tar.gz.bundle.json" \
             "$PUBLICATION_DIR/signed-release-evidence.tar.gz"
+          install -m 0600 "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sh" \
+            "$PUBLICATION_DIR/backupsheep-consume-signed-release-v2.sh"
+          install -m 0600 "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sigstore.json" \
+            "$PUBLICATION_DIR/backupsheep-consume-signed-release-v2.sigstore.json"
           install -m 0600 "$ARTIFACT_DIR/release-manifest.json" "$PUBLICATION_DIR/release-manifest.json"
           install -m 0600 "$ARTIFACT_DIR/release-manifest.bundle.json" "$PUBLICATION_DIR/release-manifest.bundle.json"
+          install -m 0600 "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt" \
+            "$PUBLICATION_DIR/backupsheep-release-descriptor-v2.txt"
+          install -m 0600 "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.sigstore.json" \
+            "$PUBLICATION_DIR/backupsheep-release-descriptor-v2.sigstore.json"
           install -m 0600 deploy/release-policy.json "$PUBLICATION_DIR/release-policy.json"
+
+      - name: Publish signed official digests under SemVer tags last
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/promote_release_images.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --oras "$TOOL_DIR/oras"
 
       - name: Retain signed publication evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -659,6 +892,24 @@ jobs:
             --certificate-github-workflow-ref "refs/tags/$RELEASE_TAG" \
             --certificate-github-workflow-trigger push \
             "$PUBLICATION_DIR/signed-release-evidence.tar.gz"
+          "$TOOL_DIR/cosign" verify-blob \
+            --bundle "$PUBLICATION_DIR/backupsheep-consume-signed-release-v2.sigstore.json" \
+            --certificate-identity-regexp '^https://github\.com/bilal414/backupsheep/\.github/workflows/release-images\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+            --certificate-github-workflow-sha "$SOURCE_COMMIT" \
+            --certificate-github-workflow-ref "refs/tags/$RELEASE_TAG" \
+            --certificate-github-workflow-trigger push \
+            "$PUBLICATION_DIR/backupsheep-consume-signed-release-v2.sh"
+          "$TOOL_DIR/cosign" verify-blob \
+            --bundle "$PUBLICATION_DIR/backupsheep-release-descriptor-v2.sigstore.json" \
+            --certificate-identity-regexp '^https://github\.com/bilal414/backupsheep/\.github/workflows/release-images\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+            --certificate-github-workflow-sha "$SOURCE_COMMIT" \
+            --certificate-github-workflow-ref "refs/tags/$RELEASE_TAG" \
+            --certificate-github-workflow-trigger push \
+            "$PUBLICATION_DIR/backupsheep-release-descriptor-v2.txt"
           python3 scripts/publish_release_evidence.py \
             --policy deploy/release-policy.json \
             --tag "$RELEASE_TAG" \
@@ -668,4 +919,8 @@ jobs:
             --asset "$PUBLICATION_DIR/signed-release-evidence.tar.gz.bundle.json" \
             --asset "$PUBLICATION_DIR/release-manifest.json" \
             --asset "$PUBLICATION_DIR/release-manifest.bundle.json" \
-            --asset "$PUBLICATION_DIR/release-policy.json"
+            --asset "$PUBLICATION_DIR/release-policy.json" \
+            --asset "$PUBLICATION_DIR/backupsheep-release-descriptor-v2.txt" \
+            --asset "$PUBLICATION_DIR/backupsheep-release-descriptor-v2.sigstore.json" \
+            --asset "$PUBLICATION_DIR/backupsheep-consume-signed-release-v2.sh" \
+            --asset "$PUBLICATION_DIR/backupsheep-consume-signed-release-v2.sigstore.json"

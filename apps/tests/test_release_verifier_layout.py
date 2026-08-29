@@ -939,160 +939,44 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
         self.assertEqual(status, 1)
         self.assertIn("cannot be combined", errors.getvalue())
 
-    def test_bootstrap_scans_only_validated_single_platform_projections(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
-        ).read_text(encoding="utf-8")
+    def test_one_time_bootstrap_workflow_is_retired_after_exact_pin(self):
+        self.assertFalse(
+            (ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml").exists()
+        )
+        for path in (
+            ROOT / "scripts" / "preflight_release_verifier_scan.py",
+            ROOT / "scripts" / "publish_stable_release_verifier.py",
+            ROOT / "scripts" / "validate_cosign_image_verification.py",
+            ROOT / "scripts" / "validate_release_verifier_layout.py",
+        ):
+            with self.subTest(path=path.name):
+                self.assertTrue(path.is_file())
+                self.assertFalse(path.is_symlink())
+
+    def test_release_fresh_scan_uses_exact_children_without_rebuilding_verifier(self):
+        workflow = (ROOT / ".github" / "workflows" / "release-images.yml").read_text(
+            encoding="utf-8"
+        )
         scan_step = workflow.split(
-            "      - name: Scan both exact child images and validate the complete layout\n",
+            "      - name: Freshly scan the separately bootstrapped consumer verifier\n",
             1,
-        )[1].split("      - name: Authenticate only after all local evidence passes\n", 1)[0]
+        )[1].split("      - name: Build and verify the digest-bound candidate manifest\n", 1)[0]
         for expected in (
-            "python3 scripts/preflight_release_verifier_scan.py",
-            "--source-only",
-            'test ! -e "$SCAN_ROOT"',
-            'test ! -L "$SCAN_ROOT"',
-            'test ! -e "$scan_layout"',
-            'test ! -L "$scan_layout"',
-            '"$TOOL_DIR/oras" cp',
-            "--from-oci-layout",
-            "--to-oci-layout",
+            'reference="ghcr.io/bilal414/backupsheep-release-verifier@$child_digest"',
+            'scan "registry:$reference"',
+            "--image-src remote",
             '--platform "$platform"',
-            '--concurrency 1',
-            '--no-tty',
-            '"$LAYOUT_DIR:$CANDIDATE_TAG"',
-            '"$scan_layout:scan-$architecture"',
-            'if [ -e "$scan_layout/ingest" ] || [ -L "$scan_layout/ingest" ]; then',
-            'test -z "$(find "$scan_layout/ingest" -mindepth 1 -print -quit)"',
-            'rmdir -- "$scan_layout/ingest"',
-            'test ! -e "$scan_layout/ingest"',
-            'test ! -L "$scan_layout/ingest"',
-            "python3 scripts/preflight_release_verifier_scan.py",
-            '--scan-layout-amd64 "$SCAN_ROOT/amd64"',
-            '--scan-layout-arm64 "$SCAN_ROOT/arm64"',
-            'scan "oci-dir:$scan_layout"',
-            '--input "$scan_layout"',
+            "python3 scripts/normalize_local_scan_evidence.py",
+            "--image release-verifier",
+            'install -m 0600 deploy/release/sigstore-trusted-root.json',
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, scan_step)
-        self.assertLess(
-            scan_step.index("--source-only"),
-            scan_step.index('"$TOOL_DIR/oras" cp'),
-        )
-        self.assertLess(
-            scan_step.index('rmdir -- "$scan_layout/ingest"'),
-            scan_step.rindex("python3 scripts/preflight_release_verifier_scan.py"),
-        )
-        self.assertLess(
-            scan_step.rindex("python3 scripts/preflight_release_verifier_scan.py"),
-            scan_step.index('"$TOOL_DIR/syft"'),
-        )
-        syft_invocation = scan_step.split('"$TOOL_DIR/syft"', 1)[1].split(
-            "trivy_status=0", 1
-        )[0]
-        trivy_invocation = scan_step.split('"$TOOL_DIR/trivy"', 1)[1].split(
-            "trivy_status=$?", 1
-        )[0]
-        self.assertNotIn("--platform", syft_invocation)
-        self.assertNotIn("--platform", trivy_invocation)
-
-    def test_bootstrap_removes_only_buildkits_empty_ingest_directory(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
-        ).read_text(encoding="utf-8")
-        scan_step = workflow.split(
-            "      - name: Scan both exact child images and validate the complete layout\n",
-            1,
-        )[1].split("      - name: Authenticate only after all local evidence passes\n", 1)[0]
-        self.assertIn(
-            'if [ -e "$LAYOUT_DIR/ingest" ] || [ -L "$LAYOUT_DIR/ingest" ]; then',
-            scan_step,
-        )
-        self.assertIn(
-            'test -z "$(find "$LAYOUT_DIR/ingest" -mindepth 1 -print -quit)"',
-            scan_step,
-        )
-        self.assertIn('rmdir -- "$LAYOUT_DIR/ingest"', scan_step)
-        self.assertLess(
-            scan_step.index('rmdir -- "$LAYOUT_DIR/ingest"'),
-            scan_step.index('"$TOOL_DIR/syft"'),
-        )
-
-    def test_bootstrap_binds_export_name_and_reproducible_index_timestamp(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
-        ).read_text(encoding="utf-8")
-        build_step = workflow.split(
-            "      - name: Build the patched multi-platform verifier into a private OCI layout\n",
-            1,
-        )[1].split(
-            "      - name: Scan both exact child images and validate the complete layout\n",
-            1,
-        )[0]
-        self.assertIn(
-            "name=${{ env.QUARANTINE_REPOSITORY }}:${{ env.CANDIDATE_TAG }}",
-            build_step,
-        )
-        self.assertIn(
-            "index-descriptor:org.opencontainers.image.created="
-            + verifier.EXPECTED_BUILD_TIMESTAMP,
-            build_step,
-        )
-        self.assertIn('SOURCE_DATE_EPOCH: "1787961600"', build_step)
-        self.assertIn("BUILDKIT_MULTI_PLATFORM=1", build_step)
-        self.assertIn("rewrite-timestamp=true", build_step)
-
-    def test_bootstrap_uses_cosign_v3_image_verification_contract(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
-        ).read_text(encoding="utf-8")
-        signing_step = workflow.split(
-            "      - name: Sign and verify the official index and both child manifests\n",
-            1,
-        )[1].split(
-            "      - name: Execute both published verifier binaries under the consumer sandbox\n",
-            1,
-        )[0]
-        verify_invocation = signing_step.split('"$TOOL_DIR/cosign" verify', 1)[1]
-        verify_command = verify_invocation.split('"$reference" >"$verification"', 1)[0]
-        self.assertIn("--trusted-root deploy/release/sigstore-trusted-root.json", verify_command)
-        self.assertIn("--output json", verify_command)
-        self.assertNotIn('--bundle "$bundle"', verify_command)
-        self.assertIn("python3 scripts/validate_cosign_image_verification.py", signing_step)
-        self.assertIn('--verification "$verification"', signing_step)
-        self.assertIn('--bundle "$bundle"', signing_step)
-        self.assertIn('--digest "$digest"', signing_step)
-
-    def test_bootstrap_executes_each_published_child_digest(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
-        ).read_text(encoding="utf-8")
-        runtime_step = workflow.split(
-            "      - name: Execute both published verifier binaries under the consumer sandbox\n",
-            1,
-        )[1].split(
-            "      - name: Remove registry credentials and retain non-secret evidence\n",
-            1,
-        )[0]
-        for expected in (
-            "while IFS=$'\\t' read -r platform child_digest; do",
-            '"$OFFICIAL_REPOSITORY@$child_digest"',
-            'summary["platforms"][platform]["manifest_digest"]',
-            'for platform in ("linux/amd64", "linux/arm64")',
-            "--network none",
-            "--read-only",
-            "--cap-drop ALL",
-            "--security-opt no-new-privileges:true",
-        ):
-            with self.subTest(expected=expected):
-                self.assertIn(expected, runtime_step)
-        self.assertNotIn("$INDEX_DIGEST", runtime_step)
+        self.assertNotIn("Dockerfile.release-verifier", workflow)
+        self.assertNotIn("backupsheep-release-verifier-quarantine", workflow)
 
     def test_docker_build_actions_are_commit_pinned_node24_releases(self):
-        workflows = (
-            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml",
-            ROOT / ".github" / "workflows" / "release-images.yml",
-        )
+        workflows = (ROOT / ".github" / "workflows" / "release-images.yml",)
         expected = {
             "docker/setup-qemu-action": (
                 "96fe6ef7f33517b61c61be40b68a1882f3264fb8",
@@ -1115,7 +999,7 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
                     self.assertNotRegex(document, rf"uses: {re.escape(action)}@(?!{commit})")
             self.assertNotIn("          install: true", document)
 
-    def test_bootstrap_pins_the_consumer_trusted_root(self):
+    def test_release_policy_pins_the_consumer_trusted_root_and_verifier_graph(self):
         trusted_root = ROOT / "deploy" / "release" / "sigstore-trusted-root.json"
         self.assertTrue(trusted_root.is_file())
         self.assertFalse(trusted_root.is_symlink())
@@ -1134,10 +1018,29 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
                 "timestampAuthorities",
             },
         )
-        workflow = (
-            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("      - deploy/release/sigstore-trusted-root.json", workflow)
-        self.assertIn(
-            "--trusted-root deploy/release/sigstore-trusted-root.json", workflow
+        policy = json.loads(
+            (ROOT / "deploy" / "release-policy.json").read_text(encoding="utf-8")
+        )
+        consumer = policy["consumer"]
+        self.assertEqual(
+            consumer["trusted_root"]["sha256"],
+            "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
+        )
+        verifier_image = consumer["cosign_image"]
+        self.assertEqual(
+            verifier_image["index_digest"],
+            "sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e",
+        )
+        self.assertEqual(
+            verifier_image["platforms"],
+            {
+                "linux/amd64": {
+                    "manifest_digest": "sha256:29c25a1a2bcbe8190166f65e0914fbd4c904968be5a615f59421dc8fd4526f06",
+                    "config_digest": "sha256:6feeb7c97d6b7b709f2dc6b33723de442205437694fd3679461d78635745349d",
+                },
+                "linux/arm64": {
+                    "manifest_digest": "sha256:2d0bfa77e828bff3c198039763f05f44017e6c2cd75572fce8f61431a95b927d",
+                    "config_digest": "sha256:9a6ceeac0bc63631bd168417839d56e01a2ee157411daef235df13e0c8d04c01",
+                },
+            },
         )
