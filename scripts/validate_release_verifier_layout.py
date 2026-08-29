@@ -669,7 +669,11 @@ def _inspect_layer(
                     or stat.S_IMODE(member.mode) != 0o755
                     or member.size != 0
                 ):
-                    _fail("runtime layer contains an unexpected or unsafe directory")
+                    _fail(
+                        "runtime layer contains an unexpected or unsafe directory "
+                        f"(name={name!r}, mode={stat.S_IMODE(member.mode):04o}, "
+                        f"size={member.size}, expected_file={expected_file!r})"
+                    )
                 continue
             if (
                 not member.isfile()
