@@ -30,11 +30,13 @@ EXPECTED_CONFIG_TARGETS = {
     "Dockerfile",
     "Dockerfile.egress",
     "Dockerfile.postgres",
+    "deploy/ci/Dockerfile.postgres-runtime-source",
 }
 EXPECTED_VULNERABILITY_MISCONFIGURATION_IDENTITIES = {
     ("Dockerfile", "config", "dockerfile"),
     ("Dockerfile.egress", "config", "dockerfile"),
     ("Dockerfile.postgres", "config", "dockerfile"),
+    ("deploy/ci/Dockerfile.postgres-runtime-source", "config", "dockerfile"),
     ("package-lock.json", "lang-pkgs", "npm"),
     ("requirements.txt", "lang-pkgs", "pip"),
 }

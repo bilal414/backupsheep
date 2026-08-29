@@ -156,6 +156,12 @@ class SourceScanGateTests(TestCase):
                     "Type": "dockerfile",
                     "MisconfSummary": {"Successes": 20, "Failures": 0},
                 },
+                {
+                    "Target": "deploy/ci/Dockerfile.postgres-runtime-source",
+                    "Class": "config",
+                    "Type": "dockerfile",
+                    "MisconfSummary": {"Successes": 20, "Failures": 0},
+                },
             ],
         }
         self.secret_report = {
