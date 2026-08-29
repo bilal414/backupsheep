@@ -1752,6 +1752,15 @@ publish_authorized_source_receipt "$4"
         ):
             upgrade.validate_journal(self.install)
 
+    def test_intent_lineage_started_sequence_rejects_json_boolean(self):
+        intent = self._initialize()
+        tampered = json.loads(canonical(intent))
+        tampered["lineage"]["started_sequence"] = True
+        with self.assertRaisesRegex(
+            upgrade.UpgradeJournalError, "nonnegative bounded integer"
+        ):
+            upgrade._validate_intent(tampered)
+
     def test_checkpoint_export_refuses_a_missing_retained_operation(self):
         intents, _ = self._complete_version_chain(5)
         self.assertTrue(

@@ -3160,7 +3160,12 @@ def _validate_intent(value: Any) -> dict[str, Any]:
     parent_sequence = _nonnegative_integer(
         lineage["parent_sequence"], "intent lineage parent sequence", maximum=10**18
     )
-    if lineage["started_sequence"] != parent_sequence + 1:
+    started_sequence = _nonnegative_integer(
+        lineage["started_sequence"],
+        "intent lineage started sequence",
+        maximum=10**18,
+    )
+    if started_sequence != parent_sequence + 1:
         raise UpgradeJournalError("intent lineage started sequence changed")
     for key in (
         "parent_head_sha256",
