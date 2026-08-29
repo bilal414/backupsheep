@@ -208,7 +208,11 @@ class VerifierFixture:
         self.index_digest = index_descriptor["digest"]
         self._json(
             self.layout / "index.json",
-            {"schemaVersion": 2, "manifests": [index_descriptor]},
+            {
+                "schemaVersion": 2,
+                "mediaType": verifier.OCI_INDEX,
+                "manifests": [index_descriptor],
+            },
         )
 
     @staticmethod
@@ -569,6 +573,13 @@ class ReleaseVerifierLayoutTests(TestCase):
         self.fixture = VerifierFixture(self.root / "second")
         (self.fixture.blobs / ("f" * 64)).write_bytes(b"unreferenced")
         self.assert_rejected("unreferenced")
+
+    def test_outer_layout_index_requires_the_exact_oci_media_type(self):
+        path = self.fixture.layout / "index.json"
+        wrapper = json.loads(path.read_text(encoding="ascii"))
+        wrapper["mediaType"] = verifier.OCI_MANIFEST
+        self.fixture._json(path, wrapper)
+        self.assert_rejected("schema or media type")
 
     def test_privileged_or_expanded_runtime_config_is_rejected(self):
         image = self.fixture.images["linux/amd64"]

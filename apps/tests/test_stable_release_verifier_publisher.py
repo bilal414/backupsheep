@@ -48,6 +48,7 @@ class StableReleaseVerifierPublisherTests(unittest.TestCase):
         )
         root = {
             "schemaVersion": 2,
+            "mediaType": publisher.EXPECTED_ROOT_MEDIA_TYPE,
             "manifests": [
                 {
                     "mediaType": publisher.EXPECTED_ROOT_MEDIA_TYPE,
@@ -176,6 +177,14 @@ class StableReleaseVerifierPublisherTests(unittest.TestCase):
         )
         root_path.write_text(json.dumps(document), encoding="ascii")
         with self.assertRaisesRegex(publisher.PublicationError, "not bound"):
+            self.publish()
+
+    def test_outer_index_requires_the_exact_oci_media_type(self):
+        root_path = self.layout / "index.json"
+        document = json.loads(root_path.read_text(encoding="ascii"))
+        document["mediaType"] = "application/vnd.oci.image.manifest.v1+json"
+        root_path.write_text(json.dumps(document), encoding="ascii")
+        with self.assertRaisesRegex(publisher.PublicationError, "unsupported structure"):
             self.publish()
 
     def test_duplicate_root_json_key_is_rejected(self):

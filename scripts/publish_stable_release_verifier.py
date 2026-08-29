@@ -217,7 +217,11 @@ def _validated_layout_index(
         _read_regular(layout / "index.json", maximum=MAX_CONTROL_BYTES, label="OCI root index"),
         "OCI root index",
     )
-    if set(root) != {"schemaVersion", "manifests"} or root["schemaVersion"] != 2:
+    if (
+        set(root) != {"schemaVersion", "mediaType", "manifests"}
+        or root["schemaVersion"] != 2
+        or root["mediaType"] != EXPECTED_ROOT_MEDIA_TYPE
+    ):
         raise PublicationError("the OCI root index has an unsupported structure")
     manifests = root["manifests"]
     if not isinstance(manifests, list) or len(manifests) != 1:

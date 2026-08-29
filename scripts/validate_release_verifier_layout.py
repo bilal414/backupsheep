@@ -771,9 +771,13 @@ def _validate_layout(
     wrapper, wrapper_snapshot = _load_json(
         root / "index.json", maximum=MAX_CONTROL_BYTES, label="OCI layout index"
     )
-    _exact_keys(wrapper, {"schemaVersion", "manifests"}, "OCI layout index")
-    if wrapper["schemaVersion"] != 2:
-        _fail("OCI layout index has an unsupported schema")
+    _exact_keys(
+        wrapper,
+        {"schemaVersion", "mediaType", "manifests"},
+        "OCI layout index",
+    )
+    if wrapper["schemaVersion"] != 2 or wrapper["mediaType"] != OCI_INDEX:
+        _fail("OCI layout index has an unsupported schema or media type")
     roots = _list(wrapper["manifests"], "OCI layout roots")
     if len(roots) != 1:
         _fail("OCI layout must contain exactly one root image index")
