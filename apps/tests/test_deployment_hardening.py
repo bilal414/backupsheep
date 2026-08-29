@@ -146,7 +146,8 @@ class DeploymentHardeningContractTests(TestCase):
             "d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
             postgres_dockerfile,
         )
-        self.assertIn("apk add --no-cache 'su-exec=0.3-r0'", postgres_dockerfile)
+        self.assertIn("apk add --no-cache \\", postgres_dockerfile)
+        self.assertIn("'su-exec=0.3-r0'", postgres_dockerfile)
         self.assertNotIn("apk upgrade", postgres_dockerfile)
         self.assertIn("USER 70:70", postgres_dockerfile)
         database = self.service_block("db")
