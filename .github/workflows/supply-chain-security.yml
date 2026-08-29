@@ -827,7 +827,6 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/bruno,target=/code/bruno,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/deploy,target=/code/deploy,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/docs,target=/code/docs,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/integrations,target=/code/integrations,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/scripts,target=/code/scripts,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/.dockerignore,target=/code/.dockerignore,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/.gitignore,target=/code/.gitignore,readonly" \

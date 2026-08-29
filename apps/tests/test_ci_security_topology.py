@@ -752,7 +752,6 @@ database_password=test-only-password
             ("bruno", "/code/bruno"),
             ("deploy", "/code/deploy"),
             ("docs", "/code/docs"),
-            ("integrations", "/code/integrations"),
             ("scripts", "/code/scripts"),
             ("Dockerfile", "/code/Dockerfile"),
             ("docker-compose.yml", "/code/docker-compose.yml"),
