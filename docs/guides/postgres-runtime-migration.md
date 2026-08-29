@@ -2,11 +2,32 @@
 
 BackupSheep's bundled database is PostgreSQL 18.6 on the digest-pinned Alpine 3.24
 image. It runs as UID/GID `70:70`, initializes every connectable database with ICU
-locale `und`, and uses the `postgres_data_v1` volume. The image will not mount or
-adopt the older Debian/glibc `pgdata` volume.
+locale `und`, and uses the `postgres_data_v1` volume. The image never mounts or adopts
+the retired Debian/glibc `pgdata` volume.
 
-Fresh installations create and witness the new volume automatically. An existing
-stock installation requires the explicit one-time installer flag:
+Fresh installations create and witness the new volume automatically. Automatic
+runtime migration is available only for an exact, installation-witnessed generation-2
+or generation-3 stock database. It is not a general PostgreSQL migration tool.
+
+## Unsupported shared-superuser databases
+
+A legacy database with a blank identity generation used an application-held
+superuser credential. Its database body cannot be treated as trusted input, so the
+installer refuses to migrate it even when both migration flags are supplied. Do not
+set a generation marker, relabel a volume, or weaken the checks.
+
+For an installation whose disposable data can be replaced, stop the old project and
+retain its checkout, configuration, exact images and volumes unchanged as rollback
+evidence. Create the target in a clean installation directory with a new exact Compose
+project name. This initializes a fresh PostgreSQL 18/ICU volume and generation-3
+identities without deleting, renaming, mounting or adopting the old `pgdata` volume.
+Any data recovery from the old shared-superuser database requires a separate,
+schema-reviewed and data-only procedure.
+
+## Authorized stock paths
+
+For a generation-2 source, use both one-time flags with the normal installation
+arguments:
 
 ```bash
 ./install.sh \
@@ -14,77 +35,122 @@ stock installation requires the explicit one-time installer flag:
   --install-dir "$PWD" \
   --project-name backupsheep \
   --domain backups.example.com \
-  --migrate-postgres-runtime
+  --migrate-postgres-runtime \
+  --migrate-database-identities
 ```
 
-Supply the same deployment arguments used for the installation. The installer preserves
-the protected local artifact keyrings. Do not edit the storage-generation variables or
-rename Docker volumes by hand.
+For an already sealed generation-3 source, use only
+`--migrate-postgres-runtime`. Preserve the protected artifact keyrings and supply the
+same deployment arguments used for the installation. Never edit the storage or
+identity generation variables by hand.
 
-## Fail-closed source contract
+## Fail-closed source contracts
 
-The automated path is intentionally limited to the exact stock database topology.
-Before copying any data it proves:
+The generation-2 contract requires exactly bootstrap, migrator and runtime roles with
+installation-bound v2 comments. It validates every role attribute, SCRAM password
+state, expiry, inheritance, connection limit, membership and role setting. It also
+requires the exact stock database/schema grants, the exact three default-ACL records
+and their grantors, and migrator ownership of the database, `public` schema and public
+objects.
 
-- exact PostgreSQL `server_version_num=180006`, a retained glibc image running as
-  `999:999`, the canonical `${project}_pgdata` volume, and no foreign attachment;
-- only the configured BackupSheep database plus `postgres`;
-- exactly the ten configured stock roles and reviewed privilege attributes;
-- only `plpgsql`, with no non-stock collations, tablespaces, database ACLs,
-  database/role settings, event triggers, foreign-data wrappers/servers/tables/user
-  mappings, publications, subscriptions, or replication slots; and
-- an authoritative primary, not a server in recovery.
+The generation-3 contract requires the exact configured ten active roles, or those ten
+plus the one installation-bound retired-v2 runtime role. It validates every role
+attribute, comment, SCRAM/NULL password state, expiry, connection limit, membership,
+four per-role settings, database/schema ACL and grantor, the exact two owner-only
+default-ACL records, and migrator ownership. Extra, missing or renamed roles and any
+attribute, ACL, setting or ownership drift are refused.
 
-If an operator added any excluded object, migrate it with a separately reviewed
-PostgreSQL procedure. Do not weaken the allowlist to force the stock migration
-through.
+Before a dump is allowed, the migration also proves:
 
-## What the installer does
+- exact PostgreSQL `server_version_num=180006`, the retained glibc source image and
+  UID/GID `999:999`, the canonical detached `${project}_pgdata` volume, and an
+  authoritative primary;
+- only the configured BackupSheep database and `postgres`, and only the stock
+  `plpgsql` extension;
+- no non-stock collation, tablespace, event trigger, foreign-data object, publication,
+  subscription, replication slot, prepared transaction, large object, parameter ACL,
+  security label, shared security label, or routine in an unreviewed language; and
+- the exact generation-specific identities, settings, ownership, ACL rows and ACL
+  grantors described above.
 
-The installer records the exact retained source image before changing the image tag,
-validates an attached legacy database as the single owned Compose `db` container,
-and then removes the complete application topology. It requires the old volume to be
-detached immediately before migration.
+Custom or drifted sources require a separately reviewed procedure. Never broaden the
+allowlist to force a migration through.
 
-The migration starts the old and new servers with `network=none`, read-only root
-filesystems, all capabilities dropped, `no-new-privileges`, bounded PIDs, exact UIDs,
-and separate project-owned Unix-socket volumes. The old server never mounts a
-password. Short-lived helpers receive the legacy password as a read-only file. The
-new server receives a different random file-backed bootstrap credential; the role
-restore replaces it with the retained bootstrap identity before application data is
-accepted, and the random file is removed after both servers stop.
+## Isolated restore boundary
 
-Roles are restored inside one fail-closed transaction. The one allowlisted database
-is pre-created with ICU `und`, then its schema and data are restored in a separate
-transaction. This is not described as a cluster-wide transaction: PostgreSQL database
-creation cannot be part of that transaction. Dumps stream only through isolated Docker
-pipes; no plaintext dump is written to the host or a volume. A secret-derived fixed
-`\restrict` key prevents dump content from introducing helper-side psql commands while
-keeping source/target fingerprints reproducible.
+The installer first records the immutable source image ID, validates the one owned
+Compose database attachment, and removes the complete application topology. The
+migration servers have `network=none`, read-only root filesystems, all capabilities
+dropped, `no-new-privileges`, bounded PIDs, exact UIDs and separate witnessed Unix
+socket volumes. Dangerous preload, archive/recovery execution, worker, JIT and logging
+settings are overridden on the isolated source. Short catalog probes use a fixed
+`pg_catalog` search path.
 
-The gate compares canonical role, schema, and data dump hashes after removing only
-the exact PostgreSQL version-header differences. It then writes a content/image
-receipt and finally changes the storage marker to `complete`. The environment
-generation changes last. The old `pgdata` volume remains retained and detached as
-rollback evidence.
+Credentials and dump bytes do not share a helper boundary:
+
+- the source dump producer receives only the source socket and retained source secret;
+- the target restore consumer receives only the target socket and a distinct random
+  restore secret; and
+- bootstrap/admin helpers never consume dump bytes.
+
+No source-generated global SQL is executed. The target creates only the fixed
+configured generation-3 placeholder roles. A dedicated ephemeral restore role is
+`NOINHERIT`, non-superuser, has no memberships or settings, and temporarily owns only
+the target database and `public` schema. A custom archive streams directly from
+`pg_dump` to `pg_restore --single-transaction --no-owner --no-acl
+--no-security-labels`; no dump is written to host storage.
+
+After restore, fixed SQL disables and terminates the restore role, reassigns reviewed
+objects to the configured target migrator, drops owned residue, normalizes database and
+schema ownership, revokes public database/schema/table/sequence/function/routine
+access, and uses safely quoted catalog-driven statements to revoke public usage from
+every manageable restored type/domain. The restore role is then dropped. Effective
+ACL checks include hard-wired defaults for databases, routines and types, plus exact
+relation, column, default, parameter and security-label zero vectors. Array and
+multirange rows that PostgreSQL does not permit `GRANT`/`REVOKE` against are excluded
+by the same exact catalog predicate in both revocation and attestation.
+
+Canonical source identity evidence and canonical schema/data dumps are hashed. The
+target must match the schema and data hashes and the fixed target role/ownership/ACL
+contract before the in-volume receipt can complete. Receipt version 2 binds the restore
+strategy, source identity contract, source image, exact current target image, and all
+three hashes. The environment storage generation changes only after `db-provision`,
+`migrate`, `db-seal` and the in-volume witness succeed. The old volume and image remain
+detached rollback evidence.
 
 ## Interruption and retry
 
-Rerun the same installer command with `--migrate-postgres-runtime`. A target is reset
-only when its canonical name and project, installation, logical-volume, and migration
-witness labels all match. A completed receipt with a still-pending marker is treated
-as interrupted and the exact target is recreated. A completed marker is accepted only
-with a valid receipt and locally available reviewed source/target image IDs. A foreign,
-attached, unlabeled, or unexpectedly nonempty target fails closed.
+Rerun with the flags required by the still-pending state. Recovery recognizes only the
+canonical migration server names with exact installation, purpose, image, user,
+runtime and mount evidence. Anonymous `--rm` helpers are stopped and removed only when
+their installation/witness labels, reviewed image, network isolation, runtime and
+source-or-target-only mount boundary are exact. Any drift is refused.
 
-The source volume is never deleted. Keep its exact image ID until database/application
-verification and a restore rehearsal have passed.
+Before stale migration credentials are unlinked, every exact
+`.migration-bootstrap.*` or `.migration-restore.*` residue must have the canonical
+eight-character suffix, regular non-symlink type, expected owner, mode `0444`, one
+link, exact 64-hex content, and no Docker bind attachment. Other paths are never swept.
+
+A partial target is reset only when its canonical name and project, installation,
+logical-volume and migration-witness labels all match. A completed target reconciles
+only through the exact v2 receipt, and the recorded target image ID must equal the image
+ID resolved from the current target reference.
+
+Generation-2 has two bounded configuration crash windows:
+
+- generation `2` or `3-pending-upgrade` before sealing requires both migration flags;
+- generation `3` with storage still pending requires the existing completed target,
+  `--migrate-postgres-runtime`, and no database-identity flag. It cannot create or
+  erase a target.
+
+An already-generation-3 source always uses only the runtime flag. Foreign, attached,
+unlabeled, unexpectedly nonempty or stale-image targets fail closed.
 
 ## Rollback boundary
 
-The stock Compose model never remounts retired `pgdata`. If rollback is required,
-stop the entire topology and use the recorded old revision, old Compose model, exact
-retained image ID, and detached old volume in a separately reviewed recovery. Never
-mount the Debian/UID-999 volume in the Alpine/UID-70 image, and never overwrite the
-new ICU target. Preserve both generations until the rollback-retention decision is
-recorded.
+The current Compose model never remounts retired `pgdata`. For rollback, stop the
+entire target topology and use the recorded old revision, old Compose model, exact
+retained image, matching configuration/secrets and detached old volume in a separately
+reviewed recovery. Never mount a Debian/UID-999 volume in the Alpine/UID-70 image or
+overwrite the new ICU target. Preserve both generations until the rollback-retention
+decision and restore rehearsal are recorded.

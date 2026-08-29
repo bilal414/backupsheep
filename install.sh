@@ -959,6 +959,7 @@ validate_checkout() {
     require_regular_checkout_file backupsheep-compose
     require_regular_checkout_file deploy/postgres/entrypoint.sh
     require_regular_checkout_file deploy/postgres/storage-witness.sh
+    require_regular_checkout_file deploy/postgres/source-identity-contract.sh
     require_regular_checkout_file deploy/postgres/migrate-runtime.sh
     [[ -x "$INSTALL_DIR/backupsheep-compose" ]] \
         || die "The reviewed backupsheep-compose wrapper must remain executable."
@@ -2572,12 +2573,14 @@ configure_postgres_storage_generation() {
     local active_exists=false
     local legacy_image_ref=""
     local legacy_image_user=""
+    local database_generation=""
 
     installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
     state="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION)"
     intent="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_INTENT)"
     witness="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_WITNESS)"
     retired_image_id="$(read_env_value BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID)"
+    database_generation="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
     all_volume_names="$($DOCKER_BIN volume ls --format '{{.Name}}')" \
         || die "Could not inventory Docker volumes before selecting PostgreSQL storage."
     grep -Fxq -- "$old_volume" <<< "$all_volume_names" && old_exists=true
@@ -2590,7 +2593,27 @@ configure_postgres_storage_generation() {
             if [[ "$old_exists" == true ]]; then
                 [[ "$MIGRATE_POSTGRES_RUNTIME" == true ]] \
                     || die "The legacy Debian PostgreSQL volume exists. Preserve rollback evidence and rerun once with --migrate-postgres-runtime; it will never be mounted by the Alpine image."
-                intent="migrated-debian-v1"
+                case "$database_generation" in
+                    "")
+                        die "Automatic PostgreSQL runtime migration is not supported for a legacy single-superuser database. Preserve the detached Debian volume and exact image for rollback, then initialize a fresh generation-3/Alpine database or use a separately reviewed data-only recovery."
+                        ;;
+                    2)
+                        [[ "$MIGRATE_DATABASE_IDENTITIES" == true ]] \
+                            || die "The generation-2 database identity transition requires --migrate-database-identities together with --migrate-postgres-runtime."
+                        intent="migrated-debian-generation2-v1"
+                        ;;
+                    3-pending-upgrade)
+                        die "Database identity generation 3 is already pending without a PostgreSQL storage witness, so the source generation is ambiguous. Restore the pre-transition configuration or use a separately reviewed migration; the installer will not guess."
+                        ;;
+                    3)
+                        [[ "$MIGRATE_DATABASE_IDENTITIES" == false ]] \
+                            || die "Generation-3 database identities cannot reuse --migrate-database-identities."
+                        intent="migrated-debian-v1"
+                        ;;
+                    *)
+                        die "The PostgreSQL source identity generation is not supported by the bundled runtime migration."
+                        ;;
+                esac
                 state="${POSTGRES_STORAGE_GENERATION}-pending-upgrade"
                 legacy_image_ref="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
                 [[ -n "$legacy_image_ref" ]] \
@@ -2622,8 +2645,34 @@ configure_postgres_storage_generation() {
                 || die "--migrate-postgres-runtime is invalid for a pending fresh installation."
             ;;
         "${POSTGRES_STORAGE_GENERATION}-pending-upgrade")
-            [[ "$intent" == "migrated-debian-v1" && "$old_exists" == true ]] \
+            [[ ( "$intent" == "migrated-debian-v1" \
+                || "$intent" == "migrated-debian-generation2-v1" ) \
+                && "$old_exists" == true ]] \
                 || die "Pending PostgreSQL migration lost its exact legacy volume or intent."
+            if [[ "$intent" == "migrated-debian-generation2-v1" ]]; then
+                case "$database_generation" in
+                    2|3-pending-upgrade)
+                        [[ "$MIGRATE_DATABASE_IDENTITIES" == true ]] \
+                            || die "The witnessed generation-2 PostgreSQL migration requires the explicit database identity migration flag before sealing."
+                        ;;
+                    3)
+                        [[ "$MIGRATE_DATABASE_IDENTITIES" == false \
+                            && "$active_exists" == true ]] \
+                            || die "A sealed generation-2 PostgreSQL retry requires the existing target volume and no database identity migration flag."
+                        ;;
+                    *)
+                        die "The witnessed generation-2 PostgreSQL migration has an unsupported database identity state."
+                        ;;
+                esac
+            else
+                case "$database_generation" in
+                    3)
+                        [[ "$MIGRATE_DATABASE_IDENTITIES" == false ]] \
+                            || die "The strict PostgreSQL migration already has generation-3 database identities."
+                        ;;
+                    *) die "The strict PostgreSQL migration lost its generation-3 database identity state." ;;
+                esac
+            fi
             [[ "$MIGRATE_POSTGRES_RUNTIME" == true ]] \
                 || die "The PostgreSQL storage migration remains pending; rerun with --migrate-postgres-runtime."
             [[ "$retired_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
@@ -2646,9 +2695,11 @@ configure_postgres_storage_generation() {
                     [[ "$old_exists" == false && -z "$retired_image_id" ]] \
                         || die "Fresh PostgreSQL storage unexpectedly has retired Debian evidence."
                     ;;
-                migrated-debian-v1)
+                migrated-debian-v1|migrated-debian-generation2-v1)
                     [[ "$old_exists" == true && "$retired_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
                         || die "Migrated PostgreSQL storage is missing its detached legacy volume or exact retired image ID."
+                    [[ "$database_generation" == "3" ]] \
+                        || die "Completed PostgreSQL storage requires completed generation-3 database identities."
                     ;;
                 *) die "Completed PostgreSQL storage has an unsupported intent." ;;
             esac
@@ -3437,8 +3488,10 @@ validate_runtime_configuration() {
     case "$postgres_storage_state:$postgres_storage_intent" in
         "${POSTGRES_STORAGE_GENERATION}:new-empty-v1"|\
         "${POSTGRES_STORAGE_GENERATION}:migrated-debian-v1"|\
+        "${POSTGRES_STORAGE_GENERATION}:migrated-debian-generation2-v1"|\
         "${POSTGRES_STORAGE_GENERATION}-pending-fresh:new-empty-v1"|\
-        "${POSTGRES_STORAGE_GENERATION}-pending-upgrade:migrated-debian-v1") ;;
+        "${POSTGRES_STORAGE_GENERATION}-pending-upgrade:migrated-debian-v1"|\
+        "${POSTGRES_STORAGE_GENERATION}-pending-upgrade:migrated-debian-generation2-v1") ;;
         *) die "PostgreSQL storage generation and intent are inconsistent." ;;
     esac
     expected_postgres_storage_witness="$(sha256_text "BackupSheep/postgres-storage/v1|${installation_id}|${PROJECT_NAME}|${POSTGRES_STORAGE_LOGICAL_VOLUME}|${POSTGRES_STORAGE_GENERATION}|icu=und|${postgres_storage_intent}")"
@@ -3730,6 +3783,41 @@ docker_resource_name() {
     esac
 }
 
+is_exact_interrupted_postgres_source() {
+    local resource_id="$1"
+    local installation_id="$2"
+    local storage_witness="$3"
+    local retired_image_id="$4"
+    local expected_name="/${PROJECT_NAME}-postgres-migration-source"
+    local expected_purpose="postgres-runtime-${storage_witness}"
+    local runtime_record=""
+    local mount_records=""
+    local expected_mount_records=""
+
+    [[ "$installation_id" =~ ^[0-9a-f]{64}$ \
+        && "$storage_witness" =~ ^[0-9a-f]{64}$ \
+        && "$retired_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    [[ "$(docker_resource_label container "$resource_id" com.backupsheep.project)" == "$PROJECT_NAME" \
+        && "$(docker_resource_label container "$resource_id" com.backupsheep.installation-id)" == "$installation_id" \
+        && "$(docker_resource_label container "$resource_id" com.backupsheep.postgres-migration)" == "$expected_purpose" \
+        && -z "$(docker_resource_label container "$resource_id" com.docker.compose.project)" \
+        && -z "$(docker_resource_label container "$resource_id" com.docker.compose.service)" ]] \
+        || return 1
+    runtime_record="$("$DOCKER_BIN" inspect --format \
+        '{{.Name}}|{{.Image}}|{{.Config.User}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{json .HostConfig.CapDrop}}|{{json .HostConfig.SecurityOpt}}|{{.Path}}' \
+        "$resource_id")" || return 1
+    [[ "$runtime_record" == "${expected_name}|${retired_image_id}|999:999|none|true|[\"ALL\"]|[\"no-new-privileges:true\"]|/usr/local/bin/docker-entrypoint.sh" ]] \
+        || return 1
+    mount_records="$("$DOCKER_BIN" inspect --format \
+        '{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Destination}}|{{.RW}}{{println}}{{end}}' \
+        "$resource_id" | LC_ALL=C sort)" || return 1
+    expected_mount_records="$(printf '%s\n%s' \
+        "volume|${PROJECT_NAME}_pgdata|/var/lib/postgresql|true" \
+        "volume|${PROJECT_NAME}_postgres_migration_source_socket|/var/run/postgresql|true" \
+        | LC_ALL=C sort)"
+    [[ "$mount_records" == "$expected_mount_records" ]]
+}
+
 create_verified_ownership_sentinel() {
     local installation_id="$1"
     local sentinel_name="${PROJECT_NAME}_installation_identity"
@@ -3891,7 +3979,8 @@ validate_compose_project_ownership() {
         logical_name="$(docker_resource_label volume "$retired_pgdata_name" com.docker.compose.volume)" \
             || die "Could not inspect retired Docker volume ${retired_pgdata_name}."
         [[ "$resource_project" == "$PROJECT_NAME" && "$logical_name" == "pgdata" \
-            && "$postgres_storage_intent" == "migrated-debian-v1" ]] \
+            && ( "$postgres_storage_intent" == "migrated-debian-v1" \
+                || "$postgres_storage_intent" == "migrated-debian-generation2-v1" ) ]] \
             || die "Docker volume ${retired_pgdata_name} collides with retired PostgreSQL rollback storage but is not its exact owned volume."
     fi
 
@@ -3983,7 +4072,8 @@ validate_compose_project_ownership() {
                 case "$logical_name" in
                     ssh_trust) is_retired_ssh_trust=true ;;
                     pgdata)
-                        [[ "$postgres_storage_intent" == "migrated-debian-v1" ]] \
+                        [[ "$postgres_storage_intent" == "migrated-debian-v1" \
+                            || "$postgres_storage_intent" == "migrated-debian-generation2-v1" ]] \
                             || die "Retired pgdata is valid only for an explicit PostgreSQL runtime migration."
                         is_retired_pgdata=true
                         ;;
@@ -4023,18 +4113,24 @@ validate_compose_project_ownership() {
                     while IFS= read -r retired_pgdata_attachment_id; do
                         [[ -n "$retired_pgdata_attachment_id" ]] || continue
                         retired_pgdata_attachment_count=$((retired_pgdata_attachment_count + 1))
-                        grep -Fxq -- "$retired_pgdata_attachment_id" <<< "$container_listing" \
-                            || die "Legacy PostgreSQL storage is attached to a container outside the exact owned Compose project."
-                        retired_pgdata_attachment_service="$(docker_resource_label container "$retired_pgdata_attachment_id" com.docker.compose.service)" \
-                            || die "Could not inspect the legacy PostgreSQL attachment service."
-                        retired_pgdata_attachment_image="$("$DOCKER_BIN" inspect --format '{{.Image}}' "$retired_pgdata_attachment_id")" \
-                            || die "Could not inspect the legacy PostgreSQL attachment image."
-                        retired_pgdata_attachment_user="$("$DOCKER_BIN" inspect --format '{{.Config.User}}' "$retired_pgdata_attachment_id")" \
-                            || die "Could not inspect the legacy PostgreSQL attachment user."
-                        [[ "$retired_pgdata_attachment_service" == db \
-                            && "$retired_pgdata_attachment_image" == "$postgres_retired_image_id" \
-                            && "$retired_pgdata_attachment_user" == "999:999" ]] \
-                            || die "Legacy PostgreSQL storage is not attached to the exact retained UID/GID-999 database container."
+                        if grep -Fxq -- "$retired_pgdata_attachment_id" <<< "$container_listing"; then
+                            retired_pgdata_attachment_service="$(docker_resource_label container "$retired_pgdata_attachment_id" com.docker.compose.service)" \
+                                || die "Could not inspect the legacy PostgreSQL attachment service."
+                            retired_pgdata_attachment_image="$("$DOCKER_BIN" inspect --format '{{.Image}}' "$retired_pgdata_attachment_id")" \
+                                || die "Could not inspect the legacy PostgreSQL attachment image."
+                            retired_pgdata_attachment_user="$("$DOCKER_BIN" inspect --format '{{.Config.User}}' "$retired_pgdata_attachment_id")" \
+                                || die "Could not inspect the legacy PostgreSQL attachment user."
+                            [[ "$retired_pgdata_attachment_service" == db \
+                                && "$retired_pgdata_attachment_image" == "$postgres_retired_image_id" \
+                                && "$retired_pgdata_attachment_user" == "999:999" ]] \
+                                || die "Legacy PostgreSQL storage is not attached to the exact retained UID/GID-999 database container."
+                        else
+                            is_exact_interrupted_postgres_source \
+                                "$retired_pgdata_attachment_id" "$installation_id" \
+                                "$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_WITNESS)" \
+                                "$postgres_retired_image_id" \
+                                || die "Legacy PostgreSQL storage is attached outside Compose and is not the exact witnessed interrupted migration source."
+                        fi
                     done <<< "$retired_pgdata_attachments"
                     [[ "$retired_pgdata_attachment_count" -eq 1 ]] \
                         || die "Legacy PostgreSQL storage must have exactly one reviewed database attachment before shutdown."
@@ -4309,8 +4405,9 @@ run_postgres_runtime_migration() {
     local database_name=""
     local bootstrap_user=""
     local witness=""
+    local storage_intent=""
+    local database_identity_generation=""
     local expected_roles_csv=""
-    local legacy_attachments=""
     local variable=""
 
     [[ "$POSTGRES_MIGRATION_REQUIRED" == true ]] || return 0
@@ -4320,16 +4417,13 @@ run_postgres_runtime_migration() {
     database_name="$(read_env_value DB_NAME)"
     bootstrap_user="$(read_env_value DB_BOOTSTRAP_USER)"
     witness="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_WITNESS)"
+    storage_intent="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_INTENT)"
+    database_identity_generation="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
     for variable in DB_BOOTSTRAP_USER DB_MIGRATOR_USER DB_APP_USER DB_PREFLIGHT_USER \
         DB_BEAT_USER DB_CLOUD_USER DB_DATABASE_USER DB_FILES_USER DB_STORAGE_USER DB_LOGS_USER; do
         if [[ -n "$expected_roles_csv" ]]; then expected_roles_csv+=","; fi
         expected_roles_csv+="$(read_env_value "$variable")"
     done
-
-    legacy_attachments="$("$DOCKER_BIN" ps --all --quiet --filter "volume=${PROJECT_NAME}_pgdata")" \
-        || die "Could not prove legacy PostgreSQL detachment immediately before migration."
-    [[ -z "$legacy_attachments" ]] \
-        || die "The reviewed full-stack down did not detach every legacy PostgreSQL container; migration was not started."
 
     log "Migrating the exact detached Debian database into isolated Alpine/ICU storage"
     "$INSTALL_DIR/deploy/postgres/migrate-runtime.sh" \
@@ -4337,42 +4431,61 @@ run_postgres_runtime_migration() {
         "$target_image_ref" "${PROJECT_NAME}_pgdata" \
         "${PROJECT_NAME}_${POSTGRES_STORAGE_LOGICAL_VOLUME}" \
         "$SECRETS_DIR/db_bootstrap_password" "$database_name" "$bootstrap_user" \
-        "$expected_roles_csv" "$witness" \
+        "$expected_roles_csv" "$witness" "$storage_intent" \
+        "$database_identity_generation" \
         || die "PostgreSQL logical migration failed; the legacy volume remains detached and the target generation remains pending."
 
     # The target volume receipt was written only after exact image, inventory and
-    # content fingerprints passed. Record the environment generation last.
-    set_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION "$POSTGRES_STORAGE_GENERATION"
+    # content fingerprints passed. Keep the environment generation pending until
+    # the target database roles and schema have also passed db-seal.
     POSTGRES_MIGRATION_REQUIRED=false
     validate_compose_project_ownership
 }
 
 complete_postgres_storage_generation() {
     local state=""
+    local database_generation=""
     local container_id=""
+    local listed_container_id=""
     local container_count=0
     local target_image_ref=""
     local target_image_id=""
     local container_image_id=""
+    local witness_mode=""
 
     state="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION)"
-    [[ "$state" == "${POSTGRES_STORAGE_GENERATION}-pending-fresh" ]] || return 0
-    while IFS= read -r container_id; do
-        [[ -n "$container_id" ]] || continue
+    database_generation="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
+    case "$state" in
+        "${POSTGRES_STORAGE_GENERATION}-pending-fresh")
+            witness_mode=finalize-fresh
+            ;;
+        "${POSTGRES_STORAGE_GENERATION}-pending-upgrade")
+            [[ "$POSTGRES_MIGRATION_REQUIRED" == false ]] \
+                || die "PostgreSQL migration cannot be promoted before its isolated receipt is complete."
+            witness_mode=verify-migration
+            ;;
+        "$POSTGRES_STORAGE_GENERATION") return 0 ;;
+        *) die "PostgreSQL storage cannot be completed from unsupported state ${state}." ;;
+    esac
+    [[ "$database_generation" == "3" ]] \
+        || die "PostgreSQL storage cannot be promoted before generation-3 database identities are sealed."
+    while IFS= read -r listed_container_id; do
+        [[ -n "$listed_container_id" ]] || continue
+        container_id="$listed_container_id"
         container_count=$((container_count + 1))
     done < <(compose ps --all --quiet db)
     [[ "$container_count" -eq 1 && -n "$container_id" ]] \
-        || die "Fresh PostgreSQL witness requires exactly one database container."
+        || die "PostgreSQL witness promotion requires exactly one database container."
     target_image_ref="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
     target_image_id="$("$DOCKER_BIN" image inspect --format '{{.Id}}' "$target_image_ref")" \
-        || die "Could not inspect the fresh PostgreSQL target image."
+        || die "Could not inspect the PostgreSQL target image."
     container_image_id="$("$DOCKER_BIN" inspect --format '{{.Image}}' "$container_id")" \
-        || die "Could not inspect the fresh PostgreSQL container image."
+        || die "Could not inspect the PostgreSQL container image."
     [[ "$container_image_id" == "$target_image_id" ]] \
-        || die "Fresh PostgreSQL container does not use the exact locally built target image."
+        || die "PostgreSQL container does not use the exact locally built target image."
     "$DOCKER_BIN" exec "$container_id" \
-        /usr/local/bin/backupsheep-postgres-storage-witness finalize-fresh \
-        || die "Fresh PostgreSQL ICU/storage witness failed; generation remains pending."
+        /usr/local/bin/backupsheep-postgres-storage-witness "$witness_mode" \
+        || die "PostgreSQL ICU/storage witness failed; generation remains pending."
     set_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION "$POSTGRES_STORAGE_GENERATION"
 }
 

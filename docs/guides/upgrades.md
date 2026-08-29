@@ -237,8 +237,15 @@ INSTALL_ARGS=(
   --domain "${CURRENT_DOMAIN}"
   --skip-start
 )
-# When and only when this installation predates PostgreSQL identity generation 3:
-# INSTALL_ARGS+=(--migrate-database-identities)
+# A retained Debian/UID-999 pgdata volume with exact identity generation 2 requires
+# both one-time flags in the same invocation:
+# INSTALL_ARGS+=(--migrate-postgres-runtime --migrate-database-identities)
+# A retained Debian/UID-999 pgdata volume already sealed at identity generation 3
+# requires only the runtime flag:
+# INSTALL_ARGS+=(--migrate-postgres-runtime)
+# A blank shared-superuser identity generation is intentionally unsupported by the
+# runtime migrator. Keep that project stopped/intact and create a clean install
+# directory under a new exact Compose project namespace; do not set either marker.
 # Existing pre-v3 staging layouts also require the one-time gate documented above:
 # INSTALL_ARGS+=(--migrate-staging-layout)
 # An installation without BACKUPSHEEP_EGRESS_POLICY_GENERATION=2 requires the
@@ -276,9 +283,11 @@ lane and retained-key-ID boundaries. Preserve an independent encrypted off-host 
 copy even after successful cleanup. Do not invoke a long-lived service or edit pending
 metadata by hand.
 
-That pre-hardening bootstrap must stage every applicable database generation-3,
-staging-v3, RabbitMQ identity-generation-2 and task-auth-generation-3 transition in the
-same pending state. The [RabbitMQ migration guide](rabbitmq-upgrade.md) owns the exact
+For an eligible generation-2 database, that pre-hardening bootstrap must stage every
+applicable database generation-3, staging-v3, RabbitMQ identity-generation-2 and
+task-auth-generation-3 transition in the same pending state. A blank shared-superuser
+database instead requires the separate fresh-project boundary described above. The
+[RabbitMQ migration guide](rabbitmq-upgrade.md) owns the exact
 3.13 -> 4.2 -> 4.3 wrapper validation and final installer reconciliation; do not splice
 the normal upgrade commands below into it.
 
@@ -471,7 +480,10 @@ The stock image uses PostgreSQL 18.6 on Alpine 3.24, UID/GID `70:70`, ICU `und`,
 installation-witnessed `postgres_data_v1` volume. It never mounts the retired
 Debian/UID-999 `pgdata` volume. Follow the explicit
 [PostgreSQL Alpine/ICU migration gate](postgres-runtime-migration.md) for that one-time
-transition. Other major-version or non-stock database changes require a separately
+transition. The automatic gate accepts only exact witnessed generation-2 or
+generation-3 sources; blank shared-superuser sources require a clean installation
+directory and new Compose project namespace, with the old project retained offline.
+Other major-version or non-stock database changes require a separately
 reviewed logical dump/restore or supported `pg_upgrade` plan; never change an image tag
 against an old data directory. Rehearse on a copy and preserve the old volume and exact
 image until database verification and a restore test pass.

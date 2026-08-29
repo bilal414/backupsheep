@@ -54,9 +54,15 @@ limit causes `db-seal` or preflight to fail closed.
 ## Scope
 
 Fresh verified installs create generation 3 automatically. This runbook covers an
-existing stock Docker database on generation 2 or the older shared-superuser model.
-It does not automatically rewrite identities for external/managed PostgreSQL or a
-deployment using `DATABASE_URL`; that operator owns its roles and equivalent grants.
+existing stock database on the same reviewed PostgreSQL runtime at generation 2 or the
+older shared-superuser model. It does not make the shared-superuser database eligible
+for the separate Debian-to-Alpine runtime migration: that combined path is refused
+because the application-held superuser made its database body untrusted. Follow the
+[runtime migration guide](postgres-runtime-migration.md#unsupported-shared-superuser-databases)
+and use a new installation directory/project namespace or a separately reviewed
+data-only recovery. This runbook also does not automatically rewrite identities for
+external/managed PostgreSQL or a deployment using `DATABASE_URL`; that operator owns
+its roles and equivalent grants.
 
 The provisioner accepts only the reviewed stock database shape: application objects
 in `public`, the expected Django tables/routines/triggers, and ownership by the marked

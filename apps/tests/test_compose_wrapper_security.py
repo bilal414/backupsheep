@@ -1232,27 +1232,33 @@ class SecureComposeWrapperTests(TestCase):
                 )
 
     def test_exact_owned_retired_pgdata_is_detached_rollback_evidence(self):
-        self.write_env(
-            postgres_storage_generation="18-alpine-icu-v1",
-            postgres_storage_intent="migrated-debian-v1",
-        )
-        self.set_state(
-            volumes={
-                "sentinel": self.sentinel(),
-                "database": self.owned_volume("postgres_data_v1"),
-                "retired-pgdata": self.owned_volume(
-                    "pgdata", installation_id=None
-                ),
-            }
-        )
-        self.run_wrapper(*APP_PAIR_UP, check=True)
-        attachment_checks = [
-            event
-            for event in self.raw_events("ps")
-            if "volume=backupsheep_pgdata" in event["argv"]
-        ]
-        self.assertEqual(len(attachment_checks), 1)
-        self.assertIn("--all", attachment_checks[0]["argv"])
+        for storage_intent in (
+            "migrated-debian-v1",
+            "migrated-debian-generation2-v1",
+        ):
+            with self.subTest(storage_intent=storage_intent):
+                self.write_env(
+                    postgres_storage_generation="18-alpine-icu-v1",
+                    postgres_storage_intent=storage_intent,
+                )
+                self.set_state(
+                    volumes={
+                        "sentinel": self.sentinel(),
+                        "database": self.owned_volume("postgres_data_v1"),
+                        "retired-pgdata": self.owned_volume(
+                            "pgdata", installation_id=None
+                        ),
+                    }
+                )
+                self.event_log.unlink(missing_ok=True)
+                self.run_wrapper(*APP_PAIR_UP, check=True)
+                attachment_checks = [
+                    event
+                    for event in self.raw_events("ps")
+                    if "volume=backupsheep_pgdata" in event["argv"]
+                ]
+                self.assertEqual(len(attachment_checks), 1)
+                self.assertIn("--all", attachment_checks[0]["argv"])
 
     def test_verified_sentinel_allows_only_exact_path_blank_identity_legacy_containers(self):
         legacy_app = self.owned_container("app", installation_id=None)

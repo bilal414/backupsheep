@@ -171,14 +171,13 @@ class DeploymentHardeningContractTests(TestCase):
 
         self.assertIn("BackupSheep/postgres-dump-restrict/v1", migration)
         self.assertIn("openssl dgst -sha256", migration)
-        self.assertGreaterEqual(migration.count("--restrict-key=\"$"), 2)
-        self.assertGreaterEqual(migration.count("--restrict-key=$4"), 3)
+        self.assertEqual(migration.count('--restrict-key="$6"'), 1)
         for exact_header in (
             "^-- Dumped from database version .*",
             "^-- Dumped by pg_dump version .*",
-            "^-- Dumped by pg_dumpall version .*",
         ):
             self.assertIn(exact_header, migration)
+        self.assertNotIn("pg_dumpall", migration)
 
         marker_read = migration.index(
             'marker_status="$(sed -n \'1p\' <<< "$evidence")"'
@@ -196,12 +195,13 @@ class DeploymentHardeningContractTests(TestCase):
             migration,
         )
 
-        self.assertIn("migration-target.XXXXXXXX", migration)
+        self.assertIn("migration-bootstrap.XXXXXXXX", migration)
+        self.assertIn("migration-restore.XXXXXXXX", migration)
         self.assertIn("/run/secrets/source_password:ro", migration)
-        self.assertIn("/run/secrets/target_password:ro", migration)
+        self.assertIn("/run/secrets/restore_password:ro", migration)
         self.assertIn("legacy source server must not mount a plaintext credential", migration)
-        self.assertIn("ephemeral target credential remains after migration", migration)
-        self.assertIn('grep -Fxq -- "$bootstrap_user"', migration)
+        self.assertIn("ephemeral restore credential remains after migration", migration)
+        self.assertIn("bootstrap role is not first in the ordered stock inventory", migration)
         self.assertIn('grep -Fxq -- "$database_owner"', migration)
         self.assertIn('grep -Fxq -- "${data_volume}|${data_target}"', migration)
         self.assertIn("__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__", migration)
@@ -237,10 +237,12 @@ class DeploymentHardeningContractTests(TestCase):
         migrate_runner = installer.split(
             "run_postgres_runtime_migration() {", 1
         )[1].split("\n}\n", 1)[0]
-        self.assertIn(
-            "prove legacy PostgreSQL detachment immediately before migration",
-            migrate_runner,
-        )
+        self.assertNotIn("prove legacy PostgreSQL detachment", migrate_runner)
+        self.assertIn("is_exact_interrupted_postgres_source", ownership)
+        self.assertIn("pg_catalog.pg_attribute", migration)
+        self.assertNotIn("REVOKE ALL ON ALL TYPES", migration)
+        self.assertIn("REVOKE USAGE ON TYPE %I.%I FROM PUBLIC", migration)
+        self.assertEqual(migration.count("pg_catalog.array_subscript_handler"), 2)
 
     def test_postgres_migration_hostile_label_bytes_never_reach_deletion(self):
         migration = ROOT / "deploy" / "postgres" / "migrate-runtime.sh"
@@ -345,6 +347,8 @@ raise SystemExit(99)
                         "backupsheep_bootstrap",
                         roles,
                         storage_witness,
+                        "migrated-debian-v1",
+                        "3",
                     ],
                     check=False,
                     capture_output=True,

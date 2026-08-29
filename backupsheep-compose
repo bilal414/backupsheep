@@ -268,8 +268,10 @@ postgres_storage_intent="$(unquote_env_value "$postgres_storage_intent_raw")"
 postgres_storage_witness="$(unquote_env_value "$postgres_storage_witness_raw")"
 case "${postgres_storage_generation}:${postgres_storage_intent}" in
     18-alpine-icu-v1:new-empty-v1|18-alpine-icu-v1:migrated-debian-v1|\
+    18-alpine-icu-v1:migrated-debian-generation2-v1|\
     18-alpine-icu-v1-pending-fresh:new-empty-v1|\
-    18-alpine-icu-v1-pending-upgrade:migrated-debian-v1) ;;
+    18-alpine-icu-v1-pending-upgrade:migrated-debian-v1|\
+    18-alpine-icu-v1-pending-upgrade:migrated-debian-generation2-v1) ;;
     *) die "PostgreSQL storage generation and intent are absent or inconsistent; run install.sh." ;;
 esac
 [[ "$postgres_storage_witness" =~ ^[0-9a-f]{64}$ ]] \
@@ -1472,7 +1474,8 @@ validate_compose_project_ownership() {
         logical_name="$(docker_resource_label volume "$retired_pgdata_name" com.docker.compose.volume)" \
             || die "could not inspect retired Docker volume ${retired_pgdata_name}."
         [[ "$resource_project" == "$project_name" && "$logical_name" == "pgdata" \
-            && "$postgres_storage_intent" == "migrated-debian-v1" ]] \
+            && ( "$postgres_storage_intent" == "migrated-debian-v1" \
+                || "$postgres_storage_intent" == "migrated-debian-generation2-v1" ) ]] \
             || die "Docker volume ${retired_pgdata_name} collides with retired PostgreSQL rollback storage but is not owned by it."
     fi
 
@@ -1611,7 +1614,8 @@ validate_compose_project_ownership() {
                 case "$logical_name" in
                     ssh_trust) is_retired_ssh_trust=true ;;
                     pgdata)
-                        [[ "$postgres_storage_intent" == "migrated-debian-v1" ]] \
+                        [[ "$postgres_storage_intent" == "migrated-debian-v1" \
+                            || "$postgres_storage_intent" == "migrated-debian-generation2-v1" ]] \
                             || die "retired pgdata is valid only after the explicit PostgreSQL migration."
                         is_retired_pgdata=true
                         ;;

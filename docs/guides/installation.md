@@ -106,6 +106,7 @@ Supported options are:
 | `--rotate-celery-signing-keys` | Drained-queue generation-3 task-signing rotation; requires all publishers/consumers stopped and exact broker ownership |
 | `--migrate-staging-layout` | One-time existing-install authorization for an empty legacy shared work volume and new layout-v3 witness |
 | `--migrate-egress-policy` | One-time fail-closed reset of a uniform stock legacy egress policy to generation-2 deny defaults and blank exact endpoint/name lists; mixed/custom policy is refused |
+| `--migrate-postgres-runtime` | One-time stop-the-world migration of the exact witnessed Debian PostgreSQL volume into the isolated Alpine/ICU generation; a blank legacy database-identity generation also requires `--migrate-database-identities` |
 | `--migrate-artifact-key-provider-empty` | One-time transition from a blank, development-only or retired provider; the current migration run must prove zero wraps, plaintext artifact ledgers, and historical database/files backup or storage-point rows before generation 1 is sealed |
 | `--rotate-artifact-keyring database\|files` | Operations-down, one-lane rotation that prepends a new key and retains every legacy key; every matching worker container must be removed and operations cannot start in the same run |
 | `--expected-artifact-active-key-id lfk-...` | Required replay/staleness witness for artifact-keyring rotation; must equal the exact active ID inspected before the maintenance window |
