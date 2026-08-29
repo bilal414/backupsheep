@@ -1596,7 +1596,7 @@ class SecureComposeWrapperTests(TestCase):
         override.write_text("services: {}\n", encoding="utf-8")
         override.chmod(0o600)
         rabbit = self.root / "deploy" / "rabbitmq" / "upgrade-4.2.9.compose.yml"
-        rabbit.parent.mkdir(parents=True)
+        rabbit.parent.mkdir(parents=True, exist_ok=True)
         rabbit.write_text("services: {}\n", encoding="utf-8")
         rabbit.chmod(0o600)
         self.assert_refused(("config", "--quiet"), "review it and pass --approved-compose-file")
