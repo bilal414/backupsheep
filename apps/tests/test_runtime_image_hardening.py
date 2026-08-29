@@ -1,5 +1,6 @@
 """Static supply-chain and least-privilege contracts for the application image."""
 
+import ast
 from pathlib import Path
 from unittest import TestCase
 
@@ -52,23 +53,91 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertEqual(self.dockerfile.count(UBUNTU_IMAGE), 1)
         self.assertIn("COPY --from=python-runtime /usr/local /usr/local", self.runtime)
 
-    def test_artifact_provider_runtime_has_no_aws_kms_dependency(self):
+    def test_artifact_kms_authority_closure_has_no_aws_sdk_dependency(self):
         provider_root = ROOT / "backupsheep" / "artifact_crypto" / "providers"
         provider_files = {path.name for path in provider_root.glob("*.py")}
         self.assertEqual(
             provider_files,
             {"__init__.py", "base.py", "local.py", "local_file.py", "registry.py"},
         )
-        provider_source = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in sorted(provider_root.glob("*.py"))
-        )
-        self.assertNotIn("aws_kms", provider_source.lower())
-        self.assertNotIn("boto3", provider_source.lower())
-        self.assertNotIn("generatedatakey", provider_source.lower())
-        settings_source = (ROOT / "backupsheep" / "settings.py").read_text(
-            encoding="utf-8"
-        )
+
+        factory_path = ROOT / "apps" / "_tasks" / "artifact_encryption.py"
+        settings_path = ROOT / "backupsheep" / "settings.py"
+        crypto_root = ROOT / "backupsheep" / "artifact_crypto"
+        # This is the complete authority-bearing closure: the production factory,
+        # its settings selector, and every artifact-crypto implementation module.
+        # Shared ledger models imported by the factory are deliberately outside
+        # this boundary; they retain generic SDK imports for optional AWS backup
+        # integrations but cannot select or execute an artifact key provider.
+        kms_authority_paths = [
+            factory_path,
+            settings_path,
+            *sorted(crypto_root.rglob("*.py")),
+        ]
+        findings = []
+        for path in kms_authority_paths:
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            relative_path = str(path.relative_to(ROOT))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported = [alias.name.lower() for alias in node.names]
+                    if any(
+                        name == "boto3"
+                        or name.startswith("boto3.")
+                        or name == "botocore"
+                        or name.startswith("botocore.")
+                        or "aws_kms" in name
+                        for name in imported
+                    ):
+                        findings.append((relative_path, node.lineno, "AWS SDK import"))
+                elif isinstance(node, ast.ImportFrom):
+                    imported_from = str(node.module or "").lower()
+                    if (
+                        imported_from == "boto3"
+                        or imported_from.startswith("boto3.")
+                        or imported_from == "botocore"
+                        or imported_from.startswith("botocore.")
+                        or "aws_kms" in imported_from
+                    ):
+                        findings.append((relative_path, node.lineno, "AWS SDK import"))
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    literal = node.value.strip().lower()
+                    if literal in {"aws-kms", "aws_kms"}:
+                        findings.append((relative_path, node.lineno, "AWS KMS literal"))
+                    elif literal in {"boto3", "botocore"} or literal.startswith(
+                        ("boto3.", "botocore.")
+                    ):
+                        findings.append((relative_path, node.lineno, "AWS SDK literal"))
+                elif isinstance(node, ast.Call):
+                    services = list(node.args[:1])
+                    services.extend(
+                        keyword.value
+                        for keyword in node.keywords
+                        if keyword.arg == "service_name"
+                    )
+                    callable_name = (
+                        node.func.attr
+                        if isinstance(node.func, ast.Attribute)
+                        else node.func.id
+                        if isinstance(node.func, ast.Name)
+                        else ""
+                    )
+                    if (
+                        callable_name in {"client", "create_client"}
+                        and any(
+                            isinstance(service, ast.Constant)
+                            and isinstance(service.value, str)
+                            and service.value.strip().lower() == "kms"
+                            for service in services
+                        )
+                    ):
+                        findings.append((relative_path, node.lineno, "KMS client"))
+
+        self.assertEqual(findings, [])
+        factory_source = factory_path.read_text(encoding="utf-8")
+        self.assertIn("LocalFileKeyProvider", factory_source)
+        settings_source = settings_path.read_text(encoding="utf-8")
         self.assertNotIn('"aws-kms"', settings_source)
         self.assertIn('"local-file"', settings_source)
 
