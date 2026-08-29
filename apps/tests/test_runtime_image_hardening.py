@@ -85,6 +85,23 @@ class RuntimeImageHardeningTests(TestCase):
             self.runtime,
         )
         self.assertIn("/usr/local/bin/pip3.14", self.runtime)
+        for launcher in (
+            "cli.exe",
+            "cli-32.exe",
+            "cli-64.exe",
+            "cli-arm64.exe",
+            "gui.exe",
+            "gui-32.exe",
+            "gui-64.exe",
+            "gui-arm64.exe",
+        ):
+            with self.subTest(setuptools_launcher=launcher):
+                self.assertIn(launcher, self.runtime)
+        self.assertIn(
+            "find /usr/local/lib/python3.14/site-packages/setuptools \\",
+            self.runtime,
+        )
+        self.assertIn("-type f -name '*.exe' -print -quit", self.runtime)
 
     def test_database_clients_are_version_pinned_and_authenticated(self):
         expected_packages = (
