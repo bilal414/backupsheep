@@ -490,6 +490,7 @@ jobs:
       TEST_EGRESS_IMAGE: "backupsheep-ci-egress:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_RABBITMQ_IMAGE: "backupsheep-ci-rabbitmq:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_RABBITMQ_UPGRADE_IMAGE: "backupsheep-ci-rabbitmq-upgrade:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RELEASE_VERIFIER_IMAGE: "backupsheep-ci-release-verifier:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_NETWORK: "backupsheep-ci-net-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_POSTGRES_CONTAINER: "backupsheep-ci-postgres-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_APPLICATION_CONTAINER: "backupsheep-ci-tests-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
@@ -503,7 +504,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - name: Build the production application, PostgreSQL, egress, and RabbitMQ images
+      - name: Build every first-party production and release-verification image
         shell: bash
         run: |
           set -euo pipefail
@@ -528,7 +529,7 @@ jobs:
             printf '%s\n' "Refusing a pre-existing CI network-name collision: $TEST_NETWORK" >&2
             exit 1
           fi
-          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE"; do
+          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RELEASE_VERIFIER_IMAGE"; do
             if docker image inspect "$image" >/dev/null 2>&1; then
               printf '%s\n' "Refusing a pre-existing CI image-tag collision: $image" >&2
               exit 1
@@ -553,17 +554,26 @@ jobs:
           docker build --pull --no-cache \
             --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
             --file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE" .
-          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE"; do
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.release-verifier --tag "$TEST_RELEASE_VERIFIER_IMAGE" .
+          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RELEASE_VERIFIER_IMAGE"; do
             test "$(docker image inspect --format '{{.Architecture}}' "$image")" = amd64
           done
           test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_IMAGE")" = '100:101'
           test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_UPGRADE_IMAGE")" = '100:101'
+          test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RELEASE_VERIFIER_IMAGE")" = '65532:65532'
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$TEST_RELEASE_VERIFIER_IMAGE")" = '["/ko-app/cosign"]'
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
             --entrypoint rabbitmqctl "$TEST_RABBITMQ_IMAGE" version | grep -Fxq '4.3.5'
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
             --entrypoint rabbitmqctl "$TEST_RABBITMQ_UPGRADE_IMAGE" version | grep -Fxq '4.2.9'
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \
+            "$TEST_RELEASE_VERIFIER_IMAGE" version | grep -Fq 'v3.1.3-backupsheep.1'
 
       - name: Install hash-verified Syft 1.51.0 and Trivy 0.74.0
         shell: bash
@@ -678,6 +688,7 @@ jobs:
           egress	$TEST_EGRESS_IMAGE
           rabbitmq	$TEST_RABBITMQ_IMAGE
           rabbitmq-upgrade	$TEST_RABBITMQ_UPGRADE_IMAGE
+          release-verifier	$TEST_RELEASE_VERIFIER_IMAGE
           EOF
 
           trap - EXIT HUP INT TERM
@@ -857,6 +868,7 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.postgres,target=/code/Dockerfile.postgres,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.rabbitmq,target=/code/Dockerfile.rabbitmq,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.rabbitmq-upgrade,target=/code/Dockerfile.rabbitmq-upgrade,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.release-verifier,target=/code/Dockerfile.release-verifier,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/LICENSE,target=/code/LICENSE,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/README.md,target=/code/README.md,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/SECURITY.md,target=/code/SECURITY.md,readonly" \
@@ -1152,6 +1164,9 @@ jobs:
           fi
           if owned_image "$TEST_RABBITMQ_UPGRADE_IMAGE"; then
             docker image rm --force "$TEST_RABBITMQ_UPGRADE_IMAGE" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_RELEASE_VERIFIER_IMAGE"; then
+            docker image rm --force "$TEST_RELEASE_VERIFIER_IMAGE" >/dev/null 2>&1 || true
           fi
           storage_owner="$GITHUB_WORKSPACE/_storage/.backupsheep-ci-owner"
           if [ -f "$storage_owner" ] && [ ! -L "$storage_owner" ] \

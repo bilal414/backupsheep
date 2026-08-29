@@ -32,6 +32,7 @@ EXPECTED_CONFIG_TARGETS = {
     "Dockerfile.postgres",
     "Dockerfile.rabbitmq",
     "Dockerfile.rabbitmq-upgrade",
+    "Dockerfile.release-verifier",
     "deploy/ci/Dockerfile.postgres-runtime-source",
 }
 EXPECTED_VULNERABILITY_MISCONFIGURATION_IDENTITIES = {
@@ -40,6 +41,7 @@ EXPECTED_VULNERABILITY_MISCONFIGURATION_IDENTITIES = {
     ("Dockerfile.postgres", "config", "dockerfile"),
     ("Dockerfile.rabbitmq", "config", "dockerfile"),
     ("Dockerfile.rabbitmq-upgrade", "config", "dockerfile"),
+    ("Dockerfile.release-verifier", "config", "dockerfile"),
     ("deploy/ci/Dockerfile.postgres-runtime-source", "config", "dockerfile"),
     ("package-lock.json", "lang-pkgs", "npm"),
     ("requirements.txt", "lang-pkgs", "pip"),

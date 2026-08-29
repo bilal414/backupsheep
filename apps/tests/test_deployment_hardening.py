@@ -178,6 +178,28 @@ class DeploymentHardeningContractTests(TestCase):
                 self.assertIn("USER 100:101", dockerfile)
                 self.assertNotIn("apk upgrade", dockerfile)
 
+    def test_release_verifier_rebuilds_exact_cosign_source_with_fixed_graph(self):
+        dockerfile = (ROOT / "Dockerfile.release-verifier").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            "golang:1.26.6-alpine3.23@sha256:"
+            "e57c41c1d5864341031181b0db34b9a537bb5773eb6428e4e5bdaea0f9135406",
+            "11926fa5bbbbde47e88fc006b625a17769b743b2",
+            "3a718446bac51466efff6853639e1ca108b456ecbf07cd92938f548715d22d6b",
+            "golang.org/x/mod@v0.40.0",
+            "golang.org/x/text@v0.40.0",
+            "google.golang.org/grpc@v1.82.1",
+            "894396e4119d1620852793d03419a7130f4c62881ae5e11301b36c2a775aa6f2",
+            "FROM scratch",
+            "USER 65532:65532",
+            'ENTRYPOINT ["/ko-app/cosign"]',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, dockerfile)
+        self.assertIn("GOTOOLCHAIN=local", dockerfile)
+        self.assertNotIn("apk upgrade", dockerfile)
+
     def test_postgres_logical_runtime_migration_is_deterministic_and_fail_closed(self):
         migration = (
             ROOT / "deploy" / "postgres" / "migrate-runtime.sh"
@@ -439,6 +461,7 @@ raise SystemExit(99)
             '--tag "$TEST_LEGACY_POSTGRES_IMAGE"',
             '--file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE"',
             '--file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE"',
+            '--file Dockerfile.release-verifier --tag "$TEST_RELEASE_VERIFIER_IMAGE"',
             "run: timeout --signal=TERM --kill-after=30s 45m deploy/ci/run-postgres-runtime-migration-e2e.sh",
             "docker network create --driver bridge --internal",
             'docker create \\\n',
@@ -474,7 +497,7 @@ raise SystemExit(99)
         self.assertNotIn("--network-alias database", gate)
         self.assertNotIn("--env DB_HOST=database", gate)
 
-        self.assertEqual(gate.count("docker build --pull --no-cache"), 6)
+        self.assertEqual(gate.count("docker build --pull --no-cache"), 7)
         self.assertNotIn("continue-on-error", gate)
         self.assertNotIn("--privileged", gate)
         self.assertNotIn("docker.sock", gate)

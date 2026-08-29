@@ -32,12 +32,18 @@ EXPECTED_RABBITMQ_SECURITY_PACKAGES = {
     "libcrypto3": "3.5.8-r0",
     "libssl3": "3.5.8-r0",
 }
+EXPECTED_VERIFIER_GO_PACKAGES = {
+    "golang.org/x/mod": "v0.40.0",
+    "golang.org/x/text": "v0.41.0",
+    "google.golang.org/grpc": "v1.82.1",
+}
 EXPECTED_OS_PACKAGE_TYPES = {
     "app": ("deb", "ubuntu"),
     "postgres": ("apk", "alpine"),
     "egress": ("apk", "alpine"),
     "rabbitmq": ("apk", "alpine"),
     "rabbitmq-upgrade": ("apk", "alpine"),
+    "release-verifier": (None, None),
 }
 EXPECTED_SYFT_VERSION = "1.51.0"
 EXPECTED_SYFT_SCHEMA_VERSION = "16.1.10"
@@ -277,6 +283,22 @@ def validate_rabbitmq_security_packages(
         )
 
 
+def validate_verifier_go_packages(
+    packages: dict[str, set[str]], scanner: str
+) -> None:
+    expected = dict(EXPECTED_VERIFIER_GO_PACKAGES)
+    expected["stdlib"] = "go1.26.6" if scanner == "Syft" else "v1.26.6"
+    observed: dict[str, str | None] = {}
+    for name in expected:
+        versions = packages.get(name, set())
+        observed[name] = next(iter(versions)) if len(versions) == 1 else None
+    if observed != expected:
+        die(
+            f"{scanner} release-verifier Go identities are not the exact "
+            f"reviewed versions: {observed}"
+        )
+
+
 def validate_locked_python_inventory(
     observed: set[tuple[str, str]],
     expected: dict[str, str],
@@ -481,6 +503,7 @@ def validate_syft(
     if not isinstance(artifacts, list) or not artifacts:
         die("Syft contains no package inventory")
     package_names: set[str] = set()
+    package_versions: dict[str, set[str]] = {}
     os_package_names: set[str] = set()
     os_package_versions: dict[str, str] = {}
     os_package_count = 0
@@ -499,7 +522,8 @@ def validate_syft(
         ):
             die("Syft package inventory contains an incomplete package identity")
         package_names.add(name)
-        if package_type == expected_os_type:
+        package_versions.setdefault(name, set()).add(version)
+        if expected_os_type is not None and package_type == expected_os_type:
             os_package_count += 1
             os_package_names.add(name)
             os_package_versions[name] = version
@@ -522,10 +546,14 @@ def validate_syft(
                 top_level_python_identities.add(
                     (normalized_python_package_name(name), version)
                 )
-    if not os_package_names:
-        die(f"Syft contains no {expected_os_type} OS package inventory")
-    if os_package_count != len(os_package_names):
-        die("Syft OS package inventory contains duplicate package names")
+    if expected_os_type is None:
+        if os_package_count != 0 or os_package_names:
+            die("scratch release-verifier unexpectedly has an OS package inventory")
+    else:
+        if not os_package_names:
+            die(f"Syft contains no {expected_os_type} OS package inventory")
+        if os_package_count != len(os_package_names):
+            die("Syft OS package inventory contains duplicate package names")
 
     source = report.get("source")
     if not isinstance(source, dict) or source.get("type") != "image":
@@ -571,6 +599,8 @@ def validate_syft(
             die(f"egress SBOM is missing policy-runtime packages: {sorted(missing)}")
     elif image_kind in {"rabbitmq", "rabbitmq-upgrade"}:
         validate_rabbitmq_security_packages(os_package_versions, "Syft")
+    elif image_kind == "release-verifier":
+        validate_verifier_go_packages(package_versions, "Syft")
     else:  # pragma: no cover - argparse enforces the choices
         die("unknown image kind")
     return (
@@ -615,6 +645,7 @@ def validate_trivy(
     os_result_count = 0
     os_package_names: set[str] = set()
     os_package_versions: dict[str, str] = {}
+    package_versions: dict[str, set[str]] = {}
     python_package_count = 0
     top_level_python_package_count = 0
     top_level_python_identities: set[tuple[str, str]] = set()
@@ -642,6 +673,7 @@ def validate_trivy(
                     isinstance(value, str) and value for value in (name, version)
                 ):
                     die("Trivy package inventory contains an incomplete identity")
+                package_versions.setdefault(name, set()).add(version)
                 if result_class == "os-pkgs":
                     os_package_count += 1
                     os_package_names.add(name)
@@ -666,10 +698,14 @@ def validate_trivy(
             vulnerabilities.extend(found)
     if package_count == 0:
         die("Trivy contains no package inventory")
-    if os_result_count != 1 or not os_package_names:
-        die(f"Trivy contains no unique {expected_os_type} OS package inventory")
-    if os_package_count != len(os_package_names):
-        die("Trivy OS package inventory contains duplicate package names")
+    if expected_os_type is None:
+        if os_result_count != 0 or os_package_count != 0 or os_package_names:
+            die("scratch release-verifier unexpectedly has an OS package inventory")
+    else:
+        if os_result_count != 1 or not os_package_names:
+            die(f"Trivy contains no unique {expected_os_type} OS package inventory")
+        if os_package_count != len(os_package_names):
+            die("Trivy OS package inventory contains duplicate package names")
     matched_python_count = 0
     if image_kind == "app":
         matched_python_count = validate_locked_python_inventory(
@@ -682,6 +718,8 @@ def validate_trivy(
             )
     elif image_kind in {"rabbitmq", "rabbitmq-upgrade"}:
         validate_rabbitmq_security_packages(os_package_versions, "Trivy")
+    elif image_kind == "release-verifier":
+        validate_verifier_go_packages(package_versions, "Trivy")
     if vulnerabilities:
         identities = sorted(
             {
@@ -716,7 +754,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--image-kind",
-        choices=("app", "postgres", "egress", "rabbitmq", "rabbitmq-upgrade"),
+        choices=(
+            "app",
+            "postgres",
+            "egress",
+            "rabbitmq",
+            "rabbitmq-upgrade",
+            "release-verifier",
+        ),
         required=True,
     )
     parser.add_argument("--image-id", required=True)

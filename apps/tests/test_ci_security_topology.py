@@ -42,6 +42,7 @@ class CISecurityTopologyContractTests(TestCase):
             'TEST_EGRESS_IMAGE: "backupsheep-ci-egress:',
             'TEST_RABBITMQ_IMAGE: "backupsheep-ci-rabbitmq:',
             'TEST_RABBITMQ_UPGRADE_IMAGE: "backupsheep-ci-rabbitmq-upgrade:',
+            'TEST_RELEASE_VERIFIER_IMAGE: "backupsheep-ci-release-verifier:',
             '--file Dockerfile --tag "$TEST_APP_IMAGE"',
             '--file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE"',
             '--file deploy/ci/Dockerfile.postgres-runtime-source',
@@ -49,6 +50,7 @@ class CISecurityTopologyContractTests(TestCase):
             '--file Dockerfile.egress --tag "$TEST_EGRESS_IMAGE"',
             '--file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE"',
             '--file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE"',
+            '--file Dockerfile.release-verifier --tag "$TEST_RELEASE_VERIFIER_IMAGE"',
             'BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION: "1"',
             'BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION: "2"',
             'BACKUPSHEEP_EGRESS_POLICY_GENERATION: "2"',
@@ -88,6 +90,7 @@ class CISecurityTopologyContractTests(TestCase):
             "egress\t$TEST_EGRESS_IMAGE",
             "rabbitmq\t$TEST_RABBITMQ_IMAGE",
             "rabbitmq-upgrade\t$TEST_RABBITMQ_UPGRADE_IMAGE",
+            "release-verifier\t$TEST_RELEASE_VERIFIER_IMAGE",
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             'CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"',
             "path: ${{ runner.temp }}/backupsheep-ci-image-evidence",
@@ -112,6 +115,19 @@ class CISecurityTopologyContractTests(TestCase):
                     image_scan.validate_rabbitmq_security_packages(
                         observed, "fixture"
                     )
+
+    def test_release_verifier_scan_requires_exact_patched_go_graph(self):
+        syft = {
+            "stdlib": {"go1.26.6"},
+            "golang.org/x/mod": {"v0.40.0"},
+            "golang.org/x/text": {"v0.41.0"},
+            "google.golang.org/grpc": {"v1.82.1"},
+        }
+        image_scan.validate_verifier_go_packages(syft, "Syft")
+        vulnerable = dict(syft)
+        vulnerable["stdlib"] = {"go1.26.4"}
+        with self.assertRaises(SystemExit):
+            image_scan.validate_verifier_go_packages(vulnerable, "Syft")
 
         validator = (
             ROOT / "deploy" / "ci" / "validate-image-scan.py"
@@ -786,6 +802,10 @@ database_password=test-only-password
             (
                 "Dockerfile.rabbitmq-upgrade",
                 "/code/Dockerfile.rabbitmq-upgrade",
+            ),
+            (
+                "Dockerfile.release-verifier",
+                "/code/Dockerfile.release-verifier",
             ),
             ("scripts", "/code/scripts"),
             ("Dockerfile", "/code/Dockerfile"),
