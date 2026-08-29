@@ -425,6 +425,207 @@ release_mutation_lock
             self.assertIn("stale fail-closed lock remains", stale.stderr)
             self.assertEqual(owner.read_text(encoding="utf-8"), stale_value)
 
+    def test_installer_signal_handlers_kill_active_group_and_release_lock(self):
+        for signal_number, expected in (
+            (signal.SIGHUP, 129),
+            (signal.SIGINT, 130),
+            (signal.SIGTERM, 143),
+        ):
+            with self.subTest(signal=signal_number), tempfile.TemporaryDirectory(
+                prefix="backupsheep-installer-signal-"
+            ) as directory:
+                install_dir = Path(directory) / "installation"
+                install_dir.mkdir(mode=0o700)
+                ready = Path(directory) / "ready"
+                child_pid_path = Path(directory) / "child.pid"
+                command = r'''
+source "$1"
+INSTALL_DIR="$2"
+acquire_installation_mutation_lock
+: > "$3"
+run_installer_command 30 "signal test child" sh -c 'printf "%s\n" "$$" > "$1"; exec sleep 30' child "$4"
+'''
+                process = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        command,
+                        "installer-signal-test",
+                        str(INSTALLER),
+                        str(install_dir),
+                        str(ready),
+                        str(child_pid_path),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                deadline = time.monotonic() + 10
+                while (not ready.exists() or not child_pid_path.exists()) and time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        stdout, stderr = process.communicate()
+                        self.fail(f"installer exited before signal: {process.returncode}\n{stdout}\n{stderr}")
+                    time.sleep(0.02)
+                child_pid = int(child_pid_path.read_text(encoding="utf-8").strip())
+                process.send_signal(signal_number)
+                stdout, stderr = process.communicate(timeout=12)
+                self.assertEqual(process.returncode, expected, f"{stdout}\n{stderr}")
+                self.assertFalse(Path(f"{install_dir}.backupsheep-mutation-lock").exists())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child_pid, 0)
+
+    def test_install_path_grammar_matches_signed_consumer_mount_contract(self):
+        consumer = (ROOT / "deploy/release/consume-signed-release.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("outside the reviewed Docker mount and attestation grammar", self.installer)
+        self.assertIn("outside the reviewed Docker mount and attestation grammar", consumer)
+        for suffix in ("bad:path", "bad=value", "bad%value", "bad#value", "bad~value", "bad(value)", "badé"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory(
+                prefix="backupsheep-path-contract-"
+            ) as directory:
+                path = str(Path(directory) / suffix)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; INSTALL_DIR="$2"; validate_install_dir',
+                        "installer-path-test",
+                        str(INSTALLER),
+                        path,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("outside the reviewed", result.stderr)
+
+    def test_signed_release_consumer_serializes_and_postvalidates_evidence_publication(self):
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        source_text = consumer.read_text(encoding="utf-8")
+        self.assertIn('MUTATION_LOCK_DIR="${INSTALL_DIR}.backupsheep-mutation-lock"', source_text)
+        self.assertIn('publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"', source_text)
+        self.assertLess(
+            source_text.index('publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"'),
+            source_text.index("Verified signed release %s at source commit %s."),
+        )
+
+        with tempfile.TemporaryDirectory(prefix="backupsheep-consumer-lock-") as directory:
+            install_dir = Path(directory) / "installation"
+            install_dir.mkdir(mode=0o700)
+            ready = Path(directory) / "ready"
+            release = Path(directory) / "release"
+            holder = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    r'''source "$1"
+INSTALL_DIR="$2"
+acquire_or_inherit_mutation_lock
+trap 'release_mutation_lock' EXIT
+: > "$3"
+while [[ ! -e "$4" ]]; do sleep 0.05; done
+''',
+                    "release-consumer-lock-holder",
+                    str(consumer),
+                    str(install_dir),
+                    str(ready),
+                    str(release),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(100):
+                if ready.exists():
+                    break
+                time.sleep(0.02)
+            self.assertTrue(ready.exists())
+            contender = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; INSTALL_DIR="$2"; acquire_or_inherit_mutation_lock',
+                    "release-consumer-lock-contender",
+                    str(consumer),
+                    str(install_dir),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(contender.returncode, 0)
+            self.assertIn("another mutation is active", contender.stderr)
+            release.touch()
+            holder.communicate(timeout=10)
+            self.assertFalse(Path(f"{install_dir}.backupsheep-mutation-lock").exists())
+
+        with tempfile.TemporaryDirectory(prefix="backupsheep-evidence-race-") as directory:
+            install_dir = Path(directory) / "installation"
+            install_dir.mkdir(mode=0o700)
+            staging = install_dir / ".release-evidence.download.12345678"
+            evidence = install_dir / ".release-evidence"
+            staging.mkdir(mode=0o700)
+            for name in (
+                "backupsheep-release-descriptor-v1.txt",
+                "backupsheep-release-descriptor-v1.sigstore.json",
+                "release-manifest.json",
+            ):
+                path = staging / name
+                path.write_text("authenticated\n", encoding="utf-8")
+                path.chmod(0o600)
+            receipt = staging / "local-images.txt"
+            receipt.write_text(
+                "".join(
+                    f"{role}_image_id=sha256:{index:064x}\n"
+                    for index, role in enumerate(
+                        (
+                            "app",
+                            "postgres",
+                            "egress",
+                            "rabbit_current",
+                            "rabbit_upgrade",
+                            "cosign",
+                        ),
+                        start=1,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            receipt.chmod(0o600)
+            raced = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    r'''source "$1"
+INSTALL_DIR="$2"
+STAGING_DIR="$3"
+EVIDENCE_DIR="$4"
+acquire_or_inherit_mutation_lock
+trap 'release_mutation_lock' EXIT
+mv() {
+  if [[ "$1" == --no-target-directory ]]; then return 1; fi
+  mkdir -- "$EVIDENCE_DIR"
+  command mv "$@"
+}
+publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
+''',
+                    "release-evidence-race",
+                    str(consumer),
+                    str(install_dir),
+                    str(staging),
+                    str(evidence),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(raced.returncode, 0)
+            self.assertIn("persisted release evidence", raced.stderr)
+
     def test_compose_control_plane_is_explicit(self):
         for token in (
             "/usr/bin/env -i",
@@ -480,6 +681,831 @@ release_mutation_lock
         self.assertIn("RabbitMQ identity provisioning failed", self.installer)
         self.assertIn("provision_container_id", self.installer)
         self.assertIn("Database identity provisioning failed", self.installer)
+
+    def test_signed_release_mode_uses_only_a_pinned_locked_down_cosign_container(self):
+        consumer = (ROOT / "deploy/release/consume-signed-release.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--release-tag TAG", self.installer)
+        self.assertIn('IMAGE_MODE="local-build"', self.installer)
+        self.assertIn('IMAGE_MODE="signed-release"', self.installer)
+        self.assertIn("prepare_image_source", self.installer)
+        self.assertIn("validate_local_release_images", self.installer)
+        self.assertNotIn("apt-get", consumer)
+        self.assertNotIn("apk add", consumer)
+        self.assertRegex(
+            consumer,
+            r"ghcr\.io/bilal414/backupsheep-release-verifier@sha256:[0-9a-f]{64}",
+        )
+        for required in (
+            "--pull=never",
+            "--read-only",
+            "--cap-drop ALL",
+            "--security-opt no-new-privileges:true",
+            "--pids-limit 64",
+            "--user 65532:65532",
+            "--certificate-identity",
+            "--certificate-github-workflow-sha",
+            "--certificate-github-workflow-ref",
+            "--certificate-github-workflow-trigger push",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, consumer)
+        self.assertNotIn("docker.sock", consumer)
+        self.assertNotRegex(consumer, r"(?m)^\s*(?:eval|source)\s")
+
+    def test_signed_consumer_attests_exact_clean_source_checkout_even_with_skip_worktree(self):
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        with tempfile.TemporaryDirectory(prefix="backupsheep-consumer-source-") as directory:
+            checkout = Path(directory) / "checkout"
+            for relative in (
+                "deploy/release/consume-signed-release.sh",
+                "deploy/release/sigstore-trusted-root.json",
+                "deploy/release/signed-release.compose.yml",
+                "deploy/release-policy.json",
+                "deploy/runtime/compose-json.awk",
+            ):
+                target = checkout / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / relative, target)
+                target.chmod(0o700 if relative.endswith(".sh") else 0o600)
+            checkout.chmod(0o700)
+            subprocess.run(["git", "init", "--quiet", str(checkout)], check=True)
+            subprocess.run(["git", "-C", str(checkout), "config", "user.email", "security@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(checkout), "config", "user.name", "Security Test"], check=True)
+            subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(checkout), "commit", "--quiet", "-m", "fixture"], check=True)
+            subprocess.run(
+                ["git", "-C", str(checkout), "remote", "add", "origin", "https://github.com/bilal414/backupsheep.git"],
+                check=True,
+            )
+            commit = subprocess.check_output(
+                ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+            ).strip()
+            checkout = checkout.resolve()
+            command = 'source "$1"; INSTALL_DIR="$2"; SOURCE_COMMIT="$3"; GIT_BIN="$(command -v git)"; validate_source_checkout; validate_trusted_root "$2/deploy/release/sigstore-trusted-root.json"'
+            accepted = subprocess.run(
+                ["bash", "-c", command, "source-attestation", str(consumer), str(checkout), commit],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+            policy = checkout / "deploy/release-policy.json"
+            subprocess.run(
+                ["git", "-C", str(checkout), "update-index", "--skip-worktree", "deploy/release-policy.json"],
+                check=True,
+            )
+            policy.write_text(policy.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            refused = subprocess.run(
+                ["bash", "-c", command, "source-attestation", str(consumer), str(checkout), commit],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("does not byte-match source commit", refused.stderr)
+
+    def test_image_source_contract_is_one_atomic_durable_update_and_partial_candidate_retries(self):
+        configure_body = self.installer.split("configure_image_source() {", 1)[1].split(
+            "\n}\n\nattest_local_release_image()", 1
+        )[0]
+        self.assertEqual(configure_body.count("set_image_source_contract_atomically"), 1)
+        self.assertNotIn('set_env_value "$key"', configure_body)
+        contract_lines = [
+            "BACKUPSHEEP_IMAGE_MODE|signed-release",
+            "BACKUPSHEEP_RELEASE_TAG|v1.2.3",
+            f"BACKUPSHEEP_RELEASE_SOURCE_COMMIT|{'a' * 40}",
+            f"BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256|sha256:{'b' * 64}",
+            f"BACKUPSHEEP_RELEASE_APP_IMAGE|ghcr.io/bilal414/backupsheep@sha256:{'c' * 64}",
+            f"BACKUPSHEEP_RELEASE_POSTGRES_IMAGE|ghcr.io/bilal414/backupsheep-postgres@sha256:{'d' * 64}",
+            f"BACKUPSHEEP_RELEASE_EGRESS_IMAGE|ghcr.io/bilal414/backupsheep-egress@sha256:{'e' * 64}",
+            f"BACKUPSHEEP_IMAGE|ghcr.io/bilal414/backupsheep@sha256:{'c' * 64}",
+            f"BACKUPSHEEP_POSTGRES_IMAGE|ghcr.io/bilal414/backupsheep-postgres@sha256:{'d' * 64}",
+            f"BACKUPSHEEP_EGRESS_IMAGE|ghcr.io/bilal414/backupsheep-egress@sha256:{'e' * 64}",
+        ]
+        with tempfile.TemporaryDirectory(prefix="backupsheep-image-contract-") as directory:
+            install_dir = Path(directory)
+            install_dir.chmod(0o700)
+            env_file = install_dir / ".env"
+            original = "EXISTING='preserved'\n"
+            env_file.write_text(original, encoding="utf-8")
+            env_file.chmod(0o600)
+            command = 'source "$1"; INSTALL_DIR="$2"; ENV_FILE="$2/.env"; reconcile_image_source_contract_candidate'
+            for boundary in range(len(contract_lines) + 1):
+                candidate = install_dir / ".env.image-source.new"
+                candidate.write_text("\n".join(contract_lines[:boundary]), encoding="utf-8")
+                candidate.chmod(0o600)
+                result = subprocess.run(
+                    ["bash", "-c", command, "image-contract-retry", str(INSTALLER), str(install_dir)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with self.subTest(boundary=boundary):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(env_file.read_text(encoding="utf-8"), original)
+                    self.assertFalse(candidate.exists())
+            contract = "\x1c".join(contract_lines) + "\x1c"
+            applied = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; INSTALL_DIR="$2"; ENV_FILE="$2/.env"; set_image_source_contract_atomically "$3"',
+                    "image-contract-apply",
+                    str(INSTALLER),
+                    str(install_dir),
+                    contract,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            rendered = env_file.read_text(encoding="utf-8")
+            self.assertIn("EXISTING='preserved'", rendered)
+            for line in contract_lines:
+                key, value = line.split("|", 1)
+                self.assertEqual(rendered.count(f"{key}='{value}'"), 1)
+
+    def test_signed_release_download_and_docker_clients_are_bounded_and_scrubbed(self):
+        consumer = (ROOT / "deploy/release/consume-signed-release.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"$CURL_BIN" --disable --fail', consumer)
+        self.assertIn("/usr/bin/env -i LC_ALL=C", consumer)
+        self.assertIn('--max-filesize "$maximum"', consumer)
+        self.assertIn('run_bounded 310 "release asset download"', consumer)
+        self.assertIn('run_bounded 600 "Cosign verifier pull"', consumer)
+        self.assertIn('run_bounded 600 "${role} digest pull"', consumer)
+        self.assertIn('run_bounded 180 "Cosign verification"', consumer)
+        self.assertIn('kill -TERM -- "-$ACTIVE_PID"', consumer)
+        self.assertIn('kill -KILL -- "-$ACTIVE_PID"', consumer)
+        self.assertIn("DOCKER_ENV=(/usr/bin/env -i", consumer)
+        for variable in ("HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY", "NO_PROXY"):
+            self.assertIn(f"--env {variable}=", consumer)
+        for variable in (
+            "COSIGN_REPOSITORY", "COSIGN_EXPERIMENTAL", "SIGSTORE_NO_CACHE",
+            "HTTP_PROXY", "http_proxy", "FTP_PROXY", "ftp_proxy",
+            "SSL_CERT_FILE", "DOCKER_CONFIG",
+        ):
+            self.assertIn(f"--env {variable}=", consumer)
+
+    def test_signed_release_signal_handlers_force_interrupted_status(self):
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        phases = ("release asset download", "Cosign verification", "app digest pull")
+        for (signal_number, expected), phase in zip(
+            ((signal.SIGHUP, 129), (signal.SIGINT, 130), (signal.SIGTERM, 143)), phases
+        ):
+            with tempfile.TemporaryDirectory(prefix="backupsheep-signal-tree-") as directory:
+                descendant_file = Path(directory) / "descendant.pid"
+                command = r'''
+source "$1"
+INSTALL_DIR="$4"
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
+printf 'ready\n'
+run_bounded_capture 30 "$2" sh -c 'printf "%s\n" "$$" > "$1"; printf captured; sleep 30' child "$3"
+'''
+                process = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        command,
+                        "release-signal-test",
+                        str(consumer),
+                        phase,
+                        str(descendant_file),
+                        directory,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.assertEqual(process.stdout.readline(), "ready\n")
+                for _ in range(50):
+                    if descendant_file.exists():
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(descendant_file.exists())
+                descendant_pid = int(descendant_file.read_text().strip())
+                process.send_signal(signal_number)
+                stdout, stderr = process.communicate(timeout=10)
+                with self.subTest(signal=signal_number, phase=phase):
+                    self.assertEqual(process.returncode, expected, (stdout, stderr))
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(descendant_pid, 0)
+
+    def test_signed_release_watchdog_handles_fast_exit_and_kills_timeout_tree(self):
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        fast = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; run_bounded 2 quick true; ! run_bounded 2 quick false',
+                "release-watchdog-test",
+                str(consumer),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(fast.returncode, 0, fast.stderr)
+        with tempfile.TemporaryDirectory(prefix="backupsheep-timeout-tree-") as directory:
+            descendant_file = Path(directory) / "descendant.pid"
+            timed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    r'''source "$1"
+run_bounded 1 timeout sh -c 'trap "" TERM; printf "%s\n" "$$" > "$1"; sleep 30' child "$2"
+''',
+                    "release-watchdog-test",
+                    str(consumer),
+                    str(descendant_file),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+            self.assertEqual(timed.returncode, 124, timed.stderr)
+            descendant_pid = int(descendant_file.read_text().strip())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+
+    def test_signed_release_residue_and_named_verifier_reconciliation_is_fail_closed(self):
+        consumer = (ROOT / "deploy/release/consume-signed-release.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("validate_residue_dir", consumer)
+        self.assertIn("release residue is still mounted by a Docker container", consumer)
+        self.assertIn("(( count <= 8 ))", consumer)
+        self.assertIn("--name \"$VERIFIER_NAME\"", consumer)
+        self.assertIn("com.backupsheep.installation-path-sha256", consumer)
+        self.assertIn("attest_verifier_container", consumer)
+        self.assertIn("reconcile_evidence_refresh", consumer)
+        self.assertIn('chmod 0755 "$VERIFIER_DIR"', consumer)
+        self.assertIn('expected_mode="755"', consumer)
+        self.assertIn('--workdir /', consumer)
+        self.assertIn("'[\"/ko-app/cosign\"]|null|/|null||null|0'", consumer)
+        self.assertNotIn('$(file_links "$path")" == "2"', consumer)
+        self.assertNotIn('$(file_links "$evidence")" == "2"', consumer)
+        self.assertIn('run_bounded 30 "durable release evidence sync"', consumer)
+        self.assertGreaterEqual(consumer.count("durable_sync"), 4)
+        create_block = consumer[consumer.index("cosign() {"):consumer.index("verify_signatures() {")]
+        self.assertLess(
+            create_block.index("VERIFIER_CREATE_UNCERTAIN=true"),
+            create_block.index('run_bounded 30 "Cosign verifier creation"'),
+        )
+        self.assertIn("RECOVERY_VERIFIER_DIR", consumer)
+        self.assertNotIn("quiesce_verifier_creation_residue", consumer)
+        self.assertIn('size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 ))', consumer)
+        self.assertIn("installation path contains Docker mount or filter metacharacters", consumer)
+        self.assertIn("--install-dir cannot contain a comma", self.installer)
+        command = r'''
+source "$1"
+docker_client() {
+  if [[ "$1" == ps ]]; then
+    printf '%064d\n' 1
+  elif [[ "$1" == inspect ]]; then
+    printf '/unrelated/source\n'
+  else
+    return 1
+  fi
+}
+containers_mounting_path /wanted/source
+docker_client() {
+  if [[ "$1" == ps ]]; then
+    printf '%064d\n' 1
+  elif [[ "$1" == inspect ]]; then
+    printf '/wanted/source\n'
+  else
+    return 1
+  fi
+}
+if containers_mounting_path /wanted/source; then exit 1; else test "$?" -eq 10; fi
+docker_client() {
+  if [[ "$1" == ps ]]; then
+    printf '%064d\n' 1
+  elif [[ "$1" == inspect ]]; then
+    printf '/wanted\n'
+  else
+    return 1
+  fi
+}
+if containers_mounting_path /wanted/source; then exit 1; else test "$?" -eq 10; fi
+docker_client() {
+  if [[ "$1" == ps ]]; then
+    printf '%064d\n' 1
+  elif [[ "$1" == inspect ]]; then
+    printf '/wanted/source/nested/file\n'
+  else
+    return 1
+  fi
+}
+if containers_mounting_path /wanted/source; then exit 1; else test "$?" -eq 10; fi
+'''
+        result = subprocess.run(
+            ["bash", "-c", command, "release-mount-test", str(ROOT / "deploy/release/consume-signed-release.sh")],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for blocked_call in ("ps", "inspect"):
+            timeout_command = rf'''
+source "$1"
+docker_client() {{
+  if [[ "$1" == ps ]]; then
+    {'sleep 30' if blocked_call == 'ps' else "printf '%064d\\n' 1"}
+  elif [[ "$1" == inspect ]]; then
+    {'sleep 30' if blocked_call == 'inspect' else 'return 1'}
+  fi
+}}
+if containers_mounting_path /wanted/source 1; then exit 1; else test "$?" -eq 124; fi
+'''
+            timeout_result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    timeout_command,
+                    "release-mount-timeout-test",
+                    str(ROOT / "deploy/release/consume-signed-release.sh"),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            with self.subTest(blocked_call=blocked_call):
+                self.assertEqual(timeout_result.returncode, 0, timeout_result.stderr)
+        self.assertLess(
+            consumer.index("reconcile_verifier_orphan\n    cleanup_residues"),
+            consumer.index('STAGING_DIR="$(mktemp'),
+        )
+
+        with tempfile.TemporaryDirectory(prefix="backupsheep-apfs-links-") as directory:
+            root = Path(directory)
+            residue = root / ".release-evidence.download.ABCDEFGH"
+            evidence = root / ".release-evidence"
+            residue.mkdir(mode=0o700)
+            evidence.mkdir(mode=0o700)
+            for name in (
+                "backupsheep-release-descriptor-v1.txt",
+                "backupsheep-release-descriptor-v1.sigstore.json",
+                "release-manifest.json",
+                "sigstore-trusted-root.json",
+            ):
+                path = residue / name
+                path.write_text("x\n", encoding="utf-8")
+                path.chmod(0o600)
+            for name in (
+                "backupsheep-release-descriptor-v1.txt",
+                "backupsheep-release-descriptor-v1.sigstore.json",
+                "release-manifest.json",
+            ):
+                path = evidence / name
+                path.write_text("x\n", encoding="utf-8")
+                path.chmod(0o600)
+            receipt = evidence / "local-images.txt"
+            receipt.write_text(
+                "".join(
+                    f"{role}_image_id=sha256:{index * 64}\n"
+                    for index, role in zip(
+                        "123456",
+                        (
+                            "app", "postgres", "egress", "rabbit_current",
+                            "rabbit_upgrade", "cosign",
+                        ),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            receipt.chmod(0o600)
+            portable_links = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    r'''source "$1"
+file_links() {
+  if [[ -d "$1" ]]; then printf '7\n';
+  else stat -c '%h' "$1" 2>/dev/null || stat -f '%l' "$1"; fi
+}
+validate_residue_dir "$2"
+validate_persisted_evidence "$3"
+''',
+                    "apfs-link-test",
+                    str(ROOT / "deploy/release/consume-signed-release.sh"),
+                    str(residue),
+                    str(evidence),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(portable_links.returncode, 0, portable_links.stderr)
+
+    def test_signed_release_shell_descriptor_parser_rejects_adversarial_lines(self):
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        tag = "v1.2.3-rc.1"
+        commit = "a" * 40
+        with tempfile.TemporaryDirectory(prefix="backupsheep-release-parser-") as directory:
+            root = Path(directory)
+            manifest = root / "release-manifest.json"
+            manifest.write_bytes(b'{"test":true}\n')
+            manifest.chmod(0o600)
+            manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            descriptor = (
+                "BACKUPSHEEP-SIGNED-RELEASE-V1\n"
+                f"release_tag={tag}\n"
+                f"source_commit={commit}\n"
+                f"release_manifest_sha256=sha256:{manifest_digest}\n"
+                f"app_image=ghcr.io/bilal414/backupsheep@sha256:{'1' * 64}\n"
+                f"postgres_image=ghcr.io/bilal414/backupsheep-postgres@sha256:{'2' * 64}\n"
+                f"egress_image=ghcr.io/bilal414/backupsheep-egress@sha256:{'3' * 64}\n"
+            )
+            descriptor_path = root / "descriptor.txt"
+            command = (
+                'source "$1"; validate_descriptor "$2" "$3" "$4" "$5"'
+            )
+            cases = (
+                (descriptor, True),
+                (descriptor.replace("release_tag=", "source_commit=", 1), False),
+                (descriptor.replace("ghcr.io/bilal414/backupsheep@", "ghcr.io/attacker/backupsheep@", 1), False),
+                (descriptor + "app_image=duplicate\n", False),
+                (descriptor.rstrip("\n"), False),
+                (descriptor.replace("\n", "\r\n", 1), False),
+            )
+            for payload, accepted in cases:
+                descriptor_path.write_bytes(payload.encode("ascii"))
+                descriptor_path.chmod(0o600)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        command,
+                        "release-parser-test",
+                        str(consumer),
+                        str(descriptor_path),
+                        tag,
+                        commit,
+                        str(manifest),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with self.subTest(payload=payload[:80]):
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_signed_release_local_image_receipt_has_exact_ordered_six_line_grammar(self):
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        keys = (
+            "app_image_id",
+            "postgres_image_id",
+            "egress_image_id",
+            "rabbit_current_image_id",
+            "rabbit_upgrade_image_id",
+            "cosign_image_id",
+        )
+        canonical = "".join(
+            f"{key}=sha256:{index:064x}\n" for index, key in enumerate(keys, 1)
+        )
+        cases = (
+            (canonical, True),
+            (canonical.replace(keys[1], keys[0], 1), False),
+            (
+                canonical.splitlines(keepends=True)[1]
+                + canonical.splitlines(keepends=True)[0]
+                + "".join(canonical.splitlines(keepends=True)[2:]),
+                False,
+            ),
+            (canonical + f"extra_image_id=sha256:{7:064x}\n", False),
+            (canonical.rstrip("\n"), False),
+            (canonical.replace("sha256:", "sha256:\x01", 1), False),
+        )
+        with tempfile.TemporaryDirectory(prefix="backupsheep-image-receipt-") as directory:
+            receipt = Path(directory) / "local-images.txt"
+            for payload, accepted in cases:
+                receipt.write_bytes(payload.encode("ascii"))
+                receipt.chmod(0o600)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; validate_local_image_receipt "$2"',
+                        "release-receipt-test",
+                        str(consumer),
+                        str(receipt),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with self.subTest(payload=repr(payload[:100])):
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_signed_release_daemon_platform_is_linux_and_scanned_arch_only(self):
+        consumer = ROOT / "deploy/release/consume-signed-release.sh"
+        command = r'''
+source "$1"
+MOCK_PLATFORM="$2"
+INSTALL_DIR="$3"
+docker_client() { printf '%s\n' "$MOCK_PLATFORM"; }
+attest_docker_daemon_platform
+'''
+        with tempfile.TemporaryDirectory(prefix="backupsheep-platform-capture-") as directory:
+            for platform, accepted in (
+                ("linux|amd64", True),
+                ("linux|arm64", True),
+                ("linux|386", False),
+                ("darwin|arm64", False),
+                ("linux|x86_64", False),
+            ):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        command,
+                        "release-platform-test",
+                        str(consumer),
+                        platform,
+                        directory,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with self.subTest(platform=platform):
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+        source = consumer.read_text(encoding="utf-8")
+        self.assertIn("persisted local image receipt conflicts with attested images", source)
+        self.assertNotIn(
+            'mv -f -- "$EVIDENCE_DIR/local-images.txt.new" "$EVIDENCE_DIR/local-images.txt"',
+            source,
+        )
+
+    def test_signed_release_overlay_removes_all_three_builds_and_never_pulls(self):
+        overlay = (ROOT / "deploy/release/signed-release.compose.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(overlay.count("build: !reset null"), 3)
+        self.assertEqual(overlay.count("pull_policy: never"), 6)
+        self.assertIn("signed-release.compose.yml", self.installer)
+        self.assertIn("Signed-release Compose model contains a build definition", self.installer)
+
+    def test_installer_validates_model_shaping_values_before_compose(self):
+        model_validator = self.installer.index("validate_compose_model_settings")
+        compose_validation = self.installer.index("compose config --quiet", model_validator)
+        self.assertLess(
+            self.installer.index("validate_compose_model_settings", model_validator + 1),
+            compose_validation,
+        )
+        self.assertIn(
+            "Signed-release Compose model contains an unsafe tmpfs mount option",
+            self.installer,
+        )
+        invalid = (
+            ("BACKUPSHEEP_TMPFS_SIZE", "256m,exec,suid,dev", "integer size"),
+            ("POSTGRES_PIDS_LIMIT", "0", "reviewed resource range"),
+            ("APP_CPU_LIMIT", "64.001", "canonical CPU value"),
+            ("APP_MEMORY_LIMIT", "99999999g", "reviewed resource range"),
+            ("BACKUPSHEEP_STOP_GRACE_PERIOD", "5m,exec", "canonical nonzero duration"),
+        )
+        with tempfile.TemporaryDirectory(prefix="backupsheep-model-settings-") as root:
+            env_path = Path(root) / ".env"
+            for key, value, expected in invalid:
+                with self.subTest(key=key):
+                    env_path.write_text(f"{key}='{value}'\n", encoding="utf-8")
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            'source "$1"; ENV_FILE="$2"; validate_compose_model_settings',
+                            "installer-model-settings-test",
+                            str(INSTALLER),
+                            str(env_path),
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected, result.stderr)
+            env_path.write_text(
+                "BACKUPSHEEP_TMPFS_SIZE='256m'\nAPP_CPU_LIMIT='2.000'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; ENV_FILE="$2"; validate_compose_model_settings',
+                    "installer-model-settings-test",
+                    str(INSTALLER),
+                    str(env_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+    def test_signed_wrapper_binds_runtime_files_and_service_roles_to_source_commit(self):
+        wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
+        self.assertIn("validate_signed_release_source_checkout", wrapper)
+        self.assertIn("signed-release checkout HEAD does not match its release receipt", wrapper)
+        self.assertIn("https://github.com/bilal414/backupsheep.git", wrapper)
+        for relative in (
+            "backupsheep-compose",
+            "docker-compose.yml",
+            "deploy/release/signed-release.compose.yml",
+            "deploy/rabbitmq/upgrade-4.2.9.compose.yml",
+            "deploy/release-policy.json",
+        ):
+            with self.subTest(relative=relative):
+                self.assertIn(relative, wrapper)
+        self.assertIn("does not byte-match its source commit", wrapper)
+        self.assertIn("deployment overrides are outside the exact signed-release runtime model", wrapper)
+        self.assertIn("signed-release Compose model service set or order changed", wrapper)
+        self.assertIn("does not use its exact role image", wrapper)
+        for forbidden in (
+            "use_api_socket",
+            "provider",
+            "develop",
+            "post_start",
+            "pre_stop",
+            "extends",
+            "include",
+            "devices",
+            "device_cgroup_rules",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertIn(forbidden, wrapper)
+        self.assertIn(
+            "Signed-release mode rejects docker-compose.override.yml", self.installer
+        )
+        self.assertIn('"COMPOSE_MENU=false"', self.installer)
+
+    def test_fresh_configuration_crash_boundaries_converge_without_legacy_classification(self):
+        base_setup = r'''
+source "$1"
+INSTALL_DIR="$2"
+INSTALL_REF="$3"
+PROJECT_NAME=backupsheep
+IMAGE_MODE=local-build
+PUBLIC_HOST=localhost
+APP_DOMAIN=localhost:8000
+ENV_FILE="$2/.env"
+DOCKER_BIN=mock_docker
+mock_docker() {
+    if [[ "$1" == volume && "$2" == ls ]]; then return 0; fi
+    return 64
+}
+'''
+        finish = r'''
+reconcile_installer_temp_residues
+reconcile_fresh_env_candidate
+create_or_migrate_configuration
+validate_runtime_configuration
+'''
+
+        def new_installation():
+            temporary = tempfile.TemporaryDirectory(prefix="backupsheep-fresh-resume-")
+            install_dir = Path(temporary.name)
+            install_dir.chmod(0o700)
+            sample = install_dir / ".env_sample"
+            shutil.copyfile(SAMPLE_ENV, sample)
+            sample.chmod(0o600)
+            return temporary, install_dir
+
+        def run(install_dir, body):
+            return subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    base_setup + body,
+                    "fresh-resume-test",
+                    str(INSTALLER),
+                    str(install_dir),
+                    COMMIT,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        temporary, install_dir = new_installation()
+        try:
+            candidate = install_dir / ".env.fresh.new"
+            candidate.write_bytes(b"")
+            candidate.chmod(0o600)
+            resumed = run(install_dir, finish)
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertIn(
+                "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE='complete'",
+                (install_dir / ".env").read_text(encoding="utf-8"),
+            )
+        finally:
+            temporary.cleanup()
+
+        # Exercise every mutating call in the current fresh-install path.  These
+        # bounds intentionally fail if the implementation adds a later mutation
+        # without extending the crash matrix.
+        for function_name, boundaries in (
+            ("write_secret_file", range(1, 23)),
+            ("set_env_value", range(1, 24)),
+        ):
+            for boundary in boundaries:
+                with self.subTest(function=function_name, boundary=boundary):
+                    temporary, install_dir = new_installation()
+                    try:
+                        staged = run(install_dir, "create_fresh_env_atomically\n")
+                        self.assertEqual(staged.returncode, 0, staged.stderr)
+                        pending = (install_dir / ".env").read_text(encoding="utf-8")
+                        self.assertIn(
+                            "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE='pending-fresh'",
+                            pending,
+                        )
+                        crash = rf'''
+reconcile_installer_temp_residues
+reconcile_fresh_env_candidate
+definition="$(declare -f {function_name})"
+eval "${{definition/{function_name}/original_{function_name}}}"
+boundary_count=0
+{function_name}() {{
+    original_{function_name} "$@"
+    boundary_count=$((boundary_count + 1))
+    if [[ "$boundary_count" -eq {boundary} ]]; then kill -KILL "$$"; fi
+}}
+create_or_migrate_configuration
+exit 97
+'''
+                        interrupted = run(install_dir, crash)
+                        self.assertEqual(interrupted.returncode, -signal.SIGKILL, interrupted.stderr)
+                        resumed = run(install_dir, finish)
+                        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+                        completed = (install_dir / ".env").read_text(encoding="utf-8")
+                        self.assertIn(
+                            "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE='complete'",
+                            completed,
+                        )
+                        self.assertFalse(list(install_dir.glob(".env-update.*")))
+                        self.assertFalse(list(install_dir.glob(".env-artifact-policy.*")))
+                    finally:
+                        temporary.cleanup()
+
+        # The related RabbitMQ/Celery generation fields are one atomic contract.
+        # Interrupt immediately before and after each of its two publications in
+        # a true first invocation; no partially promoted generation may appear.
+        for phase in ("before", "after"):
+            for boundary in (1, 2):
+                with self.subTest(function="set_env_values_atomically", phase=phase, boundary=boundary):
+                    temporary, install_dir = new_installation()
+                    try:
+                        crash = rf'''
+reconcile_installer_temp_residues
+reconcile_fresh_env_candidate
+definition="$(declare -f set_env_values_atomically)"
+eval "${{definition/set_env_values_atomically/original_set_env_values_atomically}}"
+boundary_count=0
+set_env_values_atomically() {{
+    boundary_count=$((boundary_count + 1))
+    if [[ "{phase}" == before && "$boundary_count" -eq {boundary} ]]; then kill -KILL "$$"; fi
+    original_set_env_values_atomically "$@"
+    if [[ "{phase}" == after && "$boundary_count" -eq {boundary} ]]; then kill -KILL "$$"; fi
+}}
+create_or_migrate_configuration
+exit 97
+'''
+                        interrupted = run(install_dir, crash)
+                        self.assertEqual(interrupted.returncode, -signal.SIGKILL, interrupted.stderr)
+                        resumed = run(install_dir, finish)
+                        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+                        completed = (install_dir / ".env").read_text(encoding="utf-8")
+                        self.assertIn(
+                            "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE='complete'",
+                            completed,
+                        )
+                        self.assertFalse(list(install_dir.glob(".env-update.*")))
+                    finally:
+                        temporary.cleanup()
+
+        configuration_body = self.installer.split(
+            "if [[ \"$FRESH_CONFIG_PENDING\" == true ]]; then", 2
+        )[-1].split("FRESH_CONFIG_PENDING=false", 1)[0]
+        self.assertLess(
+            configuration_body.index('sync || die "Could not durably stage'),
+            configuration_body.index(
+                "set_env_value BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE complete"
+            ),
+        )
 
 
 class InstallerSecretMigrationTests(TestCase):

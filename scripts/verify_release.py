@@ -337,6 +337,22 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
     if trusted_root["source_path"] != "targets/trusted_root.json":
         raise ReleaseVerificationError("policy.consumer.trusted_root source path is not canonical")
 
+    trusted_root_path = (ROOT / trusted_root["path"]).resolve()
+    try:
+        trusted_root_path.relative_to(ROOT)
+    except ValueError as exc:
+        raise ReleaseVerificationError("consumer trusted root escapes the repository") from exc
+    trusted_root_payload = _mapping(
+        _load_json(trusted_root_path, maximum_bytes=64 * 1024),
+        "consumer trusted root",
+    )
+    if trusted_root_payload.get("mediaType") != (
+        "application/vnd.dev.sigstore.trustedroot+json;version=0.1"
+    ):
+        raise ReleaseVerificationError("checked-in consumer trusted root media type is invalid")
+    if _sha256_path(trusted_root_path) != f"sha256:{trusted_root['sha256']}":
+        raise ReleaseVerificationError("checked-in consumer trusted root digest mismatch")
+
     cosign_image = _mapping(consumer["cosign_image"], "policy.consumer.cosign_image")
     _exact_keys(
         cosign_image,

@@ -74,10 +74,13 @@ x-egress-guard-runtime: &egress-guard-runtime
   user: "0:0"
   privileged: false
   read_only: true
+  init: false
   cgroup: private
   ipc: private
   pids_limit: 32
   mem_limit: 64m
+  memswap_limit: 64m
+  mem_swappiness: 0
   cpus: "0.25"
   cap_drop:
     - ALL
@@ -132,6 +135,7 @@ x-app-runtime: &app-runtime
   cgroup: private
   ipc: private
   pids_limit: "${BACKUPSHEEP_PIDS_LIMIT:-512}"
+  mem_swappiness: 0
   cap_drop:
     - ALL
   security_opt:
@@ -441,6 +445,7 @@ x-stateful-runtime: &stateful-runtime
   labels: *installation-labels
   privileged: false
   read_only: true
+  init: false
   # Do not inject Docker's root-owned init shim here. Both vendor entrypoints
   # exec their long-running server after dropping privileges, so the server can
   # be non-root PID 1 and handle its own documented shutdown path.
@@ -524,6 +529,8 @@ services:
       - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=70,gid=70
     pids_limit: "${POSTGRES_PIDS_LIMIT:-256}"
     mem_limit: "${POSTGRES_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${POSTGRES_MEMORY_LIMIT:-2g}"
+    mem_swappiness: 0
     cpus: "${POSTGRES_CPU_LIMIT:-2.0}"
     shm_size: "${POSTGRES_SHM_SIZE:-256m}"
     stop_grace_period: "${POSTGRES_STOP_GRACE_PERIOD:-1m}"
@@ -563,6 +570,8 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
     pids_limit: 32
     mem_limit: 64m
+    memswap_limit: 64m
+    mem_swappiness: 0
     cpus: "0.25"
     network_mode: none
     logging: *default-logging
@@ -603,6 +612,8 @@ services:
       - /run/backupsheep-rabbitmq:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=100,gid=101
     pids_limit: "${RABBITMQ_PIDS_LIMIT:-512}"
     mem_limit: "${RABBITMQ_MEMORY_LIMIT:-1g}"
+    memswap_limit: "${RABBITMQ_MEMORY_LIMIT:-1g}"
+    mem_swappiness: 0
     cpus: "${RABBITMQ_CPU_LIMIT:-1.0}"
     stop_grace_period: "${RABBITMQ_STOP_GRACE_PERIOD:-3m}"
     healthcheck:
@@ -661,6 +672,8 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
     pids_limit: 128
     mem_limit: 256m
+    memswap_limit: 256m
+    mem_swappiness: 0
     cpus: "0.5"
     depends_on:
       rabbitmq:
@@ -742,6 +755,8 @@ services:
           nocopy: true
     pids_limit: 64
     mem_limit: 128m
+    memswap_limit: 128m
+    mem_swappiness: 0
     cpus: "0.25"
     network_mode: none
     logging: *default-logging
@@ -803,6 +818,7 @@ services:
       - db_logs_password
     command: ["python", "-m", "backupsheep.database_identity", "provision"]
     mem_limit: "${DB_PROVISION_MEMORY_LIMIT:-512m}"
+    memswap_limit: "${DB_PROVISION_MEMORY_LIMIT:-512m}"
     cpus: "${DB_PROVISION_CPU_LIMIT:-0.5}"
     depends_on:
       db:
@@ -838,6 +854,7 @@ services:
       - rabbitmq_preflight_password
     command: ["python", "manage.py", "migrate_and_verify_artifact_provider"]
     mem_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
     cpus: "${MIGRATE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -900,6 +917,7 @@ services:
       - db_logs_password
     command: ["python", "-m", "backupsheep.database_identity", "seal"]
     mem_limit: "${DB_SEAL_MEMORY_LIMIT:-1g}"
+    memswap_limit: "${DB_SEAL_MEMORY_LIMIT:-1g}"
     cpus: "${DB_SEAL_CPU_LIMIT:-1.0}"
     depends_on:
       db:
@@ -937,6 +955,7 @@ services:
       - celery_trusted_public_keys
     command: ["python", "manage.py", "docker_preflight"]
     mem_limit: "${PREFLIGHT_MEMORY_LIMIT:-1g}"
+    memswap_limit: "${PREFLIGHT_MEMORY_LIMIT:-1g}"
     cpus: "${PREFLIGHT_CPU_LIMIT:-1.0}"
     depends_on:
       db:
@@ -1082,6 +1101,7 @@ services:
       app-egress-guard:
         condition: service_healthy
     mem_limit: "${APP_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${APP_MEMORY_LIMIT:-2g}"
     cpus: "${APP_CPU_LIMIT:-2.0}"
     volumes:
       # Empty, read-only sentinel volume whose immutable Docker label lets the
@@ -1159,6 +1179,7 @@ services:
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_CLOUD_MEMORY_LIMIT:-1g}"
+    memswap_limit: "${WORKER_CLOUD_MEMORY_LIMIT:-1g}"
     cpus: "${WORKER_CLOUD_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -1236,6 +1257,7 @@ services:
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_DATABASE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -1331,6 +1353,7 @@ services:
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_FILES_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -1437,6 +1460,7 @@ services:
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_STORAGE_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${WORKER_STORAGE_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_STORAGE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -1557,6 +1581,7 @@ services:
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_LOGS_MEMORY_LIMIT:-512m}"
+    memswap_limit: "${WORKER_LOGS_MEMORY_LIMIT:-512m}"
     cpus: "${WORKER_LOGS_CPU_LIMIT:-1.0}"
     depends_on:
       db:
@@ -1602,6 +1627,7 @@ services:
     command: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "backupsheep.scheduler:BackupDatabaseScheduler"]
     profiles: ["operations"]
     mem_limit: "${BEAT_MEMORY_LIMIT:-512m}"
+    memswap_limit: "${BEAT_MEMORY_LIMIT:-512m}"
     cpus: "${BEAT_CPU_LIMIT:-0.5}"
     depends_on:
       db:

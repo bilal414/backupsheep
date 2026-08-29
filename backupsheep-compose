@@ -53,14 +53,24 @@ script_path="${BASH_SOURCE[0]}"
     || die "the wrapper must be invoked as a regular, non-symlink file."
 root_dir="$(cd -- "$(dirname -- "$script_path")" && pwd -P)"
 installation_parent="$(dirname -- "$root_dir")"
+install_path_regex='^/[A-Za-z0-9._/@+ -]+$'
+[[ "$root_dir" != *','* && "$root_dir" != *'|'* && "$root_dir" != *[[:cntrl:]]* ]] \
+    || die "installation paths containing commas, pipes, or control characters are not supported."
+[[ "$root_dir" =~ $install_path_regex ]] \
+    || die "the installation path contains characters outside the reviewed Docker mount and attestation grammar."
 env_file="${root_dir}/.env"
 base_file="${root_dir}/docker-compose.yml"
 default_override="${root_dir}/docker-compose.override.yml"
 rabbitmq_upgrade="${root_dir}/deploy/rabbitmq/upgrade-4.2.9.compose.yml"
+release_overlay="${root_dir}/deploy/release/signed-release.compose.yml"
+runtime_json_parser="${root_dir}/deploy/runtime/compose-json.awk"
+release_evidence_dir="${root_dir}/.release-evidence"
 mutation_lock_dir="${root_dir}.backupsheep-mutation-lock"
 mutation_lock_owner_file="${mutation_lock_dir}/owner"
 mutation_lock_token=""
 mutation_lock_held=false
+legacy_rabbitmq_image_defaults_unavailable=false
+active_compose_pid=""
 
 file_uid() {
     stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1"
@@ -106,11 +116,61 @@ release_mutation_lock() {
 
 finish_wrapper() {
     local original_status=$?
-    trap - EXIT
+    trap - HUP INT TERM EXIT
     if ! release_mutation_lock; then
         exit 74
     fi
     exit "$original_status"
+}
+
+terminate_active_compose_group() {
+    local pid="${active_compose_pid:-}" grace=0 own_pgid=""
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { active_compose_pid=""; return 0; }
+    own_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$pid" == "$own_pgid" ]]; then
+        printf '%s\n' "BackupSheep Compose warning: refusing to signal the wrapper's own process group." >&2
+        active_compose_pid=""
+        return 1
+    fi
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 -- "-$pid" 2>/dev/null && (( grace < 5 )); do
+        sleep 1
+        grace=$((grace + 1))
+    done
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    active_compose_pid=""
+}
+
+handle_wrapper_signal() {
+    local interrupted_status="$1"
+    trap - HUP INT TERM EXIT
+    terminate_active_compose_group || true
+    release_mutation_lock >/dev/null 2>&1 || true
+    exit "$interrupted_status"
+}
+
+run_compose_in_isolated_group() {
+    local child_pgid="" child_state="" own_pgid="" status=0
+    set -m
+    "$@" &
+    active_compose_pid=$!
+    set +m
+    child_pgid="$(ps -o pgid= -p "$active_compose_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    own_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$child_pgid" != "$active_compose_pid" || "$child_pgid" == "$own_pgid" ]]; then
+        child_state="$(ps -o stat= -p "$active_compose_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+        if ! kill -0 "$active_compose_pid" 2>/dev/null || [[ -z "$child_state" || "$child_state" == Z* ]]; then
+            if wait "$active_compose_pid"; then status=0; else status=$?; fi
+            active_compose_pid=""
+            return "$status"
+        fi
+        terminate_active_compose_group || true
+        die "could not isolate the Compose client in a dedicated process group."
+    fi
+    if wait "$active_compose_pid"; then status=0; else status=$?; fi
+    active_compose_pid=""
+    return "$status"
 }
 
 acquire_mutation_lock() {
@@ -121,6 +181,9 @@ acquire_mutation_lock() {
     fi
     mutation_lock_held=true
     trap finish_wrapper EXIT
+    trap 'handle_wrapper_signal 129' HUP
+    trap 'handle_wrapper_signal 130' INT
+    trap 'handle_wrapper_signal 143' TERM
     mutation_lock_token="version=1;tool=backupsheep-compose;pid=$$;uid=${EUID}"
     chmod 0700 "$mutation_lock_dir" \
         || die "could not protect the new mutation lock directory."
@@ -197,6 +260,7 @@ validate_private_directory "$root_dir" "installation directory"
 validate_private_file "$script_path" "backupsheep-compose wrapper"
 validate_private_file "$env_file" ".env"
 validate_private_file "$base_file" "docker-compose.yml"
+validate_private_file "$runtime_json_parser" "reviewed Compose JSON parser"
 [[ "$(file_mode "$env_file")" == "600" ]] \
     || die ".env must have mode 0600."
 
@@ -215,6 +279,583 @@ awk '
 ' "$env_file" || die ".env has malformed or duplicate keys."
 ! grep -Eq '^(COMPOSE_[A-Za-z0-9_]*|BUILDX_[A-Za-z0-9_]*|BUILDKIT_[A-Za-z0-9_]*|DOCKER_BUILDKIT|DOCKER_DEFAULT_PLATFORM|DOCKER_HOST|DOCKER_CONTEXT|BACKUPSHEEP_SECRETS)=' "$env_file" \
     || die ".env contains a forbidden Docker/Compose control or replacement variable."
+
+unquote_env_value() {
+    local raw="$1"
+    case "$raw" in
+        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+    esac
+    printf '%s' "$raw"
+}
+
+read_env_value() {
+    local key="$1"
+    local raw=""
+    raw="$(awk -F= -v wanted="$key" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
+    unquote_env_value "$raw"
+}
+
+env_value_or_default() {
+    local key="$1" default_value="$2" value=""
+    value="$(read_env_value "$key")"
+    [[ -n "$value" ]] || value="$default_value"
+    printf '%s' "$value"
+}
+
+validate_integer_setting() {
+    local key="$1" default_value="$2" minimum="$3" maximum="$4" value=""
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^(0|[1-9][0-9]{0,8})$ ]] \
+        || die "${key} must be a canonical decimal integer."
+    (( 10#$value >= minimum && 10#$value <= maximum )) \
+        || die "${key} is outside its reviewed resource range."
+}
+
+validate_size_setting() {
+    local key="$1" default_value="$2" minimum_bytes="$3" maximum_bytes="$4"
+    local value="" magnitude="" unit="" multiplier=0 bytes=0
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^([1-9][0-9]{0,7})([kKmMgG])$ ]] \
+        || die "${key} must be an integer size with a single k, m, or g suffix."
+    magnitude="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+        k|K) multiplier=1024 ;;
+        m|M) multiplier=1048576 ;;
+        g|G) multiplier=1073741824 ;;
+        *) die "${key} has an unsupported size suffix." ;;
+    esac
+    bytes=$((10#$magnitude * multiplier))
+    (( bytes >= minimum_bytes && bytes <= maximum_bytes )) \
+        || die "${key} is outside its reviewed resource range."
+}
+
+validate_cpu_setting() {
+    local key="$1" default_value="$2" value=""
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^([0-9]|[1-5][0-9]|6[0-4])(\.[0-9]{1,3})?$ \
+        && "$value" != 0 && "$value" != 0.0 && "$value" != 0.00 && "$value" != 0.000 \
+        && ! "$value" =~ ^64\.[0-9]*[1-9][0-9]*$ ]] \
+        || die "${key} must be a canonical CPU value greater than zero and no more than 64."
+}
+
+validate_duration_setting() {
+    local key="$1" default_value="$2" value="" magnitude="" unit="" seconds=0
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^([1-9][0-9]{0,3})([smh])$ ]] \
+        || die "${key} must be a canonical nonzero duration in seconds, minutes, or hours."
+    magnitude="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+        s) seconds=$((10#$magnitude)) ;;
+        m) seconds=$((10#$magnitude * 60)) ;;
+        h) seconds=$((10#$magnitude * 3600)) ;;
+    esac
+    (( seconds >= 1 && seconds <= 3600 )) \
+        || die "${key} is outside its reviewed resource range."
+}
+
+model_duration_seconds() {
+    local key="$1" default_value="$2" value="" magnitude="" unit="" seconds=0
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^([1-9][0-9]{0,3})([smh])$ ]] \
+        || die "${key} must be a canonical nonzero duration in seconds, minutes, or hours."
+    magnitude="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+        s) seconds=$((10#$magnitude)) ;;
+        m) seconds=$((10#$magnitude * 60)) ;;
+        h) seconds=$((10#$magnitude * 3600)) ;;
+        *) die "${key} has an unsupported duration suffix." ;;
+    esac
+    (( seconds >= 1 && seconds <= 3600 )) \
+        || die "${key} is outside its reviewed resource range."
+    printf '%s' "$seconds"
+}
+
+compose_duration_for_seconds() {
+    local seconds="$1"
+    [[ "$seconds" =~ ^[1-9][0-9]{0,3}$ ]] \
+        || die "could not canonicalize a malformed reviewed duration."
+    if (( 10#$seconds % 3600 == 0 )); then
+        printf '%sh0m0s' "$((10#$seconds / 3600))"
+    elif (( 10#$seconds % 60 == 0 )); then
+        printf '%sm0s' "$((10#$seconds / 60))"
+    else
+        printf '%ss' "$seconds"
+    fi
+}
+
+validate_compose_model_settings() {
+    local key="" default_value=""
+    validate_integer_setting BACKUPSHEEP_BIND_PORT 8000 1 65535
+    validate_integer_setting BACKUPSHEEP_PIDS_LIMIT 512 32 4096
+    validate_integer_setting POSTGRES_PIDS_LIMIT 256 32 4096
+    validate_integer_setting RABBITMQ_PIDS_LIMIT 512 32 4096
+    validate_integer_setting DOCKER_LOG_MAX_FILE 5 1 20
+
+    validate_size_setting DOCKER_LOG_MAX_SIZE 10m 1048576 1073741824
+    validate_size_setting BACKUPSHEEP_TMPFS_SIZE 256m 16777216 2147483648
+    validate_size_setting POSTGRES_TMPFS_SIZE 128m 16777216 2147483648
+    validate_size_setting RABBITMQ_TMPFS_SIZE 128m 16777216 2147483648
+    validate_size_setting POSTGRES_SHM_SIZE 256m 16777216 8589934592
+    for key in POSTGRES_MEMORY_LIMIT RABBITMQ_MEMORY_LIMIT DB_PROVISION_MEMORY_LIMIT \
+        MIGRATE_MEMORY_LIMIT DB_SEAL_MEMORY_LIMIT PREFLIGHT_MEMORY_LIMIT \
+        APP_MEMORY_LIMIT WORKER_CLOUD_MEMORY_LIMIT WORKER_DATABASE_MEMORY_LIMIT \
+        WORKER_FILES_MEMORY_LIMIT WORKER_STORAGE_MEMORY_LIMIT \
+        WORKER_LOGS_MEMORY_LIMIT BEAT_MEMORY_LIMIT; do
+        case "$key" in
+            POSTGRES_MEMORY_LIMIT|APP_MEMORY_LIMIT|MIGRATE_MEMORY_LIMIT|WORKER_DATABASE_MEMORY_LIMIT|WORKER_FILES_MEMORY_LIMIT|WORKER_STORAGE_MEMORY_LIMIT) default_value=2g ;;
+            RABBITMQ_MEMORY_LIMIT|DB_SEAL_MEMORY_LIMIT|PREFLIGHT_MEMORY_LIMIT|WORKER_CLOUD_MEMORY_LIMIT) default_value=1g ;;
+            *) default_value=512m ;;
+        esac
+        validate_size_setting "$key" "$default_value" 67108864 68719476736
+    done
+
+    for key in POSTGRES_CPU_LIMIT RABBITMQ_CPU_LIMIT DB_PROVISION_CPU_LIMIT \
+        MIGRATE_CPU_LIMIT DB_SEAL_CPU_LIMIT PREFLIGHT_CPU_LIMIT APP_CPU_LIMIT \
+        WORKER_CLOUD_CPU_LIMIT WORKER_DATABASE_CPU_LIMIT WORKER_FILES_CPU_LIMIT \
+        WORKER_STORAGE_CPU_LIMIT WORKER_LOGS_CPU_LIMIT BEAT_CPU_LIMIT; do
+        case "$key" in
+            POSTGRES_CPU_LIMIT|MIGRATE_CPU_LIMIT|APP_CPU_LIMIT|WORKER_CLOUD_CPU_LIMIT|WORKER_DATABASE_CPU_LIMIT|WORKER_FILES_CPU_LIMIT|WORKER_STORAGE_CPU_LIMIT) default_value=2.0 ;;
+            RABBITMQ_CPU_LIMIT|DB_SEAL_CPU_LIMIT|PREFLIGHT_CPU_LIMIT|WORKER_LOGS_CPU_LIMIT) default_value=1.0 ;;
+            *) default_value=0.5 ;;
+        esac
+        validate_cpu_setting "$key" "$default_value"
+    done
+
+    validate_duration_setting BACKUPSHEEP_STOP_GRACE_PERIOD 5m
+    validate_duration_setting POSTGRES_STOP_GRACE_PERIOD 1m
+    validate_duration_setting RABBITMQ_STOP_GRACE_PERIOD 3m
+}
+
+model_size_bytes() {
+    local key="$1" default_value="$2" value="" magnitude="" unit="" multiplier=0
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^([1-9][0-9]{0,7})([kKmMgG])$ ]] || return 1
+    magnitude="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+        k|K) multiplier=1024 ;;
+        m|M) multiplier=1048576 ;;
+        g|G) multiplier=1073741824 ;;
+        *) return 1 ;;
+    esac
+    printf '%s' "$((10#$magnitude * multiplier))"
+}
+
+model_cpu_nanos() {
+    local key="$1" default_value="$2" value="" whole="" fraction=""
+    value="$(env_value_or_default "$key" "$default_value")"
+    whole="${value%%.*}"
+    if [[ "$value" == *.* ]]; then fraction="${value#*.}"; else fraction=""; fi
+    while (( ${#fraction} < 9 )); do fraction+="0"; done
+    fraction="${fraction:0:9}"
+    [[ -n "$fraction" ]] || fraction=0
+    printf '%s' "$((10#$whole * 1000000000 + 10#$fraction))"
+}
+
+validate_container_mount_policy() {
+    local service="$1" container_id="$2" mounts="" mount_type="" mount_name="" source="" destination="" rw="" propagation="" mount_mode=""
+    local logical="" expected_rw="" mount_count=0 expected_count=0 secret_name=""
+    local actual_secrets="" expected_secrets="" actual_tmpfs="" expected_tmpfs=""
+    local expected_mountpoint="" host_mounts="" host_mount_count=0 expected_host_mount_count=0
+    local read_only="" volume_options="" no_copy="" volume_subpath="" volume_label_count=""
+    local driver_config="" bind_options="" tmpfs_options="" cluster_options="" image_options=""
+    local actual_binds="" expected_binds="" bind_name=""
+    mounts="$("${docker_command[@]}" inspect --format \
+        '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t|%s|%s\n" .Type .Name .Source .Destination .RW .Propagation .Mode}}{{end}}' \
+        "$container_id")" || die "could not inspect ${service} mounts."
+    while IFS='|' read -r mount_type mount_name source destination rw propagation mount_mode; do
+        [[ -n "$mount_type$mount_name$source$destination$rw$propagation$mount_mode" ]] || continue
+        mount_count=$((mount_count + 1))
+        (( mount_count <= 64 )) || die "Compose service ${service} has too many mounts."
+        [[ "$mount_name" != *[[:cntrl:]]* && "$source" != *[[:cntrl:]]* && "$destination" == /* \
+            && "$destination" != *[[:cntrl:]]* && "$rw" =~ ^(true|false)$ ]] \
+            || die "Compose service ${service} has a malformed mount record."
+        case "$mount_type" in
+            bind)
+                [[ -z "$mount_name" && "$propagation" == rprivate && "$mount_mode" == ro ]] \
+                    || die "Compose service ${service} bind propagation or mode drifted."
+                case "${source}|${destination}|${service}|${rw}" in
+                    "${root_dir}/deploy/rabbitmq/volume-init.sh|/usr/local/bin/backupsheep-rabbitmq-volume-init|rabbitmq-volume-init|false"|\
+                    "${root_dir}/deploy/rabbitmq/volume-init.sh|/usr/local/bin/backupsheep-rabbitmq-volume-init|rabbitmq|false"|\
+                    "${root_dir}/deploy/rabbitmq/90-backupsheep.conf|/etc/rabbitmq/conf.d/90-backupsheep.conf|rabbitmq|false"|\
+                    "${root_dir}/deploy/rabbitmq/entrypoint.sh|/usr/local/bin/backupsheep-rabbitmq-entrypoint|rabbitmq|false"|\
+                    "${root_dir}/deploy/rabbitmq/provision.sh|/usr/local/bin/backupsheep-rabbitmq-provision|rabbitmq-provision|false")
+                        validate_private_file "$source" "${service} reviewed bind source"
+                        ;;
+                    "${root_dir}/.secrets/"*"|/run/secrets/"*"|${service}|false")
+                        secret_name="${source#${root_dir}/.secrets/}"
+                        [[ "$secret_name" != */* && -n "$secret_name" \
+                            && "$destination" == "/run/secrets/${secret_name}" ]] \
+                            || die "Compose service ${service} has a mismatched secret bind mount."
+                        case "$secret_name" in
+                            django_secret_key|db_*_password|rabbitmq_*_password|celery_signing_*_private_key|celery_trusted_public_keys|onboarding_token|ssh_managed_*_private_key|artifact_local_file_*_keyring) ;;
+                            *) die "Compose service ${service} mounts an unreviewed secret source." ;;
+                        esac
+                        validate_private_file "$source" "${service} secret bind source"
+                        actual_secrets+="${secret_name}"$'\n'
+                        ;;
+                    *) die "Compose service ${service} has an unreviewed or writable host bind mount." ;;
+                esac
+                ;;
+            volume)
+                [[ "$mount_name" =~ ^[a-z0-9][a-z0-9_.-]{0,127}$ && -z "$propagation" ]] \
+                    || die "Compose service ${service} volume propagation drifted."
+                logical="$(printf '%s\n' "$volume_map" | awk -F'|' -v physical="$mount_name" '$2 == physical { if (found++) exit 9; value=$1 } END { if (found == 1) print value; else exit 8 }')" \
+                    || die "Compose service ${service} mounts a volume outside the exact reviewed model."
+                expected_mountpoint="$(printf '%s\n' "$volume_mountpoint_map" | awk -F'|' -v physical="$mount_name" '$1 == physical { if (found++) exit 9; value=$2 } END { if (found == 1) print value; else exit 8 }')" \
+                    || die "Compose service ${service} volume mountpoint is not bound to an inspected owned volume."
+                [[ "$source" == "$expected_mountpoint" ]] \
+                    || die "Compose service ${service} volume source differs from the exact inspected Docker mountpoint."
+                case "${service}|${logical}|${destination}" in
+                    db\|postgres_data_v1\|/var/lib/postgresql|\
+                    rabbitmq-volume-init\|rabbitmq_data\|/var/lib/rabbitmq|\
+                    rabbitmq\|rabbitmq_data\|/var/lib/rabbitmq|\
+                    rabbitmq-provision\|rabbitmq_data\|/var/lib/rabbitmq|\
+                    staging-provision\|database_workdir\|/volumes/database|\
+                    staging-provision\|files_workdir\|/volumes/files|\
+                    staging-provision\|storage_workdir\|/volumes/storage|\
+                    staging-provision\|database_ciphertext_transfer\|/volumes/database-transfer|\
+                    staging-provision\|files_ciphertext_transfer\|/volumes/files-transfer|\
+                    staging-provision\|restore_ciphertext_transfer\|/volumes/restore-transfer|\
+                    staging-provision\|backup_storage\|/volumes/backup-storage|\
+                    staging-provision\|backup_workdir\|/volumes/legacy|\
+                    staging-provision\|staging_layout_witness\|/volumes/witness|\
+                    app\|installation_identity\|/run/backupsheep-installation|\
+                    worker-database\|database_workdir\|/code/_storage|\
+                    worker-database\|database_ciphertext_transfer\|/var/lib/backupsheep/transfer/database|\
+                    worker-database\|restore_ciphertext_transfer\|/var/lib/backupsheep/restore-transfer|\
+                    worker-files\|files_workdir\|/code/_storage|\
+                    worker-files\|files_ciphertext_transfer\|/var/lib/backupsheep/transfer/files|\
+                    worker-files\|restore_ciphertext_transfer\|/var/lib/backupsheep/restore-transfer|\
+                    worker-storage\|storage_workdir\|/code/_storage|\
+                    worker-storage\|database_ciphertext_transfer\|/var/lib/backupsheep/transfer/database|\
+                    worker-storage\|files_ciphertext_transfer\|/var/lib/backupsheep/transfer/files|\
+                    worker-storage\|restore_ciphertext_transfer\|/var/lib/backupsheep/restore-transfer|\
+                    worker-storage\|backup_storage\|/backups) ;;
+                    *) die "Compose service ${service} has an unreviewed volume source or target." ;;
+                esac
+                expected_rw=true
+                case "${service}|${logical}" in
+                    rabbitmq-provision\|rabbitmq_data|app\|installation_identity|\
+                    worker-database\|restore_ciphertext_transfer|worker-files\|restore_ciphertext_transfer|\
+                    worker-storage\|database_ciphertext_transfer|worker-storage\|files_ciphertext_transfer)
+                        expected_rw=false ;;
+                esac
+                [[ "$rw" == "$expected_rw" ]] \
+                    || die "Compose service ${service} volume read/write policy drifted."
+                [[ -z "$mount_mode" ]] \
+                    || die "Compose service ${service} volume mode drifted."
+                ;;
+            tmpfs)
+                [[ -z "$mount_name" && -z "$source" && "$rw" == true && -z "$propagation" ]] \
+                    || die "Compose service ${service} has a read-only, propagated, or malformed tmpfs."
+                case "$destination" in
+                    /tmp|/run/backupsheep|/run/backupsheep-egress|/var/run/postgresql|/var/log/rabbitmq|/run/backupsheep-rabbitmq) ;;
+                    *) die "Compose service ${service} has an unreviewed tmpfs target." ;;
+                esac
+                ;;
+            *) die "Compose service ${service} uses an unsupported mount type." ;;
+        esac
+    done <<< "$mounts"
+    case "$service" in
+        db) expected_count=4 ;;
+        rabbitmq-volume-init) expected_count=3 ;;
+        rabbitmq) expected_count=8 ;;
+        rabbitmq-provision) expected_count=12 ;;
+        staging-provision) expected_count=10 ;;
+        db-provision|db-seal) expected_count=12 ;;
+        migrate) expected_count=5 ;;
+        preflight) expected_count=6 ;;
+        *-egress-guard) expected_count=1 ;;
+        app) expected_count=9 ;;
+        worker-cloud|worker-logs|beat) expected_count=7 ;;
+        worker-database|worker-files|worker-storage) expected_count=12 ;;
+    esac
+    [[ "$mount_count" == "$expected_count" ]] \
+        || die "Compose service ${service} mount set is incomplete or has extra entries."
+
+    actual_secrets="$(printf '%s' "$actual_secrets" | LC_ALL=C sort)"
+    case "$service" in
+        db) expected_secrets=db_bootstrap_password ;;
+        rabbitmq) expected_secrets=rabbitmq_bootstrap_password ;;
+        rabbitmq-provision) expected_secrets=$'rabbitmq_app_password\nrabbitmq_beat_password\nrabbitmq_bootstrap_password\nrabbitmq_cloud_password\nrabbitmq_database_password\nrabbitmq_files_password\nrabbitmq_logs_password\nrabbitmq_preflight_password\nrabbitmq_storage_password' ;;
+        db-provision|db-seal) expected_secrets=$'db_app_password\ndb_beat_password\ndb_bootstrap_password\ndb_cloud_password\ndb_database_password\ndb_files_password\ndb_logs_password\ndb_migrator_password\ndb_preflight_password\ndb_storage_password' ;;
+        migrate) expected_secrets=$'db_migrator_password\ndjango_secret_key\nrabbitmq_preflight_password' ;;
+        preflight) expected_secrets=$'celery_trusted_public_keys\ndb_preflight_password\ndjango_secret_key\nrabbitmq_preflight_password' ;;
+        app) expected_secrets=$'celery_signing_app_private_key\ncelery_trusted_public_keys\ndb_app_password\ndjango_secret_key\nonboarding_token\nrabbitmq_app_password' ;;
+        worker-cloud) expected_secrets=$'celery_signing_cloud_private_key\ncelery_trusted_public_keys\ndb_cloud_password\ndjango_secret_key\nrabbitmq_cloud_password' ;;
+        worker-database) expected_secrets=$'artifact_local_file_database_keyring\ncelery_signing_database_private_key\ncelery_trusted_public_keys\ndb_database_password\ndjango_secret_key\nrabbitmq_database_password\nssh_managed_database_private_key' ;;
+        worker-files) expected_secrets=$'artifact_local_file_files_keyring\ncelery_signing_files_private_key\ncelery_trusted_public_keys\ndb_files_password\ndjango_secret_key\nrabbitmq_files_password\nssh_managed_files_private_key' ;;
+        worker-storage) expected_secrets=$'celery_signing_storage_private_key\ncelery_trusted_public_keys\ndb_storage_password\ndjango_secret_key\nrabbitmq_storage_password' ;;
+        worker-logs) expected_secrets=$'celery_signing_logs_private_key\ncelery_trusted_public_keys\ndb_logs_password\ndjango_secret_key\nrabbitmq_logs_password' ;;
+        beat) expected_secrets=$'celery_signing_beat_private_key\ncelery_trusted_public_keys\ndb_beat_password\ndjango_secret_key\nrabbitmq_beat_password' ;;
+        *) expected_secrets="" ;;
+    esac
+    [[ "$actual_secrets" == "$expected_secrets" ]] \
+        || die "Compose service ${service} does not mount its exact reviewed secret set."
+
+    while IFS= read -r bind_name; do
+        [[ -n "$bind_name" ]] || continue
+        expected_binds+="${root_dir}/.secrets/${bind_name}:/run/secrets/${bind_name}:ro"$'\n'
+    done <<< "$expected_secrets"
+    case "$service" in
+        rabbitmq-volume-init)
+            expected_binds+="${root_dir}/deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro"$'\n'
+            ;;
+        rabbitmq)
+            expected_binds+="${root_dir}/deploy/rabbitmq/90-backupsheep.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro"$'\n'
+            expected_binds+="${root_dir}/deploy/rabbitmq/entrypoint.sh:/usr/local/bin/backupsheep-rabbitmq-entrypoint:ro"$'\n'
+            expected_binds+="${root_dir}/deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro"$'\n'
+            ;;
+        rabbitmq-provision)
+            expected_binds+="${root_dir}/deploy/rabbitmq/provision.sh:/usr/local/bin/backupsheep-rabbitmq-provision:ro"$'\n'
+            ;;
+    esac
+    expected_binds="$(printf '%s' "$expected_binds" | LC_ALL=C sort)"
+    actual_binds="$("${docker_command[@]}" inspect --format \
+        '{{range .HostConfig.Binds}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
+        || die "could not inspect ${service} exact bind-create policy."
+    [[ "$actual_binds" == "$expected_binds" ]] \
+        || die "Compose service ${service} bind-create source, target, or option set drifted."
+
+    # All named volumes use the long Compose mount syntax with nocopy:true.
+    # Bind mounts remain in HostConfig.Binds; therefore every HostConfig.Mounts
+    # entry must be one of these exact volume records and must retain NoCopy.
+    host_mounts="$("${docker_command[@]}" inspect --format \
+        '{{range .HostConfig.Mounts}}{{printf "%s|%s|%s|%t|" .Type .Source .Target .ReadOnly}}{{if .VolumeOptions}}{{printf "true|%t|%s|%d|" .VolumeOptions.NoCopy .VolumeOptions.Subpath (len .VolumeOptions.Labels)}}{{if .VolumeOptions.DriverConfig}}true{{else}}false{{end}}{{else}}false|false||-1|false{{end}}{{printf "|"}}{{if .BindOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .TmpfsOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .ClusterOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .ImageOptions}}true{{else}}false{{end}}{{println}}{{end}}' \
+        "$container_id")" || die "could not inspect ${service} Docker mount-create policy."
+    while IFS='|' read -r mount_type source destination read_only volume_options no_copy volume_subpath \
+        volume_label_count driver_config bind_options tmpfs_options cluster_options image_options; do
+        [[ -n "$mount_type$source$destination$read_only$volume_options$no_copy$volume_subpath$volume_label_count$driver_config$bind_options$tmpfs_options$cluster_options$image_options" ]] || continue
+        host_mount_count=$((host_mount_count + 1)); (( host_mount_count <= 16 )) \
+            || die "Compose service ${service} has too many Docker mount-create records."
+        [[ "$mount_type" == volume && "$source" == "${project_name}_"* \
+            && "$destination" == /* && "$read_only" =~ ^(true|false)$ \
+            && "$volume_options" == true && "$no_copy" == true && -z "$volume_subpath" \
+            && "$volume_label_count" == 0 && "$driver_config" == false \
+            && "$bind_options" == false && "$tmpfs_options" == false \
+            && "$cluster_options" == false && "$image_options" == false ]] \
+            || die "Compose service ${service} has unsafe mount-create volume, NoCopy, subpath, label, driver, bind, tmpfs, cluster, or image options."
+        expected_rw=true; [[ "$read_only" == true ]] && expected_rw=false
+        expected_mountpoint="$(printf '%s\n' "$volume_mountpoint_map" | awk -F'|' -v physical="$source" '$1 == physical { if (found++) exit 9; value=$2 } END { if (found == 1) print value; else exit 8 }')" \
+            || die "Compose service ${service} mount-create source is not an inspected owned volume."
+        grep -Fxq -- "volume|${source}|${expected_mountpoint}|${destination}|${expected_rw}||" <<< "$mounts" \
+            || die "Compose service ${service} mount-create policy disagrees with its runtime mount."
+    done <<< "$host_mounts"
+    case "$service" in
+        db|rabbitmq-volume-init|rabbitmq|rabbitmq-provision|app) expected_host_mount_count=1 ;;
+        staging-provision) expected_host_mount_count=9 ;;
+        worker-database|worker-files) expected_host_mount_count=3 ;;
+        worker-storage) expected_host_mount_count=5 ;;
+        *) expected_host_mount_count=0 ;;
+    esac
+    [[ "$host_mount_count" == "$expected_host_mount_count" ]] \
+        || die "Compose service ${service} named-volume NoCopy set is incomplete or has extra entries."
+
+    actual_tmpfs="$("${docker_command[@]}" inspect --format \
+        '{{range $path, $options := .HostConfig.Tmpfs}}{{printf "%s|%s\n" $path $options}}{{end}}' \
+        "$container_id" | LC_ALL=C sort)" \
+        || die "could not inspect ${service} tmpfs option strings."
+    case "$service" in
+        db) expected_tmpfs="/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default POSTGRES_TMPFS_SIZE 128m),mode=1777"$'\n''/var/run/postgresql|rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=70,gid=70' ;;
+        rabbitmq-volume-init) expected_tmpfs='/tmp|rw,noexec,nosuid,nodev,size=8m,mode=1777' ;;
+        rabbitmq) expected_tmpfs="/run/backupsheep-rabbitmq|rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=100,gid=101"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default RABBITMQ_TMPFS_SIZE 128m),mode=1777"$'\n''/var/log/rabbitmq|rw,noexec,nosuid,nodev,size=64m,mode=0750,uid=100,gid=101' ;;
+        rabbitmq-provision) expected_tmpfs='/tmp|rw,noexec,nosuid,nodev,size=32m,mode=1777' ;;
+        staging-provision) expected_tmpfs='/tmp|rw,noexec,nosuid,nodev,size=16m,mode=1777' ;;
+        *-egress-guard) expected_tmpfs='/run/backupsheep-egress|rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=0,gid=0' ;;
+        app) expected_tmpfs="/run/backupsheep|rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10001,gid=10001"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default BACKUPSHEEP_TMPFS_SIZE 256m),mode=1777" ;;
+        worker-cloud) expected_tmpfs="/run/backupsheep|rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10008,gid=10008"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default BACKUPSHEEP_TMPFS_SIZE 256m),mode=1777" ;;
+        worker-database) expected_tmpfs="/run/backupsheep|rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10002,gid=10002"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default BACKUPSHEEP_TMPFS_SIZE 256m),mode=1777" ;;
+        worker-files) expected_tmpfs="/run/backupsheep|rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10003,gid=10003"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default BACKUPSHEEP_TMPFS_SIZE 256m),mode=1777" ;;
+        worker-storage) expected_tmpfs="/run/backupsheep|rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10004,gid=10004"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default BACKUPSHEEP_TMPFS_SIZE 256m),mode=1777" ;;
+        worker-logs) expected_tmpfs="/run/backupsheep|rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10005,gid=10005"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default BACKUPSHEEP_TMPFS_SIZE 256m),mode=1777" ;;
+        beat) expected_tmpfs="/run/backupsheep|rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10006,gid=10006"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default BACKUPSHEEP_TMPFS_SIZE 256m),mode=1777" ;;
+        db-provision|migrate|db-seal|preflight) expected_tmpfs="/run/backupsheep|rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10007,gid=10007"$'\n'"/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default BACKUPSHEEP_TMPFS_SIZE 256m),mode=1777" ;;
+    esac
+    expected_tmpfs="$(printf '%s\n' "$expected_tmpfs" | LC_ALL=C sort)"
+    [[ "$actual_tmpfs" == "$expected_tmpfs" ]] \
+        || die "Compose service ${service} tmpfs targets or security options drifted."
+}
+
+validate_compose_model_settings
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 -r "$1" | awk '{print $1}'
+    else
+        die "sha256sum, shasum, or openssl is required to attest signed-release evidence."
+    fi
+}
+
+git_client() {
+    /usr/bin/env -i LC_ALL=C LANG=C HOME=/ PATH=/usr/local/bin:/usr/bin:/bin \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+        GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GIT_ALLOW_PROTOCOL=https \
+        "$git_bin" -c core.hooksPath=/dev/null -c init.templateDir=/dev/null \
+        -c http.sslVerify=true -c core.fsmonitor=false -c core.untrackedCache=false \
+        -c diff.external= "$@"
+}
+
+validate_signed_release_source_checkout() {
+    local top="" git_dir="" head="" origins="" relative="" path=""
+    git_bin="$(command -v git || true)"
+    [[ "$git_bin" == /* && -x "$git_bin" ]] \
+        || die "git is required to attest signed-release runtime files."
+    [[ -d "$root_dir/.git" && ! -L "$root_dir/.git" ]] \
+        || die "signed-release operations require the installer-managed Git checkout."
+    top="$(git_client -C "$root_dir" rev-parse --show-toplevel)" \
+        || die "could not resolve signed-release checkout."
+    git_dir="$(git_client -C "$root_dir" rev-parse --absolute-git-dir)" \
+        || die "could not resolve signed-release Git directory."
+    [[ "$top" == "$root_dir" && "$git_dir" == "$root_dir/.git" ]] \
+        || die "signed-release checkout escapes the installation directory."
+    head="$(git_client -C "$root_dir" rev-parse --verify 'HEAD^{commit}')" \
+        || die "could not resolve signed-release checkout HEAD."
+    [[ "$head" == "$release_commit" ]] \
+        || die "signed-release checkout HEAD does not match its release receipt."
+    origins="$(git_client -C "$root_dir" remote get-url --all origin)" \
+        || die "could not attest signed-release checkout origin."
+    [[ "$origins" == "https://github.com/bilal414/backupsheep.git" ]] \
+        || die "signed-release checkout origin is not official."
+    git_client -C "$root_dir" fsck --strict --no-dangling >/dev/null \
+        || die "signed-release checkout object verification failed."
+    git_client -C "$root_dir" diff --no-ext-diff --no-textconv --quiet -- \
+        || die "signed-release checkout has modified tracked runtime files."
+    git_client -C "$root_dir" diff --cached --no-ext-diff --no-textconv --quiet -- \
+        || die "signed-release checkout has staged runtime changes."
+    for relative in \
+        backupsheep-compose \
+        docker-compose.yml \
+        deploy/release/signed-release.compose.yml \
+        deploy/rabbitmq/upgrade-4.2.9.compose.yml \
+        deploy/rabbitmq/volume-init.sh \
+        deploy/rabbitmq/90-backupsheep.conf \
+        deploy/rabbitmq/entrypoint.sh \
+        deploy/rabbitmq/provision.sh \
+        deploy/runtime/compose-json.awk \
+        deploy/release-policy.json; do
+        path="$root_dir/$relative"
+        validate_private_file "$path" "signed-release runtime file ${relative}"
+        git_client -C "$root_dir" show "${release_commit}:${relative}" | cmp -s - "$path" \
+            || die "signed-release runtime file does not byte-match its source commit: ${relative}."
+    done
+    for path in "$base_file" "$release_overlay" "$rabbitmq_upgrade"; do
+        ! grep -Eq '^[[:space:]]*(use_api_socket|provider|develop|post_start|pre_stop|extends|include|devices|device_cgroup_rules|configs):[[:space:]]' "$path" \
+            || die "signed-release Compose source contains a forbidden host or lifecycle extension."
+        ! grep -Eq '^[[:space:]]*privileged:[[:space:]]*true([[:space:]]|$)' "$path" \
+            || die "signed-release Compose source contains a privileged service."
+        ! grep -Eq '^[[:space:]]*(network_mode|pid|ipc|cgroup):[[:space:]]*["'\'']?host(["'\'']?[[:space:]]*)$' "$path" \
+            || die "signed-release Compose source shares a host namespace."
+    done
+}
+
+release_evidence_value() {
+    local path="$1"
+    local key="$2"
+    local count=""
+    local value=""
+    count="$(awk -v prefix="${key}=" 'index($0, prefix) == 1 { count++ } END { print count + 0 }' "$path")"
+    [[ "$count" == "1" ]] || die "signed-release evidence key ${key} is absent or duplicated."
+    value="$(awk -v prefix="${key}=" 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1) }' "$path")"
+    [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] \
+        || die "signed-release evidence key ${key} is malformed."
+    printf '%s' "$value"
+}
+
+image_mode="$(read_env_value BACKUPSHEEP_IMAGE_MODE)"
+[[ -n "$image_mode" ]] || image_mode="local-build"
+[[ "$image_mode" == "local-build" || "$image_mode" == "signed-release" ]] \
+    || die "BACKUPSHEEP_IMAGE_MODE must be local-build or signed-release."
+release_tag="$(read_env_value BACKUPSHEEP_RELEASE_TAG)"
+release_commit="$(read_env_value BACKUPSHEEP_RELEASE_SOURCE_COMMIT)"
+release_descriptor_digest="$(read_env_value BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256)"
+release_app_image="$(read_env_value BACKUPSHEEP_RELEASE_APP_IMAGE)"
+release_postgres_image="$(read_env_value BACKUPSHEEP_RELEASE_POSTGRES_IMAGE)"
+release_egress_image="$(read_env_value BACKUPSHEEP_RELEASE_EGRESS_IMAGE)"
+configured_app_image="$(read_env_value BACKUPSHEEP_IMAGE)"
+configured_postgres_image="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
+configured_egress_image="$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
+
+if [[ "$image_mode" == "local-build" ]]; then
+    [[ -z "$release_tag$release_commit$release_descriptor_digest$release_app_image$release_postgres_image$release_egress_image" ]] \
+        || die "signed-release provenance must be blank in local-build mode."
+else
+    [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ \
+        && "$release_commit" =~ ^[0-9a-f]{40}$ \
+        && "$release_descriptor_digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "signed-release tag, commit, or descriptor digest is malformed."
+    [[ "$release_app_image" =~ ^ghcr\.io/bilal414/backupsheep@sha256:[0-9a-f]{64}$ \
+        && "$release_postgres_image" =~ ^ghcr\.io/bilal414/backupsheep-postgres@sha256:[0-9a-f]{64}$ \
+        && "$release_egress_image" =~ ^ghcr\.io/bilal414/backupsheep-egress@sha256:[0-9a-f]{64}$ ]] \
+        || die "signed-release image references are not official immutable digests."
+    [[ "$configured_app_image" == "$release_app_image" \
+        && "$configured_postgres_image" == "$release_postgres_image" \
+        && "$configured_egress_image" == "$release_egress_image" ]] \
+        || die "runtime image references do not match signed-release provenance."
+    [[ "$release_app_image" != "$release_postgres_image" \
+        && "$release_app_image" != "$release_egress_image" \
+        && "$release_postgres_image" != "$release_egress_image" ]] \
+        || die "signed-release image references collide."
+    [[ "$(read_env_value BACKUPSHEEP_BIND_ADDRESS)" == "127.0.0.1" \
+        && "$(read_env_value DJANGO_SERVER)" == "prod" \
+        && "$(read_env_value DJANGO_DEBUG)" == "false" \
+        && "$(read_env_value BACKUPSHEEP_SECRETS_DIR)" == ".secrets" \
+        && "$(read_env_value BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE)" == "bse1" \
+        && "$(read_env_value BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE)" == "true" \
+        && "$(read_env_value BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE)" == "false" \
+        && "$(read_env_value BACKUPSHEEP_ARTIFACT_KEY_PROVIDER)" == "local-file" ]] \
+        || die "signed-release production bind, debug, secret, or artifact-encryption policy drifted."
+
+    validate_signed_release_source_checkout
+
+    validate_private_file "$release_overlay" "signed-release Compose overlay"
+    validate_private_directory "$release_evidence_dir" "signed-release evidence directory"
+    [[ "$(file_mode "$release_evidence_dir")" == "700" ]] \
+        || die "signed-release evidence directory must have mode 0700."
+    for evidence_name in backupsheep-release-descriptor-v1.txt \
+        backupsheep-release-descriptor-v1.sigstore.json \
+        release-manifest.json local-images.txt; do
+        validate_private_file "$release_evidence_dir/$evidence_name" "signed-release evidence ${evidence_name}"
+        [[ "$(file_mode "$release_evidence_dir/$evidence_name")" == "600" ]] \
+            || die "signed-release evidence ${evidence_name} must have mode 0600."
+    done
+    evidence_count=0
+    while IFS= read -r -d '' evidence_path; do
+        evidence_count=$((evidence_count + 1))
+        case "$(basename -- "$evidence_path")" in
+            backupsheep-release-descriptor-v1.txt|backupsheep-release-descriptor-v1.sigstore.json|release-manifest.json|local-images.txt) ;;
+            *) die "signed-release evidence contains an unexpected entry." ;;
+        esac
+    done < <(find "$release_evidence_dir" -mindepth 1 -maxdepth 1 -print0)
+    [[ "$evidence_count" -eq 4 ]] \
+        || die "signed-release evidence must contain exactly four control files."
+    descriptor="$release_evidence_dir/backupsheep-release-descriptor-v1.txt"
+    descriptor_lines=()
+    while IFS= read -r descriptor_line; do
+        descriptor_lines[${#descriptor_lines[@]}]="$descriptor_line"
+    done < "$descriptor"
+    [[ "${#descriptor_lines[@]}" == "7" \
+        && "${descriptor_lines[0]}" == "BACKUPSHEEP-SIGNED-RELEASE-V1" \
+        && "${descriptor_lines[1]}" == "release_tag=${release_tag}" \
+        && "${descriptor_lines[2]}" == "source_commit=${release_commit}" \
+        && "${descriptor_lines[3]}" =~ ^release_manifest_sha256=sha256:[0-9a-f]{64}$ \
+        && "${descriptor_lines[4]}" == "app_image=${release_app_image}" \
+        && "${descriptor_lines[5]}" == "postgres_image=${release_postgres_image}" \
+        && "${descriptor_lines[6]}" == "egress_image=${release_egress_image}" ]] \
+        || die "persisted signed-release descriptor is not the exact ordered contract."
+    [[ "sha256:$(sha256_file "$descriptor")" == "$release_descriptor_digest" ]] \
+        || die "persisted signed-release descriptor digest changed."
+    [[ "sha256:$(sha256_file "$release_evidence_dir/release-manifest.json")" == "${descriptor_lines[3]#release_manifest_sha256=}" ]] \
+        || die "persisted release manifest changed after signed descriptor verification."
+fi
 
 project_raw="$(awk -F= '$1 == "BACKUPSHEEP_COMPOSE_PROJECT_NAME" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
 case "$project_raw" in
@@ -1225,6 +1866,930 @@ rabbit_upgrade_compose_command=(
 
 docker_command=("${safe_environment[@]}" "$docker_bin")
 
+compose_json_value() {
+    local service="$1" field="$2" field2="${3-}" value=""
+    value="$(printf '%s\n' "$rendered_model_json" | LC_ALL=C awk \
+        -v mode=value -v service="$service" -v field="$field" -v field2="$field2" \
+        -f "$runtime_json_parser")" \
+        || die "could not structurally extract ${service}.${field}${field2:+.${field2}} from the reviewed Compose JSON model."
+    [[ -n "$value" && "$value" != *$'\n'* && ${#value} -le 1048576 ]] \
+        || die "Compose returned a malformed or oversized JSON value for ${service}.${field}."
+    printf '%s' "$value"
+}
+
+compose_json_environment_records() {
+    local service="$1"
+    printf '%s\n' "$rendered_model_json" | LC_ALL=C awk \
+        -v mode=env -v service="$service" -f "$runtime_json_parser" \
+        || die "could not structurally extract the exact ${service} environment from the reviewed Compose JSON model."
+}
+
+json_array_records() {
+    local value="$1"
+    printf '%s\n' "$value" | LC_ALL=C awk -v mode=array -f "$runtime_json_parser"
+}
+
+normalize_environment_records() {
+    LC_ALL=C awk '
+        $0 == "" { next }
+        {
+            if ($0 !~ /^"[A-Za-z_][A-Za-z0-9_]*=/) exit 41
+            equals = index($0, "=")
+            key = substr($0, 2, equals - 2)
+            if (key == "" || seen[key]++) exit 42
+            print
+        }
+    ' | LC_ALL=C sort
+}
+
+merge_environment_records() {
+    local image_records="$1" compose_records="$2"
+    printf '%s\n%s\n%s\n' \
+        "$image_records" '__BACKUPSHEEP_COMPOSE_ENVIRONMENT_V1__' "$compose_records" | \
+        LC_ALL=C awk '
+            $0 == "" { next }
+            $0 == "__BACKUPSHEEP_COMPOSE_ENVIRONMENT_V1__" {
+                if (compose_mode) exit 43
+                compose_mode = 1
+                next
+            }
+            {
+                if ($0 !~ /^"[A-Za-z_][A-Za-z0-9_]*=/) exit 44
+                equals = index($0, "=")
+                key = substr($0, 2, equals - 2)
+                source = compose_mode ? "compose" : "image"
+                if (key == "" || seen[source SUBSEP key]++) exit 45
+                merged[key] = $0
+            }
+            END {
+                if (!compose_mode) exit 46
+                for (key in merged) print merged[key]
+            }
+        ' | LC_ALL=C sort
+}
+
+validate_container_runtime_image_identity() {
+    local service="$1" container_id="$2" actual_ref="" actual_id=""
+    local image_listing="" candidate="" expected_ref="" expected_id="" image_count=0 role=""
+    actual_ref="$("${docker_command[@]}" inspect --format '{{.Config.Image}}' "$container_id")" \
+        || die "could not inspect ${service} configured image reference."
+    actual_id="$("${docker_command[@]}" inspect --format '{{.Image}}' "$container_id")" \
+        || die "could not inspect ${service} immutable image ID."
+    [[ ${#actual_ref} -le 512 && "$actual_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ \
+        && "$actual_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "Compose service ${service} has a malformed image reference or ID."
+
+    if [[ "$image_mode" == signed-release ]]; then
+        if [[ "$service" == rabbitmq && -n "$rabbitmq_transition_target" ]]; then
+            case "$actual_ref" in
+                rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7) role=rabbit_current ;;
+                rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095) role=rabbit_upgrade ;;
+                *) die "signed-release RabbitMQ transition source is not an exact authenticated release role." ;;
+            esac
+            expected_id="$(release_evidence_value "$release_evidence_dir/local-images.txt" "${role}_image_id")"
+            [[ "$actual_id" == "$expected_id" ]] \
+                || die "signed-release RabbitMQ transition image ID changed after verification."
+        else
+            attest_signed_release_container_image "$service" "$container_id"
+        fi
+        validated_runtime_image_id="$actual_id"
+        return
+    fi
+
+    # An explicitly gated local-build Rabbit transition starts from the source
+    # generation while the active rendered model names the target generation.
+    # Comparing that existing source container to the target reference would
+    # reject every legitimate hop.  The Rabbit transition gate immediately
+    # after project-wide validation proves the live version/feature state and
+    # exact pinned identity for every 4.2/4.3 source before mutation.  The
+    # historical 3.13 compatibility source has no current checkout image model.
+    # Signed releases never take this local-build exception.
+    if [[ "$service" == rabbitmq && -n "$rabbitmq_transition_target" ]]; then
+        legacy_rabbitmq_image_defaults_unavailable=true
+        validated_runtime_image_id="$actual_id"
+        return
+    fi
+
+    image_listing="$("${compose_command[@]}" --profile operations config --images "$service")" \
+        || die "could not resolve the reviewed ${service} image reference."
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] || continue
+        image_count=$((image_count + 1))
+        expected_ref="$candidate"
+    done <<< "$image_listing"
+    [[ "$image_count" -eq 1 && ${#expected_ref} -le 512 \
+        && "$expected_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]] \
+        || die "Compose service ${service} must resolve to exactly one canonical local image reference."
+    expected_id="$("${docker_command[@]}" image inspect --format '{{.Id}}' "$expected_ref")" \
+        || die "the reviewed ${service} image object is unavailable for runtime attestation."
+    [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ \
+        && "$actual_ref" == "$expected_ref" && "$actual_id" == "$expected_id" ]] \
+        || die "Compose service ${service} is not bound to the exact reviewed local image reference and ID."
+    validated_runtime_image_id="$actual_id"
+}
+
+validate_container_configuration_policy() {
+    local service="$1" container_id="$2" compose_env="" image_env_json=""
+    local image_env="" actual_env_json="" actual_env="" expected_env=""
+    local field="" docker_field="" compose_value="" image_value="" actual_value="" expected_value=""
+    local entrypoint_records="" command_records="" first_record="" expected_path="" actual_path=""
+    local compose_hostname="" actual_hostname="" container_full_id="" expected_hostname=""
+    local compose_domain="" actual_domain="" expected_domain=""
+    local compose_workdir="" image_workdir="" actual_workdir="" expected_workdir=""
+    local compose_stop_signal="" image_stop_signal="" actual_stop_signal="" expected_stop_signal=""
+    local compose_stop_grace="" actual_stop_timeout="" expected_stop_timeout=""
+    local stop_duration_key="" stop_duration_default="" expected_stop_grace=""
+    local console_state=""
+    local compose_health="" image_health="" actual_health="" expected_test="" actual_test=""
+    local expected_interval="" expected_timeout="" expected_retries=""
+    local expected_start_period="" expected_start_interval=""
+    local actual_interval="" actual_timeout="" actual_retries=""
+    local actual_start_period="" actual_start_interval="" log_state=""
+
+    legacy_rabbitmq_image_defaults_unavailable=false
+    validate_container_runtime_image_identity "$service" "$container_id"
+    # The source-generation image defaults differ from the target rendered
+    # model during an explicit local-build hop.  The caller still enforces exact
+    # runtime/mount/network/resource controls, and the Rabbit transition gate
+    # proves source version, feature state, and (for 4.2/4.3) pinned image ID.
+    # No signed-release path is allowed to use this exception.
+    if [[ "$legacy_rabbitmq_image_defaults_unavailable" == true ]]; then
+        return
+    fi
+    compose_env="$(compose_json_environment_records "$service")" \
+        || die "could not extract ${service} Compose environment."
+    image_env_json="$("${docker_command[@]}" image inspect --format '{{json .Config.Env}}' "$validated_runtime_image_id")" \
+        || die "could not inspect ${service} image environment defaults."
+    image_env="$(json_array_records "$image_env_json")" \
+        || die "${service} image environment is not a strict bounded JSON string array."
+    actual_env_json="$("${docker_command[@]}" inspect --format '{{json .Config.Env}}' "$container_id")" \
+        || die "could not inspect ${service} configured environment."
+    actual_env="$(json_array_records "$actual_env_json" | normalize_environment_records)" \
+        || die "${service} configured environment is malformed or contains duplicate keys."
+    expected_env="$(merge_environment_records "$image_env" "$compose_env")" \
+        || die "could not derive the exact ${service} image-plus-Compose environment."
+    [[ "$actual_env" == "$expected_env" ]] \
+        || die "Compose service ${service} configured environment differs from the exact image-plus-Compose model."
+
+    for field in entrypoint command; do
+        case "$field" in
+            entrypoint) docker_field=Entrypoint ;;
+            command) docker_field=Cmd ;;
+        esac
+        compose_value="$(compose_json_value "$service" "$field")"
+        image_value="$("${docker_command[@]}" image inspect --format \
+            "{{json .Config.${docker_field}}}" "$validated_runtime_image_id")" \
+            || die "could not inspect ${service} image ${field} defaults."
+        actual_value="$("${docker_command[@]}" inspect --format \
+            "{{json .Config.${docker_field}}}" "$container_id")" \
+            || die "could not inspect ${service} configured ${field}."
+        json_array_records "$image_value" >/dev/null \
+            || die "${service} image ${field} is not a bounded JSON string array or null."
+        json_array_records "$actual_value" >/dev/null \
+            || die "${service} configured ${field} is not a bounded JSON string array or null."
+        if [[ "$compose_value" == __BACKUPSHEEP_ABSENT__ || "$compose_value" == null ]]; then
+            expected_value="$image_value"
+        else
+            json_array_records "$compose_value" >/dev/null \
+                || die "${service} Compose ${field} is not a bounded JSON string array."
+            expected_value="$compose_value"
+        fi
+        [[ "$actual_value" == "$expected_value" ]] \
+            || die "Compose service ${service} configured ${field} differs from the exact image-plus-Compose model."
+        if [[ "$field" == entrypoint ]]; then
+            entrypoint_records="$(json_array_records "$expected_value")"
+        else
+            command_records="$(json_array_records "$expected_value")"
+        fi
+    done
+    if [[ -n "$entrypoint_records" ]]; then
+        first_record="${entrypoint_records%%$'\n'*}"
+    elif [[ -n "$command_records" ]]; then
+        first_record="${command_records%%$'\n'*}"
+    else
+        first_record=""
+    fi
+    if [[ -n "$first_record" ]]; then
+        [[ "$first_record" =~ ^\"[/A-Za-z0-9._@+-]+\"$ ]] \
+            || die "${service} executable path is not canonical ASCII."
+        expected_path="${first_record#\"}"; expected_path="${expected_path%\"}"
+    fi
+    actual_path="$("${docker_command[@]}" inspect --format '{{.Path}}' "$container_id")" \
+        || die "could not inspect ${service} executable path."
+    [[ "$actual_path" == "$expected_path" ]] \
+        || die "Compose service ${service} executable path differs from its exact entrypoint/command model."
+
+    compose_hostname="$(compose_json_value "$service" hostname)"
+    actual_hostname="$("${docker_command[@]}" inspect --format '{{.Config.Hostname}}' "$container_id")" \
+        || die "could not inspect ${service} configured hostname."
+    if [[ "$compose_hostname" == __BACKUPSHEEP_ABSENT__ || "$compose_hostname" == null ]]; then
+        container_full_id="$("${docker_command[@]}" inspect --format '{{.Id}}' "$container_id")" \
+            || die "could not inspect ${service} full container ID for hostname binding."
+        [[ "$container_full_id" =~ ^[0-9a-f]{64}$ ]] \
+            || die "Compose service ${service} returned a malformed full container ID."
+        expected_hostname="${container_full_id:0:12}"
+    else
+        [[ "$compose_hostname" =~ ^\"[a-z0-9][a-z0-9.-]{0,62}\"$ ]] \
+            || die "Compose service ${service} hostname is not canonical."
+        expected_hostname="${compose_hostname#\"}"; expected_hostname="${expected_hostname%\"}"
+    fi
+    [[ "$actual_hostname" == "$expected_hostname" ]] \
+        || die "Compose service ${service} hostname differs from the exact reviewed identity."
+
+    compose_domain="$(compose_json_value "$service" domainname)"
+    actual_domain="$("${docker_command[@]}" inspect --format '{{.Config.Domainname}}' "$container_id")" \
+        || die "could not inspect ${service} configured domain name."
+    if [[ "$compose_domain" == __BACKUPSHEEP_ABSENT__ || "$compose_domain" == null ]]; then
+        expected_domain=""
+    else
+        [[ "$compose_domain" =~ ^\"[a-z0-9][a-z0-9.-]{0,252}\"$ ]] \
+            || die "Compose service ${service} domain name is not canonical."
+        expected_domain="${compose_domain#\"}"; expected_domain="${expected_domain%\"}"
+    fi
+    [[ "$actual_domain" == "$expected_domain" ]] \
+        || die "Compose service ${service} domain name differs from the reviewed model."
+
+    compose_workdir="$(compose_json_value "$service" working_dir)"
+    image_workdir="$("${docker_command[@]}" image inspect --format '{{.Config.WorkingDir}}' "$validated_runtime_image_id")" \
+        || die "could not inspect ${service} image working directory."
+    actual_workdir="$("${docker_command[@]}" inspect --format '{{.Config.WorkingDir}}' "$container_id")" \
+        || die "could not inspect ${service} configured working directory."
+    if [[ "$compose_workdir" == __BACKUPSHEEP_ABSENT__ || "$compose_workdir" == null ]]; then
+        expected_workdir="$image_workdir"
+    else
+        [[ "$compose_workdir" =~ ^\"/[A-Za-z0-9._/@+-]*\"$ ]] \
+            || die "Compose service ${service} working directory is not a canonical absolute path."
+        expected_workdir="${compose_workdir#\"}"; expected_workdir="${expected_workdir%\"}"
+    fi
+    [[ "$actual_workdir" == "$expected_workdir" ]] \
+        || die "Compose service ${service} working directory differs from the exact image-plus-Compose model."
+
+    compose_stop_signal="$(compose_json_value "$service" stop_signal)"
+    image_stop_signal="$("${docker_command[@]}" image inspect --format '{{.Config.StopSignal}}' "$validated_runtime_image_id")" \
+        || die "could not inspect ${service} image stop signal."
+    actual_stop_signal="$("${docker_command[@]}" inspect --format '{{.Config.StopSignal}}' "$container_id")" \
+        || die "could not inspect ${service} configured stop signal."
+    if [[ "$compose_stop_signal" == __BACKUPSHEEP_ABSENT__ || "$compose_stop_signal" == null ]]; then
+        expected_stop_signal="$image_stop_signal"
+    else
+        [[ "$compose_stop_signal" =~ ^\"SIG[A-Z0-9]{1,12}\"$ ]] \
+            || die "Compose service ${service} stop signal is not canonical."
+        expected_stop_signal="${compose_stop_signal#\"}"; expected_stop_signal="${expected_stop_signal%\"}"
+    fi
+    [[ "$actual_stop_signal" == "$expected_stop_signal" ]] \
+        || die "Compose service ${service} stop signal differs from the exact image-plus-Compose model."
+
+    compose_stop_grace="$(compose_json_value "$service" stop_grace_period)"
+    case "$service" in
+        db) stop_duration_key=POSTGRES_STOP_GRACE_PERIOD; stop_duration_default=1m ;;
+        rabbitmq) stop_duration_key=RABBITMQ_STOP_GRACE_PERIOD; stop_duration_default=3m ;;
+        staging-provision|db-provision|migrate|db-seal|preflight|app|\
+        worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
+            stop_duration_key=BACKUPSHEEP_STOP_GRACE_PERIOD
+            stop_duration_default=5m
+            ;;
+    esac
+    if [[ -z "$stop_duration_key" ]]; then
+        [[ "$compose_stop_grace" == __BACKUPSHEEP_ABSENT__ || "$compose_stop_grace" == null ]] \
+            || die "Compose service ${service} has an unreviewed stop grace period."
+        expected_stop_timeout=null
+    else
+        expected_stop_timeout="$(model_duration_seconds "$stop_duration_key" "$stop_duration_default")"
+        expected_stop_grace="\"$(compose_duration_for_seconds "$expected_stop_timeout")\""
+        [[ "$compose_stop_grace" == "$expected_stop_grace" ]] \
+            || die "Compose service ${service} stop grace period differs from the reviewed ${stop_duration_key} setting."
+    fi
+    actual_stop_timeout="$("${docker_command[@]}" inspect --format '{{json .Config.StopTimeout}}' "$container_id")" \
+        || die "could not inspect ${service} stop timeout."
+    [[ "$actual_stop_timeout" == "$expected_stop_timeout" ]] \
+        || die "Compose service ${service} stop timeout differs from the reviewed grace period."
+
+    console_state="$("${docker_command[@]}" inspect --format \
+        '{{.Config.Tty}}|{{.Config.OpenStdin}}|{{.Config.StdinOnce}}|{{.Config.AttachStdin}}|{{.Config.AttachStdout}}|{{.Config.AttachStderr}}' \
+        "$container_id")" || die "could not inspect ${service} interactive console policy."
+    [[ "$console_state" == 'false|false|false|false|true|true' ]] \
+        || die "Compose service ${service} enables an unreviewed console mode or disables audited output attachment."
+
+    image_value="$("${docker_command[@]}" image inspect --format '{{json .Config.Shell}}' "$validated_runtime_image_id")" \
+        || die "could not inspect ${service} image command shell."
+    actual_value="$("${docker_command[@]}" inspect --format '{{json .Config.Shell}}' "$container_id")" \
+        || die "could not inspect ${service} configured command shell."
+    json_array_records "$image_value" >/dev/null \
+        || die "${service} image command shell is not a bounded JSON string array or null."
+    json_array_records "$actual_value" >/dev/null \
+        || die "${service} configured command shell is not a bounded JSON string array or null."
+    [[ "$actual_value" == "$image_value" ]] \
+        || die "Compose service ${service} command shell differs from the exact image default."
+
+    compose_health="$(compose_json_value "$service" healthcheck)"
+    image_health="$("${docker_command[@]}" image inspect --format '{{json .Config.Healthcheck}}' "$validated_runtime_image_id")" \
+        || die "could not inspect ${service} image healthcheck defaults."
+    actual_health="$("${docker_command[@]}" inspect --format '{{json .Config.Healthcheck}}' "$container_id")" \
+        || die "could not inspect ${service} configured healthcheck."
+    if [[ "$compose_health" == __BACKUPSHEEP_ABSENT__ || "$compose_health" == null ]]; then
+        [[ "$actual_health" == "$image_health" ]] \
+            || die "Compose service ${service} inherited healthcheck differs from its exact image default."
+    else
+        [[ "$image_health" == null ]] \
+            || die "Compose service ${service} combines an unreviewed image healthcheck with a Compose override."
+        expected_test="$(compose_json_value "$service" healthcheck test)"
+        json_array_records "$expected_test" >/dev/null \
+            || die "Compose service ${service} healthcheck test is not a bounded JSON string array."
+        actual_test="$("${docker_command[@]}" inspect --format '{{json .Config.Healthcheck.Test}}' "$container_id")" \
+            || die "could not inspect ${service} healthcheck command."
+        json_array_records "$actual_test" >/dev/null \
+            || die "${service} runtime healthcheck command is malformed."
+        [[ "$actual_test" == "$expected_test" ]] \
+            || die "Compose service ${service} healthcheck command differs from the reviewed model."
+        expected_interval="$(compose_json_value "$service" healthcheck interval)"
+        expected_timeout="$(compose_json_value "$service" healthcheck timeout)"
+        expected_retries="$(compose_json_value "$service" healthcheck retries)"
+        expected_start_period="$(compose_json_value "$service" healthcheck start_period)"
+        expected_start_interval="$(compose_json_value "$service" healthcheck start_interval)"
+        [[ "$expected_interval" =~ ^\"(3s|5s|10s|30s|1m0s)\"$ \
+            && "$expected_timeout" =~ ^\"(3s|5s|10s|30s|1m0s)\"$ \
+            && "$expected_retries" =~ ^[1-9][0-9]?$ ]] \
+            || die "Compose service ${service} has an unreviewed healthcheck interval, timeout, or retry count."
+        [[ "$expected_start_period" == __BACKUPSHEEP_ABSENT__ ]] && expected_start_period='"0s"'
+        [[ "$expected_start_interval" == __BACKUPSHEEP_ABSENT__ ]] && expected_start_interval='"0s"'
+        [[ "$expected_start_period" =~ ^\"(0s|3s|5s|10s|30s|1m0s)\"$ \
+            && "$expected_start_interval" =~ ^\"(0s|3s|5s|10s|30s|1m0s)\"$ ]] \
+            || die "Compose service ${service} has an unreviewed healthcheck startup duration."
+        actual_interval="$("${docker_command[@]}" inspect --format '{{.Config.Healthcheck.Interval}}' "$container_id")"
+        actual_timeout="$("${docker_command[@]}" inspect --format '{{.Config.Healthcheck.Timeout}}' "$container_id")"
+        actual_retries="$("${docker_command[@]}" inspect --format '{{.Config.Healthcheck.Retries}}' "$container_id")"
+        actual_start_period="$("${docker_command[@]}" inspect --format '{{.Config.Healthcheck.StartPeriod}}' "$container_id")"
+        actual_start_interval="$("${docker_command[@]}" inspect --format '{{.Config.Healthcheck.StartInterval}}' "$container_id")"
+        [[ "\"${actual_interval}\"" == "$expected_interval" \
+            && "\"${actual_timeout}\"" == "$expected_timeout" \
+            && "$actual_retries" == "$expected_retries" \
+            && "\"${actual_start_period}\"" == "$expected_start_period" \
+            && "\"${actual_start_interval}\"" == "$expected_start_interval" ]] \
+            || die "Compose service ${service} healthcheck timing differs from the reviewed model."
+    fi
+
+    log_state="$("${docker_command[@]}" inspect --format \
+        '{{.HostConfig.LogConfig.Type}}|{{len .HostConfig.LogConfig.Config}}|{{index .HostConfig.LogConfig.Config "max-size"}}|{{index .HostConfig.LogConfig.Config "max-file"}}' \
+        "$container_id")" || die "could not inspect ${service} logging policy."
+    [[ "$log_state" == "json-file|2|$(env_value_or_default DOCKER_LOG_MAX_SIZE 10m)|$(env_value_or_default DOCKER_LOG_MAX_FILE 5)" ]] \
+        || die "Compose service ${service} logging driver or rotation policy differs from the reviewed model."
+}
+
+attest_signed_release_image() {
+    local role="$1"
+    local reference="$2"
+    local expected_id=""
+    local actual_id=""
+    local repo_digests=""
+    local source_label=""
+    local revision_label=""
+    local version_label=""
+
+    expected_id="$(release_evidence_value "$release_evidence_dir/local-images.txt" "${role}_image_id")"
+    [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "persisted ${role} image ID is malformed."
+    repo_digests="$("${docker_command[@]}" image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$reference")" \
+        || die "verified ${role} image digest is not present locally."
+    grep -Fxq -- "$reference" <<< "$repo_digests" \
+        || die "local ${role} image does not expose its verified official RepoDigest."
+    actual_id="$("${docker_command[@]}" image inspect --format '{{.Id}}' "$reference")"
+    [[ "$actual_id" == "$expected_id" ]] || die "local ${role} image ID changed after verification."
+    source_label="$("${docker_command[@]}" image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$reference")"
+    revision_label="$("${docker_command[@]}" image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$reference")"
+    version_label="$("${docker_command[@]}" image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$reference")"
+    [[ "$source_label" == "https://github.com/bilal414/backupsheep" \
+        && "$revision_label" == "$release_commit" \
+        && "$version_label" == "$release_tag" ]] \
+        || die "local ${role} image provenance labels do not match the signed release."
+}
+
+attest_signed_release_vendor_image() {
+    local role="$1" reference="$2" repo_digest="$3" expected_id="" actual_id="" repo_digests=""
+    expected_id="$(release_evidence_value "$release_evidence_dir/local-images.txt" "${role}_image_id")"
+    [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "persisted ${role} image ID is malformed."
+    repo_digests="$("${docker_command[@]}" image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$reference")" \
+        || die "pinned ${role} image digest is not present locally."
+    grep -Fxq -- "$repo_digest" <<< "$repo_digests" || die "local ${role} image does not expose its pinned RepoDigest."
+    actual_id="$("${docker_command[@]}" image inspect --format '{{.Id}}' "$reference")"
+    [[ "$actual_id" == "$expected_id" ]] || die "local ${role} image ID changed after verification."
+}
+
+attest_signed_release_container_image() {
+    local service="$1" container_id="$2" role="" expected_ref="" expected_id=""
+    local actual_ref="" actual_id=""
+    case "$service" in
+        db) role=postgres; expected_ref="$release_postgres_image" ;;
+        app-egress-guard|cloud-egress-guard|database-egress-guard|files-egress-guard|storage-egress-guard|logs-egress-guard)
+            role=egress; expected_ref="$release_egress_image" ;;
+        rabbitmq-volume-init|rabbitmq-provision)
+            role=rabbit_current
+            expected_ref="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+            ;;
+        rabbitmq)
+            if [[ "$approved_rabbit" == true ]]; then
+                role=rabbit_upgrade
+                expected_ref="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+            else
+                role=rabbit_current
+                expected_ref="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+            fi
+            ;;
+        staging-provision|db-provision|migrate|db-seal|preflight|app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
+            role=app; expected_ref="$release_app_image" ;;
+        *) die "signed-release container has an unknown service role: ${service}." ;;
+    esac
+    expected_id="$(release_evidence_value "$release_evidence_dir/local-images.txt" "${role}_image_id")"
+    [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "persisted ${role} image ID is malformed."
+    actual_ref="$("${docker_command[@]}" inspect --format '{{.Config.Image}}' "$container_id")" \
+        || die "could not inspect signed-release ${service} image reference."
+    actual_id="$("${docker_command[@]}" inspect --format '{{.Image}}' "$container_id")" \
+        || die "could not inspect signed-release ${service} image ID."
+    [[ "$actual_ref" == "$expected_ref" && "$actual_id" == "$expected_id" ]] \
+        || die "signed-release ${service} container does not match its exact role reference and image ID."
+}
+
+validate_container_runtime_policy() {
+    local service="$1" container_id="$2" state="" expected_user="" expected_restart=""
+    local expected_network="" expected_port_count=0 expected_cap_add="" actual_cap_add=""
+    local cap_drop="" security_opt="" config_hash_line="" expected_config_hash=""
+    local actual_config_hash="" network_mode="" guard_service="" guard_id=""
+    local port_binding="" bind_port=""
+    local actual_user="" privileged="" readonly_rootfs="" pid_mode="" ipc_mode=""
+    local cgroup_mode="" device_count="" port_count="" restart_policy=""
+    local actual_networks="" expected_networks=""
+    local none_network_id="" none_state="" none_lifecycle="" none_network="" none_endpoint=""
+    local none_gateway="" none_ip="" none_prefix="" none_mac="" none_aliases="" none_links="" none_driver_opts=""
+    local none_status="" none_running="" none_pid="" none_exit=""
+    local resource_state="" expected_pids="" expected_memory="" expected_cpus=""
+    local expected_shm=67108864 expected_init=false expected_nofile=4096
+    local actual_pids="" actual_memory="" memory_reservation="" actual_memory_swap="" actual_memory_swappiness=""
+    local actual_cpus="" actual_shm="" actual_init="" actual_oom_kill_disable="" actual_oom_score_adj=""
+    local ulimit_count="" actual_ulimits="" expected_ulimits=""
+    local host_boundary="" group_add="" expected_group_add="" masked_paths="" readonly_paths=""
+    local resource_zero_state=""
+
+    case "$service" in
+        db) expected_user=70:70; expected_restart=unless-stopped; expected_network="${project_name}_app-database" ;;
+        rabbitmq-volume-init) expected_user=100:101; expected_restart=no; expected_network=none ;;
+        rabbitmq) expected_user=100:101; expected_restart=unless-stopped; expected_network="${project_name}_app-broker" ;;
+        rabbitmq-provision) expected_user=100:101; expected_restart=no; expected_network="${project_name}_provision-broker" ;;
+        staging-provision)
+            expected_user=0:0; expected_restart=no; expected_network=none
+            expected_cap_add=$'CHOWN\nDAC_OVERRIDE\nFOWNER\nFSETID'
+            ;;
+        db-provision|db-seal) expected_user=10007:10007; expected_restart=no; expected_network="${project_name}_provision-database" ;;
+        migrate) expected_user=10007:10007; expected_restart=no; expected_network="${project_name}_migrate-database" ;;
+        preflight) expected_user=10007:10007; expected_restart=no; expected_network="${project_name}_preflight-database" ;;
+        app-egress-guard)
+            expected_user=0:0; expected_restart=no; expected_network="${project_name}_app-database"; expected_port_count=1
+            expected_cap_add=$'CHOWN\nNET_ADMIN\nSETGID\nSETPCAP\nSETUID'
+            ;;
+        cloud-egress-guard)
+            expected_user=0:0; expected_restart=no; expected_network="${project_name}_cloud-database"
+            expected_cap_add=$'CHOWN\nNET_ADMIN\nSETGID\nSETPCAP\nSETUID'
+            ;;
+        database-egress-guard)
+            expected_user=0:0; expected_restart=no; expected_network="${project_name}_database-database"
+            expected_cap_add=$'CHOWN\nNET_ADMIN\nSETGID\nSETPCAP\nSETUID'
+            ;;
+        files-egress-guard)
+            expected_user=0:0; expected_restart=no; expected_network="${project_name}_files-database"
+            expected_cap_add=$'CHOWN\nNET_ADMIN\nSETGID\nSETPCAP\nSETUID'
+            ;;
+        storage-egress-guard)
+            expected_user=0:0; expected_restart=no; expected_network="${project_name}_storage-database"
+            expected_cap_add=$'CHOWN\nNET_ADMIN\nSETGID\nSETPCAP\nSETUID'
+            ;;
+        logs-egress-guard)
+            expected_user=0:0; expected_restart=no; expected_network="${project_name}_logs-database"
+            expected_cap_add=$'CHOWN\nNET_ADMIN\nSETGID\nSETPCAP\nSETUID'
+            ;;
+        app) expected_user=10001:10001; expected_restart=unless-stopped; expected_network=service; guard_service=app-egress-guard ;;
+        worker-cloud) expected_user=10008:10008; expected_restart=unless-stopped; expected_network=service; guard_service=cloud-egress-guard ;;
+        worker-database) expected_user=10002:10002; expected_restart=unless-stopped; expected_network=service; guard_service=database-egress-guard ;;
+        worker-files) expected_user=10003:10003; expected_restart=unless-stopped; expected_network=service; guard_service=files-egress-guard ;;
+        worker-storage) expected_user=10004:10004; expected_restart=unless-stopped; expected_network=service; guard_service=storage-egress-guard ;;
+        worker-logs) expected_user=10005:10005; expected_restart=unless-stopped; expected_network=service; guard_service=logs-egress-guard ;;
+        beat) expected_user=10006:10006; expected_restart=unless-stopped; expected_network="${project_name}_beat-database" ;;
+        *) die "cannot attest runtime policy for unexpected service ${service}." ;;
+    esac
+
+    state="$("${docker_command[@]}" inspect --format \
+        '{{.Config.User}}|{{.HostConfig.Privileged}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.PidMode}}|{{.HostConfig.IpcMode}}|{{.HostConfig.CgroupnsMode}}|{{len .HostConfig.Devices}}|{{len .HostConfig.PortBindings}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.NetworkMode}}' \
+        "$container_id")" || die "could not inspect the ${service} container runtime policy."
+    IFS='|' read -r actual_user privileged readonly_rootfs pid_mode ipc_mode cgroup_mode \
+        device_count port_count restart_policy network_mode <<< "$state"
+    [[ "$actual_user" == "$expected_user" && "$privileged" == false \
+        && "$readonly_rootfs" == true && -z "$pid_mode" && "$ipc_mode" == private \
+        && "$cgroup_mode" == private && "$device_count" == 0 \
+        && "$port_count" == "$expected_port_count" && "$restart_policy" == "$expected_restart" ]] \
+        || die "Compose service ${service} has an unsafe user, privilege, namespace, device, port, rootfs, or restart runtime."
+
+    host_boundary="$("${docker_command[@]}" inspect --format \
+        '{{len .HostConfig.DeviceRequests}}|{{len .HostConfig.DeviceCgroupRules}}|{{.HostConfig.UsernsMode}}|{{.HostConfig.UTSMode}}|{{.HostConfig.Runtime}}|{{len .HostConfig.Sysctls}}|{{len .HostConfig.DNS}}|{{len .HostConfig.DNSOptions}}|{{len .HostConfig.DNSSearch}}|{{len .HostConfig.ExtraHosts}}|{{len .HostConfig.VolumesFrom}}|{{len .HostConfig.Links}}|{{.HostConfig.PublishAllPorts}}|{{.HostConfig.AutoRemove}}|{{.HostConfig.Cgroup}}|{{.HostConfig.ContainerIDFile}}|{{.HostConfig.VolumeDriver}}|{{json .HostConfig.ConsoleSize}}|{{len .HostConfig.Annotations}}|{{.HostConfig.Isolation}}|{{.HostConfig.KernelMemory}}|{{.HostConfig.KernelMemoryTCP}}|{{.HostConfig.RestartPolicy.MaximumRetryCount}}' \
+        "$container_id")" || die "could not inspect ${service} host-boundary controls."
+    [[ "$host_boundary" == '0|0|||runc|0|0|0|0|0|0|0|false|false||||[0,0]|0||0|0|0' ]] \
+        || die "Compose service ${service} has an unreviewed device, user/UTS namespace, runtime, sysctl, DNS, host, link, volume-from, or publication setting."
+    group_add="$("${docker_command[@]}" inspect --format \
+        '{{range .HostConfig.GroupAdd}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
+        || die "could not inspect ${service} supplementary groups."
+    case "$service" in
+        worker-database) expected_group_add=$'10989\n10990\n10994' ;;
+        worker-files) expected_group_add=$'10991\n10992\n10993' ;;
+        worker-storage) expected_group_add=$'10990\n10992\n10993\n10994\n10995' ;;
+        *) expected_group_add="" ;;
+    esac
+    [[ "$group_add" == "$expected_group_add" ]] \
+        || die "Compose service ${service} supplementary group boundary drifted."
+
+    readonly_paths="$("${docker_command[@]}" inspect --format \
+        '{{range .HostConfig.ReadonlyPaths}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
+        || die "could not inspect ${service} read-only kernel paths."
+    [[ "$readonly_paths" == $'/proc/bus\n/proc/fs\n/proc/irq\n/proc/sys\n/proc/sysrq-trigger' ]] \
+        || die "Compose service ${service} read-only kernel path boundary drifted."
+    masked_paths="$("${docker_command[@]}" inspect --format \
+        '{{range .HostConfig.MaskedPaths}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
+        || die "could not inspect ${service} masked kernel paths."
+    printf '%s\n' "$masked_paths" | awk '
+        BEGIN {
+            required["/proc/acpi"]; required["/proc/asound"];
+            required["/proc/kcore"]; required["/proc/keys"]; required["/proc/latency_stats"];
+            required["/proc/sched_debug"]; required["/proc/scsi"]; required["/proc/timer_list"];
+            required["/proc/timer_stats"]; required["/sys/devices/virtual/powercap"];
+            required["/sys/firmware"]
+        }
+        {
+            if (seen[$0]++) exit 2
+            if ($0 in required) { present[$0] = 1; next }
+            if ($0 == "/proc/interrupts") next
+            if ($0 !~ /^\/sys\/devices\/system\/cpu\/cpu[0-9]+\/thermal_throttle$/) exit 3
+        }
+        END { for (path in required) if (!present[path]) exit 4 }
+    ' || die "Compose service ${service} masked kernel path boundary drifted."
+
+    if [[ "$expected_network" == service ]]; then
+        [[ "$network_mode" == container:* && -n "${network_mode#container:}" ]] \
+            || die "Compose service ${service} is not joined to its exact egress-guard namespace."
+        guard_id="${network_mode#container:}"
+        [[ "$(docker_resource_label container "$guard_id" com.docker.compose.project)" == "$project_name" \
+            && "$(docker_resource_label container "$guard_id" com.docker.compose.service)" == "$guard_service" \
+            && "$(docker_resource_label container "$guard_id" com.backupsheep.installation-id)" == "$installation_id" ]] \
+            || die "Compose service ${service} shares an unowned or wrong network namespace."
+    else
+        [[ "$network_mode" == "$expected_network" ]] \
+            || die "Compose service ${service} is attached to an unexpected primary network namespace."
+    fi
+
+    actual_networks="$("${docker_command[@]}" inspect --format \
+        '{{range $name, $settings := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+        "$container_id" | LC_ALL=C sort)" \
+        || die "could not inspect the complete ${service} network attachment set."
+    case "$service" in
+        db) expected_networks=$'backupsheep_app-database\nbackupsheep_beat-database\nbackupsheep_cloud-database\nbackupsheep_database-database\nbackupsheep_files-database\nbackupsheep_logs-database\nbackupsheep_migrate-database\nbackupsheep_preflight-database\nbackupsheep_provision-database\nbackupsheep_storage-database' ;;
+        rabbitmq-volume-init|staging-provision) expected_networks=none ;;
+        rabbitmq) expected_networks=$'backupsheep_app-broker\nbackupsheep_beat-broker\nbackupsheep_cloud-broker\nbackupsheep_database-broker\nbackupsheep_files-broker\nbackupsheep_logs-broker\nbackupsheep_preflight-broker\nbackupsheep_provision-broker\nbackupsheep_storage-broker' ;;
+        rabbitmq-provision) expected_networks=backupsheep_provision-broker ;;
+        db-provision|db-seal) expected_networks=backupsheep_provision-database ;;
+        migrate) expected_networks=backupsheep_migrate-database ;;
+        preflight) expected_networks=$'backupsheep_preflight-broker\nbackupsheep_preflight-database' ;;
+        app-egress-guard) expected_networks=$'backupsheep_app-broker\nbackupsheep_app-database\nbackupsheep_app-egress' ;;
+        cloud-egress-guard) expected_networks=$'backupsheep_cloud-broker\nbackupsheep_cloud-database\nbackupsheep_cloud-egress' ;;
+        database-egress-guard) expected_networks=$'backupsheep_database-broker\nbackupsheep_database-database\nbackupsheep_database-egress' ;;
+        files-egress-guard) expected_networks=$'backupsheep_files-broker\nbackupsheep_files-database\nbackupsheep_files-egress' ;;
+        storage-egress-guard) expected_networks=$'backupsheep_storage-broker\nbackupsheep_storage-database\nbackupsheep_storage-egress' ;;
+        logs-egress-guard) expected_networks=$'backupsheep_logs-broker\nbackupsheep_logs-database\nbackupsheep_logs-egress' ;;
+        app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs) expected_networks="" ;;
+        beat) expected_networks=$'backupsheep_beat-broker\nbackupsheep_beat-database' ;;
+    esac
+    expected_networks="$(printf '%s\n' "$expected_networks" | sed "s/^backupsheep_/${project_name}_/" | LC_ALL=C sort)"
+    [[ "$actual_networks" == "$expected_networks" ]] \
+        || die "Compose service ${service} has an extra, missing, or foreign network attachment."
+    if [[ "$expected_network" == none ]]; then
+        none_network_id="$("${docker_command[@]}" network inspect --format '{{.Id}}' none)" \
+            || die "could not attest Docker's built-in none network."
+        [[ "$none_network_id" =~ ^[0-9a-f]{64}$ ]] \
+            || die "Docker's built-in none network has a malformed identity."
+        none_state="$("${docker_command[@]}" inspect --format \
+            '{{with index .NetworkSettings.Networks "none"}}{{.NetworkID}}|{{.EndpointID}}|{{.Gateway}}|{{.IPAddress}}|{{.IPPrefixLen}}|{{.MacAddress}}|{{len .Aliases}}|{{len .Links}}|{{len .DriverOpts}}{{else}}||||||-1|-1|-1{{end}}' \
+            "$container_id")" || die "could not inspect the isolated none-network endpoint."
+        IFS='|' read -r none_network none_endpoint none_gateway none_ip none_prefix none_mac \
+            none_aliases none_links none_driver_opts <<< "$none_state"
+        [[ -z "$none_gateway" && -z "$none_ip" && "$none_prefix" == 0 && -z "$none_mac" \
+            && "$none_aliases" == 0 && "$none_links" == 0 && "$none_driver_opts" == 0 ]] \
+            || die "Compose service ${service} has addressing or options on its isolated none network."
+        none_lifecycle="$("${docker_command[@]}" inspect --format \
+            '{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}|{{.State.ExitCode}}' "$container_id")" \
+            || die "could not inspect the none-network container lifecycle."
+        IFS='|' read -r none_status none_running none_pid none_exit <<< "$none_lifecycle"
+        case "$none_status" in
+            created)
+                [[ "$none_running" == false && "$none_pid" == 0 && "$none_exit" == 0 \
+                    && -z "$none_network" && -z "$none_endpoint" ]] \
+                    || die "created none-network service ${service} has unexpected process or endpoint state."
+                ;;
+            running)
+                [[ "$none_running" == true && "$none_pid" =~ ^[1-9][0-9]*$ && "$none_exit" == 0 \
+                    && "$none_network" == "$none_network_id" && "$none_endpoint" =~ ^[0-9a-f]{64}$ ]] \
+                    || die "running none-network service ${service} has unexpected process or endpoint state."
+                ;;
+            exited)
+                [[ "$none_running" == false && "$none_pid" == 0 && "$none_exit" =~ ^[0-9]+$ \
+                    && "$none_network" == "$none_network_id" && -z "$none_endpoint" ]] \
+                    || die "exited none-network service ${service} has unexpected process or endpoint state."
+                ;;
+            *) die "none-network service ${service} is in an unreviewed lifecycle state." ;;
+        esac
+    fi
+
+    case "$service" in
+        db)
+            expected_pids="$(env_value_or_default POSTGRES_PIDS_LIMIT 256)"
+            expected_memory="$(model_size_bytes POSTGRES_MEMORY_LIMIT 2g)"
+            expected_cpus="$(model_cpu_nanos POSTGRES_CPU_LIMIT 2.0)"
+            expected_shm="$(model_size_bytes POSTGRES_SHM_SIZE 256m)"
+            expected_init=false; expected_nofile=65536
+            ;;
+        rabbitmq-volume-init) expected_pids=32; expected_memory=67108864; expected_cpus=250000000; expected_init=false; expected_nofile=65536 ;;
+        rabbitmq)
+            expected_pids="$(env_value_or_default RABBITMQ_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes RABBITMQ_MEMORY_LIMIT 1g)"
+            expected_cpus="$(model_cpu_nanos RABBITMQ_CPU_LIMIT 1.0)"
+            expected_init=false; expected_nofile=65536
+            ;;
+        rabbitmq-provision) expected_pids=128; expected_memory=268435456; expected_cpus=500000000; expected_init=false; expected_nofile=65536 ;;
+        staging-provision) expected_pids=64; expected_memory=134217728; expected_cpus=250000000; expected_init=true ;;
+        db-provision)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes DB_PROVISION_MEMORY_LIMIT 512m)"
+            expected_cpus="$(model_cpu_nanos DB_PROVISION_CPU_LIMIT 0.5)"; expected_init=true
+            ;;
+        migrate)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes MIGRATE_MEMORY_LIMIT 2g)"
+            expected_cpus="$(model_cpu_nanos MIGRATE_CPU_LIMIT 2.0)"; expected_init=true
+            ;;
+        db-seal)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes DB_SEAL_MEMORY_LIMIT 1g)"
+            expected_cpus="$(model_cpu_nanos DB_SEAL_CPU_LIMIT 1.0)"; expected_init=true
+            ;;
+        preflight)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes PREFLIGHT_MEMORY_LIMIT 1g)"
+            expected_cpus="$(model_cpu_nanos PREFLIGHT_CPU_LIMIT 1.0)"; expected_init=true
+            ;;
+        *-egress-guard) expected_pids=32; expected_memory=67108864; expected_cpus=250000000; expected_init=false; expected_nofile=128 ;;
+        app)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes APP_MEMORY_LIMIT 2g)"
+            expected_cpus="$(model_cpu_nanos APP_CPU_LIMIT 2.0)"; expected_init=true
+            ;;
+        worker-cloud)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes WORKER_CLOUD_MEMORY_LIMIT 1g)"
+            expected_cpus="$(model_cpu_nanos WORKER_CLOUD_CPU_LIMIT 2.0)"; expected_init=true
+            ;;
+        worker-database)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes WORKER_DATABASE_MEMORY_LIMIT 2g)"
+            expected_cpus="$(model_cpu_nanos WORKER_DATABASE_CPU_LIMIT 2.0)"; expected_init=true
+            ;;
+        worker-files)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes WORKER_FILES_MEMORY_LIMIT 2g)"
+            expected_cpus="$(model_cpu_nanos WORKER_FILES_CPU_LIMIT 2.0)"; expected_init=true
+            ;;
+        worker-storage)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes WORKER_STORAGE_MEMORY_LIMIT 2g)"
+            expected_cpus="$(model_cpu_nanos WORKER_STORAGE_CPU_LIMIT 2.0)"; expected_init=true
+            ;;
+        worker-logs)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes WORKER_LOGS_MEMORY_LIMIT 512m)"
+            expected_cpus="$(model_cpu_nanos WORKER_LOGS_CPU_LIMIT 1.0)"; expected_init=true
+            ;;
+        beat)
+            expected_pids="$(env_value_or_default BACKUPSHEEP_PIDS_LIMIT 512)"
+            expected_memory="$(model_size_bytes BEAT_MEMORY_LIMIT 512m)"
+            expected_cpus="$(model_cpu_nanos BEAT_CPU_LIMIT 0.5)"; expected_init=true
+            ;;
+    esac
+    resource_state="$("${docker_command[@]}" inspect --format \
+        '{{.HostConfig.PidsLimit}}|{{.HostConfig.Memory}}|{{.HostConfig.MemoryReservation}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.MemorySwappiness}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.ShmSize}}|{{json .HostConfig.Init}}|{{.HostConfig.OomKillDisable}}|{{.HostConfig.OomScoreAdj}}|{{len .HostConfig.Ulimits}}' \
+        "$container_id")" || die "could not inspect ${service} resource limits."
+    IFS='|' read -r actual_pids actual_memory memory_reservation actual_memory_swap actual_memory_swappiness \
+        actual_cpus actual_shm actual_init actual_oom_kill_disable actual_oom_score_adj ulimit_count <<< "$resource_state"
+    [[ "$actual_pids" == "$expected_pids" && "$actual_memory" == "$expected_memory" \
+        && "$memory_reservation" == 0 \
+        && "$actual_memory_swap" == "$expected_memory" \
+        && ( "$actual_memory_swappiness" == 0 || "$actual_memory_swappiness" == '<nil>' ) \
+        && "$actual_cpus" == "$expected_cpus" && "$actual_shm" == "$expected_shm" \
+        && "$actual_init" == "$expected_init" \
+        && ( "$actual_oom_kill_disable" == false || "$actual_oom_kill_disable" == '<nil>' ) \
+        && "$actual_oom_score_adj" == 0 && "$ulimit_count" =~ ^[0-9]+$ \
+        && "$ulimit_count" -ge 2 && "$ulimit_count" -le 16 ]] \
+        || die "Compose service ${service} has drifted PID, memory, swap, CPU, OOM, shared-memory, init, or ulimit controls."
+    resource_zero_state="$("${docker_command[@]}" inspect --format \
+        '{{.HostConfig.CgroupParent}}|{{.HostConfig.CpuShares}}|{{.HostConfig.CpuPeriod}}|{{.HostConfig.CpuQuota}}|{{.HostConfig.CpuRealtimePeriod}}|{{.HostConfig.CpuRealtimeRuntime}}|{{.HostConfig.CpusetCpus}}|{{.HostConfig.CpusetMems}}|{{.HostConfig.BlkioWeight}}|{{len .HostConfig.BlkioWeightDevice}}|{{len .HostConfig.BlkioDeviceReadBps}}|{{len .HostConfig.BlkioDeviceWriteBps}}|{{len .HostConfig.BlkioDeviceReadIOps}}|{{len .HostConfig.BlkioDeviceWriteIOps}}|{{len .HostConfig.StorageOpt}}|{{.HostConfig.CPUCount}}|{{.HostConfig.CPUPercent}}|{{.HostConfig.IOMaximumIOps}}|{{.HostConfig.IOMaximumBandwidth}}' \
+        "$container_id")" || die "could not inspect ${service} complete cgroup and block-I/O controls."
+    [[ "$resource_zero_state" == '|0|0|0|0|0|||0|0|0|0|0|0|0|0|0|0|0' ]] \
+        || die "Compose service ${service} has an unreviewed cgroup parent, CPU, block-I/O, storage, or Windows resource control."
+    actual_ulimits="$("${docker_command[@]}" inspect --format \
+        '{{range .HostConfig.Ulimits}}{{println .Name "|" .Soft "|" .Hard}}{{end}}' \
+        "$container_id" | tr -d ' ' | LC_ALL=C sort)" \
+        || die "could not inspect ${service} ulimit values."
+    printf '%s\n' "$actual_ulimits" | awk -F'|' -v nofile="$expected_nofile" '
+        NF != 3 || seen[$1]++ { exit 2 }
+        $2 !~ /^(-1|0|[1-9][0-9]{0,9})$/ || $3 !~ /^(-1|0|[1-9][0-9]{0,9})$/ { exit 3 }
+        $1 == "core" { if ($2 != 0 || $3 != 0) exit 4; core++; next }
+        $1 == "nofile" { if ($2 != nofile || $3 != nofile) exit 5; files++; next }
+        $1 ~ /^(cpu|data|fsize|locks|memlock|msgqueue|nproc|rss|rttime|sigpending|stack)$/ { next }
+        { exit 6 }
+        END { if (core != 1 || files != 1) exit 7 }
+    ' || die "Compose service ${service} has drifted core/nofile or unsafe daemon-default ulimits."
+    validate_container_mount_policy "$service" "$container_id"
+
+    cap_drop="$("${docker_command[@]}" inspect --format '{{range .HostConfig.CapDrop}}{{println .}}{{end}}' "$container_id")" \
+        || die "could not inspect ${service} capability drops."
+    security_opt="$("${docker_command[@]}" inspect --format '{{range .HostConfig.SecurityOpt}}{{println .}}{{end}}' "$container_id")" \
+        || die "could not inspect ${service} security options."
+    actual_cap_add="$("${docker_command[@]}" inspect --format '{{range .HostConfig.CapAdd}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
+        || die "could not inspect ${service} added capabilities."
+    [[ "$cap_drop" == ALL && "$security_opt" == no-new-privileges:true \
+        && "$actual_cap_add" == "$expected_cap_add" ]] \
+        || die "Compose service ${service} capability or no-new-privileges policy drifted."
+
+    if [[ "$service" == app-egress-guard ]]; then
+        bind_port="$(env_value_or_default BACKUPSHEEP_BIND_PORT 8000)"
+        port_binding="$("${docker_command[@]}" inspect --format \
+            '{{with index .HostConfig.PortBindings "8000/tcp"}}{{len .}}|{{range .}}{{.HostIp}}|{{.HostPort}}{{end}}{{else}}0||{{end}}' \
+            "$container_id")" || die "could not inspect the application loopback port binding."
+        [[ "$port_binding" == "1|127.0.0.1|${bind_port}" ]] \
+            || die "application port binding is not the exact reviewed loopback publication."
+    fi
+
+    validated_runtime_image_id=""
+    validate_container_configuration_policy "$service" "$container_id"
+
+    config_hash_line="$("${compose_command[@]}" --profile operations config --hash "$service")" \
+        || die "could not calculate the reviewed ${service} Compose configuration hash."
+    [[ "$config_hash_line" =~ ^${service}[[:space:]]([0-9a-f]{64})$ ]] \
+        || die "Compose returned a malformed ${service} configuration hash."
+    expected_config_hash="${BASH_REMATCH[1]}"
+    actual_config_hash="$(docker_resource_label container "$container_id" com.docker.compose.config-hash)" \
+        || die "could not inspect ${service} configuration hash label."
+    [[ "$actual_config_hash" == "$expected_config_hash" ]] \
+        || die "Compose service ${service} was not created from the exact reviewed rendered configuration."
+}
+
+validate_signed_release_compose_model() {
+    local rendered=""
+    local images=""
+    local image=""
+    local services=""
+    local expected_services=""
+    local service=""
+    local role=""
+    local expected_image=""
+    local service_images=""
+    local service_image=""
+    local service_image_count=0
+    local rabbit_current="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+    local rabbit_upgrade_image="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+
+    rendered="$("${compose_command[@]}" --profile operations config)" \
+        || die "could not render the signed-release Compose model."
+    ! grep -Eq '^[[:space:]]+build:' <<< "$rendered" \
+        || die "signed-release Compose model contains a build definition."
+    ! grep -Eq '(^|,)(exec|suid|dev)(,|$)' <<< "$rendered" \
+        || die "signed-release Compose model contains an unsafe tmpfs mount option."
+    awk -v app="$release_app_image" -v postgres="$release_postgres_image" -v egress="$release_egress_image" -v rabbit="$rabbit_current" -v rabbit_upgrade="$rabbit_upgrade_image" '
+        function finish_service() {
+            if ((image == app || image == postgres || image == egress || image == rabbit || image == rabbit_upgrade) && pull != "never") exit 7
+        }
+        /^services:$/ { in_services = 1; next }
+        in_services && /^[^ ]/ { finish_service(); in_services = 0 }
+        in_services && /^  [A-Za-z0-9_.-]+:$/ {
+            finish_service(); image = ""; pull = ""; next
+        }
+        in_services && /^    image: / { image = substr($0, 12); gsub(/^"|"$/, "", image) }
+        in_services && /^    pull_policy: / { pull = substr($0, 18); gsub(/^"|"$/, "", pull) }
+        END { if (in_services) finish_service() }
+    ' <<< "$rendered" \
+        || die "every signed-release digest service must retain pull_policy: never."
+    services="$("${compose_command[@]}" --profile operations config --services)" \
+        || die "could not enumerate signed-release Compose services."
+    expected_services="$(cat <<'EOF'
+db
+rabbitmq-volume-init
+rabbitmq
+rabbitmq-provision
+staging-provision
+db-provision
+migrate
+db-seal
+preflight
+app-egress-guard
+app
+cloud-egress-guard
+worker-cloud
+database-egress-guard
+worker-database
+files-egress-guard
+worker-files
+storage-egress-guard
+worker-storage
+logs-egress-guard
+worker-logs
+beat
+EOF
+)"
+    [[ "$services" == "$expected_services" ]] \
+        || die "signed-release Compose model service set or order changed."
+    while IFS='|' read -r service role; do
+        case "$role" in
+            app) expected_image="$release_app_image" ;;
+            postgres) expected_image="$release_postgres_image" ;;
+            egress) expected_image="$release_egress_image" ;;
+            rabbit_current) expected_image="$rabbit_current" ;;
+            rabbit_target)
+                if [[ "$approved_rabbit" == true ]]; then
+                    expected_image="$rabbit_upgrade_image"
+                else
+                    expected_image="$rabbit_current"
+                fi
+                ;;
+            *) die "internal signed-release service role is invalid." ;;
+        esac
+        service_images="$("${compose_command[@]}" --profile operations config --images "$service")" \
+            || die "could not resolve signed-release image for ${service}."
+        service_image=""
+        service_image_count=0
+        while IFS= read -r image; do
+            [[ -n "$image" ]] || continue
+            service_image="$image"
+            service_image_count=$((service_image_count + 1))
+        done <<< "$service_images"
+        [[ "$service_image_count" -eq 1 && "$service_image" == "$expected_image" ]] \
+            || die "signed-release service ${service} does not use its exact role image."
+    done <<'EOF'
+db|postgres
+rabbitmq-volume-init|rabbit_current
+rabbitmq|rabbit_target
+rabbitmq-provision|rabbit_current
+staging-provision|app
+db-provision|app
+migrate|app
+db-seal|app
+preflight|app
+app-egress-guard|egress
+app|app
+cloud-egress-guard|egress
+worker-cloud|app
+database-egress-guard|egress
+worker-database|app
+files-egress-guard|egress
+worker-files|app
+storage-egress-guard|egress
+worker-storage|app
+logs-egress-guard|egress
+worker-logs|app
+beat|app
+EOF
+    images="$("${compose_command[@]}" --profile operations config --images)" \
+        || die "could not enumerate signed-release Compose images."
+    for image in "$release_app_image" "$release_postgres_image" "$release_egress_image"; do
+        grep -Fxq -- "$image" <<< "$images" \
+            || die "signed-release Compose model omitted verified image ${image}."
+    done
+    while IFS= read -r image; do
+        [[ -n "$image" ]] || continue
+        case "$image" in
+            "$release_app_image"|"$release_postgres_image"|"$release_egress_image"|"$rabbit_current"|"$rabbit_upgrade_image") ;;
+            *) die "signed-release Compose model references unauthorized image ${image}." ;;
+        esac
+    done <<< "$images"
+}
+
+if [[ "$image_mode" == "signed-release" ]]; then
+    validate_signed_release_compose_model
+    if [[ "$compose_subcommand" == "up" || "$compose_subcommand" == "create" || "$compose_subcommand" == "run" ]]; then
+        attest_signed_release_image app "$release_app_image"
+        attest_signed_release_image postgres "$release_postgres_image"
+        attest_signed_release_image egress "$release_egress_image"
+        attest_signed_release_vendor_image rabbit_current \
+            "rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7" \
+            "rabbitmq@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+        if [[ "$approved_rabbit" == true ]]; then
+            attest_signed_release_vendor_image rabbit_upgrade \
+                "rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095" \
+                "rabbitmq@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+        fi
+    fi
+fi
+
 docker_resource_label() {
     local resource_type="$1"
     local resource_id="$2"
@@ -1281,6 +2846,153 @@ docker_resource_name() {
         volume) "${docker_command[@]}" volume inspect --format '{{.Name}}' "$resource_id" ;;
         *) die "unknown Docker resource type during name validation." ;;
     esac
+}
+
+service_network_is_authorized() {
+    local service="$1" logical="$2"
+    case "${service}|${logical}" in
+        db\|app-database|db\|migrate-database|db\|cloud-database|db\|database-database|\
+        db\|files-database|db\|storage-database|db\|logs-database|db\|beat-database|\
+        db\|preflight-database|db\|provision-database|\
+        rabbitmq\|app-broker|rabbitmq\|cloud-broker|rabbitmq\|database-broker|\
+        rabbitmq\|files-broker|rabbitmq\|storage-broker|rabbitmq\|logs-broker|\
+        rabbitmq\|beat-broker|rabbitmq\|preflight-broker|rabbitmq\|provision-broker|\
+        rabbitmq-provision\|provision-broker|db-provision\|provision-database|\
+        db-seal\|provision-database|migrate\|migrate-database|\
+        preflight\|preflight-database|preflight\|preflight-broker|\
+        app-egress-guard\|app-database|app-egress-guard\|app-broker|app-egress-guard\|app-egress|\
+        cloud-egress-guard\|cloud-database|cloud-egress-guard\|cloud-broker|cloud-egress-guard\|cloud-egress|\
+        database-egress-guard\|database-database|database-egress-guard\|database-broker|database-egress-guard\|database-egress|\
+        files-egress-guard\|files-database|files-egress-guard\|files-broker|files-egress-guard\|files-egress|\
+        storage-egress-guard\|storage-database|storage-egress-guard\|storage-broker|storage-egress-guard\|storage-egress|\
+        logs-egress-guard\|logs-database|logs-egress-guard\|logs-broker|logs-egress-guard\|logs-egress|\
+        beat\|beat-database|beat\|beat-broker) return 0 ;;
+    esac
+    return 1
+}
+
+validate_network_runtime_policy() {
+    local resource_id="$1" logical_name="$2" state="" expected_internal="true" expected_option_count="0"
+    local expected_icc="" ipam="" ipam_count="" subnet="" ip_range="" gateway="" aux_count="" remainder=""
+    local endpoints="" endpoint_container="" endpoint_name="" endpoint_id="" endpoint_mac=""
+    local endpoint_ipv4="" endpoint_ipv6="" endpoint_count=0 endpoint_project="" endpoint_installation=""
+    local endpoint_service="" endpoint_working_dir="" physical_name="" network_id="" endpoint_state=""
+    local container_name="" aliases="" expected_aliases="" links="" container_network_id=""
+    local container_endpoint_id="" container_gateway="" container_ip="" container_prefix="" container_mac=""
+    local actual_endpoint_ids="" expected_endpoint_ids="" existing_container="" existing_service="" existing_full_id=""
+    case "$logical_name" in
+        app-egress|cloud-egress|database-egress|files-egress|storage-egress|logs-egress)
+            expected_internal="false"
+            expected_option_count="1"
+            expected_icc="false"
+            ;;
+    esac
+    state="$("${docker_command[@]}" network inspect --format \
+        '{{.Driver}}|{{.Internal}}|{{.Attachable}}|{{.Ingress}}|{{len .Options}}|{{index .Options "com.docker.network.bridge.enable_icc"}}|{{.IPAM.Driver}}|{{len .IPAM.Options}}' \
+        "$resource_id")" || die "could not inspect Docker network runtime policy."
+    [[ "$state" == "bridge|${expected_internal}|false|false|${expected_option_count}|${expected_icc}|default|0" ]] \
+        || die "Docker network ${logical_name} has an unsafe driver, namespace, attachment, option, or IPAM policy."
+    ipam="$("${docker_command[@]}" network inspect --format \
+        '{{len .IPAM.Config}}|{{range .IPAM.Config}}{{.Subnet}}|{{.IPRange}}|{{.Gateway}}|{{len .AuxiliaryAddresses}}{{end}}' \
+        "$resource_id")" || die "could not inspect Docker network IPAM configuration."
+    IFS='|' read -r ipam_count subnet ip_range gateway aux_count remainder <<< "$ipam"
+    [[ "$ipam_count" == 1 && -z "$ip_range" && "$aux_count" == 0 && -z "$remainder" \
+        && "$subnet" =~ ^[0-9A-Fa-f:.]+/[0-9]{1,3}$ \
+        && "$gateway" =~ ^[0-9A-Fa-f:.]+$ && "$gateway" != 0.0.0.0 && "$gateway" != :: ]] \
+        || die "Docker network ${logical_name} has an unsafe or ambiguous IPAM allocation."
+
+    physical_name="$(docker_resource_name network "$resource_id")" \
+        || die "could not inspect Docker network physical name."
+    network_id="$("${docker_command[@]}" network inspect --format '{{.Id}}' "$resource_id")" \
+        || die "could not inspect Docker network ID."
+    [[ "$physical_name" == "${project_name}_${logical_name}" \
+        && "$network_id" =~ ^[0-9a-f]{64}$ ]] \
+        || die "Docker network ${logical_name} has a malformed physical identity."
+    endpoints="$("${docker_command[@]}" network inspect --format \
+        '{{range $id, $endpoint := .Containers}}{{printf "%s|%s|%s|%s|%s|%s\n" $id $endpoint.Name $endpoint.EndpointID $endpoint.MacAddress $endpoint.IPv4Address $endpoint.IPv6Address}}{{end}}' \
+        "$resource_id")" || die "could not inspect Docker network endpoint membership."
+    while IFS='|' read -r endpoint_container endpoint_name endpoint_id endpoint_mac endpoint_ipv4 endpoint_ipv6; do
+        [[ -n "$endpoint_container$endpoint_name$endpoint_id$endpoint_mac$endpoint_ipv4$endpoint_ipv6" ]] || continue
+        endpoint_count=$((endpoint_count + 1)); (( endpoint_count <= 256 )) \
+            || die "Docker network ${logical_name} has too many endpoints."
+        [[ "$endpoint_container" =~ ^[0-9a-f]{64}$ && "$endpoint_id" =~ ^[0-9a-f]{64}$ \
+            && "$endpoint_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ \
+            && "$endpoint_mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ \
+            && "$endpoint_ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]{1,2}$ \
+            && -z "$endpoint_ipv6" ]] \
+            || die "Docker network ${logical_name} has a malformed endpoint record."
+        endpoint_project="$(docker_resource_label container "$endpoint_container" com.docker.compose.project)" \
+            || die "Docker network ${logical_name} contains an unattested endpoint."
+        endpoint_installation="$(docker_resource_label container "$endpoint_container" com.backupsheep.installation-id)" \
+            || die "Docker network ${logical_name} contains an unattested endpoint identity."
+        endpoint_service="$(docker_resource_label container "$endpoint_container" com.docker.compose.service)" \
+            || die "Docker network ${logical_name} contains an unattested endpoint service."
+        endpoint_working_dir="$(docker_resource_label container "$endpoint_container" com.docker.compose.project.working_dir)" \
+            || die "Docker network ${logical_name} contains an unattested endpoint source."
+        [[ "$endpoint_project" == "$project_name" && "$endpoint_installation" == "$installation_id" \
+            && "$endpoint_working_dir" == "$root_dir" ]] \
+            || die "Docker network ${logical_name} contains a foreign or wrong-installation endpoint."
+        service_network_is_authorized "$endpoint_service" "$logical_name" \
+            || die "Docker network ${logical_name} contains a service outside its reviewed topology."
+        container_name="$("${docker_command[@]}" inspect --format '{{.Name}}' "$endpoint_container")" \
+            || die "could not inspect Docker network endpoint container name."
+        container_name="${container_name#/}"
+        [[ "$container_name" == "$endpoint_name" ]] \
+            || die "Docker network ${logical_name} endpoint name disagrees with its container."
+        endpoint_state="$("${docker_command[@]}" inspect --format \
+            "{{with index .NetworkSettings.Networks \"${physical_name}\"}}{{.NetworkID}}|{{.EndpointID}}|{{.Gateway}}|{{.IPAddress}}|{{.IPPrefixLen}}|{{.MacAddress}}|{{len .Links}}{{else}}||||||-1{{end}}" \
+            "$endpoint_container")" || die "could not inspect container-side Docker network endpoint."
+        IFS='|' read -r container_network_id container_endpoint_id container_gateway container_ip container_prefix container_mac links <<< "$endpoint_state"
+        [[ "$container_network_id" == "$network_id" && "$container_endpoint_id" == "$endpoint_id" \
+            && "${container_ip}/${container_prefix}" == "$endpoint_ipv4" \
+            && "$container_gateway" == "$gateway" && "$container_mac" == "$endpoint_mac" \
+            && "$links" == 0 ]] \
+            || die "Docker network ${logical_name} endpoint state disagrees across Engine views."
+        aliases="$("${docker_command[@]}" inspect --format \
+            "{{with index .NetworkSettings.Networks \"${physical_name}\"}}{{range .Aliases}}{{println .}}{{end}}{{end}}" \
+            "$endpoint_container" | LC_ALL=C sort)" || die "could not inspect Docker network endpoint aliases."
+        expected_aliases="$(printf '%s\n%s\n' "$container_name" "$endpoint_service" | LC_ALL=C sort -u)"
+        [[ "$aliases" == "$expected_aliases" ]] \
+            || die "Docker network ${logical_name} endpoint aliases drifted from the reviewed topology."
+        actual_endpoint_ids+="${endpoint_container}"$'\n'
+    done <<< "$endpoints"
+    # Prove both directions of membership. Merely validating the endpoints that
+    # Docker reports would miss a detached expected container; merely validating
+    # each container's network list would miss a foreign endpoint. The project
+    # inventory is dynamically scoped from validate_compose_project_ownership.
+    for existing_container in "${container_ids[@]}"; do
+        existing_service="$(docker_resource_label container "$existing_container" com.docker.compose.service)" \
+            || die "could not inspect existing container service while validating network membership."
+        service_network_is_authorized "$existing_service" "$logical_name" || continue
+        existing_full_id="$("${docker_command[@]}" inspect --format '{{.Id}}' "$existing_container")" \
+            || die "could not inspect existing container ID while validating network membership."
+        [[ "$existing_full_id" =~ ^[0-9a-f]{64}$ ]] \
+            || die "existing container has a malformed full ID during network validation."
+        expected_endpoint_ids+="${existing_full_id}"$'\n'
+    done
+    actual_endpoint_ids="$(printf '%s' "$actual_endpoint_ids" | LC_ALL=C sort)"
+    expected_endpoint_ids="$(printf '%s' "$expected_endpoint_ids" | LC_ALL=C sort)"
+    [[ "$actual_endpoint_ids" == "$expected_endpoint_ids" ]] \
+        || die "Docker network ${logical_name} complete endpoint set differs from the reviewed existing-container topology."
+}
+
+validate_volume_runtime_policy() {
+    local resource_id="$1" logical_name="$2" physical_name="$3" state="" driver="" options="" scope="" mountpoint=""
+    state="$("${docker_command[@]}" volume inspect --format \
+        '{{.Driver}}|{{len .Options}}|{{.Scope}}|{{.Mountpoint}}' "$resource_id")" \
+        || die "could not inspect Docker volume runtime policy."
+    IFS='|' read -r driver options scope mountpoint <<< "$state"
+    [[ "$driver" == "local" && "$options" == "0" && "$scope" == "local" \
+        && "$mountpoint" == /*/volumes/"${physical_name}"/_data \
+        && "$mountpoint" != *[[:cntrl:]]* ]] \
+        || die "Docker volume ${logical_name} has an unsafe driver, bind option, scope, or mountpoint."
+    if printf '%s' "${volume_mountpoint_map-}" | grep -Fxq -- "${physical_name}|${mountpoint}"; then
+        return
+    fi
+    ! printf '%s' "${volume_mountpoint_map-}" | awk -F'|' -v physical="$physical_name" \
+        '$1 == physical { found=1 } END { exit(found ? 0 : 1) }' \
+        || die "Docker volume ${logical_name} returned conflicting physical mountpoint witnesses."
+    volume_mountpoint_map+="${physical_name}|${mountpoint}"$'\n'
 }
 
 parse_rendered_resource_map() {
@@ -1353,8 +3065,10 @@ validate_compose_project_ownership() {
     local available_networks=""
     local available_volumes=""
     local rendered_model=""
+    local rendered_model_json=""
     local network_map=""
     local volume_map=""
+    local volume_mountpoint_map=""
     local all_network_names=""
     local all_volume_names=""
     local retired_ssh_trust_name="${project_name}_ssh_trust"
@@ -1369,6 +3083,9 @@ validate_compose_project_ownership() {
     local volume_count=0
     local identity_volume_count=0
     local legacy_container_identity_count=0
+    local container_service_inventory=""
+    local duplicate_service=""
+    local oneoff_label=""
     local container_listing=""
     local network_listing=""
     local volume_listing=""
@@ -1378,6 +3095,10 @@ validate_compose_project_ownership() {
 
     rendered_model="$("${compose_command[@]}" --profile operations config)" \
         || die "could not render the reviewed Compose model."
+    rendered_model_json="$("${compose_command[@]}" --profile operations config --format json)" \
+        || die "could not render the reviewed Compose JSON model."
+    [[ -n "$rendered_model_json" && ${#rendered_model_json} -le 2097151 ]] \
+        || die "reviewed Compose JSON model is empty or exceeds the bounded parser limit."
     network_map="$(parse_rendered_resource_map networks "$rendered_model")" \
         || die "could not prove canonical non-external Compose network names."
     volume_map="$(parse_rendered_resource_map volumes "$rendered_model")" \
@@ -1536,6 +3257,21 @@ validate_compose_project_ownership() {
             fi
             grep -Fxq -- "$logical_name" <<< "$available_services" \
                 || die "Compose project ${project_name} has an unexpected service container: ${logical_name}."
+            oneoff_label="$(docker_resource_label container "$resource_id" com.docker.compose.oneoff)" \
+                || die "could not inspect a Compose container one-off label."
+            case "$oneoff_label" in
+                ""|False|false|FALSE|0) ;;
+                True|true|TRUE|1)
+                    case "$logical_name" in
+                        app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs)
+                            die "an egress-backed Compose one-off for ${logical_name} still exists; exact runtime cardinality cannot be proved."
+                            ;;
+                        *) die "Compose project ${project_name} has a stranded one-off container for ${logical_name}; exact runtime cardinality cannot be proved." ;;
+                    esac
+                    ;;
+                *) die "Compose project ${project_name} has a malformed one-off lifecycle label." ;;
+            esac
+            container_service_inventory+="${logical_name}"$'\n'
             resource_installation_id="$(docker_resource_label container "$resource_id" com.backupsheep.installation-id)" \
                 || die "could not inspect a Compose container installation identity."
             if [[ -z "$resource_installation_id" ]]; then
@@ -1545,6 +3281,21 @@ validate_compose_project_ownership() {
                     || die "Compose project ${project_name} has a container with a different BackupSheep installation identity."
             fi
         done
+        duplicate_service="$(printf '%s' "$container_service_inventory" | awk '
+            NF != 1 { exit 41 }
+            { count[$1]++ }
+            END {
+                for (service in count) {
+                    maximum = (service ~ /^worker-(cloud|database|files|storage|logs)$/) ? 32 : 1
+                    if (count[service] > maximum) {
+                        print service "|" count[service] "|" maximum
+                        exit
+                    }
+                }
+            }
+        ')" || die "could not validate Compose service cardinality."
+        [[ -z "$duplicate_service" ]] \
+            || die "Compose service ${duplicate_service%%|*} exceeds its exact reviewed container cardinality (${duplicate_service#*|})."
     fi
 
     # The empty sentinel volume is the durable ownership witness after `down`
@@ -2092,6 +3843,19 @@ fi
 
 # Validate the same fully rendered model immediately before every read or mutation.
 "${compose_command[@]}" config --quiet
+ownership_required="$mutating_command"
+case "$compose_subcommand" in
+    events|images|logs|port|ps|stats|top|volumes|wait) ownership_required=true ;;
+esac
+if [[ "$mutating_command" == true && "$rabbitmq_transition_target" == 4.3 ]]; then
+    # Prove the target model before source-container inspection so an approved
+    # storage override cannot substitute a different broker image and hide
+    # behind a later source-generation error.
+    expected_pinned_rabbitmq_image >/dev/null
+fi
+if [[ "$ownership_required" == true ]]; then
+    validate_compose_project_ownership "$volume_deletion_requested"
+fi
 if [[ "$mutating_command" == true ]]; then
     validate_compose_project_ownership "$volume_deletion_requested"
     validate_rabbitmq_data_generation
@@ -2135,7 +3899,20 @@ if [[ "$compose_subcommand" == "up" && "$up_broad_project" == true \
         esac
     done <<< "$existing_project_containers"
 fi
-"${compose_command[@]}" "${compose_arguments[@]}"
+assert_installation_ancestor_identity
+assert_installation_root_identity
+run_compose_in_isolated_group "${compose_command[@]}" "${compose_arguments[@]}"
+assert_installation_ancestor_identity
+assert_installation_root_identity
+if [[ "$dry_run_requested" == false ]]; then
+    case "$compose_subcommand" in
+        up|create)
+            # Compose may adopt or create resources after the preflight inventory.
+            # Re-attest the complete resulting project before returning success.
+            validate_compose_project_ownership false
+            ;;
+    esac
+fi
 if [[ "$rabbitmq_transition_target" == "4.3" ]]; then
     verify_and_record_completed_rabbitmq_43_transition
 fi

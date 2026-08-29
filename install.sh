@@ -152,6 +152,12 @@ MUTATION_LOCK_TOKEN=""
 MUTATION_LOCK_HELD=false
 POSTGRES_MIGRATION_REQUIRED=false
 POSTGRES_SOURCE_IMAGE_ID=""
+INSTALL_PARENT_IDENTITY=""
+INSTALL_ROOT_IDENTITY=""
+INSTALL_PARENT_ANCESTOR_IDENTITY=""
+INSTALL_ANCESTOR_IDENTITY=""
+ACTIVE_PID=""
+ACTIVE_OUTPUT_FILE=""
 
 log() {
     printf '\n==> %s\n' "$*"
@@ -265,15 +271,31 @@ also protected and root-owned.
 EOF
 }
 
-cleanup() {
-    local original_status=$?
+cleanup_installer_resources() {
     local cleanup_failed=false
+    local output_file="${ACTIVE_OUTPUT_FILE:-}"
 
-    trap - EXIT
+    ACTIVE_OUTPUT_FILE=""
+    if [[ -n "$output_file" && -f "$output_file" && ! -L "$output_file" \
+          && "$(basename -- "$output_file")" == .backupsheep-command.* \
+          && "$(file_uid "$output_file" 2>/dev/null || true)" == "$EUID" \
+          && "$(file_links "$output_file" 2>/dev/null || true)" == "1" ]]; then
+        rm -f -- "$output_file" || cleanup_failed=true
+    elif [[ -n "$output_file" && ( -e "$output_file" || -L "$output_file" ) ]]; then
+        warn "Refusing to remove unattested command-output path: ${output_file}"
+        cleanup_failed=true
+    fi
     if [[ -n "$STAGING_DIR" && -d "$STAGING_DIR" ]]; then
         case "$(basename -- "$STAGING_DIR")" in
             .backupsheep-install.*)
-                rm -rf -- "$STAGING_DIR" || cleanup_failed=true
+                if [[ ! -L "$STAGING_DIR" \
+                      && "$(file_uid "$STAGING_DIR" 2>/dev/null || true)" == "$EUID" \
+                      && "$(file_mode "$STAGING_DIR" 2>/dev/null || true)" == "700" ]]; then
+                    rm -rf -- "$STAGING_DIR" || cleanup_failed=true
+                else
+                    warn "Refusing to remove unattested staging directory: ${STAGING_DIR}"
+                    cleanup_failed=true
+                fi
                 ;;
             *)
                 warn "Refusing to remove unexpected staging path: ${STAGING_DIR}"
@@ -282,13 +304,44 @@ cleanup() {
         esac
     fi
     release_mutation_lock || cleanup_failed=true
-    if [[ "$cleanup_failed" == true ]]; then
-        exit 74
-    fi
+    [[ "$cleanup_failed" == false ]]
+}
+
+cleanup() {
+    local original_status=$?
+    trap - HUP INT TERM EXIT
+    cleanup_installer_resources || {
+        [[ "$original_status" -ne 0 ]] || original_status=74
+    }
     exit "$original_status"
 }
 
-trap cleanup EXIT
+terminate_active_installer_group() {
+    local pid="${ACTIVE_PID:-}" grace=0 own_pgid=""
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { ACTIVE_PID=""; return 0; }
+    own_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$pid" == "$own_pgid" ]]; then
+        warn "Refusing to signal the installer's own process group."
+        ACTIVE_PID=""
+        return 1
+    fi
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 -- "-$pid" 2>/dev/null && (( grace < 5 )); do
+        sleep 1
+        grace=$((grace + 1))
+    done
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    ACTIVE_PID=""
+}
+
+handle_installer_signal() {
+    local interrupted_status="$1"
+    trap - HUP INT TERM EXIT
+    terminate_active_installer_group || true
+    cleanup_installer_resources >/dev/null 2>&1 || true
+    exit "$interrupted_status"
+}
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -347,6 +400,10 @@ acquire_installation_mutation_lock() {
         die "Another installer/wrapper mutation is active, or a stale fail-closed lock remains at ${MUTATION_LOCK_DIR}. Verify that no BackupSheep mutation is running before removing that exact lock manually."
     fi
     MUTATION_LOCK_HELD=true
+    trap cleanup EXIT
+    trap 'handle_installer_signal 129' HUP
+    trap 'handle_installer_signal 130' INT
+    trap 'handle_installer_signal 143' TERM
     MUTATION_LOCK_TOKEN="version=1;tool=install.sh;pid=$$;uid=${EUID}"
     chmod 0700 "$MUTATION_LOCK_DIR" \
         || die "Could not protect the new mutation lock directory."
@@ -363,6 +420,68 @@ acquire_installation_mutation_lock() {
         && "$(file_links "$MUTATION_LOCK_OWNER_FILE")" == "1" \
         && "$(<"$MUTATION_LOCK_OWNER_FILE")" == "$MUTATION_LOCK_TOKEN" ]] \
         || die "The new mutation-lock ownership witness failed validation."
+}
+
+run_installer_command() {
+    local timeout_seconds="$1" label="$2"
+    local elapsed=0 status=0 child_pgid="" child_state="" own_pgid="" had_monitor=false
+    shift 2
+    [[ "$timeout_seconds" =~ ^[1-9][0-9]{0,4}$ ]] \
+        || die "Invalid timeout for ${label}."
+    [[ $# -gt 0 ]] || die "No command was provided for ${label}."
+    case "$-" in *m*) had_monitor=true ;; esac
+    set -m
+    "$@" &
+    ACTIVE_PID=$!
+    [[ "$had_monitor" == true ]] || set +m
+    child_pgid="$(ps -o pgid= -p "$ACTIVE_PID" 2>/dev/null | tr -d '[:space:]' || true)"
+    own_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$child_pgid" != "$ACTIVE_PID" || "$child_pgid" == "$own_pgid" ]]; then
+        child_state="$(ps -o stat= -p "$ACTIVE_PID" 2>/dev/null | tr -d '[:space:]' || true)"
+        if ! kill -0 "$ACTIVE_PID" 2>/dev/null || [[ -z "$child_state" || "$child_state" == Z* ]]; then
+            if wait "$ACTIVE_PID"; then status=0; else status=$?; fi
+            ACTIVE_PID=""
+            return "$status"
+        fi
+        terminate_active_installer_group || true
+        die "Could not isolate ${label} in a dedicated process group."
+    fi
+    while kill -0 -- "-$ACTIVE_PID" 2>/dev/null && (( elapsed < timeout_seconds )); do
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    if kill -0 -- "-$ACTIVE_PID" 2>/dev/null; then
+        warn "${label} exceeded its ${timeout_seconds}-second wall-clock deadline."
+        terminate_active_installer_group || true
+        return 124
+    fi
+    if wait "$ACTIVE_PID"; then status=0; else status=$?; fi
+    ACTIVE_PID=""
+    return "$status"
+}
+
+run_installer_capture() {
+    local timeout_seconds="$1" label="$2" target_name="$3" output_file="" status=0
+    shift 3
+    [[ "$target_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+        || die "Invalid capture target for ${label}."
+    output_file="$(mktemp "$(dirname -- "$INSTALL_DIR")/.backupsheep-command.XXXXXXXX")" \
+        || die "Could not allocate protected output for ${label}."
+    chmod 0600 "$output_file" || die "Could not protect output for ${label}."
+    ACTIVE_OUTPUT_FILE="$output_file"
+    run_installer_command "$timeout_seconds" "$label" "$@" >"$output_file" || status=$?
+    if [[ "$status" -eq 0 ]]; then
+        [[ -f "$output_file" && ! -L "$output_file" \
+            && "$(file_uid "$output_file")" == "$EUID" \
+            && "$(file_mode "$output_file")" == "600" \
+            && "$(file_links "$output_file")" == "1" \
+            && "$(file_size "$output_file")" -le 65536 ]] \
+            || die "Captured output for ${label} failed validation."
+        printf -v "$target_name" '%s' "$(<"$output_file")"
+    fi
+    rm -f -- "$output_file" || die "Could not remove captured output for ${label}."
+    ACTIVE_OUTPUT_FILE=""
+    return "$status"
 }
 
 atomic_move_new() {
@@ -720,11 +839,16 @@ validate_install_dir() {
     local unresolved_suffix=""
     local path_component=""
     local physical_ancestor=""
+    local install_path_regex='^/[A-Za-z0-9._/@+ -]+$'
 
     [[ "$INSTALL_DIR" == /* && "$INSTALL_DIR" != "/" ]] \
         || die "--install-dir must be an absolute path other than /."
     [[ "$INSTALL_DIR" != *$'\n'* && "$INSTALL_DIR" != *$'\r'* && "$INSTALL_DIR" != *$'\t'* ]] \
         || die "--install-dir cannot contain control characters."
+    [[ "$INSTALL_DIR" != *','* && "$INSTALL_DIR" != *'|'* ]] \
+        || die "--install-dir cannot contain a comma or pipe because Docker mount, Compose label, and attestation grammars use them as delimiters."
+    [[ "$INSTALL_DIR" =~ $install_path_regex ]] \
+        || die "--install-dir contains characters outside the reviewed Docker mount and attestation grammar."
 
     # BSD realpath has neither GNU -m nor a portable way to canonicalize a path
     # that does not exist yet. Resolve the nearest existing ancestor physically,
@@ -812,16 +936,30 @@ validate_approved_compose_file() {
 validate_docker_access() {
     local engine_version=""
     local compose_version=""
+    local selected_context=""
 
-    "$DOCKER_BIN" info >/dev/null 2>&1 \
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        [[ -z "${DOCKER_CONTEXT-}" ]] \
+            || die "Signed-release mode rejects DOCKER_CONTEXT; select an exact daemon with DOCKER_HOST and reviewed TLS inputs."
+        run_installer_capture 30 "Docker context selection probe" selected_context \
+            "$DOCKER_BIN" context show 2>/dev/null \
+            || die "Could not determine the exact Docker context used by the installer."
+        [[ "$selected_context" == default || -n "${DOCKER_HOST-}" ]] \
+            || die "Signed-release mode requires the default Docker context or an explicit DOCKER_HOST so every verification phase targets one daemon."
+    fi
+
+    run_installer_command 30 "Docker daemon availability probe" \
+        "$DOCKER_BIN" info >/dev/null 2>&1 \
         || die "The Docker daemon is unavailable to the effective invoking UID. Install/configure Docker on the host, then retry."
-    engine_version="$("$DOCKER_BIN" version --format '{{.Server.Version}}' 2>/dev/null)" \
+    run_installer_capture 30 "Docker Engine version probe" engine_version \
+        "$DOCKER_BIN" version --format '{{.Server.Version}}' 2>/dev/null \
         || die "Could not read the Docker Engine server version from the selected daemon."
     if ! semver_at_least "$engine_version" "28.0.0"; then
         die "Docker Engine 28.0.0 or newer is required by the isolated-network model (found: ${engine_version:-unparseable}). Upgrade the operator-managed Docker host, then retry."
     fi
 
-    compose_version="$("$DOCKER_BIN" compose version --short 2>/dev/null)" \
+    run_installer_capture 30 "Docker Compose version probe" compose_version \
+        "$DOCKER_BIN" compose version --short 2>/dev/null \
         || die "Docker Compose is unavailable. Install the Compose plugin on the host, then retry."
     if ! semver_at_least "$compose_version" "2.33.1"; then
         die "Docker Compose 2.33.1 or newer is required for the reviewed network routing model (found: ${compose_version:-unparseable}). Upgrade the operator-managed Compose plugin, then retry."
@@ -957,6 +1095,11 @@ validate_checkout() {
     require_regular_checkout_file .env_sample
     require_regular_checkout_file install.sh
     require_regular_checkout_file backupsheep-compose
+    require_regular_checkout_file deploy/release/consume-signed-release.sh
+    require_regular_checkout_file deploy/release/signed-release.compose.yml
+    require_regular_checkout_file deploy/release/sigstore-trusted-root.json
+    require_regular_checkout_file deploy/runtime/compose-json.awk
+    require_regular_checkout_file deploy/release-policy.json
     require_regular_checkout_file deploy/postgres/entrypoint.sh
     require_regular_checkout_file deploy/postgres/storage-witness.sh
     require_regular_checkout_file deploy/postgres/source-identity-contract.sh
@@ -990,7 +1133,13 @@ clone_exact_commit() {
     log "Fetching immutable BackupSheep commit ${INSTALL_REF}"
     git_safe -C "$STAGING_DIR" init --quiet
     git_safe -C "$STAGING_DIR" remote add origin "$REPOSITORY_URL"
-    git_safe -C "$STAGING_DIR" -c protocol.version=2 fetch --quiet --depth=1 --no-tags origin "$INSTALL_REF"
+    run_installer_command 300 "immutable Git fetch" git_safe \
+        -C "$STAGING_DIR" \
+        -c protocol.version=2 \
+        -c http.lowSpeedLimit=1024 \
+        -c http.lowSpeedTime=30 \
+        fetch --quiet --depth=1 --no-tags origin "$INSTALL_REF" \
+        || die "The immutable Git fetch failed or exceeded its wall-clock deadline."
     fetched_commit="$(git_safe -C "$STAGING_DIR" rev-parse --verify 'FETCH_HEAD^{commit}')"
     [[ "$fetched_commit" == "$INSTALL_REF" ]] \
         || die "The fetched commit (${fetched_commit}) does not match requested commit ${INSTALL_REF}."
@@ -2559,6 +2708,238 @@ sha256_file() {
     printf '%s' "$digest"
 }
 
+release_evidence_value() {
+    local path="$1"
+    local key="$2"
+    local value=""
+    local count=""
+
+    count="$(awk -v prefix="${key}=" 'index($0, prefix) == 1 { count++ } END { print count + 0 }' "$path")"
+    [[ "$count" == "1" ]] || die "Signed-release evidence key ${key} is absent or duplicated."
+    value="$(awk -v prefix="${key}=" 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1) }' "$path")"
+    [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] \
+        || die "Signed-release evidence key ${key} is malformed."
+    printf '%s' "$value"
+}
+
+validate_release_evidence_files() {
+    local evidence_dir="${INSTALL_DIR}/.release-evidence"
+    local name=""
+    local path=""
+    local entry=""
+    local count=0
+
+    [[ -d "$evidence_dir" && ! -L "$evidence_dir" \
+        && "$(file_uid "$evidence_dir")" == "$EUID" \
+        && "$(file_mode "$evidence_dir")" == "700" ]] \
+        || die "Signed-release evidence directory must be owner-only and non-symlink."
+    for name in \
+        backupsheep-release-descriptor-v1.txt \
+        backupsheep-release-descriptor-v1.sigstore.json \
+        release-manifest.json \
+        local-images.txt; do
+        path="${evidence_dir}/${name}"
+        [[ -f "$path" && ! -L "$path" \
+            && "$(file_uid "$path")" == "$EUID" \
+            && "$(file_mode "$path")" == "600" \
+            && "$(file_links "$path")" == "1" ]] \
+            || die "Signed-release evidence ${name} must be an owner-only regular file without hard links."
+    done
+    while IFS= read -r -d '' entry; do
+        count=$((count + 1))
+        case "$(basename -- "$entry")" in
+            backupsheep-release-descriptor-v1.txt|backupsheep-release-descriptor-v1.sigstore.json|release-manifest.json|local-images.txt) ;;
+            *) die "Signed-release evidence contains an unexpected entry." ;;
+        esac
+    done < <(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print0)
+    [[ "$count" -eq 4 ]] || die "Signed-release evidence must contain exactly four control files."
+}
+
+validate_requested_image_mode_against_existing() {
+    local configured_mode=""
+    local configured_tag=""
+    local configured_commit=""
+
+    ENV_FILE="${INSTALL_DIR}/.env"
+    [[ -e "$ENV_FILE" || -L "$ENV_FILE" ]] || return 0
+    validate_env_file
+    configured_mode="$(read_env_value BACKUPSHEEP_IMAGE_MODE)"
+    [[ -n "$configured_mode" ]] || configured_mode="local-build"
+    if [[ "$IMAGE_MODE" == "local-build" \
+        && ( -e "${INSTALL_DIR}/.release-request" || -L "${INSTALL_DIR}/.release-request" ) ]]; then
+        die "A signed-release request witness exists; local-build mode cannot consume or discard it. Retry the exact signed request."
+    fi
+    if [[ "$IMAGE_MODE" == "signed-release" && "$configured_mode" == "local-build" \
+        && ( -e "${INSTALL_DIR}/.release-request" || -L "${INSTALL_DIR}/.release-request" ) ]]; then
+        validate_release_request_witness
+        [[ -z "$(read_env_value BACKUPSHEEP_RELEASE_TAG)" \
+            && -z "$(read_env_value BACKUPSHEEP_RELEASE_SOURCE_COMMIT)" \
+            && -z "$(read_env_value BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256)" \
+            && -z "$(read_env_value BACKUPSHEEP_RELEASE_APP_IMAGE)" \
+            && -z "$(read_env_value BACKUPSHEEP_RELEASE_POSTGRES_IMAGE)" \
+            && -z "$(read_env_value BACKUPSHEEP_RELEASE_EGRESS_IMAGE)" \
+            && "$(read_env_value BACKUPSHEEP_IMAGE)" == "backupsheep:local" \
+            && "$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)" == "backupsheep-postgres:local" \
+            && "$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)" == "backupsheep-egress:local" ]] \
+            || die "Interrupted signed-release request found non-pristine image-source fields."
+        return 0
+    fi
+    [[ "$configured_mode" == "$IMAGE_MODE" ]] \
+        || die "Existing installation image mode is ${configured_mode}; mode changes require a separately reviewed fresh project or rollback procedure."
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        configured_tag="$(read_env_value BACKUPSHEEP_RELEASE_TAG)"
+        configured_commit="$(read_env_value BACKUPSHEEP_RELEASE_SOURCE_COMMIT)"
+        [[ "$configured_tag" == "$RELEASE_TAG" && "$configured_commit" == "$INSTALL_REF" ]] \
+            || die "Existing signed-release tag/source commit does not match this exact request."
+    fi
+}
+
+prepare_image_source() {
+    local consumer="${INSTALL_DIR}/deploy/release/consume-signed-release.sh"
+    if [[ "$IMAGE_MODE" == "local-build" ]]; then
+        [[ ! -e "${INSTALL_DIR}/.release-request" && ! -L "${INSTALL_DIR}/.release-request" ]] \
+            || die "A signed-release request witness exists; retry the exact signed request."
+        [[ ! -e "${INSTALL_DIR}/.release-evidence" && ! -L "${INSTALL_DIR}/.release-evidence" ]] \
+            || die "Signed-release evidence exists but local-build mode was requested; select the exact release tag or use the reviewed rollback procedure."
+        return
+    fi
+    prepare_release_request_witness
+    log "Verifying signed descriptor and official image digests for ${RELEASE_TAG}"
+    run_installer_command 7200 "signed-release verification and digest pulls" "$consumer" \
+        --tag "$RELEASE_TAG" \
+        --commit "$INSTALL_REF" \
+        --install-dir "$INSTALL_DIR" \
+        --docker "$DOCKER_BIN" \
+        || die "Signed-release verification failed or exceeded its wall-clock deadline."
+    validate_release_evidence_files
+}
+
+configure_image_source() {
+    local descriptor="${INSTALL_DIR}/.release-evidence/backupsheep-release-descriptor-v1.txt"
+    local expected_mode="$IMAGE_MODE"
+    local expected_tag=""
+    local expected_commit=""
+    local expected_descriptor_digest=""
+    local expected_app="backupsheep:${INSTALL_REF}"
+    local expected_postgres="backupsheep-postgres:${INSTALL_REF}"
+    local expected_egress="backupsheep-egress:${INSTALL_REF}"
+    local key=""
+    local expected=""
+    local current=""
+    local contract=""
+
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        validate_release_evidence_files
+        expected_tag="$RELEASE_TAG"
+        expected_commit="$INSTALL_REF"
+        expected_descriptor_digest="sha256:$(sha256_file "$descriptor")"
+        expected_app="$(release_evidence_value "$descriptor" app_image)"
+        expected_postgres="$(release_evidence_value "$descriptor" postgres_image)"
+        expected_egress="$(release_evidence_value "$descriptor" egress_image)"
+    fi
+
+    while IFS='|' read -r key expected; do
+        current="$(read_env_value "$key")"
+        if [[ "$ENV_WAS_PRESENT" == true ]]; then
+            if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+                [[ "$current" == "$expected" ]] \
+                    || die "${key} does not match the installation's immutable ${IMAGE_MODE} image-source contract."
+            else
+                case "$key" in
+                    BACKUPSHEEP_IMAGE_MODE)
+                        [[ -z "$current" || "$current" == "local-build" ]] \
+                            || die "Existing installation is not in local-build mode."
+                        ;;
+                    BACKUPSHEEP_RELEASE_*)
+                        [[ -z "$current" ]] \
+                            || die "${key} must be blank in local-build mode."
+                        ;;
+                    BACKUPSHEEP_IMAGE|BACKUPSHEEP_POSTGRES_IMAGE|BACKUPSHEEP_EGRESS_IMAGE)
+                        : # Preserve historical behavior: rebind local tags to --ref.
+                        ;;
+                esac
+            fi
+        fi
+        [[ "$key" =~ ^[A-Z0-9_]+$ && "$expected" != *$'\n'* && "$expected" != *$'\r'* \
+            && "$expected" != *"'"* && "$expected" != *'|'* && "$expected" != *$'\034'* ]] \
+            || die "Image-source contract contains an unsafe key or value."
+        contract+="${key}|${expected}"$'\034'
+    done <<EOF
+BACKUPSHEEP_IMAGE_MODE|${expected_mode}
+BACKUPSHEEP_RELEASE_TAG|${expected_tag}
+BACKUPSHEEP_RELEASE_SOURCE_COMMIT|${expected_commit}
+BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256|${expected_descriptor_digest}
+BACKUPSHEEP_RELEASE_APP_IMAGE|${expected_app/#backupsheep:${INSTALL_REF}/}
+BACKUPSHEEP_RELEASE_POSTGRES_IMAGE|${expected_postgres/#backupsheep-postgres:${INSTALL_REF}/}
+BACKUPSHEEP_RELEASE_EGRESS_IMAGE|${expected_egress/#backupsheep-egress:${INSTALL_REF}/}
+BACKUPSHEEP_IMAGE|${expected_app}
+BACKUPSHEEP_POSTGRES_IMAGE|${expected_postgres}
+BACKUPSHEEP_EGRESS_IMAGE|${expected_egress}
+EOF
+    set_image_source_contract_atomically "$contract"
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        validate_release_request_witness
+        rm -f -- "${INSTALL_DIR}/.release-request" || die "Could not remove completed signed-release request witness."
+        sync || die "Could not durably finalize the signed-release request witness."
+    fi
+}
+
+attest_local_release_image() {
+    local role="$1"
+    local reference="$2"
+    local expected_id=""
+    local actual_id=""
+    local repo_digest_output=""
+    local source_label=""
+    local revision_label=""
+    local version_label=""
+    local ids="${INSTALL_DIR}/.release-evidence/local-images.txt"
+
+    expected_id="$(release_evidence_value "$ids" "${role}_image_id")"
+    [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Persisted ${role} image ID is malformed."
+    repo_digest_output="$("$DOCKER_BIN" image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$reference")" \
+        || die "Verified ${role} image digest is no longer present locally."
+    grep -Fxq -- "$reference" <<< "$repo_digest_output" \
+        || die "Local ${role} image no longer exposes the verified official RepoDigest."
+    actual_id="$("$DOCKER_BIN" image inspect --format '{{.Id}}' "$reference")"
+    [[ "$actual_id" == "$expected_id" ]] || die "Local ${role} image ID changed after verification."
+    source_label="$("$DOCKER_BIN" image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$reference")"
+    revision_label="$("$DOCKER_BIN" image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$reference")"
+    version_label="$("$DOCKER_BIN" image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$reference")"
+    [[ "$source_label" == "https://github.com/bilal414/backupsheep" \
+        && "$revision_label" == "$INSTALL_REF" \
+        && "$version_label" == "$RELEASE_TAG" ]] \
+        || die "Local ${role} image provenance labels do not match the signed release."
+}
+
+attest_local_vendor_release_image() {
+    local role="$1" reference="$2" repo_digest="$3" expected_id="" actual_id="" repo_digests=""
+    expected_id="$(release_evidence_value "${INSTALL_DIR}/.release-evidence/local-images.txt" "${role}_image_id")"
+    [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Persisted ${role} image ID is malformed."
+    repo_digests="$("$DOCKER_BIN" image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$reference")" \
+        || die "Pinned ${role} image digest is no longer present locally."
+    grep -Fxq -- "$repo_digest" <<< "$repo_digests" || die "Local ${role} image no longer exposes its pinned RepoDigest."
+    actual_id="$("$DOCKER_BIN" image inspect --format '{{.Id}}' "$reference")"
+    [[ "$actual_id" == "$expected_id" ]] || die "Local ${role} image ID changed after verification."
+}
+
+validate_local_release_images() {
+    local descriptor="${INSTALL_DIR}/.release-evidence/backupsheep-release-descriptor-v1.txt"
+    [[ "$IMAGE_MODE" == "signed-release" ]] || return 0
+    validate_release_evidence_files
+    [[ "sha256:$(sha256_file "$descriptor")" == "$(read_env_value BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256)" ]] \
+        || die "Signed-release descriptor changed after verification."
+    attest_local_release_image app "$(read_env_value BACKUPSHEEP_IMAGE)"
+    attest_local_release_image postgres "$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
+    attest_local_release_image egress "$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
+    attest_local_vendor_release_image rabbit_current \
+        "rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7" \
+        "rabbitmq@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+    attest_local_vendor_release_image rabbit_upgrade \
+        "rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095" \
+        "rabbitmq@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+}
+
 configure_postgres_storage_generation() {
     local installation_id=""
     local state=""
@@ -3634,6 +4015,10 @@ validate_runtime_configuration() {
 
 compose() {
     (
+        assert_install_parent_identity
+        assert_install_root_identity
+        validate_env_file
+        validate_compose_model_settings
         local -a compose_environment=(
             /usr/bin/env -i
             "LC_ALL=C"
@@ -3641,6 +4026,7 @@ compose() {
             "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
             "COMPOSE_BAKE=false"
             "COMPOSE_EXPERIMENTAL=false"
+            "COMPOSE_MENU=false"
             "COMPOSE_REMOVE_ORPHANS=0"
         )
         local transport_variable=""
@@ -3648,6 +4034,9 @@ compose() {
 
         if [[ -n "$APPROVED_COMPOSE_FILE" ]]; then
             compose_model+=(-f "$APPROVED_COMPOSE_FILE")
+        fi
+        if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+            compose_model+=(-f "$INSTALL_DIR/deploy/release/signed-release.compose.yml")
         fi
 
         # Compose gives the invoking shell precedence over --env-file during
@@ -3657,41 +4046,44 @@ compose() {
         # bypass the configuration that was just parsed and validated above.
         # Preserve only Docker transport/credential-helper inputs and proxy/CA
         # settings needed to reach an intentionally selected daemon or registry.
-        for transport_variable in \
-            DOCKER_API_VERSION \
-            DOCKER_CERT_PATH \
-            DOCKER_CONFIG \
-            DOCKER_CONTEXT \
-            DOCKER_CUSTOM_HEADERS \
-            DOCKER_HOST \
-            DOCKER_TLS \
-            DOCKER_TLS_VERIFY \
-            SSH_AUTH_SOCK \
-            XDG_RUNTIME_DIR \
-            SSL_CERT_DIR \
-            SSL_CERT_FILE \
-            HTTP_PROXY \
-            HTTPS_PROXY \
-            NO_PROXY \
-            http_proxy \
-            https_proxy \
-            no_proxy; do
-            if [[ -n "${!transport_variable-}" ]]; then
-                compose_environment+=(
-                    "${transport_variable}=${!transport_variable}"
-                )
-            fi
-        done
+    for transport_variable in \
+        DOCKER_API_VERSION \
+        DOCKER_CERT_PATH \
+        DOCKER_CONFIG \
+        DOCKER_CONTEXT \
+        DOCKER_CUSTOM_HEADERS \
+        DOCKER_HOST \
+        DOCKER_TLS \
+        DOCKER_TLS_VERIFY \
+        SSH_AUTH_SOCK \
+        XDG_RUNTIME_DIR \
+        SSL_CERT_DIR \
+        SSL_CERT_FILE \
+        HTTP_PROXY \
+        HTTPS_PROXY \
+        NO_PROXY \
+        http_proxy \
+        https_proxy \
+        no_proxy; do
+        if [[ -n "${!transport_variable-}" ]]; then
+            compose_environment+=(
+                "${transport_variable}=${!transport_variable}"
+            )
+        fi
+    done
 
-        unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES
-        unset COMPOSE_REMOVE_ORPHANS
-        unset COMPOSE_PATH_SEPARATOR COMPOSE_DISABLE_ENV_FILE
+    unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES
+    unset COMPOSE_REMOVE_ORPHANS
+    unset COMPOSE_PATH_SEPARATOR COMPOSE_DISABLE_ENV_FILE
+    run_installer_command 3600 "Docker Compose operation" \
         "${compose_environment[@]}" "$DOCKER_BIN" compose \
             --project-name "$PROJECT_NAME" \
             --project-directory "$INSTALL_DIR" \
             --env-file "$ENV_FILE" \
             "${compose_model[@]}" \
             "$@"
+        assert_install_parent_identity
+        assert_install_root_identity
     )
 }
 
@@ -4721,6 +5113,10 @@ print_next_steps() {
 }
 
 main() {
+    trap cleanup EXIT
+    trap 'handle_installer_signal 129' HUP
+    trap 'handle_installer_signal 130' INT
+    trap 'handle_installer_signal 143' TERM
     parse_args "$@"
     validate_invocation_mode
     require_commands

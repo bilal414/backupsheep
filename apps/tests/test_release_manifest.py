@@ -1406,6 +1406,19 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertLess(archive_signature_position, promotion_position)
         self.assertLess(promotion_position, upload_position)
 
+    def test_consumer_policy_pins_first_party_cosign_verifier_by_version_and_digest(self):
+        self.assertEqual(self.policy["schema_version"], 3)
+        reference = self.policy["consumer"]["cosign_image"]["reference"]
+        self.assertRegex(
+            reference,
+            r"^ghcr\.io/bilal414/backupsheep-release-verifier@sha256:[0-9a-f]{64}$",
+        )
+        consumer_script = (
+            ROOT / "deploy/release/consume-signed-release.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(reference, consumer_script)
+        self.assertIn("--network none", consumer_script)
+
     def test_v2_descriptor_is_built_signed_verified_and_published(self):
         consumer = self.policy["consumer"]
         self.assertEqual(
