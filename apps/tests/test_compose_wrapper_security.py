@@ -4,6 +4,7 @@ import os
 import signal
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -207,7 +208,7 @@ ENVIRONMENT_KEYS = (
     "BACKUPSHEEP_POSTGRES_STORAGE_GENERATION",
     "BACKUPSHEEP_POSTGRES_STORAGE_INTENT", "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS",
     "COMPOSE_BAKE", "COMPOSE_ENV_FILES",
-    "COMPOSE_EXPERIMENTAL", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR",
+    "COMPOSE_EXPERIMENTAL", "COMPOSE_FILE", "COMPOSE_MENU", "COMPOSE_PATH_SEPARATOR",
     "COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME", "COMPOSE_REMOVE_ORPHANS",
     "BUILDX_BAKE_FILE", "BUILDKIT_PROGRESS", "DOCKER_BUILDKIT",
     "DOCKER_DEFAULT_PLATFORM", "DOCKER_CONTEXT", "DOCKER_HOST",
@@ -448,7 +449,7 @@ def find_resource(resources, identifier):
     raise KeyError(identifier)
 
 def inspect_value(resource, template):
-    label_match = re.search(r'index [^\"]*\"([^\"]+)\"', template)
+    label_match = re.search(r'index [^\"]*Labels[^\"]*\"([^\"]+)\"', template)
     if label_match:
         value = resource.get("labels", {}).get(label_match.group(1), "")
         marker = "__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__"
@@ -457,6 +458,8 @@ def inspect_value(resource, template):
         return value
     if template == "{{.Name}}":
         return resource.get("name", "")
+    if template == "{{.Id}}":
+        return resource.get("id", "a" * 64)
     if template == "{{.State.Status}}":
         return resource.get("state", "")
     if template == "{{if .State.Health}}{{.State.Health.Status}}{{end}}":
@@ -910,6 +913,11 @@ def handle_compose(arguments, state):
             time.sleep(0.01)
     if command == "config":
         if "--quiet" in command_arguments:
+            return
+        if "--hash" in command_arguments:
+            hash_index = command_arguments.index("--hash")
+            requested = command_arguments[hash_index + 1]
+            emit(f"{requested} {CONFIG_HASH}")
             return
         if "--services" in command_arguments:
             emit("\n".join(SERVICES))
@@ -1390,7 +1398,7 @@ class SecureComposeWrapperTests(TestCase):
         unsafe_directory = self.run_wrapper("config", "--quiet")
         self.assertNotEqual(unsafe_directory.returncode, 0)
         self.assertIn(
-            "installation directory must not be writable by group",
+            "installation path ancestor is attacker-writable",
             unsafe_directory.stderr,
         )
         self.root.chmod(0o700)
@@ -1424,6 +1432,7 @@ class SecureComposeWrapperTests(TestCase):
             "com.docker.compose.project.working_dir": str(self.root.resolve()),
             "com.docker.compose.project.config_files": str(self.base_file.resolve()),
             "com.docker.compose.service": service,
+            "com.docker.compose.config-hash": CONFIG_HASH,
         }
         if installation_id is not None:
             labels["com.backupsheep.installation-id"] = installation_id
@@ -1492,6 +1501,7 @@ class SecureComposeWrapperTests(TestCase):
             "com.docker.compose.project.working_dir": str(self.root.resolve()),
             "com.docker.compose.project.config_files": config_files,
             "com.docker.compose.service": "rabbitmq",
+            "com.docker.compose.config-hash": CONFIG_HASH,
         }
         if installation_id is not None:
             rabbit_labels["com.backupsheep.installation-id"] = installation_id
@@ -1642,6 +1652,31 @@ class SecureComposeWrapperTests(TestCase):
             with self.subTest(arguments=arguments):
                 self.assert_refused(arguments, "may not override")
 
+    def test_config_is_strictly_read_only_and_cannot_write_or_resolve_registry_digests(self):
+        for arguments in (
+            ("config", "--lock-image-digests"),
+            ("config", "--lock-image-digests=lock.yml"),
+            ("config", "--resolve-image-digests"),
+            ("config", "--resolve-image-digests=true"),
+            ("config", "--output", "rendered.yml"),
+            ("config", "--output=rendered.yml"),
+            ("config", "-o", "rendered.yml"),
+            ("config", "-orendered.yml"),
+            ("config", "unexpected-positional"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assert_refused(arguments, "unsupported config option")
+
+        for arguments in (
+            ("config", "--quiet"),
+            ("config", "--services"),
+            ("config", "--format", "json"),
+            ("config", "--format=yaml"),
+            ("config", "--no-interpolate", "--images"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.run_wrapper(*arguments, check=True)
+
     def test_volume_deletion_boolean_cluster_rm_and_rmi_forms_fail_closed(self):
         self.set_state(volumes={"sentinel": self.sentinel()})
         deletion_forms = (
@@ -1684,6 +1719,39 @@ class SecureComposeWrapperTests(TestCase):
             with self.subTest(key=key):
                 self.write_env(additional_lines=(f"{key}='attacker'",))
                 self.assert_refused(("config", "--quiet"), "forbidden Docker/Compose")
+
+    def test_model_shaping_environment_values_have_strict_resource_grammars(self):
+        invalid = (
+            ("BACKUPSHEEP_TMPFS_SIZE", "256m,exec,suid,dev", "integer size"),
+            ("POSTGRES_TMPFS_SIZE", "128m,exec", "integer size"),
+            ("RABBITMQ_TMPFS_SIZE", "0m", "integer size"),
+            ("BACKUPSHEEP_PIDS_LIMIT", "0", "reviewed resource range"),
+            ("POSTGRES_PIDS_LIMIT", "512.0", "canonical decimal integer"),
+            ("APP_CPU_LIMIT", "64.001", "canonical CPU value"),
+            ("WORKER_CLOUD_CPU_LIMIT", "nan", "canonical CPU value"),
+            ("APP_MEMORY_LIMIT", "99999999g", "reviewed resource range"),
+            ("BACKUPSHEEP_STOP_GRACE_PERIOD", "5m,exec", "canonical nonzero duration"),
+            ("BACKUPSHEEP_BIND_PORT", "8000/tcp", "canonical decimal integer"),
+            ("DOCKER_LOG_MAX_FILE", "21", "reviewed resource range"),
+        )
+        for key, value, message in invalid:
+            with self.subTest(key=key, value=value):
+                self.write_env(additional_lines=(f"{key}='{value}'",))
+                self.clear_events()
+                self.assert_refused(("config", "--quiet"), message)
+                self.assertEqual(self.events(), [])
+
+        self.write_env(
+            additional_lines=(
+                "BACKUPSHEEP_TMPFS_SIZE='256m'",
+                "POSTGRES_TMPFS_SIZE='128M'",
+                "RABBITMQ_TMPFS_SIZE='131072k'",
+                "APP_CPU_LIMIT='2.000'",
+                "APP_MEMORY_LIMIT='2048m'",
+                "BACKUPSHEEP_STOP_GRACE_PERIOD='300s'",
+            )
+        )
+        self.run_wrapper("config", "--quiet", check=True)
 
     def test_nul_bytes_in_env_are_rejected_before_parsing_or_docker(self):
         original = self.env_file.read_bytes()
@@ -2332,8 +2400,8 @@ class SecureComposeWrapperTests(TestCase):
             for event in self.raw_events("ps")
             if "volume=backupsheep_ssh_trust" in event["argv"]
         ]
-        self.assertEqual(len(attachment_checks), 1)
-        self.assertIn("--all", attachment_checks[0]["argv"])
+        self.assertEqual(len(attachment_checks), 2)
+        self.assertTrue(all("--all" in event["argv"] for event in attachment_checks))
 
         self.set_state(
             volumes={
@@ -2419,13 +2487,18 @@ class SecureComposeWrapperTests(TestCase):
                     for event in self.raw_events("ps")
                     if "volume=backupsheep_pgdata" in event["argv"]
                 ]
-                self.assertEqual(len(attachment_checks), 1)
-                self.assertIn("--all", attachment_checks[0]["argv"])
+                self.assertEqual(len(attachment_checks), 2)
+                self.assertTrue(
+                    all("--all" in event["argv"] for event in attachment_checks)
+                )
 
     def test_verified_sentinel_allows_only_exact_path_blank_identity_legacy_containers(self):
         legacy_app = self.owned_container("app", installation_id=None)
         self.set_state(
-            containers={"legacy-app": legacy_app},
+            containers={
+                "legacy-app": legacy_app,
+                "owned-guard": self.owned_guard("app-egress-guard"),
+            },
             volumes={"sentinel": self.sentinel()},
         )
         self.run_wrapper(*APP_PAIR_UP, check=True)
@@ -2452,7 +2525,10 @@ class SecureComposeWrapperTests(TestCase):
                 )
 
         self.set_state(
-            containers={"legacy-app": legacy_app},
+            containers={
+                "legacy-app": legacy_app,
+                "owned-guard": self.owned_guard("app-egress-guard"),
+            },
             volumes={"sentinel": self.sentinel(OTHER_INSTALLATION_ID)},
         )
         self.assert_refused(
@@ -3453,6 +3529,18 @@ release_mutation_lock
                 self.assert_refused(
                     arguments, "exec cannot override privilege, user, or environment"
                 )
+        for arguments in (
+            ("exec", "--detach", "app", "sleep", "30"),
+            ("exec", "--detach=true", "app", "sleep", "30"),
+            ("exec", "-d", "app", "sleep", "30"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assert_refused(arguments, "detached exec is refused")
+
+    def test_wait_down_project_is_always_refused(self):
+        for arguments in (("wait", "--down-project"), ("wait", "--down-project=true")):
+            with self.subTest(arguments=arguments):
+                self.assert_refused(arguments, "run a separately validated down command")
 
     def test_stateful_exec_forces_vendor_server_uids(self):
         for service, expected_user in (("db", "70:70"), ("rabbitmq", "rabbitmq")):
@@ -3495,6 +3583,17 @@ release_mutation_lock
         self.clear_events()
         self.run_wrapper("up", "--pull=never", check=True)
         self.assertTrue(self.compose_events("up"))
+
+    def test_compose_menu_is_disabled_and_cannot_trigger_sync_or_exec(self):
+        for arguments in (("up", "--menu"), ("up", "--menu=true")):
+            with self.subTest(arguments=arguments):
+                self.assert_refused(arguments, "Compose menu is refused")
+        self.clear_events()
+        self.run_wrapper("config", "--quiet", check=True)
+        compose_event = self.compose_events("config")[-1]
+        self.assertEqual(compose_event["env"]["COMPOSE_MENU"], "false")
+        source = self.wrapper.read_text(encoding="utf-8")
+        self.assertIn('"COMPOSE_MENU=false"', source)
 
     def test_scale_is_worker_only_bounded_and_not_a_direct_command(self):
         rejected = (

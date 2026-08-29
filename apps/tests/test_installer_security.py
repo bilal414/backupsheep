@@ -3,9 +3,11 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase
 
@@ -2854,6 +2856,16 @@ fi
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Docker/Compose control variable", result.stderr)
+        self.env_file.write_text(
+            "\n".join(
+                line
+                for line in self.env_file.read_text(encoding="utf-8").splitlines()
+                if not line.startswith("COMPOSE_REMOVE_ORPHANS=")
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.env_file.chmod(0o600)
 
         mock_docker = self.temp_dir / "mock-docker"
         mock_docker.write_text(
@@ -2873,10 +2885,14 @@ fi
 
         command = r'''
 source "$1"
-INSTALL_DIR=/srv/backupsheep
-ENV_FILE=/srv/backupsheep/.env
+INSTALL_DIR="$3"
+ENV_FILE="$3/.env"
 PROJECT_NAME=backupsheep
 DOCKER_BIN="$2"
+INSTALL_PARENT_IDENTITY="$(directory_inode_identity "$(dirname -- "$INSTALL_DIR")")"
+INSTALL_PARENT_ANCESTOR_IDENTITY="$(installation_ancestor_snapshot "$(dirname -- "$INSTALL_DIR")")"
+INSTALL_ROOT_IDENTITY="$(directory_inode_identity "$INSTALL_DIR")"
+INSTALL_ANCESTOR_IDENTITY="$(installation_ancestor_snapshot "$INSTALL_DIR")"
 compose config --quiet
 '''
         environment = os.environ.copy()
@@ -2897,6 +2913,7 @@ compose config --quiet
                 "installer-test",
                 str(INSTALLER),
                 str(mock_docker),
+                str(self.temp_dir),
             ],
             check=True,
             capture_output=True,

@@ -118,6 +118,9 @@ default_install_dir() {
 }
 
 INSTALL_REF=""
+IMAGE_MODE="local-build"
+IMAGE_MODE_WAS_EXPLICIT=false
+RELEASE_TAG=""
 INSTALL_DIR="$(default_install_dir)"
 INSTALL_DIR_WAS_EXPLICIT=false
 PUBLIC_HOST="localhost"
@@ -139,6 +142,7 @@ ARTIFACT_LOCAL_FILE_ROTATE_LANE=""
 ARTIFACT_LOCAL_FILE_ROTATE_EXPECTED_KEY_ID=""
 INSTALL_WAS_PRESENT=false
 ENV_WAS_PRESENT=false
+FRESH_CONFIG_PENDING=false
 ENV_FILE=""
 SECRETS_DIR=""
 APP_DOMAIN=""
@@ -188,6 +192,13 @@ Usage:
 Required:
   --ref COMMIT       Exact 40-character Git commit to install. Branches, tags and
                      abbreviated commits are intentionally rejected.
+
+Image source:
+  (default)          Build the three BackupSheep images locally from --ref.
+  --local-build      Explicitly select the default local-build mode.
+  --release-tag TAG  Consume only the signed official image digests for this exact
+                     v-prefixed SemVer tag. TAG and the signed descriptor must bind
+                     to --ref. No host package is installed.
 
 Options:
   --domain HOST       Accepted/public hostname or IPv4 address (default: localhost).
@@ -366,6 +377,86 @@ file_size() {
 file_identity() {
     stat -c '%d:%i:%s:%h:%u:%a' -- "$1" 2>/dev/null \
         || stat -f '%d:%i:%z:%l:%u:%Lp' -- "$1"
+}
+
+directory_inode_identity() {
+    stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' -- "$1"
+}
+
+validate_installation_ancestor_chain() {
+    local current="$1" parent="" owner="" mode=""
+    while :; do
+        [[ -d "$current" && ! -L "$current" ]] \
+            || die "Installation path ancestor must be a real directory: ${current}."
+        owner="$(file_uid "$current")"
+        mode="$(file_mode "$current")"
+        [[ "$owner" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{3,4}$ ]] \
+            || die "Could not attest installation path ancestor ${current}."
+        if (( EUID == 0 )); then
+            (( 10#$owner == 0 )) \
+                || die "A root invocation requires every installation path ancestor to be root-owned: ${current}."
+        else
+            (( 10#$owner == EUID || 10#$owner == 0 )) \
+                || die "Installation path ancestor is owned by an unrelated account: ${current}."
+        fi
+        if (( (8#$mode & 8#022) != 0 )); then
+            (( (8#$mode & 8#1000) != 0 && 10#$owner == 0 )) \
+                || die "Installation path ancestor is attacker-writable without a root-owned sticky boundary: ${current}."
+        fi
+        [[ "$current" == / ]] && break
+        parent="$(dirname -- "$current")"
+        [[ "$parent" != "$current" ]] || die "Could not walk installation path ancestors."
+        current="$parent"
+    done
+}
+
+installation_ancestor_snapshot() {
+    local current="$1" parent="" identity="" owner="" mode=""
+    while :; do
+        [[ -d "$current" && ! -L "$current" ]] || return 1
+        identity="$(directory_inode_identity "$current")" || return 1
+        owner="$(file_uid "$current")" || return 1
+        mode="$(file_mode "$current")" || return 1
+        [[ "$identity" =~ ^[0-9]+:[0-9]+$ && "$owner" =~ ^[0-9]+$ \
+            && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+        printf '%s|%s|%s|%s\n' "$current" "$identity" "$owner" "$mode"
+        [[ "$current" == / ]] && break
+        parent="$(dirname -- "$current")"
+        [[ "$parent" != "$current" ]] || return 1
+        current="$parent"
+    done
+}
+
+assert_install_parent_ancestor_identity() {
+    local parent_dir="" current_snapshot=""
+    parent_dir="$(dirname -- "$INSTALL_DIR")"
+    current_snapshot="$(installation_ancestor_snapshot "$parent_dir")" \
+        || die "Could not re-attest the installation parent ancestor chain."
+    [[ "$current_snapshot" == "$INSTALL_PARENT_ANCESTOR_IDENTITY" ]] \
+        || die "Installation parent ancestor identity or permissions changed during validation."
+}
+
+assert_install_ancestor_identity() {
+    local current_snapshot=""
+    current_snapshot="$(installation_ancestor_snapshot "$INSTALL_DIR")" \
+        || die "Could not re-attest the full installation path ancestor chain."
+    [[ "$current_snapshot" == "$INSTALL_ANCESTOR_IDENTITY" ]] \
+        || die "Installation path ancestor identity or permissions changed during validation."
+}
+
+assert_install_parent_identity() {
+    local parent_dir="$(dirname -- "$INSTALL_DIR")"
+    [[ -d "$parent_dir" && ! -L "$parent_dir" \
+        && "$(directory_inode_identity "$parent_dir")" == "$INSTALL_PARENT_IDENTITY" ]] \
+        || die "Installation parent identity changed during validation."
+    assert_install_parent_ancestor_identity
+}
+
+assert_install_root_identity() {
+    [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" \
+        && "$(directory_inode_identity "$INSTALL_DIR")" == "$INSTALL_ROOT_IDENTITY" ]] \
+        || die "Installation directory identity changed during validation."
+    assert_install_ancestor_identity
 }
 
 release_mutation_lock() {
@@ -567,6 +658,22 @@ parse_args() {
             --branch)
                 die "Mutable branches and tags are not accepted. Use --ref with the exact 40-character commit."
                 ;;
+            --local-build)
+                [[ "$IMAGE_MODE_WAS_EXPLICIT" != true ]] \
+                    || die "the image-source mode may be specified only once"
+                IMAGE_MODE="local-build"
+                IMAGE_MODE_WAS_EXPLICIT=true
+                shift
+                ;;
+            --release-tag)
+                [[ $# -ge 2 ]] || die "--release-tag requires an exact v-prefixed SemVer tag"
+                [[ "$IMAGE_MODE_WAS_EXPLICIT" != true ]] \
+                    || die "the image-source mode may be specified only once"
+                IMAGE_MODE="signed-release"
+                IMAGE_MODE_WAS_EXPLICIT=true
+                RELEASE_TAG="$2"
+                shift 2
+                ;;
             --domain)
                 [[ $# -ge 2 ]] || die "--domain requires a hostname or IPv4 address"
                 PUBLIC_HOST="$2"
@@ -676,6 +783,14 @@ parse_args() {
 
     [[ "$SKIP_START" != true || "$ENABLE_OPERATIONS" != true ]] \
         || die "--skip-start and --enable-operations cannot be used together"
+    [[ "$IMAGE_MODE" == "local-build" || "$IMAGE_MODE" == "signed-release" ]] \
+        || die "unsupported image-source mode"
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] \
+            || die "--release-tag must be an exact v-prefixed SemVer tag"
+    else
+        [[ -z "$RELEASE_TAG" ]] || die "a release tag is valid only in signed-release mode"
+    fi
     [[ "$ROTATE_CELERY_SIGNING_KEYS" != true || "$ENABLE_OPERATIONS" != true ]] \
         || die "--rotate-celery-signing-keys and --enable-operations cannot be used together"
     [[ -z "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" || "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" == database \
@@ -762,13 +877,17 @@ require_commands() {
     local command_name=""
     local -a required=(
         awk basename chmod cmp cp dirname docker env find git grep install mkdir mktemp mv od
-        ln realpath rm rmdir sed ssh-keygen stat sync tr
+        ln ps realpath rm rmdir sed ssh-keygen stat sync tr
     )
 
     for command_name in "${required[@]}"; do
         command_exists "$command_name" \
             || die "Required command '${command_name}' is unavailable. Host prerequisites are the operator's responsibility."
     done
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        command_exists curl \
+            || die "Required command 'curl' is unavailable for signed-release asset download. No host package was installed."
+    fi
 
     GIT_BIN="$(command -v git)"
     DOCKER_BIN="$(command -v docker)"
@@ -889,10 +1008,22 @@ validate_install_dir() {
         || die "The installation parent must be owned by the effective invoking UID: ${parent_dir}"
     (( (8#$parent_mode & 8#022) == 0 )) \
         || die "The installation parent must not be group- or world-writable: ${parent_dir}"
+    validate_installation_ancestor_chain "$parent_dir"
+    INSTALL_PARENT_IDENTITY="$(directory_inode_identity "$parent_dir")"
+    [[ "$INSTALL_PARENT_IDENTITY" =~ ^[0-9]+:[0-9]+$ ]] \
+        || die "Could not capture the installation parent identity."
+    INSTALL_PARENT_ANCESTOR_IDENTITY="$(installation_ancestor_snapshot "$parent_dir")" \
+        || die "Could not capture the installation parent ancestor chain."
 
     if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
         [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] \
             || die "The installation target must be a real directory, not a file or symlink."
+        validate_installation_ancestor_chain "$INSTALL_DIR"
+        INSTALL_ROOT_IDENTITY="$(directory_inode_identity "$INSTALL_DIR")"
+        [[ "$INSTALL_ROOT_IDENTITY" =~ ^[0-9]+:[0-9]+$ ]] \
+            || die "Could not capture the installation directory identity."
+        INSTALL_ANCESTOR_IDENTITY="$(installation_ancestor_snapshot "$INSTALL_DIR")" \
+            || die "Could not capture the full installation path ancestor chain."
         INSTALL_WAS_PRESENT=true
     fi
 }
@@ -901,6 +1032,13 @@ validate_approved_compose_file() {
     local expected_override="${INSTALL_DIR}/docker-compose.override.yml"
     local approved_real=""
     local mode=""
+
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        [[ ! -e "$expected_override" && ! -L "$expected_override" \
+            && -z "$APPROVED_COMPOSE_FILE" ]] \
+            || die "Signed-release mode rejects docker-compose.override.yml; its runtime model must byte-match the signed source commit."
+        return
+    fi
 
     if [[ -e "$expected_override" || -L "$expected_override" ]]; then
         [[ -n "$APPROVED_COMPOSE_FILE" ]] \
@@ -1049,6 +1187,14 @@ validate_checkout_cleanliness() {
             && { [[ "$relative_path" == ".env" ]] \
                 || [[ "$relative_path" == ".secrets/" ]] \
                 || [[ "$relative_path" == .secrets/* ]] \
+                || [[ "$relative_path" == ".release-evidence/" ]] \
+                || [[ "$relative_path" == .release-evidence/* ]] \
+                || [[ "$relative_path" =~ ^\.release-evidence\.(download|verify)\.[A-Za-z0-9]{8}/ ]] \
+                || [[ "$relative_path" == ".env.image-source.new" ]] \
+                || [[ "$relative_path" == ".env.fresh.new" ]] \
+                || [[ "$relative_path" =~ ^\.env-(update|artifact-policy)\.[A-Za-z0-9]{8}$ ]] \
+                || [[ "$relative_path" == ".release-request" ]] \
+                || [[ "$relative_path" == ".release-request.new" ]] \
                 || { [[ "$relative_path" == "docker-compose.override.yml" ]] \
                     && [[ "$APPROVED_COMPOSE_FILE" == "${INSTALL_DIR}/docker-compose.override.yml" ]]; }; }; then
             continue
@@ -1106,6 +1252,8 @@ validate_checkout() {
     require_regular_checkout_file deploy/postgres/migrate-runtime.sh
     [[ -x "$INSTALL_DIR/backupsheep-compose" ]] \
         || die "The reviewed backupsheep-compose wrapper must remain executable."
+    [[ -x "$INSTALL_DIR/deploy/release/consume-signed-release.sh" ]] \
+        || die "The reviewed signed-release consumer must remain executable."
 
     if ! grep -Eq '^/?\.secrets/?$' "$INSTALL_DIR/.dockerignore"; then
         [[ "$(awk '/^[[:space:]]*($|#)/ { next } { print; exit }' "$INSTALL_DIR/.dockerignore")" == "**" ]] \
@@ -1126,6 +1274,7 @@ clone_exact_commit() {
     local fetched_commit=""
 
     parent_dir="$(dirname -- "$INSTALL_DIR")"
+    assert_install_parent_identity
     STAGING_DIR="$(mktemp -d "${parent_dir}/.backupsheep-install.XXXXXXXX")" \
         || die "Could not create a protected staging directory under ${parent_dir}."
     chmod 0700 "$STAGING_DIR"
@@ -1145,20 +1294,31 @@ clone_exact_commit() {
         || die "The fetched commit (${fetched_commit}) does not match requested commit ${INSTALL_REF}."
     git_safe -C "$STAGING_DIR" checkout --quiet --detach "$INSTALL_REF"
 
+    assert_install_parent_identity
     atomic_move_new "$STAGING_DIR" "$INSTALL_DIR" \
         || die "Could not atomically publish the verified checkout at ${INSTALL_DIR}."
     STAGING_DIR=""
     chmod 0700 "$INSTALL_DIR"
+    validate_installation_ancestor_chain "$INSTALL_DIR"
+    INSTALL_ROOT_IDENTITY="$(directory_inode_identity "$INSTALL_DIR")"
+    [[ "$INSTALL_ROOT_IDENTITY" =~ ^[0-9]+:[0-9]+$ ]] \
+        || die "Could not capture the installed checkout identity."
+    INSTALL_ANCESTOR_IDENTITY="$(installation_ancestor_snapshot "$INSTALL_DIR")" \
+        || die "Could not capture the installed checkout ancestor chain."
     validate_checkout
 }
 
 clone_or_validate_repository() {
     if [[ "$INSTALL_WAS_PRESENT" == true ]]; then
+        assert_install_parent_identity
+        assert_install_root_identity
         log "Validating existing installation at ${INSTALL_DIR}"
         validate_checkout
     else
         clone_exact_commit
     fi
+    assert_install_parent_identity
+    assert_install_root_identity
 }
 
 random_hex() {
@@ -2648,10 +2808,11 @@ configure_rabbitmq_identity_generation() {
             || die "--migrate-rabbitmq-identities is valid only for an existing legacy installation."
         [[ "$ROTATE_CELERY_SIGNING_KEYS" != true ]] \
             || die "--rotate-celery-signing-keys is valid only for an existing generation-2/3 installation."
-        set_env_value RABBITMQ_LEGACY_USER backupsheep
-        set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2-pending-fresh
-        set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 3-pending-fresh
-        set_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION 1
+        set_env_values_atomically \
+            RABBITMQ_LEGACY_USER backupsheep \
+            BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2-pending-fresh \
+            BACKUPSHEEP_CELERY_SECURITY_GENERATION 3-pending-fresh \
+            BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION 1
         generation=2-pending-fresh
         security_generation=3-pending-fresh
         signing_generation=1
@@ -2744,10 +2905,11 @@ configure_rabbitmq_identity_generation() {
                 validate_rabbitmq_role_name RABBITMQ_USER "$legacy_user"
                 [[ "$legacy_user" != guest ]] \
                     || die "The RabbitMQ guest account cannot be migrated as a stock identity."
-                set_env_value RABBITMQ_LEGACY_USER "$legacy_user"
-                set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2-pending-legacy
-                set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 3-pending-legacy
-                set_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION 1
+                set_env_values_atomically \
+                    RABBITMQ_LEGACY_USER "$legacy_user" \
+                    BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2-pending-legacy \
+                    BACKUPSHEEP_CELERY_SECURITY_GENERATION 3-pending-legacy \
+                    BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION 1
                 security_generation=3-pending-legacy
                 signing_generation=1
             else
@@ -2788,10 +2950,11 @@ configure_rabbitmq_identity_generation() {
     validate_distinct_rabbitmq_passwords
 
     # These witnesses are last: no partial secret/key set can look deployable.
-    set_env_value RABBITMQ_USER backupsheep_app
-    set_env_value RABBITMQ_VHOST backupsheep
-    set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2
-    set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 3
+    set_env_values_atomically \
+        RABBITMQ_USER backupsheep_app \
+        RABBITMQ_VHOST backupsheep \
+        BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2 \
+        BACKUPSHEEP_CELERY_SECURITY_GENERATION 3
 }
 
 finalize_celery_signing_rotation() {
@@ -4078,35 +4241,44 @@ configure_egress_policy_generation() {
 }
 
 create_or_migrate_configuration() {
+    local bootstrap_state="" secret_path="" secret_name=""
     ENV_FILE="${INSTALL_DIR}/.env"
     SECRETS_DIR="${INSTALL_DIR}/.secrets"
 
     if [[ -e "$ENV_FILE" || -L "$ENV_FILE" ]]; then
         ENV_WAS_PRESENT=true
         validate_env_file
-        log "Preserving and validating existing configuration"
+        bootstrap_state="$(read_env_value BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE)"
+        case "$bootstrap_state" in
+            pending-fresh)
+                FRESH_CONFIG_PENDING=true
+                [[ "$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)" == "3-pending-fresh" ]] \
+                    || die "Pending fresh configuration lost its database generation witness."
+                [[ "$MIGRATE_DATABASE_IDENTITIES" == false \
+                    && "$MIGRATE_RABBITMQ_IDENTITIES" == false \
+                    && "$MIGRATE_STAGING_LAYOUT" == false \
+                    && "$MIGRATE_EGRESS_POLICY" == false \
+                    && "$MIGRATE_POSTGRES_RUNTIME" == false \
+                    && "$MIGRATE_ARTIFACT_KEY_PROVIDER_EMPTY" == false \
+                    && "$ROTATE_CELERY_SIGNING_KEYS" == false \
+                    && -z "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" ]] \
+                    || die "A pending fresh configuration cannot be combined with migration or rotation flags."
+                log "Resuming the exact pending fresh configuration"
+                ;;
+            complete|'')
+                FRESH_CONFIG_PENDING=false
+                log "Preserving and validating existing configuration"
+                ;;
+            *) die "Unsupported BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE=${bootstrap_state}." ;;
+        esac
     else
         [[ -z "$ARTIFACT_LOCAL_FILE_ROTATE_LANE" ]] \
             || die "--rotate-artifact-keyring is valid only after a completed installation exists."
         log "Creating a protected production configuration"
-        cp -- "$INSTALL_DIR/.env_sample" "$ENV_FILE"
-        chmod 0600 "$ENV_FILE"
-        validate_env_file
-        # Establish the resumable fresh database-identity state before any later
-        # secret generation. A terminated first run can then distinguish itself
-        # from a real legacy installation without guessing from partial files.
-        set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "3-pending-fresh"
-        set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION "2-pending-fresh"
-        set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION "3-pending-fresh"
-        set_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION "1"
-        set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
-        set_env_value BACKUPSHEEP_POSTGRES_IMAGE "backupsheep-postgres:${INSTALL_REF}"
-        set_env_value BACKUPSHEEP_EGRESS_IMAGE "backupsheep-egress:${INSTALL_REF}"
-        set_env_value DJANGO_ALLOWED_HOSTS "${PUBLIC_HOST},localhost,127.0.0.1"
-        set_env_value APP_DOMAIN "$APP_DOMAIN"
-        set_env_value APP_PROTOCOL "http://"
-        set_env_value DJANGO_HTTPS "false"
-        set_env_value BACKUPSHEEP_BIND_ADDRESS "127.0.0.1"
+        # Publish every fresh-generation marker, endpoint, and image-source field
+        # in one durable rename. A kill can leave either no .env or the complete
+        # initial contract, never a legacy-looking prefix of the fresh state.
+        create_fresh_env_atomically
     fi
 
     if [[ -e "$SECRETS_DIR" || -L "$SECRETS_DIR" ]]; then
@@ -4122,7 +4294,18 @@ create_or_migrate_configuration() {
     configure_egress_policy_generation
     configure_artifact_key_policy
 
-    if [[ "$ENV_WAS_PRESENT" == true ]]; then
+    if [[ "$FRESH_CONFIG_PENDING" == true ]]; then
+        for secret_name in django_secret_key onboarding_token; do
+            secret_path="${SECRETS_DIR}/${secret_name}"
+            if [[ -e "$secret_path" || -L "$secret_path" ]]; then
+                validate_secret_file "$secret_path"
+            elif [[ "$secret_name" == django_secret_key ]]; then
+                write_secret_file "$secret_name" "$(random_hex 48)"
+            else
+                write_secret_file "$secret_name" "$(random_hex 32)"
+            fi
+        done
+    elif [[ "$ENV_WAS_PRESENT" == true ]]; then
         reject_connection_url_overrides
         migrate_one_secret DJANGO_SECRET_KEY django_secret_key false
         migrate_one_secret ONBOARDING_INSTALL_TOKEN onboarding_token true
@@ -4135,11 +4318,19 @@ create_or_migrate_configuration() {
     prepare_managed_ssh_private_keys
 
     validate_secret_dir
-    set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
-    set_env_value BACKUPSHEEP_POSTGRES_IMAGE "backupsheep-postgres:${INSTALL_REF}"
-    set_env_value BACKUPSHEEP_EGRESS_IMAGE "backupsheep-egress:${INSTALL_REF}"
+    configure_image_source
     rewrite_env_for_secret_files
     validate_env_file
+    if [[ "$FRESH_CONFIG_PENDING" == true ]]; then
+        # The pending marker is the commit record: first force every prior env
+        # rename and secret directory entry to durable storage, then publish the
+        # completed state atomically, and finally flush that commit record.
+        sync || die "Could not durably stage the completed fresh configuration."
+        set_env_value BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE complete
+        sync || die "Could not durably complete the fresh configuration witness."
+        FRESH_CONFIG_PENDING=false
+        validate_env_file
+    fi
 }
 
 validate_runtime_configuration() {
@@ -4187,15 +4378,36 @@ validate_runtime_configuration() {
         database_role_variables+=("$variable")
     done
 
-    value="$(read_env_value BACKUPSHEEP_IMAGE)"
-    [[ "$value" == "backupsheep:${INSTALL_REF}" ]] \
-        || die "BACKUPSHEEP_IMAGE must be backupsheep:${INSTALL_REF} for this verified source build."
-    value="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
-    [[ "$value" == "backupsheep-postgres:${INSTALL_REF}" ]] \
-        || die "BACKUPSHEEP_POSTGRES_IMAGE must be backupsheep-postgres:${INSTALL_REF} for this verified source build."
-    value="$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
-    [[ "$value" == "backupsheep-egress:${INSTALL_REF}" ]] \
-        || die "BACKUPSHEEP_EGRESS_IMAGE must be backupsheep-egress:${INSTALL_REF} for this verified source build."
+    value="$(read_env_value BACKUPSHEEP_IMAGE_MODE)"
+    [[ "$value" == "$IMAGE_MODE" ]] || die "BACKUPSHEEP_IMAGE_MODE does not match this installer invocation."
+    if [[ "$IMAGE_MODE" == "local-build" ]]; then
+        value="$(read_env_value BACKUPSHEEP_IMAGE)"
+        [[ "$value" == "backupsheep:${INSTALL_REF}" ]] \
+            || die "BACKUPSHEEP_IMAGE must bind to this verified source build."
+        value="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
+        [[ "$value" == "backupsheep-postgres:${INSTALL_REF}" ]] \
+            || die "BACKUPSHEEP_POSTGRES_IMAGE must be backupsheep-postgres:${INSTALL_REF} for this verified source build."
+        value="$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
+        [[ "$value" == "backupsheep-egress:${INSTALL_REF}" ]] \
+            || die "BACKUPSHEEP_EGRESS_IMAGE must bind to this verified source build."
+        for key in BACKUPSHEEP_RELEASE_TAG BACKUPSHEEP_RELEASE_SOURCE_COMMIT \
+            BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256 BACKUPSHEEP_RELEASE_APP_IMAGE \
+            BACKUPSHEEP_RELEASE_POSTGRES_IMAGE BACKUPSHEEP_RELEASE_EGRESS_IMAGE \
+            BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE; do
+            [[ -z "$(read_env_value "$key")" ]] || die "${key} must be blank in local-build mode."
+        done
+    else
+        [[ "$(read_env_value BACKUPSHEEP_RELEASE_TAG)" == "$RELEASE_TAG" \
+            && "$(read_env_value BACKUPSHEEP_RELEASE_SOURCE_COMMIT)" == "$INSTALL_REF" ]] \
+            || die "Signed-release tag/source commit does not match this invocation."
+        [[ "$(read_env_value BACKUPSHEEP_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_APP_IMAGE)" \
+            && "$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_POSTGRES_IMAGE)" \
+            && "$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_EGRESS_IMAGE)" \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE)" \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE)" ]] \
+            || die "Runtime image references do not match the signed descriptor bindings."
+        validate_local_release_images
+    fi
     value="$(read_env_value BACKUPSHEEP_BIND_ADDRESS)"
     [[ -z "$value" || "$value" == "127.0.0.1" ]] \
         || die "The installer only starts a loopback-bound web service. Set BACKUPSHEEP_BIND_ADDRESS=127.0.0.1."
@@ -4371,39 +4583,141 @@ validate_runtime_configuration() {
     done
 }
 
+env_value_or_default() {
+    local key="$1" default_value="$2" value=""
+    value="$(read_env_value "$key")"
+    [[ -n "$value" ]] || value="$default_value"
+    printf '%s' "$value"
+}
+
+validate_integer_setting() {
+    local key="$1" default_value="$2" minimum="$3" maximum="$4" value=""
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^(0|[1-9][0-9]{0,8})$ ]] \
+        || die "${key} must be a canonical decimal integer."
+    (( 10#$value >= minimum && 10#$value <= maximum )) \
+        || die "${key} is outside its reviewed resource range."
+}
+
+validate_size_setting() {
+    local key="$1" default_value="$2" minimum_bytes="$3" maximum_bytes="$4"
+    local value="" magnitude="" unit="" multiplier=0 bytes=0
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^([1-9][0-9]{0,7})([kKmMgG])$ ]] \
+        || die "${key} must be an integer size with a single k, m, or g suffix."
+    magnitude="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+        k|K) multiplier=1024 ;;
+        m|M) multiplier=1048576 ;;
+        g|G) multiplier=1073741824 ;;
+        *) die "${key} has an unsupported size suffix." ;;
+    esac
+    bytes=$((10#$magnitude * multiplier))
+    (( bytes >= minimum_bytes && bytes <= maximum_bytes )) \
+        || die "${key} is outside its reviewed resource range."
+}
+
+validate_cpu_setting() {
+    local key="$1" default_value="$2" value=""
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^([0-9]|[1-5][0-9]|6[0-4])(\.[0-9]{1,3})?$ \
+        && "$value" != 0 && "$value" != 0.0 && "$value" != 0.00 && "$value" != 0.000 \
+        && ! "$value" =~ ^64\.[0-9]*[1-9][0-9]*$ ]] \
+        || die "${key} must be a canonical CPU value greater than zero and no more than 64."
+}
+
+validate_duration_setting() {
+    local key="$1" default_value="$2" value="" magnitude="" unit="" seconds=0
+    value="$(env_value_or_default "$key" "$default_value")"
+    [[ "$value" =~ ^([1-9][0-9]{0,3})([smh])$ ]] \
+        || die "${key} must be a canonical nonzero duration in seconds, minutes, or hours."
+    magnitude="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+        s) seconds=$((10#$magnitude)) ;;
+        m) seconds=$((10#$magnitude * 60)) ;;
+        h) seconds=$((10#$magnitude * 3600)) ;;
+    esac
+    (( seconds >= 1 && seconds <= 3600 )) \
+        || die "${key} is outside its reviewed resource range."
+}
+
+validate_compose_model_settings() {
+    local key="" default_value=""
+    validate_integer_setting BACKUPSHEEP_BIND_PORT 8000 1 65535
+    validate_integer_setting BACKUPSHEEP_PIDS_LIMIT 512 32 4096
+    validate_integer_setting POSTGRES_PIDS_LIMIT 256 32 4096
+    validate_integer_setting RABBITMQ_PIDS_LIMIT 512 32 4096
+    validate_integer_setting DOCKER_LOG_MAX_FILE 5 1 20
+
+    validate_size_setting DOCKER_LOG_MAX_SIZE 10m 1048576 1073741824
+    validate_size_setting BACKUPSHEEP_TMPFS_SIZE 256m 16777216 2147483648
+    validate_size_setting POSTGRES_TMPFS_SIZE 128m 16777216 2147483648
+    validate_size_setting RABBITMQ_TMPFS_SIZE 128m 16777216 2147483648
+    validate_size_setting POSTGRES_SHM_SIZE 256m 16777216 8589934592
+    for key in POSTGRES_MEMORY_LIMIT RABBITMQ_MEMORY_LIMIT DB_PROVISION_MEMORY_LIMIT \
+        MIGRATE_MEMORY_LIMIT DB_SEAL_MEMORY_LIMIT PREFLIGHT_MEMORY_LIMIT \
+        APP_MEMORY_LIMIT WORKER_CLOUD_MEMORY_LIMIT WORKER_DATABASE_MEMORY_LIMIT \
+        WORKER_FILES_MEMORY_LIMIT WORKER_STORAGE_MEMORY_LIMIT \
+        WORKER_LOGS_MEMORY_LIMIT BEAT_MEMORY_LIMIT; do
+        case "$key" in
+            POSTGRES_MEMORY_LIMIT|APP_MEMORY_LIMIT|MIGRATE_MEMORY_LIMIT|WORKER_DATABASE_MEMORY_LIMIT|WORKER_FILES_MEMORY_LIMIT|WORKER_STORAGE_MEMORY_LIMIT) default_value=2g ;;
+            RABBITMQ_MEMORY_LIMIT|DB_SEAL_MEMORY_LIMIT|PREFLIGHT_MEMORY_LIMIT|WORKER_CLOUD_MEMORY_LIMIT) default_value=1g ;;
+            *) default_value=512m ;;
+        esac
+        validate_size_setting "$key" "$default_value" 67108864 68719476736
+    done
+
+    for key in POSTGRES_CPU_LIMIT RABBITMQ_CPU_LIMIT DB_PROVISION_CPU_LIMIT \
+        MIGRATE_CPU_LIMIT DB_SEAL_CPU_LIMIT PREFLIGHT_CPU_LIMIT APP_CPU_LIMIT \
+        WORKER_CLOUD_CPU_LIMIT WORKER_DATABASE_CPU_LIMIT WORKER_FILES_CPU_LIMIT \
+        WORKER_STORAGE_CPU_LIMIT WORKER_LOGS_CPU_LIMIT BEAT_CPU_LIMIT; do
+        case "$key" in
+            POSTGRES_CPU_LIMIT|MIGRATE_CPU_LIMIT|APP_CPU_LIMIT|WORKER_CLOUD_CPU_LIMIT|WORKER_DATABASE_CPU_LIMIT|WORKER_FILES_CPU_LIMIT|WORKER_STORAGE_CPU_LIMIT) default_value=2.0 ;;
+            RABBITMQ_CPU_LIMIT|DB_SEAL_CPU_LIMIT|PREFLIGHT_CPU_LIMIT|WORKER_LOGS_CPU_LIMIT) default_value=1.0 ;;
+            *) default_value=0.5 ;;
+        esac
+        validate_cpu_setting "$key" "$default_value"
+    done
+
+    validate_duration_setting BACKUPSHEEP_STOP_GRACE_PERIOD 5m
+    validate_duration_setting POSTGRES_STOP_GRACE_PERIOD 1m
+    validate_duration_setting RABBITMQ_STOP_GRACE_PERIOD 3m
+}
+
 compose() {
-    (
-        assert_install_parent_identity
-        assert_install_root_identity
-        validate_env_file
-        validate_compose_model_settings
-        local -a compose_environment=(
-            /usr/bin/env -i
-            "LC_ALL=C"
-            "HOME=${HOME-}"
-            "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
-            "COMPOSE_BAKE=false"
-            "COMPOSE_EXPERIMENTAL=false"
-            "COMPOSE_MENU=false"
-            "COMPOSE_REMOVE_ORPHANS=0"
-        )
-        local transport_variable=""
-        local -a compose_model=(-f "$INSTALL_DIR/docker-compose.yml")
+    assert_install_parent_identity
+    assert_install_root_identity
+    validate_env_file
+    validate_compose_model_settings
+    local -a compose_environment=(
+        /usr/bin/env -i
+        "LC_ALL=C"
+        "HOME=${HOME-}"
+        "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
+        "COMPOSE_BAKE=false"
+        "COMPOSE_EXPERIMENTAL=false"
+        "COMPOSE_MENU=false"
+        "COMPOSE_REMOVE_ORPHANS=0"
+    )
+    local transport_variable=""
+    local -a compose_model=(-f "$INSTALL_DIR/docker-compose.yml")
 
-        if [[ -n "$APPROVED_COMPOSE_FILE" ]]; then
-            compose_model+=(-f "$APPROVED_COMPOSE_FILE")
-        fi
-        if [[ "$IMAGE_MODE" == "signed-release" ]]; then
-            compose_model+=(-f "$INSTALL_DIR/deploy/release/signed-release.compose.yml")
-        fi
+    if [[ -n "$APPROVED_COMPOSE_FILE" ]]; then
+        compose_model+=(-f "$APPROVED_COMPOSE_FILE")
+    fi
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        compose_model+=(-f "$INSTALL_DIR/deploy/release/signed-release.compose.yml")
+    fi
 
-        # Compose gives the invoking shell precedence over --env-file during
-        # interpolation. Do not let an ambient BACKUPSHEEP_BIND_ADDRESS,
-        # BACKUPSHEEP_IMAGE, BACKUPSHEEP_POSTGRES_IMAGE, secret path, resource
-        # limit, or future model value
-        # bypass the configuration that was just parsed and validated above.
-        # Preserve only Docker transport/credential-helper inputs and proxy/CA
-        # settings needed to reach an intentionally selected daemon or registry.
+    # Compose gives the invoking shell precedence over --env-file during
+    # interpolation. Do not let an ambient BACKUPSHEEP_BIND_ADDRESS,
+    # BACKUPSHEEP_IMAGE, BACKUPSHEEP_POSTGRES_IMAGE, secret path, resource
+    # limit, or future model value bypass the configuration that was just parsed
+    # and validated above. Preserve only Docker transport/credential-helper
+    # inputs and proxy/CA settings needed to reach an intentionally selected
+    # daemon or registry.
     for transport_variable in \
         DOCKER_API_VERSION \
         DOCKER_CERT_PATH \
@@ -4435,20 +4749,22 @@ compose() {
     unset COMPOSE_PATH_SEPARATOR COMPOSE_DISABLE_ENV_FILE
     run_installer_command 3600 "Docker Compose operation" \
         "${compose_environment[@]}" "$DOCKER_BIN" compose \
-            --project-name "$PROJECT_NAME" \
-            --project-directory "$INSTALL_DIR" \
-            --env-file "$ENV_FILE" \
-            "${compose_model[@]}" \
-            "$@"
-        assert_install_parent_identity
-        assert_install_root_identity
-    )
+        --project-name "$PROJECT_NAME" \
+        --project-directory "$INSTALL_DIR" \
+        --env-file "$ENV_FILE" \
+        "${compose_model[@]}" \
+        "$@"
+    assert_install_parent_identity
+    assert_install_root_identity
 }
 
 expected_compose_config_files() {
     printf '%s' "${INSTALL_DIR}/docker-compose.yml"
     if [[ -n "$APPROVED_COMPOSE_FILE" ]]; then
         printf ',%s' "$APPROVED_COMPOSE_FILE"
+    fi
+    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+        printf ',%s' "$INSTALL_DIR/deploy/release/signed-release.compose.yml"
     fi
 }
 
@@ -5290,8 +5606,13 @@ complete_postgres_storage_generation() {
 start_core() {
     stop_operations
 
-    log "Building the reviewed PostgreSQL, application, and egress-guard images"
-    compose build --pull db app app-egress-guard
+    if [[ "$IMAGE_MODE" == "local-build" ]]; then
+        log "Building the reviewed PostgreSQL, application, and egress-guard images"
+        compose build --pull db app app-egress-guard
+    else
+        log "Re-attesting the pre-pulled signed-release image IDs and immutable digests"
+        validate_local_release_images
+    fi
     run_postgres_runtime_migration
 
     log "Preparing and sealing database identities while every long-lived lane remains blocked"
@@ -5536,6 +5857,12 @@ main() {
     validate_approved_compose_file
     validate_docker_access
     clone_or_validate_repository
+    reconcile_installer_temp_residues
+    reconcile_fresh_env_candidate
+    reconcile_release_request_candidate
+    reconcile_image_source_contract_candidate
+    validate_requested_image_mode_against_existing
+    prepare_image_source
     create_or_migrate_configuration
     # A signing-key rotation is prepared fail closed in configuration first. Prove
     # the exact Compose ownership model before inspecting or mutating its broker,

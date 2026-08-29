@@ -88,6 +88,68 @@ file_size() {
     stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1"
 }
 
+file_identity() {
+    stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1"
+}
+
+validate_installation_ancestor_chain() {
+    local current="$1" parent="" mode="" owner=""
+    while :; do
+        [[ -d "$current" && ! -L "$current" ]] \
+            || die "installation path ancestor must be a real directory: ${current}."
+        mode="$(file_mode "$current")"
+        owner="$(file_uid "$current")"
+        [[ "$mode" =~ ^[0-7]{3,4}$ && "$owner" =~ ^[0-9]+$ ]] \
+            || die "could not attest installation path ancestor: ${current}."
+        if (( EUID == 0 )); then
+            (( 10#$owner == 0 )) \
+                || die "a root invocation requires every installation path ancestor to be root-owned: ${current}."
+        else
+            (( 10#$owner == EUID || 10#$owner == 0 )) \
+                || die "installation path ancestor is owned by an unrelated account: ${current}."
+        fi
+        if (( (8#$mode & 8#022) != 0 )); then
+            (( (8#$mode & 8#1000) != 0 && 10#$owner == 0 )) \
+                || die "installation path ancestor is attacker-writable without a root-owned sticky boundary: ${current}."
+        fi
+        [[ "$current" == / ]] && break
+        parent="$(dirname -- "$current")"
+        [[ "$parent" != "$current" ]] || die "could not walk installation path ancestors."
+        current="$parent"
+    done
+}
+
+installation_ancestor_snapshot() {
+    local current="$1" parent="" identity="" owner="" mode=""
+    while :; do
+        [[ -d "$current" && ! -L "$current" ]] || return 1
+        identity="$(file_identity "$current")" || return 1
+        owner="$(file_uid "$current")" || return 1
+        mode="$(file_mode "$current")" || return 1
+        [[ "$identity" =~ ^[0-9]+:[0-9]+$ && "$owner" =~ ^[0-9]+$ \
+            && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+        printf '%s|%s|%s|%s\n' "$current" "$identity" "$owner" "$mode"
+        [[ "$current" == / ]] && break
+        parent="$(dirname -- "$current")"
+        [[ "$parent" != "$current" ]] || return 1
+        current="$parent"
+    done
+}
+
+assert_installation_ancestor_identity() {
+    local current_snapshot=""
+    current_snapshot="$(installation_ancestor_snapshot "$root_dir")" \
+        || die "could not re-attest the full installation path ancestor chain."
+    [[ "$current_snapshot" == "$installation_ancestor_identity" ]] \
+        || die "installation path ancestor identity or permissions changed during validation."
+}
+
+assert_installation_root_identity() {
+    [[ -d "$root_dir" && ! -L "$root_dir" \
+        && "$(file_identity "$root_dir")" == "$installation_root_identity" ]] \
+        || die "installation directory identity changed during validation."
+}
+
 release_mutation_lock() {
     local release_failed=false
 
@@ -255,6 +317,14 @@ validate_privileged_runtime_environment() {
 }
 
 validate_privileged_runtime_environment
+validate_installation_ancestor_chain "$root_dir"
+installation_ancestor_identity="$(installation_ancestor_snapshot "$root_dir")" \
+    || die "could not capture the full installation path ancestor chain."
+installation_root_identity="$(file_identity "$root_dir")"
+[[ "$installation_root_identity" =~ ^[0-9]+:[0-9]+$ ]] \
+    || die "could not capture the installation directory identity."
+assert_installation_ancestor_identity
+assert_installation_root_identity
 validate_private_directory "$installation_parent" "installation parent"
 validate_private_directory "$root_dir" "installation directory"
 validate_private_file "$script_path" "backupsheep-compose wrapper"
@@ -911,14 +981,6 @@ esac
 postgres_storage_generation_raw="$(awk -F= '$1 == "BACKUPSHEEP_POSTGRES_STORAGE_GENERATION" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
 postgres_storage_intent_raw="$(awk -F= '$1 == "BACKUPSHEEP_POSTGRES_STORAGE_INTENT" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
 postgres_storage_witness_raw="$(awk -F= '$1 == "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
-unquote_env_value() {
-    local raw="$1"
-    case "$raw" in
-        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
-        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
-    esac
-    printf '%s' "$raw"
-}
 postgres_storage_generation="$(unquote_env_value "$postgres_storage_generation_raw")"
 postgres_storage_intent="$(unquote_env_value "$postgres_storage_intent_raw")"
 postgres_storage_witness="$(unquote_env_value "$postgres_storage_witness_raw")"
@@ -1028,6 +1090,11 @@ fi
 if [[ "$approved_rabbit" == true ]]; then
     compose_files+=(-f "$rabbitmq_upgrade")
 fi
+if [[ "$image_mode" == "signed-release" ]]; then
+    [[ "$approved_default" == false ]] \
+        || die "deployment overrides are outside the exact signed-release runtime model."
+    compose_files+=(-f "$release_overlay")
+fi
 [[ $# -gt 0 ]] || die "a Docker Compose command is required."
 
 for argument in "$@"; do
@@ -1112,11 +1179,36 @@ case "$compose_subcommand" in
         mutating_command=false
         for ((argument_index = subcommand_index + 1; argument_index < ${#compose_arguments[@]}; argument_index++)); do
             case "${compose_arguments[$argument_index]}" in
-                --down-project|--down-project=*) mutating_command=true ;;
+                --down-project|--down-project=*)
+                    die "wait --down-project is refused; run a separately validated down command."
+                    ;;
             esac
         done
         ;;
 esac
+
+if [[ "$compose_subcommand" == "config" ]]; then
+    for ((argument_index = subcommand_index + 1; argument_index < ${#compose_arguments[@]}; argument_index++)); do
+        argument="${compose_arguments[$argument_index]}"
+        case "$argument" in
+            --images|--profiles|--quiet|-q|--services|--variables|--volumes|--environment|\
+            --no-consistency|--no-env-resolution|--no-interpolate|--no-normalize|--no-path-resolution)
+                ;;
+            --format)
+                (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                    || die "config --format requires json or yaml."
+                argument_index=$((argument_index + 1))
+                [[ "${compose_arguments[$argument_index]}" == "json" || "${compose_arguments[$argument_index]}" == "yaml" ]] \
+                    || die "config --format accepts only json or yaml."
+                ;;
+            --format=json|--format=yaml)
+                ;;
+            *)
+                die "unsupported config option; registry resolution, lock generation, output files, and unreviewed config arguments are refused: ${argument}."
+                ;;
+        esac
+    done
+fi
 
 if [[ "$mutating_command" == true \
       && "$postgres_storage_generation" == "18-alpine-icu-v1-pending-upgrade" ]]; then
@@ -1233,6 +1325,8 @@ validate_worker_scale() {
 }
 
 if [[ "$compose_subcommand" == "build" ]]; then
+    [[ "$image_mode" != "signed-release" ]] \
+        || die "build is disabled in signed-release mode; only verified pre-pulled digests may run."
     for ((argument_index = subcommand_index + 1; argument_index < ${#compose_arguments[@]}; argument_index++)); do
         case "${compose_arguments[$argument_index]}" in
             --build-arg|--build-arg=*|--builder|--builder=*|--ssh|--ssh=*|--push)
@@ -1322,11 +1416,14 @@ if [[ "$compose_subcommand" == "up" || "$compose_subcommand" == "create" ]]; the
                     continue
                     ;;
                 --abort-on-container-exit|--abort-on-container-failure|--always-recreate-deps|\
-                --attach-dependencies|--build|-d|--detach|--menu|\
+                --attach-dependencies|--build|-d|--detach|\
                 --no-build|--no-color|--no-log-prefix|--no-recreate|--no-start|--quiet-build|\
                 --quiet-pull|-V|--renew-anon-volumes|--timestamps|--wait|-w|--watch|-y|--yes)
                     argument_index=$((argument_index + 1))
                     continue
+                    ;;
+                --menu|--menu=*)
+                    die "Compose menu is refused because it can trigger host sync and exec actions."
                     ;;
                 --force-recreate)
                     up_force_recreate=true
@@ -1507,12 +1604,15 @@ if [[ "$compose_subcommand" == "exec" ]]; then
             --privileged|--privileged=*|-u|--user|--user=*|-u?*|-e|--env|--env=*|-e?*)
                 die "exec cannot override privilege, user, or environment through the hardened wrapper."
                 ;;
+            -d|--detach|--detach=*)
+                die "detached exec is refused because it can outlive the mutation lock."
+                ;;
             --index|--workdir|-w)
                 (( argument_index + 1 < ${#compose_arguments[@]} )) \
                     || die "${argument} requires a value before the exec service."
                 argument_index=$((argument_index + 2))
                 ;;
-            --index=*|--workdir=*|-w?*|-d|--detach|--dry-run|-T|--no-tty)
+            --index=*|--workdir=*|-w?*|--dry-run|-T|--no-tty)
                 argument_index=$((argument_index + 1))
                 ;;
             --)
@@ -1825,6 +1925,7 @@ safe_environment=(
     "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
     "COMPOSE_BAKE=false"
     "COMPOSE_EXPERIMENTAL=false"
+    "COMPOSE_MENU=false"
     "COMPOSE_REMOVE_ORPHANS=0"
 )
 for transport_variable in \
@@ -3155,7 +3256,12 @@ validate_compose_project_ownership() {
     if [[ "$approved_default" == true ]]; then
         base_config_files+=",${default_override}"
     fi
-    rabbit_config_files="${base_config_files},${rabbitmq_upgrade}"
+    if [[ "$image_mode" == "signed-release" ]]; then
+        rabbit_config_files="${base_config_files},${rabbitmq_upgrade},${release_overlay}"
+        base_config_files+=",${release_overlay}"
+    else
+        rabbit_config_files="${base_config_files},${rabbitmq_upgrade}"
+    fi
 
     # Compose can adopt an exact-name pre-existing resource after only a warning.
     # Prove every physical name, including unlabeled collisions omitted from the
@@ -3168,6 +3274,7 @@ validate_compose_project_ownership() {
             || die "could not inspect Docker network ${physical_name}."
         [[ "$resource_project" == "$project_name" && "$resource_installation_id" == "$logical_name" ]] \
             || die "Docker network ${physical_name} collides with this model but is not owned by it."
+        validate_network_runtime_policy "$physical_name" "$logical_name"
     done <<< "$network_map"
     while IFS='|' read -r logical_name physical_name external_resource; do
         grep -Fxq -- "$physical_name" <<< "$all_volume_names" || continue
@@ -3177,6 +3284,7 @@ validate_compose_project_ownership() {
             || die "could not inspect Docker volume ${physical_name}."
         [[ "$resource_project" == "$project_name" && "$resource_installation_id" == "$logical_name" ]] \
             || die "Docker volume ${physical_name} collides with this model but is not owned by it."
+        validate_volume_runtime_policy "$physical_name" "$logical_name" "$physical_name"
     done <<< "$volume_map"
     # ssh_trust is deliberately absent from the current model. Inspect its old
     # canonical physical name separately so an unlabeled/foreign collision can
@@ -3280,6 +3388,12 @@ validate_compose_project_ownership() {
                 [[ "$resource_installation_id" == "$installation_id" ]] \
                     || die "Compose project ${project_name} has a container with a different BackupSheep installation identity."
             fi
+            if [[ "$image_mode" == "signed-release" ]]; then
+                if [[ "$logical_name" != rabbitmq || -z "$rabbitmq_transition_target" ]]; then
+                    attest_signed_release_container_image "$logical_name" "$resource_id"
+                fi
+            fi
+            validate_container_runtime_policy "$logical_name" "$resource_id"
         done
         duplicate_service="$(printf '%s' "$container_service_inventory" | awk '
             NF != 1 { exit 41 }
@@ -3341,6 +3455,7 @@ validate_compose_project_ownership() {
                 || die "could not inspect a Compose network name."
             [[ "$resource_name" == "${project_name}_${logical_name}" ]] \
                 || die "Compose network ${logical_name} has a non-canonical physical name."
+            validate_network_runtime_policy "$resource_id" "$logical_name"
             resource_installation_id="$(docker_resource_label network "$resource_id" com.backupsheep.installation-id)" \
                 || die "could not inspect a Compose network installation identity."
             if [[ -z "$resource_installation_id" ]]; then
@@ -3379,6 +3494,7 @@ validate_compose_project_ownership() {
                 || die "could not inspect a Compose volume name."
             [[ "$resource_name" == "${project_name}_${logical_name}" ]] \
                 || die "Compose volume ${logical_name} has a non-canonical physical name."
+            validate_volume_runtime_policy "$resource_id" "$logical_name" "$resource_name"
             if [[ "$is_retired_ssh_trust" == true ]]; then
                 resource_project="$(docker_resource_label volume "$resource_id" com.docker.compose.project)" \
                     || die "could not inspect retired Compose volume ssh_trust."
@@ -3768,6 +3884,9 @@ verify_and_record_completed_rabbitmq_43_transition() {
     if [[ "$approved_default" == true ]]; then
         expected_config_files+=",${default_override}"
     fi
+    if [[ "$image_mode" == "signed-release" ]]; then
+        expected_config_files+=",${release_overlay}"
+    fi
 
     # Re-prove every project resource after Compose returns. This catches model,
     # path, logical-name, physical-name or identity drift across the recreation.
@@ -3842,6 +3961,8 @@ if [[ "$mutating_command" == true && "$dry_run_requested" == false ]]; then
 fi
 
 # Validate the same fully rendered model immediately before every read or mutation.
+assert_installation_ancestor_identity
+assert_installation_root_identity
 "${compose_command[@]}" config --quiet
 ownership_required="$mutating_command"
 case "$compose_subcommand" in
@@ -3857,7 +3978,6 @@ if [[ "$ownership_required" == true ]]; then
     validate_compose_project_ownership "$volume_deletion_requested"
 fi
 if [[ "$mutating_command" == true ]]; then
-    validate_compose_project_ownership "$volume_deletion_requested"
     validate_rabbitmq_data_generation
 fi
 if [[ "$dry_run_requested" == false ]]; then
