@@ -878,3 +878,28 @@ class S3ImmutabilityFollowupTests(BaseTestCase):
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("configured together", str(serializer.errors))
+
+    def test_serializer_never_exposes_provider_exception_text(self):
+        from apps.api.v1.storage.aws_s3.serializers import CoreStorageAWSS3WriteSerializer
+        from apps.console.connection.models import CoreAWSRegion
+
+        canary = "aws-provider-secret-canary"
+        aws_s3 = self._protected_storage().storage_aws_s3
+        region_id = aws_s3.region_id or CoreAWSRegion.objects.first().id
+        serializer = CoreStorageAWSS3WriteSerializer(
+            instance=aws_s3,
+            data={
+                "access_key": "access",
+                "secret_key": "secret",
+                "bucket_name": "test-bucket",
+                "region": region_id,
+            },
+            context={"encryption_key": self.account.get_encryption_key()},
+        )
+
+        with mock.patch.object(
+            CoreStorageAWSS3, "validate", side_effect=ValueError(canary)
+        ):
+            self.assertFalse(serializer.is_valid())
+        self.assertNotIn(canary, str(serializer.errors))
+        self.assertIn("Unable to authenticate", str(serializer.errors))

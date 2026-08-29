@@ -707,10 +707,10 @@ class CoreAuthDigitalOcean(TimeStampedModel):
             return list_eligible_objects(
                 headers=self.get_verified_client(), object_type=object_type
             )
-        except ValueError as error:
-            raise APIException(detail=str(error)) from error
-        except DigitalOceanAPIError as error:
-            raise APIException(detail=str(error)) from error
+        except (ValueError, DigitalOceanAPIError) as error:
+            raise NodeConnectionErrorEligibleObjects(
+                "DigitalOcean object discovery could not be completed."
+            ) from error
 
     def validate(self, check_errors=None, raise_exp=None):
         self.get_verified_client()

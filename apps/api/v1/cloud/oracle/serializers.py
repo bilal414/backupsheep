@@ -89,7 +89,10 @@ class CoreCloudOracleWriteSerializer(serializers.ModelSerializer):
                 connection.auth_oracle, "cloud", resource_id
             )
         except OracleProviderError as error:
-            raise serializers.ValidationError(str(error)) from error
+            detail = OracleProviderError.SAFE_MESSAGES.get(
+                error.code, OracleProviderError.SAFE_MESSAGES["PROVIDER_FAILED"]
+            )
+            raise serializers.ValidationError({"unique_id": detail}) from error
         if _oracle_duplicate_exists(connection, provider["_bs_unique_id"]):
             raise serializers.ValidationError(
                 {"unique_id": "This Oracle Cloud server is already linked."}
