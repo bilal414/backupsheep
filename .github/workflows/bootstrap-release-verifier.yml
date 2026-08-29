@@ -411,15 +411,12 @@ jobs:
 
       - name: Execute both published verifier binaries under the consumer sandbox
         shell: bash
-        env:
-          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
           export DOCKER_CONFIG="$RELEASE_DOCKER_CONFIG"
-          for architecture in amd64 arm64; do
-            platform="linux/$architecture"
+          while IFS=$'\t' read -r platform child_digest; do
             docker --config "$RELEASE_DOCKER_CONFIG" pull \
-              --platform "$platform" "$OFFICIAL_REPOSITORY@$INDEX_DIGEST"
+              --platform "$platform" "$OFFICIAL_REPOSITORY@$child_digest"
             docker run --rm \
               --platform "$platform" \
               --network none \
@@ -429,9 +426,19 @@ jobs:
               --pids-limit 64 \
               --memory 256m \
               --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \
-              "$OFFICIAL_REPOSITORY@$INDEX_DIGEST" version \
+              "$OFFICIAL_REPOSITORY@$child_digest" version \
               | grep -Fq 'v3.1.3-backupsheep.1'
-          done
+          done < <(
+            python3 - "$EVIDENCE_DIR/release-verifier-layout-summary.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          summary = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          for platform in ("linux/amd64", "linux/arm64"):
+              print(platform, summary["platforms"][platform]["manifest_digest"], sep="\t")
+          PY
+          )
 
       - name: Remove registry credentials and retain non-secret evidence
         if: ${{ always() }}

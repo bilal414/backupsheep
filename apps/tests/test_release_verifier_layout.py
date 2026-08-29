@@ -1063,6 +1063,31 @@ class ReleaseVerifierValidatorCLIContractTests(TestCase):
         self.assertIn('--bundle "$bundle"', signing_step)
         self.assertIn('--digest "$digest"', signing_step)
 
+    def test_bootstrap_executes_each_published_child_digest(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml"
+        ).read_text(encoding="utf-8")
+        runtime_step = workflow.split(
+            "      - name: Execute both published verifier binaries under the consumer sandbox\n",
+            1,
+        )[1].split(
+            "      - name: Remove registry credentials and retain non-secret evidence\n",
+            1,
+        )[0]
+        for expected in (
+            "while IFS=$'\\t' read -r platform child_digest; do",
+            '"$OFFICIAL_REPOSITORY@$child_digest"',
+            'summary["platforms"][platform]["manifest_digest"]',
+            'for platform in ("linux/amd64", "linux/arm64")',
+            "--network none",
+            "--read-only",
+            "--cap-drop ALL",
+            "--security-opt no-new-privileges:true",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, runtime_step)
+        self.assertNotIn("$INDEX_DIGEST", runtime_step)
+
     def test_docker_build_actions_are_commit_pinned_node24_releases(self):
         workflows = (
             ROOT / ".github" / "workflows" / "bootstrap-release-verifier.yml",
