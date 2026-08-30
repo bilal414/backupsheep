@@ -53,6 +53,7 @@ import argparse  # noqa: E402
 import fcntl  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
+import re  # noqa: E402
 import secrets  # noqa: E402
 import stat  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -62,6 +63,7 @@ from backupsheep.artifact_crypto.context import (  # noqa: E402
 )
 from backupsheep.artifact_crypto.providers.base import zeroize  # noqa: E402
 from backupsheep.artifact_crypto.providers.local_file import (  # noqa: E402
+    KEYRING_MAGIC,
     KEYRING_VERSION,
     MAX_KEYRING_BYTES,
     MAX_KEYRING_KEYS,
@@ -78,6 +80,34 @@ class KeyringLifecycleError(RuntimeError):
 _MAX_TEMPORARY_RESIDUES = 64
 _TEMPORARY_TOKEN_LENGTH = 24
 _LOWER_HEXADECIMAL = frozenset("0123456789abcdef")
+_KEY_ID_PATTERN = re.compile(r"^lfk-[0-9a-f]{32}$")
+_KEY_ENTRY_PATTERN = re.compile(r"^key=(lfk-[0-9a-f]{32}):([0-9a-f]{64})$")
+_INSTALLATION_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_LANES = frozenset({"database", "files"})
+
+
+class _ValidatedKeyring:
+    """A descriptor-relative strict keyring view with explicit zeroization."""
+
+    def __init__(self, active_key_id: str, keys: dict[str, bytearray]):
+        self.active_key_id = active_key_id
+        self._keys = keys
+        self._destroyed = False
+
+    @property
+    def key_ids(self) -> tuple[str, ...]:
+        if self._destroyed:
+            raise KeyringLifecycleError("the validated keyring has been destroyed")
+        return tuple(self._keys)
+
+    def destroy(self) -> None:
+        if self._destroyed:
+            return
+        for key in self._keys.values():
+            zeroize(key)
+        self._keys.clear()
+        self.active_key_id = ""
+        self._destroyed = True
 
 
 def _path(value: str) -> Path:
@@ -126,8 +156,52 @@ def _open_locked_parent(path: Path) -> int:
         raise
 
 
-def _temporary_path(path: Path) -> Path:
-    return path.parent / f".{path.name}.{secrets.token_hex(12)}.tmp"
+def _secure_parent_metadata(metadata: os.stat_result) -> bool:
+    return bool(
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == os.geteuid()
+        and stat.S_IMODE(metadata.st_mode) == 0o700
+    )
+
+
+def _attest_locked_parent(path: Path, parent: int) -> None:
+    """Require the supplied pathname to still name the locked directory inode."""
+
+    try:
+        locked = os.fstat(parent)
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "the locked keyring parent directory became unavailable"
+        ) from error
+    if not _secure_parent_metadata(locked):
+        raise KeyringLifecycleError(
+            "the locked keyring parent directory metadata changed"
+        )
+
+    reopened = None
+    try:
+        reopened = open_keyring_parent_directory(path)
+        named = os.fstat(reopened)
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "the keyring parent path no longer names the locked directory"
+        ) from error
+    finally:
+        if reopened is not None:
+            os.close(reopened)
+
+    if (
+        not _secure_parent_metadata(named)
+        or named.st_dev != locked.st_dev
+        or named.st_ino != locked.st_ino
+    ):
+        raise KeyringLifecycleError(
+            "the keyring parent path no longer names the locked directory"
+        )
+
+
+def _temporary_name(path: Path) -> str:
+    return f".{path.name}.{secrets.token_hex(12)}.tmp"
 
 
 def _temporary_residue_names(path: Path, parent: int) -> list[str]:
@@ -184,6 +258,204 @@ def _metadata_identity(metadata: os.stat_result) -> tuple[object, ...]:
     )
 
 
+def _unlink_attested(
+    path: Path,
+    parent: int,
+    name: str,
+    *,
+    expected: os.stat_result | None = None,
+    missing_ok: bool = False,
+) -> None:
+    """Remove one descriptor-relative name and still report a parent swap.
+
+    Cleanup remains safe when the named parent has been replaced because the
+    unlink is anchored to the locked directory descriptor.  The operation must
+    nevertheless fail closed: an identity failure observed before or after the
+    unlink is re-raised after the attested residue has been removed.
+    """
+
+    identity_error = None
+    try:
+        _attest_locked_parent(path, parent)
+    except KeyringLifecycleError as error:
+        identity_error = error
+
+    removed = _unlink_exact_at(
+        parent,
+        name,
+        expected=expected,
+        missing_ok=missing_ok,
+    )
+    if removed:
+        try:
+            os.fsync(parent)
+        except OSError as error:
+            raise KeyringLifecycleError(
+                "an attested keyring operation name could not be durably removed"
+            ) from error
+
+    try:
+        _attest_locked_parent(path, parent)
+    except KeyringLifecycleError as error:
+        if identity_error is None:
+            identity_error = error
+    if identity_error is not None:
+        raise identity_error
+
+
+def _unlink_exact_at(
+    parent: int,
+    name: str,
+    *,
+    expected: os.stat_result | None = None,
+    missing_ok: bool = False,
+) -> bool:
+    """Unlink one descriptor-relative name only at its exact witnessed identity."""
+
+    try:
+        observed = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return False
+        raise KeyringLifecycleError(
+            "an attested keyring operation name disappeared before cleanup"
+        ) from None
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "an attested keyring operation name could not be inspected before cleanup"
+        ) from error
+    if expected is not None and _metadata_identity(observed) != _metadata_identity(
+        expected
+    ):
+        raise KeyringLifecycleError(
+            "an attested keyring operation name changed before cleanup"
+        )
+    try:
+        os.unlink(name, dir_fd=parent)
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "an attested keyring operation name could not be removed"
+        ) from error
+    return True
+
+
+def _cleanup_created_publication(
+    path: Path,
+    parent: int,
+    temporary: tuple[str, os.stat_result] | None,
+    published: os.stat_result | None,
+    candidate: os.stat_result | None,
+) -> None:
+    """Remove only an unambiguous create attempt from the locked directory."""
+
+    temporary_metadata = None
+    if temporary is not None:
+        try:
+            temporary_metadata = os.stat(
+                temporary[0],
+                dir_fd=parent,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise KeyringLifecycleError(
+                "the failed keyring candidate could not be inspected"
+            ) from error
+
+    destination_metadata = None
+    if published is not None:
+        try:
+            destination_metadata = os.stat(
+                path.name,
+                dir_fd=parent,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise KeyringLifecycleError(
+                "the failed keyring publication could not be inspected"
+            ) from error
+
+    if temporary_metadata is not None and destination_metadata is not None:
+        if (
+            candidate is None
+            or temporary_metadata.st_dev != candidate.st_dev
+            or temporary_metadata.st_ino != candidate.st_ino
+            or destination_metadata.st_dev != candidate.st_dev
+            or destination_metadata.st_ino != candidate.st_ino
+            or not _safe_linked_publication(
+                temporary_metadata,
+                destination_metadata,
+            )
+        ):
+            raise KeyringLifecycleError(
+                "the failed keyring publication has an ambiguous link identity"
+            )
+        _unlink_exact_at(
+            parent,
+            temporary[0],
+            expected=temporary_metadata,
+        )
+        destination_metadata = _stat_at(parent, path.name)
+        if not (
+            stat.S_ISREG(destination_metadata.st_mode)
+            and destination_metadata.st_uid == os.geteuid()
+            and stat.S_IMODE(destination_metadata.st_mode) == 0o400
+            and destination_metadata.st_nlink == 1
+            and destination_metadata.st_dev == candidate.st_dev
+            and destination_metadata.st_ino == candidate.st_ino
+            and destination_metadata.st_size == candidate.st_size
+        ):
+            raise KeyringLifecycleError(
+                "the failed keyring publication changed during cleanup"
+            )
+        _unlink_exact_at(
+            parent,
+            path.name,
+            expected=destination_metadata,
+        )
+    elif temporary_metadata is not None:
+        if published is not None or temporary is None:
+            raise KeyringLifecycleError(
+                "the failed keyring publication lost one of its witnessed links"
+            )
+        _unlink_exact_at(
+            parent,
+            temporary[0],
+            expected=temporary[1],
+        )
+    elif destination_metadata is not None:
+        if (
+            temporary is not None
+            or published is None
+            or candidate is None
+            or not stat.S_ISREG(destination_metadata.st_mode)
+            or destination_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(destination_metadata.st_mode) != 0o400
+            or destination_metadata.st_nlink != 1
+            or destination_metadata.st_dev != candidate.st_dev
+            or destination_metadata.st_ino != candidate.st_ino
+            or destination_metadata.st_size != candidate.st_size
+        ):
+            raise KeyringLifecycleError(
+                "the failed keyring publication no longer names the created inode"
+            )
+        _unlink_exact_at(
+            parent,
+            path.name,
+            expected=destination_metadata,
+        )
+
+    try:
+        os.fsync(parent)
+    except OSError as error:
+        raise KeyringLifecycleError(
+            "the failed keyring publication cleanup could not be durably flushed"
+        ) from error
+
+
 def _safe_unpublished_residue(metadata: os.stat_result) -> bool:
     # A kill may land after O_EXCL creation but before fchmod(2). The requested
     # creation mode is already no broader than 0400, so mode 0000 is also a safe
@@ -226,18 +498,14 @@ def _reconcile_linked_publication(
 ) -> None:
     """Drop one attested second name, then strictly validate its destination."""
 
+    _attest_locked_parent(path, parent)
     if _metadata_identity(_stat_at(parent, residue_name)) != _metadata_identity(
         expected
     ):
         raise KeyringLifecycleError(
             "the linked keyring publication residue changed concurrently"
         )
-    try:
-        os.unlink(residue_name, dir_fd=parent)
-    except OSError as error:
-        raise KeyringLifecycleError(
-            "the linked keyring publication residue could not be removed"
-        ) from error
+    _unlink_attested(path, parent, residue_name, expected=expected)
 
     provider = None
     try:
@@ -254,7 +522,7 @@ def _reconcile_linked_publication(
             raise KeyringLifecycleError(
                 "the recovered keyring destination changed identity"
             )
-        provider = _validate(path, lane, installation_id)
+        provider = _validate_at(path, parent, lane, installation_id)
     except BaseException:
         # Preserve an invalid or interrupted state for operator inspection rather
         # than silently blessing or destroying it. Re-create the exact second
@@ -277,6 +545,7 @@ def _reconcile_linked_publication(
                     follow_symlinks=False,
                 )
                 os.fsync(parent)
+                _attest_locked_parent(path, parent)
         except OSError:
             pass
         raise
@@ -293,7 +562,9 @@ def _reconcile_temporary_residues(
 ) -> bool:
     """Converge safe SIGKILL residues while refusing ambiguous hard links."""
 
+    _attest_locked_parent(path, parent)
     names = _temporary_residue_names(path, parent)
+    _attest_locked_parent(path, parent)
     if not names:
         return False
 
@@ -331,12 +602,7 @@ def _reconcile_temporary_residues(
             raise KeyringLifecycleError(
                 "an interrupted keyring operation residue changed concurrently"
             )
-        try:
-            os.unlink(name, dir_fd=parent)
-        except OSError as error:
-            raise KeyringLifecycleError(
-                "an unpublished keyring operation residue could not be removed"
-            ) from error
+        _unlink_attested(path, parent, name, expected=metadata)
         changed = True
 
     recovered_publication = linked_name is not None
@@ -357,13 +623,21 @@ def _reconcile_temporary_residues(
             raise KeyringLifecycleError(
                 "interrupted keyring operation recovery could not be durably flushed"
             ) from error
+        _attest_locked_parent(path, parent)
     return recovered_publication
 
 
-def _write_temporary(path: Path, content: bytes, *, mode: int) -> Path:
-    temporary = _temporary_path(path)
+def _write_temporary(
+    path: Path,
+    parent: int,
+    content: bytes,
+    *,
+    mode: int,
+) -> tuple[str, os.stat_result]:
+    temporary = _temporary_name(path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(temporary, flags, mode)
+    _attest_locked_parent(path, parent)
+    descriptor = os.open(temporary, flags, mode, dir_fd=parent)
     try:
         os.fchmod(descriptor, mode)
         written = 0
@@ -374,22 +648,42 @@ def _write_temporary(path: Path, content: bytes, *, mode: int) -> Path:
             written += count
         os.fsync(descriptor)
     except BaseException:
+        expected = os.fstat(descriptor)
         os.close(descriptor)
-        temporary.unlink(missing_ok=True)
+        _unlink_attested(
+            path,
+            parent,
+            temporary,
+            expected=expected,
+            missing_ok=True,
+        )
         raise
+    expected = os.fstat(descriptor)
     os.close(descriptor)
-    return temporary
+    try:
+        _attest_locked_parent(path, parent)
+    except BaseException:
+        _unlink_attested(
+            path,
+            parent,
+            temporary,
+            expected=expected,
+            missing_ok=True,
+        )
+        raise
+    return temporary, expected
 
 
 def _new_key() -> tuple[str, bytearray]:
     return f"lfk-{secrets.token_hex(16)}", bytearray(secrets.token_bytes(32))
 
 
-def _rotation_file_witness(path: Path) -> tuple[object, ...]:
+def _rotation_file_witness(path: Path, parent: int) -> tuple[object, ...]:
     """Return metadata plus a full digest from one stable, no-follow read."""
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    _attest_locked_parent(path, parent)
+    descriptor = os.open(path.name, flags, dir_fd=parent)
     try:
         before = os.fstat(descriptor)
         if (
@@ -426,9 +720,148 @@ def _rotation_file_witness(path: Path) -> tuple[object, ...]:
             raise KeyringLifecycleError(
                 "the keyring changed concurrently; refusing rotation"
             )
-        return (*after_metadata, digest.digest())
+        try:
+            named = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        except OSError as error:
+            raise KeyringLifecycleError(
+                "the keyring changed concurrently; refusing rotation"
+            ) from error
+        if _metadata_identity(named) != _metadata_identity(after):
+            raise KeyringLifecycleError(
+                "the keyring changed concurrently; refusing rotation"
+            )
+        witness = (*after_metadata, digest.digest())
     finally:
         os.close(descriptor)
+    _attest_locked_parent(path, parent)
+    return witness
+
+
+def _read_validated_keyring_at(
+    path: Path,
+    parent: int,
+    lane: str,
+    installation_id: str,
+) -> _ValidatedKeyring:
+    """Strictly load a direct keyring without reopening its absolute parent."""
+
+    if lane not in _LANES or _INSTALLATION_ID_PATTERN.fullmatch(installation_id) is None:
+        raise ValueError("the direct keyring scope is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path.name, flags, dir_fd=parent)
+    raw = bytearray()
+    decoded_keys: dict[str, bytearray] = {}
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) != 0o400
+            or before.st_nlink != 1
+            or not 1 <= before.st_size <= MAX_KEYRING_BYTES
+        ):
+            raise ValueError("unsafe direct keyring metadata")
+        while len(raw) <= MAX_KEYRING_BYTES:
+            chunk = os.read(descriptor, min(512, MAX_KEYRING_BYTES + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(descriptor)
+        try:
+            named = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        except OSError as error:
+            raise ValueError("the direct keyring name changed") from error
+        if (
+            _metadata_identity(before) != _metadata_identity(after)
+            or _metadata_identity(named) != _metadata_identity(after)
+            or len(raw) != before.st_size
+            or len(raw) > MAX_KEYRING_BYTES
+        ):
+            raise ValueError("the direct keyring changed while it was read")
+
+        try:
+            text = bytes(raw).decode("ascii")
+        except UnicodeDecodeError as error:
+            raise ValueError("the direct keyring is not ASCII") from error
+        if not text.endswith("\n") or "\r" in text or "\x00" in text:
+            raise ValueError("the direct keyring framing is invalid")
+        lines = text[:-1].split("\n")
+        if len(lines) < 5 or lines[0] != KEYRING_MAGIC:
+            raise ValueError("the direct keyring version is unsupported")
+        if lines[1] != f"installation={installation_id}":
+            raise ValueError("the direct keyring installation identity is invalid")
+        if lines[2] != f"lane={lane}":
+            raise ValueError("the direct keyring lane is invalid")
+        if not lines[3].startswith("active="):
+            raise ValueError("the direct keyring active key is invalid")
+        active_key_id = lines[3][len("active=") :]
+        if _KEY_ID_PATTERN.fullmatch(active_key_id) is None:
+            raise ValueError("the direct keyring active key is invalid")
+        key_lines = lines[4:]
+        if not 1 <= len(key_lines) <= MAX_KEYRING_KEYS:
+            raise ValueError("the direct keyring key count is invalid")
+
+        canonical_keys: list[tuple[str, str]] = []
+        seen_material: set[str] = set()
+        for line in key_lines:
+            match = _KEY_ENTRY_PATTERN.fullmatch(line)
+            if match is None:
+                raise ValueError("the direct keyring contains an invalid key")
+            key_id, key_hex = match.groups()
+            if key_id in decoded_keys or key_hex in seen_material:
+                raise ValueError("the direct keyring contains a duplicate key")
+            decoded_keys[key_id] = bytearray.fromhex(key_hex)
+            canonical_keys.append((key_id, key_hex))
+            seen_material.add(key_hex)
+        if active_key_id != canonical_keys[0][0]:
+            raise ValueError("the direct keyring active key is not first")
+        if raw != canonical_keyring_bytes(
+            installation_id=installation_id,
+            lane=lane,
+            active_key_id=active_key_id,
+            keys=canonical_keys,
+        ):
+            raise ValueError("the direct keyring is not canonical")
+
+        result = _ValidatedKeyring(active_key_id, decoded_keys)
+        decoded_keys = {}
+        return result
+    finally:
+        os.close(descriptor)
+        for key in decoded_keys.values():
+            zeroize(key)
+        zeroize(raw)
+        try:
+            del text, lines, key_lines, canonical_keys, seen_material
+        except UnboundLocalError:
+            pass
+
+
+def _validate_at(
+    path: Path,
+    parent: int,
+    lane: str,
+    installation_id: str,
+) -> _ValidatedKeyring:
+    provider = None
+    _attest_locked_parent(path, parent)
+    try:
+        provider = _read_validated_keyring_at(
+            path,
+            parent,
+            lane,
+            installation_id,
+        )
+        _attest_locked_parent(path, parent)
+        return provider
+    except KeyringLifecycleError:
+        if provider is not None:
+            provider.destroy()
+        raise
+    except Exception as error:
+        if provider is not None:
+            provider.destroy()
+        raise KeyringLifecycleError("the keyring failed strict validation") from error
 
 
 def _validate(
@@ -447,9 +880,11 @@ def _validate(
 def create(path: Path, lane: str, installation_id: str) -> dict[str, object]:
     parent = _open_locked_parent(path)
     key = None
-    temporary = None
-    published = False
+    temporary: tuple[str, os.stat_result] | None = None
+    published: os.stat_result | None = None
+    candidate: os.stat_result | None = None
     try:
+        _attest_locked_parent(path, parent)
         recovered_publication = _reconcile_temporary_residues(
             path,
             parent,
@@ -457,7 +892,7 @@ def create(path: Path, lane: str, installation_id: str) -> dict[str, object]:
             installation_id,
         )
         if recovered_publication:
-            provider = _validate(path, lane, installation_id)
+            provider = _validate_at(path, parent, lane, installation_id)
             try:
                 return {
                     "active_key_id": provider.active_key_id,
@@ -467,7 +902,15 @@ def create(path: Path, lane: str, installation_id: str) -> dict[str, object]:
                 }
             finally:
                 provider.destroy()
-        if path.exists() or path.is_symlink():
+        try:
+            os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise KeyringLifecycleError(
+                "the keyring destination could not be inspected"
+            ) from error
+        else:
             raise KeyringLifecycleError("refusing to overwrite an existing keyring path")
         key_id, key = _new_key()
         content = canonical_keyring_bytes(
@@ -476,19 +919,53 @@ def create(path: Path, lane: str, installation_id: str) -> dict[str, object]:
             active_key_id=key_id,
             keys=[(key_id, bytes(key).hex())],
         )
-        temporary = _write_temporary(path, content, mode=0o400)
-        try:
-            # link(2) is an atomic no-clobber publication on the same filesystem.
-            os.link(temporary, path, follow_symlinks=False)
-            published = True
-            temporary.unlink()
-            temporary = None
-            os.fsync(parent)
-        except BaseException:
-            if published:
-                path.unlink(missing_ok=True)
-            raise
-        provider = _validate(path, lane, installation_id)
+        temporary = _write_temporary(path, parent, content, mode=0o400)
+        candidate = temporary[1]
+        # link(2) is an atomic no-clobber publication on the same filesystem.
+        _attest_locked_parent(path, parent)
+        os.link(
+            temporary[0],
+            path.name,
+            src_dir_fd=parent,
+            dst_dir_fd=parent,
+            follow_symlinks=False,
+        )
+        linked_temporary = _stat_at(parent, temporary[0])
+        published = _stat_at(parent, path.name)
+        if (
+            linked_temporary.st_dev != candidate.st_dev
+            or linked_temporary.st_ino != candidate.st_ino
+            or linked_temporary.st_size != candidate.st_size
+            or not _safe_linked_publication(linked_temporary, published)
+        ):
+            raise KeyringLifecycleError(
+                "the keyring publication changed identity while it was linked"
+            )
+        temporary = (temporary[0], linked_temporary)
+        _attest_locked_parent(path, parent)
+        _unlink_exact_at(
+            parent,
+            temporary[0],
+            expected=temporary[1],
+        )
+        temporary = None
+        activated = _stat_at(parent, path.name)
+        if not (
+            stat.S_ISREG(activated.st_mode)
+            and activated.st_uid == os.geteuid()
+            and stat.S_IMODE(activated.st_mode) == 0o400
+            and activated.st_nlink == 1
+            and activated.st_dev == candidate.st_dev
+            and activated.st_ino == candidate.st_ino
+            and activated.st_size == candidate.st_size
+        ):
+            raise KeyringLifecycleError(
+                "the keyring publication changed identity after activation"
+            )
+        published = activated
+        os.fsync(parent)
+        _attest_locked_parent(path, parent)
+        provider = _validate_at(path, parent, lane, installation_id)
         try:
             return {
                 "active_key_id": provider.active_key_id,
@@ -498,11 +975,33 @@ def create(path: Path, lane: str, installation_id: str) -> dict[str, object]:
             }
         finally:
             provider.destroy()
+    except BaseException as operation_error:
+        try:
+            _cleanup_created_publication(
+                path,
+                parent,
+                temporary,
+                published,
+                candidate,
+            )
+        except BaseException as cleanup_error:
+            raise cleanup_error from operation_error
+        raise
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-        zeroize(key)
-        os.close(parent)
+        try:
+            if temporary is not None:
+                _unlink_attested(
+                    path,
+                    parent,
+                    temporary[0],
+                    expected=temporary[1],
+                    missing_ok=True,
+                )
+        finally:
+            try:
+                zeroize(key)
+            finally:
+                os.close(parent)
 
 
 def inspect(path: Path, lane: str, installation_id: str) -> dict[str, object]:
@@ -527,18 +1026,19 @@ def rotate(
 ) -> dict[str, object]:
     parent = _open_locked_parent(path)
     new_key = None
-    temporary = None
+    temporary: tuple[str, os.stat_result] | None = None
     provider = None
     try:
+        _attest_locked_parent(path, parent)
         _reconcile_temporary_residues(
             path,
             parent,
             lane,
             installation_id,
         )
-        original = _rotation_file_witness(path)
-        provider = _validate(path, lane, installation_id)
-        if _rotation_file_witness(path) != original:
+        original = _rotation_file_witness(path, parent)
+        provider = _validate_at(path, parent, lane, installation_id)
+        if _rotation_file_witness(path, parent) != original:
             raise KeyringLifecycleError(
                 "the keyring changed concurrently; refusing rotation"
             )
@@ -562,15 +1062,22 @@ def rotate(
             active_key_id=new_key_id,
             keys=entries,
         )
-        temporary = _write_temporary(path, content, mode=0o400)
-        if _rotation_file_witness(path) != original:
+        temporary = _write_temporary(path, parent, content, mode=0o400)
+        if _rotation_file_witness(path, parent) != original:
             raise KeyringLifecycleError(
                 "the keyring changed concurrently; refusing rotation"
             )
-        os.replace(temporary, path)
+        _attest_locked_parent(path, parent)
+        os.replace(
+            temporary[0],
+            path.name,
+            src_dir_fd=parent,
+            dst_dir_fd=parent,
+        )
         temporary = None
         os.fsync(parent)
-        rotated = _validate(path, lane, installation_id)
+        _attest_locked_parent(path, parent)
+        rotated = _validate_at(path, parent, lane, installation_id)
         try:
             return {
                 "active_key_id": rotated.active_key_id,
@@ -582,12 +1089,24 @@ def rotate(
         finally:
             rotated.destroy()
     finally:
-        if provider is not None:
-            provider.destroy()
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-        zeroize(new_key)
-        os.close(parent)
+        try:
+            if provider is not None:
+                provider.destroy()
+        finally:
+            try:
+                if temporary is not None:
+                    _unlink_attested(
+                        path,
+                        parent,
+                        temporary[0],
+                        expected=temporary[1],
+                        missing_ok=True,
+                    )
+            finally:
+                try:
+                    zeroize(new_key)
+                finally:
+                    os.close(parent)
 
 
 def parser() -> argparse.ArgumentParser:

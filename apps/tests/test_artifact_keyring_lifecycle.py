@@ -66,13 +66,14 @@ elif phase == "after-link":
         os.kill(os.getpid(), signal.SIGKILL)
     os.link = link_then_kill
 elif phase == "after-unlink":
-    original_unlink = Path.unlink
+    original_unlink = os.unlink
     def unlink_then_kill(subject, *args, **kwargs):
         result = original_unlink(subject, *args, **kwargs)
-        if subject != path:
+        name = os.path.basename(os.fspath(subject))
+        if name.startswith(f".{path.name}.") and name.endswith(".tmp"):
             os.kill(os.getpid(), signal.SIGKILL)
         return result
-    Path.unlink = unlink_then_kill
+    os.unlink = unlink_then_kill
 elif phase == "after-replace":
     original_replace = os.replace
     def replace_then_kill(*args, **kwargs):
@@ -159,6 +160,255 @@ else:
         ):
             lifecycle.create(path, "database", INSTALLATION_ID)
 
+    def test_create_fails_closed_if_parent_is_replaced_during_publication(self):
+        case_root = self.root / "create-parent-race"
+        case_root.mkdir(mode=0o700)
+        moved_root = self.root / "create-parent-race-moved"
+        path = case_root / "database.keyring"
+        original_link = lifecycle.os.link
+        original_zeroize = lifecycle.zeroize
+        replacement_candidate = None
+        zeroized_key = []
+        raced = False
+
+        def replace_parent_then_link(source, destination, *args, **kwargs):
+            nonlocal raced, replacement_candidate
+            if not raced:
+                raced = True
+                case_root.rename(moved_root)
+                case_root.mkdir(mode=0o700)
+                source_name = os.path.basename(os.fspath(source))
+                replacement_candidate = case_root / source_name
+                replacement_candidate.write_bytes(
+                    (moved_root / source_name).read_bytes()
+                )
+                replacement_candidate.chmod(0o400)
+            return original_link(source, destination, *args, **kwargs)
+
+        def record_zeroize(value):
+            original_zeroize(value)
+            if value is not None:
+                zeroized_key.append(all(byte == 0 for byte in value))
+
+        with (
+            mock.patch.object(
+                lifecycle.os,
+                "link",
+                side_effect=replace_parent_then_link,
+            ),
+            mock.patch.object(
+                lifecycle,
+                "zeroize",
+                side_effect=record_zeroize,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                lifecycle.KeyringLifecycleError,
+                "parent path no longer names the locked directory",
+            ):
+                lifecycle.create(path, "database", INSTALLATION_ID)
+
+        self.assertTrue(raced)
+        self.assertIsNotNone(replacement_candidate)
+        self.assertTrue(replacement_candidate.is_file())
+        self.assertFalse(path.exists())
+        self.assertFalse((moved_root / path.name).exists())
+        self.assertEqual(
+            list(moved_root.glob(".database.keyring.*.tmp")),
+            [],
+        )
+        self.assertEqual(zeroized_key, [True])
+        descriptor = os.open(moved_root, os.O_RDONLY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+    def test_create_refuses_concurrent_hard_link_without_unlinking_any_name(self):
+        case_root = self.root / "create-hard-link-race"
+        case_root.mkdir(mode=0o700)
+        path = case_root / "database.keyring"
+        original_link = lifecycle.os.link
+        decoy_name = "retained-root-key-link"
+        injected = False
+
+        def add_hard_link_after_publication(source, destination, *args, **kwargs):
+            nonlocal injected
+            result = original_link(source, destination, *args, **kwargs)
+            if not injected:
+                injected = True
+                original_link(
+                    source,
+                    decoy_name,
+                    src_dir_fd=kwargs["src_dir_fd"],
+                    dst_dir_fd=kwargs["dst_dir_fd"],
+                    follow_symlinks=False,
+                )
+            return result
+
+        with mock.patch.object(
+            lifecycle.os,
+            "link",
+            side_effect=add_hard_link_after_publication,
+        ):
+            with self.assertRaisesRegex(
+                lifecycle.KeyringLifecycleError,
+                "ambiguous link identity|changed before cleanup",
+            ):
+                lifecycle.create(path, "database", INSTALLATION_ID)
+
+        candidates = list(case_root.glob(".database.keyring.*.tmp"))
+        self.assertTrue(injected)
+        self.assertEqual(len(candidates), 1)
+        self.assertTrue(path.is_file())
+        self.assertTrue((case_root / decoy_name).is_file())
+        inode = path.stat().st_ino
+        for linked_path in (path, candidates[0], case_root / decoy_name):
+            self.assertEqual(linked_path.stat().st_ino, inode)
+            self.assertEqual(linked_path.stat().st_nlink, 3)
+        descriptor = os.open(case_root, os.O_RDONLY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+    def test_create_never_deletes_an_unrelated_concurrent_replacement(self):
+        case_root = self.root / "create-replacement-race"
+        case_root.mkdir(mode=0o700)
+        path = case_root / "database.keyring"
+        original_stat_at = lifecycle._stat_at
+        destination_observations = 0
+        unrelated = b"unrelated-concurrent-data"
+
+        def replace_before_activation_check(parent, name):
+            nonlocal destination_observations
+            if name == path.name:
+                destination_observations += 1
+                if destination_observations == 2:
+                    os.unlink(name, dir_fd=parent)
+                    descriptor = os.open(
+                        name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o400,
+                        dir_fd=parent,
+                    )
+                    try:
+                        os.write(descriptor, unrelated)
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+            return original_stat_at(parent, name)
+
+        with mock.patch.object(
+            lifecycle,
+            "_stat_at",
+            side_effect=replace_before_activation_check,
+        ):
+            with self.assertRaisesRegex(
+                lifecycle.KeyringLifecycleError,
+                "no longer names the created inode",
+            ):
+                lifecycle.create(path, "database", INSTALLATION_ID)
+
+        self.assertGreaterEqual(destination_observations, 2)
+        self.assertEqual(path.read_bytes(), unrelated)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+        self.assertEqual(path.stat().st_nlink, 1)
+
+    def test_create_preserves_links_added_during_candidate_unlink(self):
+        case_root = self.root / "create-unlink-hard-link-race"
+        case_root.mkdir(mode=0o700)
+        path = case_root / "database.keyring"
+        original_unlink = lifecycle.os.unlink
+        original_link = lifecycle.os.link
+        decoy_name = "retained-during-unlink"
+        injected = False
+
+        def add_link_immediately_before_unlink(subject, *args, **kwargs):
+            nonlocal injected
+            name = os.fspath(subject)
+            if (
+                not injected
+                and isinstance(name, str)
+                and name.startswith(f".{path.name}.")
+                and name.endswith(".tmp")
+                and kwargs.get("dir_fd") is not None
+            ):
+                injected = True
+                original_link(
+                    name,
+                    decoy_name,
+                    src_dir_fd=kwargs["dir_fd"],
+                    dst_dir_fd=kwargs["dir_fd"],
+                    follow_symlinks=False,
+                )
+            return original_unlink(subject, *args, **kwargs)
+
+        with mock.patch.object(
+            lifecycle.os,
+            "unlink",
+            side_effect=add_link_immediately_before_unlink,
+        ):
+            with self.assertRaisesRegex(
+                lifecycle.KeyringLifecycleError,
+                "no longer names the created inode",
+            ):
+                lifecycle.create(path, "database", INSTALLATION_ID)
+
+        self.assertTrue(injected)
+        self.assertTrue(path.is_file())
+        self.assertTrue((case_root / decoy_name).is_file())
+        self.assertEqual(path.stat().st_ino, (case_root / decoy_name).stat().st_ino)
+        self.assertEqual(path.stat().st_nlink, 2)
+        descriptor = os.open(case_root, os.O_RDONLY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+    def test_create_fails_closed_if_parent_is_replaced_before_temporary_open(self):
+        case_root = self.root / "create-parent-write-race"
+        case_root.mkdir(mode=0o700)
+        moved_root = self.root / "create-parent-write-race-moved"
+        path = case_root / "database.keyring"
+        original_open = lifecycle.os.open
+        raced = False
+
+        def replace_parent_then_open(subject, flags, *args, **kwargs):
+            nonlocal raced
+            name = os.fspath(subject)
+            if (
+                not raced
+                and isinstance(name, str)
+                and name.startswith(f".{path.name}.")
+                and name.endswith(".tmp")
+                and kwargs.get("dir_fd") is not None
+            ):
+                raced = True
+                case_root.rename(moved_root)
+                case_root.mkdir(mode=0o700)
+            return original_open(subject, flags, *args, **kwargs)
+
+        with mock.patch.object(
+            lifecycle.os,
+            "open",
+            side_effect=replace_parent_then_open,
+        ):
+            with self.assertRaisesRegex(
+                lifecycle.KeyringLifecycleError,
+                "parent path no longer names the locked directory",
+            ):
+                lifecycle.create(path, "database", INSTALLATION_ID)
+
+        self.assertTrue(raced)
+        self.assertFalse(path.exists())
+        self.assertEqual(list(case_root.iterdir()), [])
+        self.assertFalse((moved_root / path.name).exists())
+        self.assertEqual(
+            list(moved_root.glob(".database.keyring.*.tmp")),
+            [],
+        )
+
     def test_rotation_sigkill_boundaries_are_single_step_and_residue_free(self):
         before_replace_root = self.root / "rotation-before-replace"
         before_replace_root.mkdir(mode=0o700)
@@ -231,6 +481,134 @@ else:
                 INSTALLATION_ID,
                 original_active,
             )
+
+    def test_rotate_fails_closed_if_parent_is_replaced_during_publication(self):
+        case_root = self.root / "rotate-parent-race"
+        case_root.mkdir(mode=0o700)
+        moved_root = self.root / "rotate-parent-race-moved"
+        path = case_root / "database.keyring"
+        created = lifecycle.create(path, "database", INSTALLATION_ID)
+        original_active = str(created["active_key_id"])
+        original_replace = lifecycle.os.replace
+        replacement_candidate = None
+        raced = False
+
+        def replace_parent_then_publish(source, destination, *args, **kwargs):
+            nonlocal raced, replacement_candidate
+            if not raced:
+                raced = True
+                case_root.rename(moved_root)
+                case_root.mkdir(mode=0o700)
+                source_name = os.path.basename(os.fspath(source))
+                destination_name = os.path.basename(os.fspath(destination))
+                replacement_candidate = case_root / source_name
+                replacement_candidate.write_bytes(
+                    (moved_root / source_name).read_bytes()
+                )
+                replacement_candidate.chmod(0o400)
+                replacement_destination = case_root / destination_name
+                replacement_destination.write_bytes(
+                    (moved_root / destination_name).read_bytes()
+                )
+                replacement_destination.chmod(0o400)
+            return original_replace(source, destination, *args, **kwargs)
+
+        with mock.patch.object(
+            lifecycle.os,
+            "replace",
+            side_effect=replace_parent_then_publish,
+        ):
+            with self.assertRaisesRegex(
+                lifecycle.KeyringLifecycleError,
+                "parent path no longer names the locked directory",
+            ):
+                lifecycle.rotate(
+                    path,
+                    "database",
+                    INSTALLATION_ID,
+                    original_active,
+                )
+
+        self.assertTrue(raced)
+        self.assertIsNotNone(replacement_candidate)
+        self.assertTrue(replacement_candidate.is_file())
+        self.assertEqual(
+            lifecycle.inspect(path, "database", INSTALLATION_ID)["active_key_id"],
+            original_active,
+        )
+        self.assertNotEqual(
+            lifecycle.inspect(
+                moved_root / path.name,
+                "database",
+                INSTALLATION_ID,
+            )["active_key_id"],
+            original_active,
+        )
+        self.assertEqual(
+            list(moved_root.glob(".database.keyring.*.tmp")),
+            [],
+        )
+
+    def test_rotate_cleanup_failure_zeroizes_key_and_releases_parent_lock(self):
+        case_root = self.root / "rotate-cleanup-race"
+        case_root.mkdir(mode=0o700)
+        moved_root = self.root / "rotate-cleanup-race-moved"
+        path = case_root / "database.keyring"
+        created = lifecycle.create(path, "database", INSTALLATION_ID)
+        original_write = lifecycle._write_temporary
+        original_zeroize = lifecycle.zeroize
+        zeroized_key = []
+        raced = False
+
+        def replace_parent_after_candidate(*args, **kwargs):
+            nonlocal raced
+            result = original_write(*args, **kwargs)
+            if not raced:
+                raced = True
+                case_root.rename(moved_root)
+                case_root.mkdir(mode=0o700)
+            return result
+
+        def record_zeroize(value):
+            original_zeroize(value)
+            if value is not None:
+                zeroized_key.append(all(byte == 0 for byte in value))
+
+        with (
+            mock.patch.object(
+                lifecycle,
+                "_write_temporary",
+                side_effect=replace_parent_after_candidate,
+            ),
+            mock.patch.object(
+                lifecycle,
+                "zeroize",
+                side_effect=record_zeroize,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                lifecycle.KeyringLifecycleError,
+                "parent path no longer names the locked directory",
+            ):
+                lifecycle.rotate(
+                    path,
+                    "database",
+                    INSTALLATION_ID,
+                    str(created["active_key_id"]),
+                )
+
+        self.assertTrue(raced)
+        self.assertTrue(zeroized_key)
+        self.assertTrue(all(zeroized_key))
+        self.assertEqual(
+            list(moved_root.glob(".database.keyring.*.tmp")),
+            [],
+        )
+        descriptor = os.open(moved_root, os.O_RDONLY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
 
     def test_residue_recovery_refuses_unrelated_hard_link(self):
         created = lifecycle.create(self.path, "database", INSTALLATION_ID)
