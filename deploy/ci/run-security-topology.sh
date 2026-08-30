@@ -640,6 +640,11 @@ database_admin_query() {
     ' database-admin-query "$query"
 }
 
+database_default_acl_shape() {
+    database_admin_query \
+        "SELECT pg_catalog.count(*)::text || ':' || pg_catalog.count(*) FILTER (WHERE role.rolname = 'backupsheep_migrator' AND defaults.defaclnamespace = 0 AND defaults.defaclobjtype = 'T' AND pg_catalog.cardinality(defaults.defaclacl) = 1)::text || ':' || pg_catalog.count(*) FILTER (WHERE role.rolname = 'backupsheep_migrator' AND defaults.defaclnamespace = 0 AND defaults.defaclobjtype = 'f' AND pg_catalog.cardinality(defaults.defaclacl) = 1)::text || ':' || pg_catalog.count(*) FILTER (WHERE role.rolname = 'backupsheep_migrator' AND defaults.defaclnamespace = 0 AND defaults.defaclobjtype = 'r' AND pg_catalog.cardinality(defaults.defaclacl) = 0)::text FROM pg_catalog.pg_default_acl defaults JOIN pg_catalog.pg_roles role ON role.oid = defaults.defaclrole"
+}
+
 assert_empty_default_acl_record_fails_closed_and_recovers() {
     local app_container runtime_ssh_path drift_log default_acl_inventory
     app_container="$(compose ps --all --quiet app)"
@@ -654,10 +659,14 @@ assert_empty_default_acl_record_fails_closed_and_recovers() {
     database_admin_query \
         "ALTER DEFAULT PRIVILEGES FOR ROLE backupsheep_migrator REVOKE ALL ON TABLES FROM backupsheep_migrator" \
         >/dev/null
-    default_acl_inventory="$(database_admin_query \
-        "SELECT pg_catalog.string_agg(defaults.defaclobjtype::text || ':' || pg_catalog.cardinality(defaults.defaclacl)::text, ',' ORDER BY defaults.defaclobjtype::text) FROM pg_catalog.pg_default_acl defaults")"
-    [[ "$default_acl_inventory" == 'T:1,f:1,r:0' ]] \
-        || fail "the empty default-ACL attack fixture did not produce its exact catalog state."
+    # Do not depend on the database collation when attesting this catalog
+    # shape.  Fresh installations deliberately use ICU und; sorting the
+    # one-character object codes under that collation is not bytewise order.
+    # These four scalar counts prove that the complete catalog contains only
+    # the two canonical global rows plus this exact empty global table row.
+    default_acl_inventory="$(database_default_acl_shape)"
+    [[ "$default_acl_inventory" == '3:1:1:1' ]] \
+        || fail "the empty default-ACL attack fixture did not produce its exact catalog state (${default_acl_inventory})."
     if docker exec \
         --env "SSH_MANAGED_PRIVATE_KEY_PATH=${runtime_ssh_path}" \
         "$app_container" python manage.py docker_preflight \
@@ -671,10 +680,9 @@ assert_empty_default_acl_record_fails_closed_and_recovers() {
     database_admin_query \
         "ALTER DEFAULT PRIVILEGES FOR ROLE backupsheep_migrator GRANT ALL ON TABLES TO backupsheep_migrator" \
         >/dev/null
-    default_acl_inventory="$(database_admin_query \
-        "SELECT pg_catalog.string_agg(defaults.defaclobjtype::text || ':' || pg_catalog.cardinality(defaults.defaclacl)::text, ',' ORDER BY defaults.defaclobjtype::text) FROM pg_catalog.pg_default_acl defaults")"
-    [[ "$default_acl_inventory" == 'T:1,f:1' ]] \
-        || fail "the repaired default-ACL inventory is not canonical."
+    default_acl_inventory="$(database_default_acl_shape)"
+    [[ "$default_acl_inventory" == '2:1:1:0' ]] \
+        || fail "the repaired default-ACL inventory is not canonical (${default_acl_inventory})."
     docker exec \
         --env "SSH_MANAGED_PRIVATE_KEY_PATH=${runtime_ssh_path}" \
         "$app_container" python manage.py docker_preflight >/dev/null \
