@@ -730,10 +730,16 @@ bootstrap_marker="backupsheep:database-identity-v3:${installation_id}:bootstrap"
 
 attest_target_placeholders() {
     local evidence records memberships settings
-    evidence="$("$docker_bin" run "${target_admin_helper[@]}" "$target_image_id" -ceu '
+    evidence="$(
+        "$docker_bin" run --interactive "${target_admin_helper[@]}" \
+            "$target_image_id" -seu -- target-placeholder-attestation \
+            "$bootstrap_user" "$database_name" \
+            <<'TARGET_PLACEHOLDER_SCRIPT'
+        [ "$1" = target-placeholder-attestation ]
+        shift
         source_password="$(cat /run/secrets/source_password)"
         PGPASSWORD="$source_password" exec psql --no-psqlrc --no-password \
-          -h /target -U "$1" -d "$2" -At -v ON_ERROR_STOP=1 <<'"'"'SQL'"'"'
+          -h /target -U "$1" -d "$2" -At -v ON_ERROR_STOP=1 <<'SQL'
 SELECT role.rolname || '|' || role.rolsuper || '|' || role.rolinherit || '|' ||
        role.rolcreaterole || '|' || role.rolcreatedb || '|' || role.rolcanlogin || '|' ||
        role.rolreplication || '|' || role.rolbypassrls || '|' || role.rolconnlimit || '|' ||
@@ -759,7 +765,8 @@ SELECT COALESCE(role.rolname, '<all-roles>') || '|' ||
  CROSS JOIN LATERAL pg_catalog.unnest(settings.setconfig) setting(value)
  ORDER BY 1;
 SQL
-    ' target-placeholder-attestation "$bootstrap_user" "$database_name")" \
+TARGET_PLACEHOLDER_SCRIPT
+    )" \
         || die "could not attest fixed target placeholder identities"
     records="$(sed '/^--memberships--$/,$d' <<< "$evidence")"
     memberships="$(sed -n '/^--memberships--$/,/^--settings--$/p' <<< "$evidence" | sed -n '2p')"
@@ -777,13 +784,19 @@ rm -- "$target_bootstrap_secret_file" \
     || die "retired target bootstrap credential remains after rotation"
 target_bootstrap_secret_file=""
 
-restore_role_record="$($docker_bin run "${target_prepare_helper[@]}" "$target_image_id" -ceu '
+restore_role_record="$(
+    "$docker_bin" run --interactive "${target_prepare_helper[@]}" \
+        "$target_image_id" -seu -- prepare-restore \
+        "$bootstrap_user" "$database_name" \
+        "$restore_role" "$installation_id" <<'PREPARE_RESTORE_SCRIPT'
+    [ "$1" = prepare-restore ]
+    shift
     source_password="$(cat /run/secrets/source_password)"
     restore_password="$(cat /run/secrets/restore_password)"
     PGPASSWORD="$source_password" psql --no-psqlrc --no-password -h /target \
       -U "$1" -d "$2" -v ON_ERROR_STOP=1 -At \
       --set="restore_role=$3" --set="restore_password=$restore_password" \
-      --set="installation=$4" --set="database_name=$2" <<'"'"'SQL'"'"'
+      --set="installation=$4" --set="database_name=$2" <<'SQL'
 SELECT pg_catalog.format(
   'CREATE ROLE %I WITH LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 PASSWORD %L',
   :'restore_role', :'restore_password'
@@ -809,7 +822,8 @@ SELECT count(*)
   JOIN pg_catalog.pg_roles parent ON parent.oid=membership.roleid
  WHERE member.rolname=:'restore_role' OR parent.rolname=:'restore_role';
 SQL
-' prepare-restore "$bootstrap_user" "$database_name" "$restore_role" "$installation_id")" \
+PREPARE_RESTORE_SCRIPT
+)" \
     || die "could not create the isolated unprivileged restore identity"
 [[ "$restore_role_record" == "${restore_role}|false|false|false|false|true|false|false|1|true|true|true|backupsheep:postgres-restore-v1:${installation_id}"$'\n''0' ]] \
     || die "ephemeral restore identity privileges, authentication, or memberships drifted"
@@ -820,7 +834,8 @@ if ! "$docker_bin" run "${source_dump_helper[@]}" "$target_image_id" -ceu '
       --no-password --format=custom --no-owner --no-acl --no-security-labels \
       --lock-wait-timeout=30000
 ' dump-source "$bootstrap_user" "$database_name" | \
-  "$docker_bin" run "${target_restore_helper[@]}" "$target_image_id" -ceu '
+  "$docker_bin" run --interactive "${target_restore_helper[@]}" \
+      "$target_image_id" -ceu '
     restore_password="$(cat /run/secrets/restore_password)"
     PGPASSWORD="$restore_password" exec pg_restore --no-password --exit-on-error \
       --single-transaction --no-owner --no-acl --no-security-labels \
@@ -829,12 +844,18 @@ if ! "$docker_bin" run "${source_dump_helper[@]}" "$target_image_id" -ceu '
     die "isolated unprivileged database restore failed"
 fi
 
-"$docker_bin" run "${target_admin_helper[@]}" "$target_image_id" -ceu '
+if ! "$docker_bin" run --interactive "${target_admin_helper[@]}" \
+    "$target_image_id" -seu -- finalize-restore \
+    "$bootstrap_user" "$database_name" \
+    "$restore_role" "$target_migrator_user" "$target_migrator_user" \
+    >/dev/null <<'FINALIZE_RESTORE_SCRIPT'
+    [ "$1" = finalize-restore ]
+    shift
     source_password="$(cat /run/secrets/source_password)"
     PGPASSWORD="$source_password" psql --no-psqlrc --no-password -h /target \
       -U "$1" -d "$2" -v ON_ERROR_STOP=1 -At \
       --set="restore_role=$3" --set="database_owner=$4" \
-      --set="schema_owner=$5" --set="database_name=$2" <<'"'"'SQL'"'"'
+      --set="schema_owner=$5" --set="database_name=$2" <<'SQL'
 BEGIN;
 SELECT pg_catalog.format('ALTER ROLE %I NOLOGIN', :'restore_role') \gexec
 SELECT pg_catalog.pg_terminate_backend(activity.pid)
@@ -871,9 +892,10 @@ SELECT pg_catalog.format(
 SELECT pg_catalog.format('DROP ROLE %I', :'restore_role') \gexec
 COMMIT;
 SQL
-' finalize-restore "$bootstrap_user" "$database_name" "$restore_role" \
-    "$target_migrator_user" "$target_migrator_user" >/dev/null \
-    || die "could not retire the ephemeral restore identity and normalize ownership"
+FINALIZE_RESTORE_SCRIPT
+then
+    die "could not retire the ephemeral restore identity and normalize ownership"
+fi
 attest_target_placeholders
 
 fingerprint_dump() {
@@ -927,14 +949,20 @@ target_roles="$($docker_bin run --rm "${common_labels[@]}" --network none --read
     ' target-inventory "$bootstrap_user" "$database_name")"
 [[ "$target_roles" == "$expected_roles" ]] \
     || die "target role inventory differs from the fixed generation-3 target identities"
-target_ownership="$($docker_bin run --rm "${common_labels[@]}" --network none --read-only \
+target_ownership="$(
+    "$docker_bin" run --interactive --rm "${common_labels[@]}" --network none --read-only \
     --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 64 --user 70:70 \
     --entrypoint /bin/sh -v "${target_socket}:/target:ro" \
-    -v "${secret_file}:/run/secrets/source_password:ro" "$target_image_id" -ceu '
+    -v "${secret_file}:/run/secrets/source_password:ro" \
+    "$target_image_id" -seu -- target-ownership \
+    "$bootstrap_user" "$database_name" "$restore_role" \
+    <<'TARGET_OWNERSHIP_SCRIPT'
+        [ "$1" = target-ownership ]
+        shift
         password="$(cat /run/secrets/source_password)"
         PGPASSWORD="$password" exec psql --no-psqlrc --no-password -h /target \
           -U "$1" -d "$2" -At -v ON_ERROR_STOP=1 \
-          --set="restore_role=$3" <<'"'"'SQL'"'"'
+          --set="restore_role=$3" <<'SQL'
 SELECT pg_catalog.pg_get_userbyid(database.datdba)
   FROM pg_catalog.pg_database database
  WHERE database.datname=current_database();
@@ -1024,7 +1052,8 @@ SELECT
   (SELECT count(*) FROM pg_catalog.pg_shseclabel) || '|' ||
   (SELECT count(*) FROM pg_catalog.pg_largeobject_metadata);
 SQL
-    ' target-ownership "$bootstrap_user" "$database_name" "$restore_role")" \
+TARGET_OWNERSHIP_SCRIPT
+)" \
     || die "could not attest target ownership after the unprivileged restore"
 expected_target_ownership="$(printf '%s\n%s\n%s\n0\n0|0|0|0|0|0|0|0|0|0|0' \
     "$target_migrator_user" "$target_migrator_user" "$target_migrator_user")"

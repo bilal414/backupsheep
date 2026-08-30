@@ -515,6 +515,130 @@ class PostgresSourceIdentityContractTests(TestCase):
         self.assertEqual(source.count("pg_catalog.array_subscript_handler"), 2)
         self.assertIn('"$target_migrator_user" "$target_migrator_user"', source)
 
+    def test_multiline_sql_and_restore_streams_are_attached_as_literal_stdin(self):
+        source = MIGRATOR.read_text(encoding="utf-8")
+        for delimiter in (
+            "TARGET_PLACEHOLDER_SCRIPT",
+            "PREPARE_RESTORE_SCRIPT",
+            "FINALIZE_RESTORE_SCRIPT",
+            "TARGET_OWNERSHIP_SCRIPT",
+        ):
+            with self.subTest(delimiter=delimiter):
+                self.assertIn(f"<<'{delimiter}'", source)
+        self.assertNotIn("<<'\"'\"'SQL'\"'\"'", source)
+        self.assertEqual(source.count("run --interactive"), 5)
+        self.assertIn(
+            'run --interactive "${target_restore_helper[@]}"', source
+        )
+        self.assertEqual(source.count("$target_image_id\" -seu --"), 4)
+        self.assertIn(
+            "if ! \"$docker_bin\" run --interactive \"${target_admin_helper[@]}\"",
+            source,
+        )
+        self.assertIn(">/dev/null <<'FINALIZE_RESTORE_SCRIPT'", source)
+        self.assertIn(
+            "FINALIZE_RESTORE_SCRIPT\nthen\n"
+            '    die "could not retire the ephemeral restore identity and normalize ownership"\n'
+            "fi",
+            source,
+        )
+
+    def test_literal_stdin_scripts_preserve_sql_and_positional_arguments(self):
+        source = MIGRATOR.read_text(encoding="utf-8")
+        cases = (
+            (
+                "TARGET_PLACEHOLDER_SCRIPT",
+                "target-placeholder-attestation",
+                ("backupsheep_bootstrap", "backupsheep"),
+                "COALESCE(database.datname, '<all-databases>')",
+                "'SCRAM-SHA-256$%'",
+            ),
+            (
+                "PREPARE_RESTORE_SCRIPT",
+                "prepare-restore",
+                ("backupsheep_bootstrap", "backupsheep", "restore_role", INSTALLATION_ID),
+                "'CREATE ROLE %I WITH LOGIN NOINHERIT",
+                ":'restore_role'",
+            ),
+            (
+                "FINALIZE_RESTORE_SCRIPT",
+                "finalize-restore",
+                (
+                    "backupsheep_bootstrap",
+                    "backupsheep",
+                    "restore_role",
+                    "backupsheep_migrator",
+                    "backupsheep_migrator",
+                ),
+                "'REASSIGN OWNED BY %I TO %I'",
+                ":'restore_role'",
+            ),
+            (
+                "TARGET_OWNERSHIP_SCRIPT",
+                "target-ownership",
+                ("backupsheep_bootstrap", "backupsheep", "restore_role"),
+                "pg_catalog.acldefault('T', type.typowner)",
+                ":'restore_role'",
+            ),
+        )
+        with tempfile.TemporaryDirectory(prefix="postgres-literal-stdin-") as temp_dir:
+            fake_bin = Path(temp_dir) / "bin"
+            fake_bin.mkdir()
+            fake_cat = fake_bin / "cat"
+            fake_cat.write_text(
+                "#!/bin/sh\n"
+                "case \"${1:-}\" in\n"
+                "  *restore_password*) printf '%s\\n' restore-secret ;;\n"
+                "  *) printf '%s\\n' source-secret ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            fake_cat.chmod(0o755)
+            fake_psql = fake_bin / "psql"
+            fake_psql.write_text(
+                "#!/bin/sh\n"
+                ": \"${CAPTURE_ARGS:?}\" \"${CAPTURE_STDIN:?}\"\n"
+                "printf '%s\\0' \"$@\" > \"$CAPTURE_ARGS\"\n"
+                "/bin/cat > \"$CAPTURE_STDIN\"\n",
+                encoding="utf-8",
+            )
+            fake_psql.chmod(0o755)
+
+            for delimiter, sentinel, arguments, sql_fragment, parameter_fragment in cases:
+                with self.subTest(delimiter=delimiter):
+                    body = source.split(f"<<'{delimiter}'\n", 1)[1].split(
+                        f"\n{delimiter}\n", 1
+                    )[0]
+                    capture_args = Path(temp_dir) / f"{delimiter}.args"
+                    capture_stdin = Path(temp_dir) / f"{delimiter}.sql"
+                    environment = os.environ.copy()
+                    environment.update(
+                        PATH=f"{fake_bin}:{environment['PATH']}",
+                        CAPTURE_ARGS=str(capture_args),
+                        CAPTURE_STDIN=str(capture_stdin),
+                    )
+                    result = subprocess.run(
+                        ["/bin/sh", "-seu", "--", sentinel, *arguments],
+                        input=body + "\n",
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    psql_arguments = capture_args.read_bytes().split(b"\0")[:-1]
+                    self.assertEqual(
+                        psql_arguments[psql_arguments.index(b"-U") + 1],
+                        b"backupsheep_bootstrap",
+                    )
+                    self.assertEqual(
+                        psql_arguments[psql_arguments.index(b"-d") + 1],
+                        b"backupsheep",
+                    )
+                    captured_sql = capture_stdin.read_text(encoding="utf-8")
+                    self.assertIn(sql_fragment, captured_sql)
+                    self.assertIn(parameter_fragment, captured_sql)
+
     def test_default_acl_object_types_are_explicitly_serialized_as_text(self):
         source = MIGRATOR.read_text(encoding="utf-8")
         self.assertEqual(source.count("defaults.defaclobjtype::text"), 2)

@@ -178,6 +178,13 @@ otherwise conceal drift in future table or sequence owner privileges. The Linux
 topology gate creates that hostile empty record, requires Docker preflight refusal,
 restores the exact canonical catalog, and requires preflight recovery.
 
+The stop-the-world logical migration sends each multiline SQL program to its
+networkless, read-only helper as a quoted stdin script. SQL is never nested inside a
+host-shell single-quoted command string, so SQL apostrophes cannot escape into host
+shell syntax. Docker stdin is attached explicitly for all four SQL helpers and for the
+`pg_dump` to unprivileged `pg_restore` stream. Failure handling remains attached to the
+actual helper command, including restore-role retirement and ownership normalization.
+
 Migration-source compatibility remains narrow and explicit. The historical
 generation-2 catalog is accepted only with its seven runtime-only schema deltas. A
 generation-3 source is accepted only in either the exact pre-fix empty state or the
@@ -258,6 +265,7 @@ production helpers are not copied into the application runtime image.
 | Release-chain contract series | 98 passed | five-image descriptor, manifest, provenance, SBOM/scanner identity, quarantine publication, and exact action pins |
 | Deployment and CI topology series | 55 passed | Compose isolation, release topology, egress and migration harness contracts |
 | PostgreSQL ACL hardening regressions | 61 passed locally | global and schema-local defaults, effective routine/type ACLs, exact historical-source contracts, hidden empty-record refusal contract, and topology attack shape; live PostgreSQL execution remains a Linux release gate |
+| PostgreSQL migration stdin/restore regressions | 51 passed locally; independent review found no P0/P1/P2 | literal SQL-byte preservation, positional arguments, fail-closed finalization, Docker stdin attachment, source/target migration contracts, and topology integration; live Alpine/Docker execution remains a Linux release gate |
 | Static runtime-provider audit | Pass | no AWS KMS provider export, factory branch, client construction, or dynamic provider import |
 | Rendered Compose mount review | Pass | only matching source workers receive matching keyrings; storage receives neither |
 | Signed-upgrade refusal contract | Pass | former stage/upgrade forms made no Docker call, mutation lock, or installation byte/metadata change |
