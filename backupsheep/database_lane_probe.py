@@ -17,6 +17,11 @@ from contextlib import closing
 import psycopg2
 from psycopg2 import errors, sql
 
+from backupsheep.artifact_crypto.envelope import (
+    ALGORITHM as ARTIFACT_ALGORITHM,
+    DEFAULT_CHUNK_SIZE as ARTIFACT_CHUNK_SIZE,
+    FORMAT_VERSION as ARTIFACT_FORMAT_VERSION,
+)
 from backupsheep.database_identity import IdentityConfiguration, ProvisioningError
 from backupsheep.database_lane_policy import (
     EXPECTED_ROUTINES,
@@ -238,13 +243,16 @@ def _insert_artifact_fixture(cursor, *, model_name: str, suffix: str):
             plaintext_byte_count, plaintext_sha256, ciphertext_byte_count,
             status, sealed_at, execution_id
         ) VALUES (
-            pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(), %s, 1,
-            'AES-256-GCM-SIV', 4194304, %s, %s, %s, 0, %s, 0,
+            pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(), %s, %s,
+            %s, %s, %s, %s, %s, 0, %s, 0,
             'pending', NULL, %s
         ) RETURNING id
         """,
         (
             str(uuid.uuid4()),
+            ARTIFACT_FORMAT_VERSION,
+            ARTIFACT_ALGORITHM,
+            ARTIFACT_CHUNK_SIZE,
             f'{{"probe":"{suffix}"}}',
             "a" * 64,
             "b" * 64,

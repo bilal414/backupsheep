@@ -3,6 +3,11 @@ from unittest import mock
 from django.test import SimpleTestCase
 
 from backupsheep import database_lane_probe
+from backupsheep.artifact_crypto.envelope import (
+    ALGORITHM,
+    DEFAULT_CHUNK_SIZE,
+    FORMAT_VERSION,
+)
 from backupsheep.database_lane_policy import (
     ARTIFACT_LEDGER_TABLES,
     BEAT_TABLES,
@@ -42,6 +47,25 @@ from backupsheep.database_lane_policy import (
 
 
 class DatabaseLaneProbeSqlAllowlistTests(SimpleTestCase):
+    def test_artifact_fixture_tracks_the_current_envelope_format(self):
+        cursor = mock.Mock()
+        cursor.fetchone.side_effect = [(11,), (12,), (13,), (14,)]
+
+        fixture = database_lane_probe._insert_artifact_fixture(
+            cursor,
+            model_name="coredatabasebackup",
+            suffix="da",
+        )
+
+        self.assertEqual(
+            fixture,
+            {"execution": 12, "envelope": 13, "key_wrap": 14},
+        )
+        envelope_parameters = cursor.execute.call_args_list[2].args[1]
+        self.assertEqual(envelope_parameters[1], FORMAT_VERSION)
+        self.assertEqual(envelope_parameters[2], ALGORITHM)
+        self.assertEqual(envelope_parameters[3], DEFAULT_CHUNK_SIZE)
+
     def test_exact_retired_tables_use_literal_denial_probes(self):
         self.assertEqual(
             frozenset(database_lane_probe._RETIRED_TABLE_READ_SQL),
