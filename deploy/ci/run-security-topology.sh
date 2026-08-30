@@ -553,9 +553,50 @@ for service in rabbitmq-volume-init rabbitmq-provision staging-provision db-prov
     assert_completed "$service"
 done
 
+attest_runtime_managed_ssh_path() {
+    local container="$1"
+    docker exec "$container" /usr/local/bin/python3 -c '
+import pathlib
+import sys
+
+children_path = pathlib.Path("/proc/1/task/1/children")
+
+def child_identity():
+    children = children_path.read_bytes().split()
+    if len(children) != 1 or not children[0].isdigit():
+        raise SystemExit("runtime direct-child identity is ambiguous")
+    pid = int(children[0])
+    if pid < 2:
+        raise SystemExit("runtime direct-child PID is invalid")
+    stat_record = pathlib.Path(f"/proc/{pid}/stat").read_bytes()
+    _head, separator, tail = stat_record.rpartition(b") ")
+    fields = tail.split()
+    if not separator or len(fields) < 20 or fields[1] != b"1":
+        raise SystemExit("runtime direct-child process identity is invalid")
+    start_time = fields[19]
+    if not start_time.isdigit():
+        raise SystemExit("runtime direct-child start time is invalid")
+    return pid, start_time
+
+before = child_identity()
+prefix = b"SSH_MANAGED_PRIVATE_KEY_PATH="
+entries = pathlib.Path(f"/proc/{before[0]}/environ").read_bytes().split(b"\0")
+values = [entry[len(prefix):] for entry in entries if entry.startswith(prefix)]
+if len(values) != 1:
+    raise SystemExit("runtime managed SSH path is absent or duplicated")
+value = values[0]
+if len(value) > 4096 or any(byte < 32 or byte > 126 for byte in value):
+    raise SystemExit("runtime managed SSH path is malformed")
+after = child_identity()
+if after != before:
+    raise SystemExit("runtime direct-child identity changed during attestation")
+sys.stdout.buffer.write(value)
+'
+}
+
 assert_healthy() {
     local service="$1"
-    local container
+    local container runtime_ssh_path expected_ssh_path=''
     container="$(compose ps --all --quiet "$service")"
     [[ -n "$container" ]] || fail "${service} was not created."
     [[ "$(docker inspect --format '{{.State.Status}}:{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container")" == 'running:healthy' ]] \
@@ -565,7 +606,21 @@ assert_healthy() {
     docker exec "$container" /usr/local/bin/backupsheep-egress-workload-healthcheck \
         >/dev/null \
         || fail "${service} cannot reach its exact database and broker peers."
-    docker exec "$container" python manage.py docker_preflight >/dev/null
+    runtime_ssh_path="$(attest_runtime_managed_ssh_path "$container")" \
+        || fail "${service} did not expose one stable runtime managed-SSH path witness."
+    case "$service" in
+        worker-database|worker-files)
+            expected_ssh_path='/run/backupsheep/ssh/managed_private_key'
+            ;;
+    esac
+    [[ "$runtime_ssh_path" == "$expected_ssh_path" ]] \
+        || fail "${service} runtime managed-SSH path witness drifted."
+    # docker exec starts from the container's immutable Config.Env, not PID 1's
+    # application-child environment.  Reuse only the exact value attested above;
+    # docker_preflight then proves the staged file, ownership, mode and key match.
+    docker exec \
+        --env "SSH_MANAGED_PRIVATE_KEY_PATH=${runtime_ssh_path}" \
+        "$container" python manage.py docker_preflight >/dev/null
 }
 assert_healthy app
 assert_healthy worker-cloud

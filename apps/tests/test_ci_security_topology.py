@@ -1185,6 +1185,37 @@ raise SystemExit(99)
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.runner)
 
+    def test_topology_recheck_attests_stable_runtime_managed_ssh_path(self):
+        for expected in (
+            "attest_runtime_managed_ssh_path",
+            'pathlib.Path("/proc/1/task/1/children")',
+            'pathlib.Path(f"/proc/{pid}/stat").read_bytes()',
+            'pathlib.Path(f"/proc/{before[0]}/environ").read_bytes()',
+            "if pid < 2:",
+            'fields[1] != b"1"',
+            "if not start_time.isdigit():",
+            'if after != before:',
+            'if len(values) != 1:',
+            "worker-database|worker-files)",
+            "expected_ssh_path='/run/backupsheep/ssh/managed_private_key'",
+            '[[ "$runtime_ssh_path" == "$expected_ssh_path" ]]',
+            '--env "SSH_MANAGED_PRIVATE_KEY_PATH=${runtime_ssh_path}"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.runner)
+        self.assertNotIn(
+            '--env SSH_MANAGED_PRIVATE_KEY_PATH=/run/backupsheep/ssh/managed_private_key',
+            self.runner,
+        )
+        self.assertLess(
+            self.runner.index(
+                'runtime_ssh_path="$(attest_runtime_managed_ssh_path "$container")"'
+            ),
+            self.runner.index(
+                '--env "SSH_MANAGED_PRIVATE_KEY_PATH=${runtime_ssh_path}"'
+            ),
+        )
+
     def test_runtime_credentials_are_files_not_direct_environment_values(self):
         self.assertIn('chmod 0444 "$secret_dir"/*', self.runner)
         self.assertIn('DJANGO_SECRET_KEY", "DB_PASSWORD", "RABBITMQ_PASSWORD', self.runner)
