@@ -1180,6 +1180,12 @@ raise SystemExit(99)
             "python manage.py docker_preflight",
             "assert_healthy app",
             "assert_healthy worker-cloud",
+            "assert_empty_default_acl_record_fails_closed_and_recovers",
+            "T:1,f:1,r:0",
+            "Docker preflight accepted an empty hostile default-ACL record",
+            "database default privileges drifted from the hardened policy",
+            "T:1,f:1",
+            "Docker preflight did not recover after exact default-ACL repair",
             "RabbitMQ dedicated identities drifted",
         ):
             with self.subTest(expected=expected):

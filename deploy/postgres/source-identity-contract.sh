@@ -125,21 +125,9 @@ backupsheep_validate_generation2_source() {
         "${runtime_user}|<all-databases>|search_path=public, pg_catalog" | LC_ALL=C sort)"
     expected_default_acl="$(
         printf '%s\n' \
-            "${migrator_user}|public|S|${migrator_user}|${migrator_user}|SELECT|false" \
-            "${migrator_user}|public|S|${migrator_user}|${migrator_user}|UPDATE|false" \
-            "${migrator_user}|public|S|${migrator_user}|${migrator_user}|USAGE|false" \
             "${migrator_user}|public|S|${runtime_user}|${migrator_user}|SELECT|false" \
             "${migrator_user}|public|S|${runtime_user}|${migrator_user}|USAGE|false" \
-            "${migrator_user}|public|f|${migrator_user}|${migrator_user}|EXECUTE|false" \
             "${migrator_user}|public|f|${runtime_user}|${migrator_user}|EXECUTE|false" \
-            "${migrator_user}|public|r|${migrator_user}|${migrator_user}|DELETE|false" \
-            "${migrator_user}|public|r|${migrator_user}|${migrator_user}|INSERT|false" \
-            "${migrator_user}|public|r|${migrator_user}|${migrator_user}|MAINTAIN|false" \
-            "${migrator_user}|public|r|${migrator_user}|${migrator_user}|REFERENCES|false" \
-            "${migrator_user}|public|r|${migrator_user}|${migrator_user}|SELECT|false" \
-            "${migrator_user}|public|r|${migrator_user}|${migrator_user}|TRIGGER|false" \
-            "${migrator_user}|public|r|${migrator_user}|${migrator_user}|TRUNCATE|false" \
-            "${migrator_user}|public|r|${migrator_user}|${migrator_user}|UPDATE|false" \
             "${migrator_user}|public|r|${runtime_user}|${migrator_user}|DELETE|false" \
             "${migrator_user}|public|r|${runtime_user}|${migrator_user}|INSERT|false" \
             "${migrator_user}|public|r|${runtime_user}|${migrator_user}|SELECT|false" \
@@ -257,17 +245,26 @@ backupsheep_validate_generation3_source() {
     ' | LC_ALL=C sort)"
     migrator_user="$(printf '%s' "$expected_roles_csv" | cut -d, -f2)"
     expected_default_acl="$(printf '%s\n' \
-        "${migrator_user}|public|T|${migrator_user}|${migrator_user}|USAGE|false" \
-        "${migrator_user}|public|f|${migrator_user}|${migrator_user}|EXECUTE|false" \
+        "${migrator_user}|<global>|T|${migrator_user}|${migrator_user}|USAGE|false" \
+        "${migrator_user}|<global>|f|${migrator_user}|${migrator_user}|EXECUTE|false" \
         | LC_ALL=C sort)"
     expected_default_acl_records="$(printf '%s\n' \
-        "${migrator_user}|public|T" \
-        "${migrator_user}|public|f" | LC_ALL=C sort)"
+        "${migrator_user}|<global>|T" \
+        "${migrator_user}|<global>|f" | LC_ALL=C sort)"
+    default_acl_is_known=false
+    if [ -z "$default_acl" ] && [ -z "$default_acl_records" ]; then
+        # Generation 3 shipped with schema-local REVOKEs, which PostgreSQL
+        # records as no delta at all.  Accept that exact legacy state only as a
+        # migration source; current provisioning seals the global defaults.
+        default_acl_is_known=true
+    elif [ "$default_acl" = "$expected_default_acl" ] \
+        && [ "$default_acl_records" = "$expected_default_acl_records" ]; then
+        default_acl_is_known=true
+    fi
     [ "$role_settings" = "$expected_settings" \
         ] && [ "$database_acl" = "$expected_database_acl" \
         ] && [ "$schema_acl" = "$expected_schema_acl" \
-        ] && [ "$default_acl" = "$expected_default_acl" \
-        ] && [ "$default_acl_records" = "$expected_default_acl_records" \
+        ] && [ "$default_acl_is_known" = true \
         ] && [ "$database_owner" = "$migrator_user" \
         ] && [ "$schema_owner" = "$migrator_user" \
         ] && [ "$public_object_owners" = "$migrator_user" ] || {

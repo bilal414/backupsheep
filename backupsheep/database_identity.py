@@ -842,6 +842,16 @@ def _revoke_default_privileges(
     migrator = sql.Identifier(config.migrator_user)
     object_types = ("TABLES", "SEQUENCES", "FUNCTIONS", "TYPES")
     for object_type in object_types:
+        # PostgreSQL's built-in defaults are global.  In particular, functions
+        # are executable and types are usable by PUBLIC unless the owning role's
+        # global defaults say otherwise.  A schema-local REVOKE only removes a
+        # schema-local GRANT; it cannot subtract those built-in privileges.
+        cursor.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {} "
+                "REVOKE ALL ON {} FROM PUBLIC"
+            ).format(migrator, sql.SQL(object_type))
+        )
         cursor.execute(
             sql.SQL(
                 "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA public "
@@ -849,6 +859,16 @@ def _revoke_default_privileges(
             ).format(migrator, sql.SQL(object_type))
         )
         for grantee in grantees:
+            cursor.execute(
+                sql.SQL(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} "
+                    "REVOKE ALL ON {} FROM {}"
+                ).format(
+                    migrator,
+                    sql.SQL(object_type),
+                    sql.Identifier(grantee),
+                )
+            )
             cursor.execute(
                 sql.SQL(
                     "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA public "
@@ -859,6 +879,28 @@ def _revoke_default_privileges(
                     sql.Identifier(grantee),
                 )
             )
+
+
+def _public_type_names(cursor) -> tuple[str, ...]:
+    """Return the bounded public types whose effective ACL must be sealed."""
+
+    cursor.execute(
+        """
+        SELECT type.typname
+          FROM pg_catalog.pg_type type
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type.typnamespace
+         WHERE namespace.nspname = 'public'
+           AND type.typisdefined
+           AND type.typtype NOT IN ('m', 'p')
+           AND NOT (
+               type.typelem <> 0
+               AND type.typsubscript =
+                   'pg_catalog.array_subscript_handler'::pg_catalog.regproc
+           )
+         ORDER BY type.oid
+        """
+    )
+    return tuple(str(row[0]) for row in cursor.fetchall())
 
 
 def _prepare_privilege_boundary(
@@ -878,6 +920,13 @@ def _prepare_privilege_boundary(
     cursor.execute("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC")
     cursor.execute("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC")
     cursor.execute("REVOKE ALL ON ALL ROUTINES IN SCHEMA public FROM PUBLIC")
+    public_types = _public_type_names(cursor)
+    for type_name in public_types:
+        cursor.execute(
+            sql.SQL("REVOKE USAGE ON TYPE {} FROM PUBLIC").format(
+                sql.Identifier("public", type_name)
+            )
+        )
 
     for role_name in runtime_roles:
         role = sql.Identifier(role_name)
@@ -903,6 +952,12 @@ def _prepare_privilege_boundary(
                 role
             )
         )
+        for type_name in public_types:
+            cursor.execute(
+                sql.SQL("REVOKE USAGE ON TYPE {} FROM {}").format(
+                    sql.Identifier("public", type_name), role
+                )
+            )
 
     _revoke_default_privileges(cursor, config, runtime_roles)
     cursor.execute(
@@ -1763,7 +1818,12 @@ def assert_database_lane_contract(
                acl.privilege_type, acl.is_grantable
           FROM pg_catalog.pg_proc procedure
           JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
-          CROSS JOIN LATERAL pg_catalog.aclexplode(procedure.proacl) acl
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+              COALESCE(
+                  procedure.proacl,
+                  pg_catalog.acldefault('f', procedure.proowner)
+              )
+          ) acl
           LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee
          WHERE namespace.nspname = 'public'
          ORDER BY procedure.proname, 2, 3, acl.privilege_type
@@ -1774,6 +1834,35 @@ def assert_database_lane_contract(
     }
     if actual_routine_acl != expected_routine_acl:
         raise ProvisioningError("database routine privileges drifted from the lane policy")
+
+    actual_type_acl = _acl_rows(
+        cursor,
+        """
+        SELECT type.typname,
+               CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END,
+               acl.privilege_type, acl.is_grantable
+          FROM pg_catalog.pg_type type
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type.typnamespace
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+              COALESCE(type.typacl, pg_catalog.acldefault('T', type.typowner))
+          ) acl
+          LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee
+         WHERE namespace.nspname = 'public'
+           AND type.typisdefined
+           AND type.typtype NOT IN ('m', 'p')
+           AND NOT (
+               type.typelem <> 0
+               AND type.typsubscript =
+                   'pg_catalog.array_subscript_handler'::pg_catalog.regproc
+           )
+         ORDER BY type.oid, 2, acl.privilege_type
+        """,
+    )
+    unexpected_type_acl = {
+        row for row in actual_type_acl if row[1] != migrator_user
+    }
+    if unexpected_type_acl:
+        raise ProvisioningError("database type privileges grant unreviewed access")
 
     expected_database_acl = {
         (role_name, "CONNECT", "False") for role_name in lane_users.values()
@@ -1822,22 +1911,42 @@ def assert_database_lane_contract(
         """
         SELECT owner.rolname,
                COALESCE(namespace.nspname, '<global>'),
-               defaults.defaclobjtype,
+               defaults.defaclobjtype::text,
                CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END,
                acl.privilege_type, acl.is_grantable
           FROM pg_catalog.pg_default_acl defaults
           JOIN pg_catalog.pg_roles owner ON owner.oid = defaults.defaclrole
           LEFT JOIN pg_catalog.pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
-          CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) acl
+          LEFT JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) acl ON true
           LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee
          ORDER BY owner.rolname, 2, defaults.defaclobjtype, 4, acl.privilege_type
         """,
     )
-    unexpected_default_acl = {
-        row for row in default_acl if row[3] != migrator_user
+    expected_default_acl = {
+        (
+            migrator_user,
+            "<global>",
+            "f",
+            migrator_user,
+            "EXECUTE",
+            "False",
+        ),
+        (
+            migrator_user,
+            "<global>",
+            "T",
+            migrator_user,
+            "USAGE",
+            "False",
+        ),
     }
-    if unexpected_default_acl:
-        raise ProvisioningError("database default privileges grant unreviewed access")
+    # LEFT JOIN deliberately preserves an empty ACL record as a row of NULL ACL
+    # fields.  A CROSS JOIN would hide that record and could miss a hostile
+    # owner-empty default for future tables or sequences.
+    if default_acl != expected_default_acl:
+        raise ProvisioningError(
+            "database default privileges drifted from the hardened policy"
+        )
 
     cursor.execute(
         """

@@ -41,21 +41,9 @@ GENERATION2_SETTINGS = "\n".join(
 GENERATION2_DEFAULT_ACL = "\n".join(
     sorted(
         (
-            f"{GENERATION2_ROLES[1]}|public|S|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|SELECT|false",
-            f"{GENERATION2_ROLES[1]}|public|S|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|UPDATE|false",
-            f"{GENERATION2_ROLES[1]}|public|S|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|USAGE|false",
             f"{GENERATION2_ROLES[1]}|public|S|{GENERATION2_ROLES[2]}|{GENERATION2_ROLES[1]}|SELECT|false",
             f"{GENERATION2_ROLES[1]}|public|S|{GENERATION2_ROLES[2]}|{GENERATION2_ROLES[1]}|USAGE|false",
-            f"{GENERATION2_ROLES[1]}|public|f|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|EXECUTE|false",
             f"{GENERATION2_ROLES[1]}|public|f|{GENERATION2_ROLES[2]}|{GENERATION2_ROLES[1]}|EXECUTE|false",
-            f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|DELETE|false",
-            f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|INSERT|false",
-            f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|MAINTAIN|false",
-            f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|REFERENCES|false",
-            f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|SELECT|false",
-            f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|TRIGGER|false",
-            f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|TRUNCATE|false",
-            f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[1]}|{GENERATION2_ROLES[1]}|UPDATE|false",
             f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[2]}|{GENERATION2_ROLES[1]}|DELETE|false",
             f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[2]}|{GENERATION2_ROLES[1]}|INSERT|false",
             f"{GENERATION2_ROLES[1]}|public|r|{GENERATION2_ROLES[2]}|{GENERATION2_ROLES[1]}|SELECT|false",
@@ -124,15 +112,15 @@ GENERATION3_SCHEMA_ACL = "\n".join(
 )
 GENERATION3_DEFAULT_ACL_RECORDS = "\n".join(
     sorted(
-        f"{GENERATION3_ROLES[1]}|public|{object_type}"
+        f"{GENERATION3_ROLES[1]}|<global>|{object_type}"
         for object_type in ("T", "f")
     )
 )
 GENERATION3_DEFAULT_ACL = "\n".join(
     sorted(
         (
-            f"{GENERATION3_ROLES[1]}|public|T|{GENERATION3_ROLES[1]}|{GENERATION3_ROLES[1]}|USAGE|false",
-            f"{GENERATION3_ROLES[1]}|public|f|{GENERATION3_ROLES[1]}|{GENERATION3_ROLES[1]}|EXECUTE|false",
+            f"{GENERATION3_ROLES[1]}|<global>|T|{GENERATION3_ROLES[1]}|{GENERATION3_ROLES[1]}|USAGE|false",
+            f"{GENERATION3_ROLES[1]}|<global>|f|{GENERATION3_ROLES[1]}|{GENERATION3_ROLES[1]}|EXECUTE|false",
         )
     )
 )
@@ -284,6 +272,16 @@ class PostgresSourceIdentityContractTests(TestCase):
     def test_exact_generation3_ten_and_retired_role_topologies_are_accepted(self):
         self.assertEqual(self.run_generation3().returncode, 0)
         self.assertEqual(self.run_generation3(retired=True).returncode, 0)
+        self.assertEqual(
+            self.run_generation3(DEFAULT_ACL="", DEFAULT_RECORDS="").returncode,
+            0,
+        )
+        self.assertEqual(
+            self.run_generation3(
+                retired=True, DEFAULT_ACL="", DEFAULT_RECORDS=""
+            ).returncode,
+            0,
+        )
 
     def test_generation3_topology_drift_is_refused(self):
         retired = generation3_records(retired=True)
@@ -300,8 +298,10 @@ class PostgresSourceIdentityContractTests(TestCase):
                 "|evil|EXECUTE|false",
                 1,
             )},
+            {"DEFAULT_ACL": GENERATION3_DEFAULT_ACL, "DEFAULT_RECORDS": ""},
+            {"DEFAULT_ACL": "", "DEFAULT_RECORDS": GENERATION3_DEFAULT_ACL_RECORDS},
             {"DEFAULT_RECORDS": GENERATION3_DEFAULT_ACL_RECORDS.splitlines()[0]},
-            {"DEFAULT_RECORDS": GENERATION3_DEFAULT_ACL_RECORDS + f"\n{GENERATION3_ROLES[1]}|public|r"},
+            {"DEFAULT_RECORDS": GENERATION3_DEFAULT_ACL_RECORDS + f"\n{GENERATION3_ROLES[1]}|<global>|r"},
             {"DATABASE_OWNER": GENERATION3_ROLES[0]},
             {"SCHEMA_OWNER": GENERATION3_ROLES[0]},
             {"PUBLIC_OWNERS": f"{GENERATION3_ROLES[0]}\n{GENERATION3_ROLES[1]}"},

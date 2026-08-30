@@ -99,6 +99,24 @@ class PostgresRuntimeMigrationE2EContractTests(TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.runner)
+        # Keep both fixtures as deployed-state compatibility proofs. Generation
+        # 3's schema-local REVOKEs intentionally reconstruct the legacy empty
+        # pg_default_acl state; fresh provisioning separately proves the global
+        # hardened policy.
+        self.assertEqual(
+            self.runner.count(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE "
+                "ON FUNCTIONS FROM PUBLIC;"
+            ),
+            2,
+        )
+        self.assertEqual(
+            self.runner.count(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE "
+                "ON TYPES FROM PUBLIC;"
+            ),
+            1,
+        )
 
     def test_schema_data_types_ownership_and_effective_acls_are_proved(self):
         for expected in (

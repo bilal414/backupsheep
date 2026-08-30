@@ -627,6 +627,62 @@ assert_healthy worker-cloud
 assert_healthy worker-database
 assert_healthy worker-files
 
+database_admin_query() {
+    local query="$1" container
+    container="$(compose ps --all --quiet db)"
+    [[ -n "$container" ]] || fail "the database container is absent."
+    docker exec "$container" /bin/sh -ceu '
+        password="$(cat /run/secrets/db_bootstrap_password)"
+        PGPASSWORD="$password" exec psql --no-psqlrc --no-password \
+            --host=127.0.0.1 --username="$POSTGRES_USER" \
+            --dbname="$POSTGRES_DB" --tuples-only --no-align \
+            --set=ON_ERROR_STOP=1 --command="$1"
+    ' database-admin-query "$query"
+}
+
+assert_empty_default_acl_record_fails_closed_and_recovers() {
+    local app_container runtime_ssh_path drift_log default_acl_inventory
+    app_container="$(compose ps --all --quiet app)"
+    [[ -n "$app_container" ]] || fail "the application container is absent."
+    runtime_ssh_path="$(attest_runtime_managed_ssh_path "$app_container")" \
+        || fail "the application managed-SSH path witness drifted before the ACL attack."
+    drift_log="${runtime_root}/default-acl-drift.log"
+
+    # An ACL array with zero entries is a real pg_default_acl record, but a
+    # CROSS JOIN aclexplode() makes it disappear.  Prove the runtime validator's
+    # LEFT JOIN inventory sees and refuses that exact catalog shape.
+    database_admin_query \
+        "ALTER DEFAULT PRIVILEGES FOR ROLE backupsheep_migrator REVOKE ALL ON TABLES FROM backupsheep_migrator" \
+        >/dev/null
+    default_acl_inventory="$(database_admin_query \
+        "SELECT pg_catalog.string_agg(defaults.defaclobjtype::text || ':' || pg_catalog.cardinality(defaults.defaclacl)::text, ',' ORDER BY defaults.defaclobjtype::text) FROM pg_catalog.pg_default_acl defaults")"
+    [[ "$default_acl_inventory" == 'T:1,f:1,r:0' ]] \
+        || fail "the empty default-ACL attack fixture did not produce its exact catalog state."
+    if docker exec \
+        --env "SSH_MANAGED_PRIVATE_KEY_PATH=${runtime_ssh_path}" \
+        "$app_container" python manage.py docker_preflight \
+        >"$drift_log" 2>&1; then
+        fail "Docker preflight accepted an empty hostile default-ACL record."
+    fi
+    grep -Fq 'database default privileges drifted from the hardened policy' \
+        "$drift_log" \
+        || fail "Docker preflight did not report the exact default-ACL refusal."
+
+    database_admin_query \
+        "ALTER DEFAULT PRIVILEGES FOR ROLE backupsheep_migrator GRANT ALL ON TABLES TO backupsheep_migrator" \
+        >/dev/null
+    default_acl_inventory="$(database_admin_query \
+        "SELECT pg_catalog.string_agg(defaults.defaclobjtype::text || ':' || pg_catalog.cardinality(defaults.defaclacl)::text, ',' ORDER BY defaults.defaclobjtype::text) FROM pg_catalog.pg_default_acl defaults")"
+    [[ "$default_acl_inventory" == 'T:1,f:1' ]] \
+        || fail "the repaired default-ACL inventory is not canonical."
+    docker exec \
+        --env "SSH_MANAGED_PRIVATE_KEY_PATH=${runtime_ssh_path}" \
+        "$app_container" python manage.py docker_preflight >/dev/null \
+        || fail "Docker preflight did not recover after exact default-ACL repair."
+}
+
+assert_empty_default_acl_record_fails_closed_and_recovers
+
 assert_lane_keyring_secret() {
     local service="$1" lane="$2"
     local container host_path host_uid inside_metadata mounts

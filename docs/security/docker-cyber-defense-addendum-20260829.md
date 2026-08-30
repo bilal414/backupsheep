@@ -152,6 +152,45 @@ Implementation anchors:
 - `apps/_tasks/integration/storage/lease.py`
 - `apps/_tasks/integration/storage/tasks.py`
 
+## PostgreSQL future-object privilege boundary
+
+PostgreSQL grants `EXECUTE` on new routines and `USAGE` on new types to `PUBLIC`
+by default. A schema-local default-privilege revoke cannot subtract those global
+built-in grants. Database provisioning and sealing therefore apply both global and
+schema-local revokes for `PUBLIC`, every active lane, and the recognized retired
+runtime role. The sealed catalog contract requires exactly two global owner-only
+default ACLs: routine `EXECUTE` and type `USAGE`, both owned by the migrator.
+These semantics are defined by PostgreSQL's
+[`ALTER DEFAULT PRIVILEGES`](https://www.postgresql.org/docs/18/sql-alterdefaultprivileges.html)
+and [`pg_default_acl`](https://www.postgresql.org/docs/18/catalog-pg-default-acl.html)
+documentation.
+
+Existing public routines and reviewed public types are also normalized before each
+migration/seal. Validation expands a null stored ACL through PostgreSQL's effective
+`acldefault` policy, so an absent ACL cannot conceal built-in public access. Type
+enumeration excludes arrays and unsupported type classes with the same predicate as
+the logical PostgreSQL migration gate. Standalone user types remain outside the
+automatic migration contract and fail closed.
+
+The default-ACL inventory uses a lateral left join. This is security-significant:
+an empty but present default-ACL record would disappear under a cross join and could
+otherwise conceal drift in future table or sequence owner privileges. The Linux
+topology gate creates that hostile empty record, requires Docker preflight refusal,
+restores the exact canonical catalog, and requires preflight recovery.
+
+Migration-source compatibility remains narrow and explicit. The historical
+generation-2 catalog is accepted only with its seven runtime-only schema deltas. A
+generation-3 source is accepted only in either the exact pre-fix empty state or the
+exact hardened global state; mixed or additional records are rejected. Every
+successfully sealed current installation converges on the hardened global state.
+
+Implementation anchors:
+
+- `backupsheep/database_identity.py`
+- `deploy/postgres/source-identity-contract.sh`
+- `deploy/ci/run-postgres-runtime-migration-e2e.sh`
+- `deploy/ci/run-security-topology.sh`
+
 ## Migration and rollback behavior
 
 The repository retains the literal historical provider name `aws-kms` only where it is
@@ -218,6 +257,7 @@ production helpers are not copied into the application runtime image.
 | Installer security series | 94 passed | installer ownership, no-host-mutation, Compose identity, keyring generation/rotation, signed fresh install, rollback, and unsupported-upgrade refusal |
 | Release-chain contract series | 98 passed | five-image descriptor, manifest, provenance, SBOM/scanner identity, quarantine publication, and exact action pins |
 | Deployment and CI topology series | 55 passed | Compose isolation, release topology, egress and migration harness contracts |
+| PostgreSQL ACL hardening regressions | 61 passed locally | global and schema-local defaults, effective routine/type ACLs, exact historical-source contracts, hidden empty-record refusal contract, and topology attack shape; live PostgreSQL execution remains a Linux release gate |
 | Static runtime-provider audit | Pass | no AWS KMS provider export, factory branch, client construction, or dynamic provider import |
 | Rendered Compose mount review | Pass | only matching source workers receive matching keyrings; storage receives neither |
 | Signed-upgrade refusal contract | Pass | former stage/upgrade forms made no Docker call, mutation lock, or installation byte/metadata change |
