@@ -3,7 +3,8 @@
 **Status:** release candidate; not yet merged or deployed  
 **Repository:** `bilal414/backupsheep`  
 **Candidate branch:** `codex/cyber-defense-completion-20260829`  
-**Initial evidence snapshot:** `9d70584173860c0b251becc88e9ac0dda9358c4c`  
+**Implementation snapshot:** `4bfc3f3b0c225750d7535eb47af7c9f18165bead`
+
 **Primary change:** replace the application artifact-encryption dependency on AWS KMS
 with installation-local, lane-scoped wrapping-key files  
 **Parent assessment:**
@@ -109,6 +110,11 @@ Implementation anchors:
 - Direct non-Docker lifecycle operations require an owner-controlled mode-0700 parent
   and mode-0400 single-link file. Installer-managed Docker keyrings are handled only
   under the installer's deployment mutation lock.
+- Direct create and rotation keep every write, link, rename, inspection, and cleanup
+  relative to the locked parent-directory descriptor. They repeatedly prove the
+  configured path still names that exact directory inode and preserve, rather than
+  delete, any ambiguous concurrent replacement or hard-link set. Cleanup failures
+  cannot skip in-memory key zeroization or lock-descriptor release.
 
 Implementation anchors:
 
@@ -133,6 +139,9 @@ Implementation anchors:
   authority.
 - Ciphertext storage paths use randomized transfer identities. Storage workers neither
   need nor receive private backup-context identifiers or decryption keys.
+- Host-side release-production tooling is excluded from the default-deny Docker build
+  context and final application image; it remains available only in the checkout and
+  reviewed release workflows.
 
 Implementation anchors:
 
@@ -194,18 +203,27 @@ forms fail before the mutation lock, Docker access, downloads, or installation w
 signed deployment must move releases through a separately verified restore into a fresh
 project while the old project remains intact. This is a material enterprise patching gap,
 but the fail-closed boundary is safer than shipping dormant privileged orchestration code.
+The five-image release chain uses exact action commits; the application build action is
+the reviewed upstream `docker/build-push-action` v7.3.0 commit. Release-transition
+production helpers are not copied into the application runtime image.
 
 ## Evidence at this snapshot
 
 | Evidence | Result | Scope |
 | --- | --- | --- |
-| Focused installer/runtime/migration/keyring tests | 129 passed | AWS-free provider installation, migration, mounts, rotation, and fail-closed contracts |
-| Adversarial provider/settings tests | 19 passed | foreign lane/installation, tamper, context swap, unsafe metadata, production policy |
-| Independent macOS provider/lifecycle rerun | 24 passed | provider wrapping, normative vector, keyring lifecycle; excludes Linux-only anonymous-file tests |
+| Standalone keyring lifecycle/adversarial tests | 21 passed | SIGKILL recovery, parent rename/replacement before write and during publication, exact-inode cleanup, ambiguous hard links, unrelated replacement preservation, zeroization, and lock release |
+| Independent final code review | No remaining P0/P1/P2 | keyring directory binding, runtime packaging, signed-install refusal boundary, and release-action pin |
+| Application runtime, build-context, Compose, and release-transition tests | 155 passed, 1 expected skip | final image exclusions, wrapper controls, fresh signed install, unsupported-upgrade refusal, and release-manifest contracts |
+| Focused AWS-free provider/settings/migration series | 64 passed | provider construction, lane and installation binding, production policy, empty-estate migration, and rollback refusal; final lifecycle delta is covered by the 21-test row above |
+| Installer security series | 94 passed | installer ownership, no-host-mutation, Compose identity, keyring generation/rotation, signed fresh install, rollback, and unsupported-upgrade refusal |
+| Release-chain contract series | 98 passed | five-image descriptor, manifest, provenance, SBOM/scanner identity, quarantine publication, and exact action pins |
+| Deployment and CI topology series | 55 passed | Compose isolation, release topology, egress and migration harness contracts |
 | Static runtime-provider audit | Pass | no AWS KMS provider export, factory branch, client construction, or dynamic provider import |
 | Rendered Compose mount review | Pass | only matching source workers receive matching keyrings; storage receives neither |
 | Signed-upgrade refusal contract | Pass | former stage/upgrade forms made no Docker call, mutation lock, or installation byte/metadata change |
-| Shell syntax and whitespace checks | Pass | candidate snapshot |
+| Enterprise docs and Bruno validation | Pass | 891 API operations and 296 configuration variables |
+| JavaScript production dependency audit | 0 vulnerabilities | lockfile-only high-severity audit |
+| Shell/Python syntax and whitespace checks | Pass | implementation snapshot |
 
 The complete BSE1 envelope suite depends on Linux `O_TMPFILE`/`linkat` behavior and is
 therefore a Linux release gate, not a macOS compatibility claim. Those real-filesystem
@@ -214,12 +232,13 @@ final merged commit.
 
 ## Open release gates
 
-This addendum is not release approval. At the initial evidence snapshot:
+This addendum is not release approval. At the implementation snapshot:
 
 - signed cross-version in-place upgrade is intentionally unsupported; an enterprise
   patching strategy based on separately verified fresh-project restore remains required;
-- the final full application, installer, image, topology, migration, and adversarial
-  suites had not yet run against one frozen final commit;
+- the final full PostgreSQL-backed application suite and Linux/Docker runtime tests had
+  not yet run against one frozen final commit; local macOS evidence cannot substitute
+  for the Linux anonymous-file and exact built-image gates;
 - the current branch had not been pushed to the pull request, approved, or merged into
   `develop`;
 - fresh exact-image multi-architecture build, SBOM, provenance, CodeQL, locked Trivy
@@ -227,8 +246,9 @@ This addendum is not release approval. At the initial evidence snapshot:
 - live key creation, backup, ciphertext-only storage, restore, cross-lane denial,
   rotation, old-key restore, tamper, key-loss, restart, and crash recovery had not yet
   been evidenced on the final demo deployment;
-- SSH to `demo.backupsheep.com:22` was refusing connections, so revision, runtime,
-  rollback, and deployment provenance could not be verified or changed.
+- on 2026-08-30 at 00:12 UTC the public health endpoint returned HTTP 200 `ok`, but SSH
+  to `demo.backupsheep.com:22` still refused connections. Health is not revision or
+  deployment proof, so runtime, rollback, and deployment provenance remain unverified.
 
 ## Enterprise release acceptance
 

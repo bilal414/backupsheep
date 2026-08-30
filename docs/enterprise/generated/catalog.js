@@ -11,7 +11,7 @@ window.BACKUPSHEEP_DOC_CATALOG = {
     "generatedFrom": "Django root URL resolver on the checked-out branch",
     "configurationVariables": 296,
     "provenance": {
-      "sourceRevision": "41788d914990",
+      "sourceRevision": "4bfc3f3b0c22",
       "catalogSource": "git-ref",
       "workingTreeApiChanges": false,
       "includesWorkingTreeApiChanges": false,
