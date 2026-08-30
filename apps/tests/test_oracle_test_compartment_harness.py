@@ -890,7 +890,7 @@ class OracleTestCompartmentHarnessTests(SimpleTestCase):
             ),
             encoding="utf-8",
         )
-        os.chmod(source, 0o644)
+        os.chmod(source, 0o600)
         source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
         with mock.patch.object(
             harness, "_load_clients", side_effect=AssertionError("provider call")

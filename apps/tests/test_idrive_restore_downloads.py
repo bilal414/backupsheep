@@ -3,6 +3,7 @@
 import hashlib
 import os
 import tempfile
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest import mock
 
@@ -18,6 +19,8 @@ BUCKET = "bs-e2e-hetzner-object-storage"
 OBJECT_KEY = "backups/restore-node/restore-exact-123.zip"
 ETAG = '"idrive-etag-1"'
 VERSION_ID = "idrive-version-1"
+BSE_ENVELOPE_UUID = "735af04d-d247-4cab-968e-c9e1306ad46f"
+BSE_OBJECT_KEY = f"backups/{BSE_ENVELOPE_UUID}.bse1"
 
 
 class _ArtifactQuery:
@@ -112,15 +115,25 @@ class _FakeClient:
 
 
 class IDriveRestoreFixtures:
-    def _point(self, *, state=None, artifacts=None, key=OBJECT_KEY):
+    def _point(self, *, state=None, artifacts=None, key=OBJECT_KEY, bse=False):
         artifacts = list(artifacts or [])
         backup = SimpleNamespace(
             id=77,
-            uuid_str="restore-exact-123",
-            uuid="restore-exact-123",
+            uuid_str=(
+                "b6d333cd-3215-4662-bea4-c64c1a48a80f"
+                if bse
+                else "restore-exact-123"
+            ),
+            uuid=(
+                "b6d333cd-3215-4662-bea4-c64c1a48a80f"
+                if bse
+                else "restore-exact-123"
+            ),
             node=SimpleNamespace(name_slug="restore-node"),
             artifact_records=_ArtifactQuery(artifacts),
         )
+        if bse:
+            backup.get_execution_state = mock.Mock()
         encryption_key = object()
         account = SimpleNamespace(get_encryption_key=mock.Mock(return_value=encryption_key))
         idrive = SimpleNamespace(
@@ -153,6 +166,26 @@ class IDriveRestoreFixtures:
 
         point.committed_version_id = committed_version_id
         return point, encryption_key
+
+    @staticmethod
+    def _bse_context():
+        stack = ExitStack()
+        stack.enter_context(
+            mock.patch(
+                "apps._tasks.artifact_encryption._load_active_source_state",
+                return_value=SimpleNamespace(
+                    envelope=SimpleNamespace(uuid=BSE_ENVELOPE_UUID),
+                ),
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                restore_common,
+                "restore_encryption_plan",
+                return_value=None,
+            )
+        )
+        return stack
 
     @staticmethod
     def _state(**overrides):
@@ -246,6 +279,47 @@ class IDriveRestoreDownloadTests(IDriveRestoreFixtures, SimpleTestCase):
             encryption_key,
         )
         self.assertTrue(body.closed)
+
+    def test_bse_idrive_restore_uses_only_opaque_key_and_artifact_marker(self):
+        state = self._state(object_key=BSE_OBJECT_KEY)
+        artifact = self._artifact(object_key=BSE_OBJECT_KEY)
+        point, encryption_key = self._point(
+            state=state,
+            artifacts=[artifact],
+            key=BSE_OBJECT_KEY,
+            bse=True,
+        )
+        head = self._head(
+            Key=BSE_OBJECT_KEY,
+            Metadata={
+                "backupsheep-artifact-id": f"bse2:{BSE_ENVELOPE_UUID}",
+                "backupsheep-bytes": str(len(PAYLOAD)),
+                "backupsheep-sha256": SHA256,
+            },
+        )
+        body = _Body([PAYLOAD])
+        client = _FakeClient([head, head], {**head, "Body": body})
+
+        with self._bse_context(), mock.patch(
+            "apps._tasks.integration.storage.idrive._s3_client",
+            return_value=client,
+        ) as build_client:
+            restore_common.fetch_backup_zip(point, self._destination())
+
+        expected_request = {
+            "Bucket": BUCKET,
+            "Key": BSE_OBJECT_KEY,
+            "VersionId": VERSION_ID,
+        }
+        self.assertEqual(client.get_calls, [expected_request])
+        self.assertNotIn(point.backup.uuid_str, BSE_OBJECT_KEY)
+        self.assertFalse(BSE_OBJECT_KEY.endswith(".zip"))
+        self.assertNotIn("backupsheep-backup-id", head["Metadata"])
+        point.generate_download_url.assert_not_called()
+        build_client.assert_called_once_with(
+            point.storage.storage_idrive,
+            encryption_key,
+        )
 
     def test_post_download_mutation_does_not_publish_or_overwrite_existing_restore(self):
         point, _encryption_key = self._point(

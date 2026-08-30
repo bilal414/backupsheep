@@ -12,6 +12,16 @@ import sys
 import tarfile
 
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from prepare_trivy_db import (  # noqa: E402
+    TrivyDBError,
+    load_evidence as load_trivy_db_evidence,
+    load_lock as load_trivy_db_lock,
+)
+
+
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 DOCKER_REPOSITORY_RE = re.compile(r"^[a-z0-9_./-]{2,255}$")
 DOCKER_TAG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -28,10 +38,25 @@ EXPECTED_APP_PACKAGES = {
     "backupsheep-postgresql-client-18",
 }
 EXPECTED_EGRESS_PACKAGES = {"iproute2-minimal", "nftables", "setpriv"}
+EXPECTED_RABBITMQ_SECURITY_PACKAGES = {
+    "libcrypto3": "3.5.8-r0",
+    "libssl3": "3.5.8-r0",
+}
+EXPECTED_VERIFIER_GO_PACKAGES = {
+    "golang.org/x/mod": "v0.40.0",
+    "golang.org/x/text": "v0.41.0",
+    "google.golang.org/grpc": "v1.82.1",
+}
+EXPECTED_VERIFIER_MAIN_MODULE = "github.com/sigstore/cosign/v3"
+SYFT_MAIN_MODULE_PLACEHOLDER = "UNKNOWN"
+TRIVY_MAIN_MODULE_PLACEHOLDER = "<unversioned-main-module>"
 EXPECTED_OS_PACKAGE_TYPES = {
     "app": ("deb", "ubuntu"),
     "postgres": ("apk", "alpine"),
     "egress": ("apk", "alpine"),
+    "rabbitmq": ("apk", "alpine"),
+    "rabbitmq-upgrade": ("apk", "alpine"),
+    "release-verifier": (None, None),
 }
 EXPECTED_SYFT_VERSION = "1.51.0"
 EXPECTED_SYFT_SCHEMA_VERSION = "16.1.10"
@@ -258,6 +283,79 @@ def formatted_python_identities(
     return sorted(f"{name}=={version}" for name, version in identities)
 
 
+def validate_rabbitmq_security_packages(
+    packages: dict[str, str], scanner: str
+) -> None:
+    observed = {
+        name: packages.get(name) for name in EXPECTED_RABBITMQ_SECURITY_PACKAGES
+    }
+    if observed != EXPECTED_RABBITMQ_SECURITY_PACKAGES:
+        die(
+            f"{scanner} RabbitMQ OpenSSL package identities are not the exact "
+            f"reviewed versions: {observed}"
+        )
+
+
+def validate_verifier_go_packages(
+    packages: dict[str, set[str]], scanner: str, main_module_count: int = 1
+) -> None:
+    expected = dict(EXPECTED_VERIFIER_GO_PACKAGES)
+    expected["stdlib"] = "go1.26.6" if scanner == "Syft" else "v1.26.6"
+    expected[EXPECTED_VERIFIER_MAIN_MODULE] = (
+        SYFT_MAIN_MODULE_PLACEHOLDER
+        if scanner == "Syft"
+        else TRIVY_MAIN_MODULE_PLACEHOLDER
+    )
+    observed: dict[str, str | None] = {}
+    for name in expected:
+        versions = packages.get(name, set())
+        observed[name] = next(iter(versions)) if len(versions) == 1 else None
+    if main_module_count != 1 or observed != expected:
+        die(
+            f"{scanner} release-verifier Go identities are not the exact "
+            f"reviewed versions/placeholders: count={main_module_count}, {observed}"
+        )
+
+
+def validate_syft_verifier_main_module(artifact: dict) -> None:
+    metadata = artifact.get("metadata")
+    locations = artifact.get("locations")
+    if (
+        artifact.get("name") != EXPECTED_VERIFIER_MAIN_MODULE
+        or artifact.get("version") != SYFT_MAIN_MODULE_PLACEHOLDER
+        or artifact.get("type") != "go-module"
+        or artifact.get("foundBy") != "go-module-binary-cataloger"
+        or artifact.get("language") != "go"
+        or artifact.get("purl")
+        != f"pkg:golang/{EXPECTED_VERIFIER_MAIN_MODULE}"
+        or not isinstance(metadata, dict)
+        or metadata.get("mainModule") != EXPECTED_VERIFIER_MAIN_MODULE
+        or not isinstance(locations, list)
+        or len(locations) != 1
+        or not isinstance(locations[0], dict)
+        or locations[0].get("path") != "/ko-app/cosign"
+        or locations[0].get("accessPath") != "/ko-app/cosign"
+    ):
+        die("Syft unversioned release-verifier main module is not the exact reviewed identity")
+
+
+def validate_trivy_verifier_main_module(package: dict, result_class: object, result_type: object) -> None:
+    identifier = package.get("Identifier")
+    if (
+        package.get("Name") != EXPECTED_VERIFIER_MAIN_MODULE
+        or package.get("ID") != EXPECTED_VERIFIER_MAIN_MODULE
+        or package.get("Version") is not None
+        or result_class != "lang-pkgs"
+        or result_type != "gobinary"
+        or package.get("Relationship") != "root"
+        or package.get("AnalyzedBy") != "gobinary"
+        or not isinstance(identifier, dict)
+        or identifier.get("PURL")
+        != f"pkg:golang/{EXPECTED_VERIFIER_MAIN_MODULE}"
+    ):
+        die("Trivy unversioned release-verifier main module is not the exact reviewed identity")
+
+
 def validate_locked_python_inventory(
     observed: set[tuple[str, str]],
     expected: dict[str, str],
@@ -462,11 +560,14 @@ def validate_syft(
     if not isinstance(artifacts, list) or not artifacts:
         die("Syft contains no package inventory")
     package_names: set[str] = set()
+    package_versions: dict[str, set[str]] = {}
     os_package_names: set[str] = set()
+    os_package_versions: dict[str, str] = {}
     os_package_count = 0
     top_level_python_identities: set[tuple[str, str]] = set()
     python_package_count = 0
     top_level_python_package_count = 0
+    verifier_main_module_count = 0
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             die("Syft package inventory contains a non-object")
@@ -478,10 +579,19 @@ def validate_syft(
             for value in (name, version, package_type)
         ):
             die("Syft package inventory contains an incomplete package identity")
+        if version == SYFT_MAIN_MODULE_PLACEHOLDER:
+            if image_kind != "release-verifier":
+                die("Syft contains an unversioned package outside the release verifier")
+            validate_syft_verifier_main_module(artifact)
+            verifier_main_module_count += 1
+        elif image_kind == "release-verifier" and name == EXPECTED_VERIFIER_MAIN_MODULE:
+            die("Syft release-verifier main module does not use its reviewed placeholder")
         package_names.add(name)
-        if package_type == expected_os_type:
+        package_versions.setdefault(name, set()).add(version)
+        if expected_os_type is not None and package_type == expected_os_type:
             os_package_count += 1
             os_package_names.add(name)
+            os_package_versions[name] = version
         if package_type == "python":
             python_package_count += 1
             locations = artifact.get("locations")
@@ -501,10 +611,14 @@ def validate_syft(
                 top_level_python_identities.add(
                     (normalized_python_package_name(name), version)
                 )
-    if not os_package_names:
-        die(f"Syft contains no {expected_os_type} OS package inventory")
-    if os_package_count != len(os_package_names):
-        die("Syft OS package inventory contains duplicate package names")
+    if expected_os_type is None:
+        if os_package_count != 0 or os_package_names:
+            die("scratch release-verifier unexpectedly has an OS package inventory")
+    else:
+        if not os_package_names:
+            die(f"Syft contains no {expected_os_type} OS package inventory")
+        if os_package_count != len(os_package_names):
+            die("Syft OS package inventory contains duplicate package names")
 
     source = report.get("source")
     if not isinstance(source, dict) or source.get("type") != "image":
@@ -548,6 +662,12 @@ def validate_syft(
         missing = EXPECTED_EGRESS_PACKAGES - package_names
         if missing:
             die(f"egress SBOM is missing policy-runtime packages: {sorted(missing)}")
+    elif image_kind in {"rabbitmq", "rabbitmq-upgrade"}:
+        validate_rabbitmq_security_packages(os_package_versions, "Syft")
+    elif image_kind == "release-verifier":
+        validate_verifier_go_packages(
+            package_versions, "Syft", verifier_main_module_count
+        )
     else:  # pragma: no cover - argparse enforces the choices
         die("unknown image kind")
     return (
@@ -591,9 +711,12 @@ def validate_trivy(
     os_package_count = 0
     os_result_count = 0
     os_package_names: set[str] = set()
+    os_package_versions: dict[str, str] = {}
+    package_versions: dict[str, set[str]] = {}
     python_package_count = 0
     top_level_python_package_count = 0
     top_level_python_identities: set[tuple[str, str]] = set()
+    verifier_main_module_count = 0
     vulnerabilities: list[dict] = []
     for result in results:
         if not isinstance(result, dict):
@@ -614,13 +737,25 @@ def validate_trivy(
                     die("Trivy package inventory contains a non-object")
                 name = package.get("Name")
                 version = package.get("Version")
-                if not all(
-                    isinstance(value, str) and value for value in (name, version)
-                ):
+                if not isinstance(name, str) or not name:
                     die("Trivy package inventory contains an incomplete identity")
+                if version is None:
+                    if image_kind != "release-verifier":
+                        die("Trivy contains an unversioned package outside the release verifier")
+                    validate_trivy_verifier_main_module(
+                        package, result_class, result_type
+                    )
+                    version = TRIVY_MAIN_MODULE_PLACEHOLDER
+                    verifier_main_module_count += 1
+                elif not isinstance(version, str) or not version:
+                    die("Trivy package inventory contains an incomplete identity")
+                elif image_kind == "release-verifier" and name == EXPECTED_VERIFIER_MAIN_MODULE:
+                    die("Trivy release-verifier main module does not use its reviewed placeholder")
+                package_versions.setdefault(name, set()).add(version)
                 if result_class == "os-pkgs":
                     os_package_count += 1
                     os_package_names.add(name)
+                    os_package_versions[name] = version
                 if (
                     result_class == "lang-pkgs"
                     and result_type == "python-pkg"
@@ -641,10 +776,14 @@ def validate_trivy(
             vulnerabilities.extend(found)
     if package_count == 0:
         die("Trivy contains no package inventory")
-    if os_result_count != 1 or not os_package_names:
-        die(f"Trivy contains no unique {expected_os_type} OS package inventory")
-    if os_package_count != len(os_package_names):
-        die("Trivy OS package inventory contains duplicate package names")
+    if expected_os_type is None:
+        if os_result_count != 0 or os_package_count != 0 or os_package_names:
+            die("scratch release-verifier unexpectedly has an OS package inventory")
+    else:
+        if os_result_count != 1 or not os_package_names:
+            die(f"Trivy contains no unique {expected_os_type} OS package inventory")
+        if os_package_count != len(os_package_names):
+            die("Trivy OS package inventory contains duplicate package names")
     matched_python_count = 0
     if image_kind == "app":
         matched_python_count = validate_locked_python_inventory(
@@ -655,6 +794,12 @@ def validate_trivy(
                 "application Trivy Python inventory contains duplicate top-level "
                 "package identities"
             )
+    elif image_kind in {"rabbitmq", "rabbitmq-upgrade"}:
+        validate_rabbitmq_security_packages(os_package_versions, "Trivy")
+    elif image_kind == "release-verifier":
+        validate_verifier_go_packages(
+            package_versions, "Trivy", verifier_main_module_count
+        )
     if vulnerabilities:
         identities = sorted(
             {
@@ -685,16 +830,48 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def trivy_database_binding(lock_path: Path, evidence_path: Path) -> dict:
+    """Validate and retain the exact DB identity used for this image scan."""
+    try:
+        lock, lock_sha256 = load_trivy_db_lock(lock_path)
+        evidence, evidence_sha256 = load_trivy_db_evidence(
+            evidence_path, lock, lock_sha256
+        )
+    except TrivyDBError as exc:
+        die(f"Trivy database evidence is invalid: {exc}")
+    return {
+        "db_sha256": evidence["db_sha256"],
+        "evidence_sha256": evidence_sha256,
+        "layer_digest": evidence["layer_digest"],
+        "lock_sha256": lock_sha256,
+        "manifest_digest": evidence["manifest_digest"],
+        "next_update": evidence["next_update"],
+        "repository": evidence["repository"],
+        "updated_at": evidence["updated_at"],
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--image-kind", choices=("app", "postgres", "egress"), required=True
+        "--image-kind",
+        choices=(
+            "app",
+            "postgres",
+            "egress",
+            "rabbitmq",
+            "rabbitmq-upgrade",
+            "release-verifier",
+        ),
+        required=True,
     )
     parser.add_argument("--image-id", required=True)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--syft", type=Path, required=True)
     parser.add_argument("--trivy", type=Path, required=True)
     parser.add_argument("--requirements-lock", type=Path, required=True)
+    parser.add_argument("--trivy-db-lock", type=Path, required=True)
+    parser.add_argument("--trivy-db-evidence", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
     arguments = parser.parse_args()
 
@@ -761,6 +938,10 @@ def main() -> None:
         "syft_package_count": syft_count,
         "trivy_high_critical_count": vulnerability_count,
         "trivy_package_count": trivy_count,
+        "trivy_database": trivy_database_binding(
+            arguments.trivy_db_lock,
+            arguments.trivy_db_evidence,
+        ),
     }
     if arguments.image_kind == "app":
         summary.update(

@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
+
+# Keep the reviewed RabbitMQ 4.3 runtime while replacing the vulnerable OpenSSL
+# packages present in the immutable upstream image. The release gate builds and
+# scans both supported platform children before publishing this derivative.
+FROM rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+
+LABEL org.opencontainers.image.title="BackupSheep RabbitMQ runtime" \
+      org.opencontainers.image.description="RabbitMQ 4.3.5 with reviewed security package updates" \
+      org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
+      org.opencontainers.image.licenses="MPL-2.0" \
+      com.backupsheep.rabbitmq.runtime-generation="4.3.5-alpine3.23-openssl-v1" \
+      com.backupsheep.rabbitmq.base-index-digest="sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7" \
+      com.backupsheep.rabbitmq.openssl-package-version="3.5.8-r0"
+
+RUN set -eux; \
+    apk add --no-cache \
+        'libcrypto3=3.5.8-r0' \
+        'libssl3=3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libcrypto3-3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libssl3-3.5.8-r0'; \
+    test "$(id -u rabbitmq):$(id -g rabbitmq)" = '100:101'; \
+    test -x /usr/local/bin/docker-entrypoint.sh; \
+    test -x /opt/rabbitmq/sbin/rabbitmq-server
+
+USER 100:101

@@ -547,10 +547,6 @@ def bs_decrypt(ciphertext, key):
         return None
 
 
-def bs_encryption_convert(ciphertext, encryption_key):
-    return bs_encrypt(kms_decrypt(ciphertext), encryption_key)
-
-
 def s3_upload_files(single_file, bucket_name, access_key, secret_key, region_name, endpoint_url):
     try:
         session = boto3.Session(
@@ -637,12 +633,16 @@ def visible_nodes(member):
     from apps.console.account.models import CoreAccountGroup
     from apps.console.node.models import CoreNode
     from apps.api.v1.utils.api_permissions import active_current_membership
+    from backupsheep.source_recovery_policy import RETIRED_SOURCE_FAMILIES
 
     membership = active_current_membership(member)
     if membership is None:
         return CoreNode.objects.none()
     account = membership.account
-    nodes = CoreNode.objects.filter(connection__account=account)
+    nodes = CoreNode.objects.filter(
+        connection__account=account,
+        connection__integration__enabled=True,
+    ).exclude(connection__integration__code__in=RETIRED_SOURCE_FAMILIES)
     if membership.primary:
         return nodes
     account_groups = CoreAccountGroup.objects.filter(
@@ -666,11 +666,15 @@ def visible_connections(member):
     from apps.api.v1.utils.api_permissions import active_current_membership
     from apps.console.account.models import CoreAccountGroup
     from apps.console.connection.models import CoreConnection
+    from backupsheep.source_recovery_policy import RETIRED_SOURCE_FAMILIES
 
     membership = active_current_membership(member)
     if membership is None:
         return CoreConnection.objects.none()
-    connections = CoreConnection.objects.filter(account=membership.account)
+    connections = CoreConnection.objects.filter(
+        account=membership.account,
+        integration__enabled=True,
+    ).exclude(integration__code__in=RETIRED_SOURCE_FAMILIES)
     if membership.primary:
         return connections
 
@@ -865,7 +869,7 @@ def assert_url_not_metadata(url, field="url"):
     """Block SSRF to cloud metadata / loopback / link-local from a user-supplied URL.
 
     This is intentionally narrow: a self-hosted install may legitimately back up a
-    WordPress site on a private LAN (RFC1918), so private ranges are allowed. What is
+    website on a private LAN (RFC1918), so private ranges are allowed. What is
     never a legitimate backup target is the loopback interface or the link-local range
     (169.254.0.0/16 / fe80::/10) that fronts the cloud instance metadata service
     (169.254.169.254, the GCP metadata host, etc.), so those are refused.
@@ -920,7 +924,7 @@ def ssrf_safe_get(url, max_redirects=5, **kwargs):
     compromised or malicious backup source could bounce the worker at the cloud metadata
     service (169.254.169.254), loopback, or other internal addresses — and the response
     body would be saved into the backup archive, exfiltrating internal data to whoever
-    downloads that backup (verified end-to-end against the WordPress download flow:
+    downloads that backup (verified end-to-end against a remote download flow:
     instance-role credentials landed in the attacker-owned backup archive).
 
     Redirects are followed manually here; each Location is validated before use, and

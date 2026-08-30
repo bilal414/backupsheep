@@ -11,7 +11,7 @@ work can't starve the web UI. Queue routing lives in `backupsheep/settings.py`
 | `app` | — | Web console (gunicorn :8000) | Stateless; scale behind a load balancer if needed |
 | `worker-cloud` | `cloud`, `default` | API-only provider snapshots plus general default-queue work | Stateless — **safe to scale horizontally**; concurrency can run high (just waits on provider HTTP) |
 | `worker-database` | `database` | `pg_dump` / `mysqldump` dumps, restores and database run-log pruning | CPU/disk heavy; low concurrency |
-| `worker-files` | `files` | Website / WordPress / Basecamp work, incremental-cache reset and files run-log pruning | CPU/disk heavy; low concurrency |
+| `worker-files` | `files` | Website / Basecamp work, incremental-cache reset and files run-log pruning | CPU/disk heavy; low concurrency |
 | `worker-storage` | `storage` | Uploads BSE1 artifacts, downloads restore ciphertext, finalizes storage state and prunes destination-upload run logs | **Scale this for measured transfer throughput** |
 | `worker-logs` | `logs` | DB activity-log entries, Slack/Telegram/Firebase notifications and DB-log pruning; no staging mount | Scale if log/notification volume is high |
 | `beat` | — | Fires scheduled backups and lane-specific maintenance | **Singleton — keep exactly one** |

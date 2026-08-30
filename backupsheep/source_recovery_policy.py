@@ -1,10 +1,10 @@
 """Fail-closed capability policy for source families without recovery parity.
 
-WordPress and Basecamp can create archive rows, but the current BSE1 pipeline has
-no authenticated plaintext export or automatic restore for either family.  A
-successful backup is therefore not a recoverable enterprise backup.  Keep one
-small policy module at every creation/dispatch boundary so a UI flag, stale
-schedule, direct API call, or replayed Celery message cannot bypass that fact.
+Basecamp can create archive rows, but the current BSE1 pipeline has no authenticated
+plaintext export or automatic restore for that family. A successful backup is
+therefore not a recoverable enterprise backup. Keep one small policy module at every
+creation/dispatch boundary so a UI flag, stale schedule, direct API call, or replayed
+Celery message cannot bypass that fact.
 """
 
 from __future__ import annotations
@@ -14,7 +14,11 @@ from rest_framework import status
 from rest_framework.exceptions import APIException
 
 
-RECOVERY_INCOMPLETE_SOURCE_FAMILIES = frozenset({"wordpress", "basecamp"})
+RECOVERY_INCOMPLETE_SOURCE_FAMILIES = frozenset({"basecamp"})
+RETIRED_SOURCE_FAMILIES = frozenset({"wordpress"})
+SOURCE_CREATION_POLICY_FAMILIES = (
+    RECOVERY_INCOMPLETE_SOURCE_FAMILIES | RETIRED_SOURCE_FAMILIES
+)
 
 SOURCE_RECOVERY_UNAVAILABLE_MESSAGE = (
     "New protection and backup runs for this source are unavailable because this "
@@ -48,6 +52,8 @@ def source_backup_creation_available(integration_code: str | None) -> bool:
     """
 
     code = str(integration_code or "").strip().lower()
+    if code in RETIRED_SOURCE_FAMILIES:
+        return False
     if code not in RECOVERY_INCOMPLETE_SOURCE_FAMILIES:
         return True
 

@@ -387,7 +387,6 @@ def _backup_destination(
     expected_source_lane = {
         "database": "database",
         "website": "files",
-        "wordpress": "files",
         "basecamp": "files",
     }.get(model_key)
     if expected_source_lane is None:
@@ -440,7 +439,6 @@ def _storage_upload(
     relations = (
         "stored_website_backups",
         "stored_database_backups",
-        "stored_wordpress_backups",
         "stored_basecamp_backups",
     )
     points = []
@@ -636,7 +634,7 @@ def _source_ciphertext_cleanup(
     else:
         model_key = str(_argument(args, kwargs, 0, "model_key") or "")
         backup_value = _argument(args, kwargs, 1, "backup_id")
-        if model_key not in {"website", "wordpress", "basecamp"}:
+        if model_key not in {"website", "basecamp"}:
             raise TaskIntentError("files cleanup has the wrong source model")
     backup_id = _positive_id(backup_value, "backup id")
     model = _BACKUP_MODELS.get(model_key)

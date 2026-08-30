@@ -25,6 +25,7 @@ from verify_release import (
     _validate_policy,
     validate_release,
 )
+import release_transition
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -56,6 +57,77 @@ def _platform_digests(index_path: Path, expected_platforms: list[str]) -> dict[s
 def _artifact_record(artifacts_dir: Path, relative_name: str) -> tuple[Path, dict[str, str]]:
     path = _safe_artifact(artifacts_dir, relative_name, relative_name)
     return path, {"file": relative_name, "sha256": _sha256_path(path)}
+
+
+def _consumer_record(policy: dict[str, Any], artifacts_dir: Path) -> dict[str, Any]:
+    consumer = policy["consumer"]
+    trusted_policy = consumer["trusted_root"]
+    _, trusted_artifact = _artifact_record(
+        artifacts_dir, "consumer/sigstore-trusted-root.json"
+    )
+    trusted_root = {
+        **trusted_artifact,
+        "source_repository": trusted_policy["source_repository"],
+        "source_commit": trusted_policy["source_commit"],
+        "source_path": trusted_policy["source_path"],
+    }
+
+    verifier = consumer["cosign_image"]
+    platform_records: list[dict[str, Any]] = []
+    for platform in policy["platforms"]:
+        slug = platform.replace("/", "-")
+        _, source_catalog = _artifact_record(
+            artifacts_dir, f"consumer/release-verifier-{slug}.syft.json"
+        )
+        _, vulnerability_report = _artifact_record(
+            artifacts_dir, f"consumer/release-verifier-{slug}.trivy.json"
+        )
+        platform_records.append(
+            {
+                "platform": platform,
+                "manifest_digest": verifier["platforms"][platform]["manifest_digest"],
+                "config_digest": verifier["platforms"][platform]["config_digest"],
+                "source_catalog": {
+                    "format": "syft-json",
+                    "generator": "syft",
+                    "generator_version": policy["tools"]["syft"]["version"],
+                    **source_catalog,
+                },
+                "vulnerability_report": {
+                    "scanner": policy["vulnerability_policy"]["scanner"],
+                    "scanner_version": policy["vulnerability_policy"]["scanner_version"],
+                    "fail_severities": policy["vulnerability_policy"]["fail_severities"],
+                    "ignore_unfixed": policy["vulnerability_policy"]["ignore_unfixed"],
+                    **vulnerability_report,
+                },
+            }
+        )
+    return {
+        "descriptor_filename": consumer["descriptor_filename"],
+        "descriptor_bundle_filename": consumer["descriptor_bundle_filename"],
+        "manifest_filename": consumer["manifest_filename"],
+        "consumer_script_filename": consumer["consumer_script_filename"],
+        "consumer_script_bundle_filename": consumer["consumer_script_bundle_filename"],
+        "trusted_root": trusted_root,
+        "cosign_image": {
+            "version": verifier["version"],
+            "runtime_contract_version": verifier["runtime_contract_version"],
+            "repository": verifier["repository"],
+            "index_digest": verifier["index_digest"],
+            "reference": verifier["reference"],
+            "platforms": platform_records,
+        },
+    }
+
+
+def _vulnerability_database_record(artifacts_dir: Path) -> dict[str, Any]:
+    _, lock = _artifact_record(
+        artifacts_dir, "vulnerability/trivy-db-lock.json"
+    )
+    _, preparation_evidence = _artifact_record(
+        artifacts_dir, "vulnerability/trivy-db-evidence.json"
+    )
+    return {"lock": lock, "preparation_evidence": preparation_evidence}
 
 
 def build_manifest(
@@ -197,7 +269,34 @@ def build_manifest(
             "sboms": sboms,
             "vulnerability_reports": reports,
         }
-    return {"schema_version": 2, "release": release, "images": images}
+    reviewed_path = _safe_artifact(
+        artifacts_dir,
+        "transition/reviewed-policy.json",
+        "reviewed transition policy",
+    )
+    migration_path = _safe_artifact(
+        artifacts_dir,
+        "transition/django-migrations.json",
+        "Django migration contract",
+    )
+    reviewed_transition = release_transition.load_json(reviewed_path)
+    migration_contract = release_transition.load_json(migration_path)
+    transition_record = release_transition.build_transition_record(
+        reviewed_policy=reviewed_transition,
+        migration_contract=migration_contract,
+        reviewed_policy_file="transition/reviewed-policy.json",
+        reviewed_policy_sha256=_sha256_path(reviewed_path),
+        migration_contract_file="transition/django-migrations.json",
+        migration_contract_sha256=_sha256_path(migration_path),
+    )
+    return {
+        "schema_version": 4,
+        "release": release,
+        "transition": transition_record,
+        "vulnerability_database": _vulnerability_database_record(artifacts_dir),
+        "consumer": _consumer_record(policy, artifacts_dir),
+        "images": images,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -215,6 +314,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--postgres-index", type=Path, required=True)
     parser.add_argument("--egress-digest", required=True)
     parser.add_argument("--egress-index", type=Path, required=True)
+    parser.add_argument("--rabbitmq-digest", required=True)
+    parser.add_argument("--rabbitmq-index", type=Path, required=True)
+    parser.add_argument("--rabbitmq-upgrade-digest", required=True)
+    parser.add_argument("--rabbitmq-upgrade-index", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
         policy = _load_json(arguments.policy, maximum_bytes=MAX_CONTROL_FILE_BYTES)
@@ -237,6 +340,11 @@ def main(argv: list[str] | None = None) -> int:
                 "app": (arguments.app_digest, arguments.app_index),
                 "postgres": (arguments.postgres_digest, arguments.postgres_index),
                 "egress": (arguments.egress_digest, arguments.egress_index),
+                "rabbitmq": (arguments.rabbitmq_digest, arguments.rabbitmq_index),
+                "rabbitmq-upgrade": (
+                    arguments.rabbitmq_upgrade_digest,
+                    arguments.rabbitmq_upgrade_index,
+                ),
             },
         )
         _write_json(arguments.output, manifest)

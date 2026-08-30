@@ -66,7 +66,6 @@ PROVIDER_GROUPS = {
         "upcloud",
         "vultr",
         "website",
-        "wordpress",
     },
     "clouds": {
         "aws",
@@ -85,7 +84,7 @@ PROVIDER_GROUPS = {
         "vultr",
         "vultr_database",
     },
-    "saas": {"basecamp", "wordpress"},
+    "saas": {"basecamp"},
     "volumes": {
         "aws",
         "digitalocean",
@@ -115,7 +114,6 @@ PROVIDER_GROUPS = {
         "vultr",
         "vultr_database",
         "website",
-        "wordpress",
     },
     "storage": {
         "alibaba",

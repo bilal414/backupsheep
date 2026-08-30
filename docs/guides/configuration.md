@@ -2,8 +2,8 @@
 
 BackupSheep reads configuration when each process starts. Compose passes non-secret and
 optional integration settings from `.env` to each application service. The stock stack
-mounts Django, per-lane PostgreSQL/RabbitMQ, task-signing, onboarding and source-lane KMS
-material from separate files in `.secrets`, and each role receives only its exact grant.
+mounts Django, per-lane PostgreSQL/RabbitMQ, task-signing, onboarding and source-lane
+artifact keyrings from separate files in `.secrets`, and each role receives only its exact grant.
 Changing either configuration source requires recreating the affected containers.
 
 ## Configuration precedence
@@ -25,7 +25,7 @@ contract.
 For normal Compose deployments, copy `.env_sample` wholesale and retain optional blank
 keys. Keep `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
 `ONBOARDING_INSTALL_TOKEN` blank. Let the exact installer create the protected per-lane
-database, broker, signing, onboarding and KMS files plus the two optional lane-specific
+database, broker, signing, onboarding and artifact-keyring files plus the two optional lane-specific
 managed-key files exactly as shown in the
 [installation guide](installation.md#manual-docker-compose-installation). Keep legacy
 `SSH_MANAGED_PRIVATE_KEY_PATH` and `SSH_MANAGED_PUBLIC_KEY` blank: each eligible worker
@@ -196,23 +196,35 @@ Do not put `ssl_*` overrides in the broker URL; they are rejected so certificate
 cannot be disabled. Use one certificate-valid broker/load-balancer hostname in production
 rather than a semicolon-separated failover URL.
 
-## Artifact encryption and AWS KMS
+## Artifact encryption and local-file keys
 
 Stock production requires `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=bse1`, enterprise mode,
-AWS KMS and legacy restore disabled. The installer requires one resolved symmetric key
-ARN, its region, an ARN allowlist containing every key still needed for restore/rotation,
-and two distinct canonical AWS credential files. It stores each credential file beneath
-`.secrets` and mounts it only into the matching database or files source lane. Storage,
-web, cloud, logs and Beat receive no KMS identity.
+the `local-file` provider, and legacy restore disabled. The installer creates separate
+database/files keyrings beneath `.secrets` and mounts each only into its matching source
+lane. Storage, web, cloud, logs and Beat receive neither keyring nor path. No AWS account,
+credentials, or KMS service is required for artifact encryption; AWS remains optional
+only for users who configure an AWS source, storage destination, or Amazon SES email
+integration.
 
-Use two AWS principals. Their identity policies and the KMS key policy must condition
-cryptographic actions on the exact installation-bound encryption context and
-`bse:lane=database` or `bse:lane=files`; do not grant an unconditional alternate path
-through an instance profile, role, grant or container credential endpoint. Prove both
-same-lane success and cross-lane denial before enabling operations. Enterprise mode also
-rejects a custom KMS endpoint, an insecure endpoint and the local-development provider.
-See [Private staging and ciphertext handoff](../security/staging-isolation.md) for the
-exact context and key-wrap rotation procedure.
+The current runtime provider registry contains exactly `local-file` and
+`local-development`. The latter is development/test-only and production enterprise mode
+rejects it. `aws-kms` is retained only as a historical schema and installer
+migration/rollback identifier; it is not selectable, imports no current KMS provider, and
+does not silently translate old wraps. A legacy installation may use the explicit
+exact-empty transition in the [upgrade guide](upgrades.md#upgrade-to-the-exact-reviewed-commit)
+only after every old artifact and backup inventory gate passes.
+
+The strict keyring contains one active 256-bit key and at most seven retained legacy keys.
+Wrapping authenticates the complete installation-bound artifact context, including the
+lane. Reruns preserve exact keyring bytes, and existing-install key loss is never hidden by
+regeneration. Enterprise mode rejects the environment-backed local-development provider.
+The keyrings are exportable software custody, not non-exportable HSM/KMS custody. The
+matching source lane necessarily reads its own root; the Docker daemon and host
+administrators can also access mounted material. Protect those boundaries and encrypted
+off-host keyring copies accordingly. The stock runtime has no hardware-backed artifact
+provider.
+See [Private staging and ciphertext handoff](../security/staging-isolation.md) for backup,
+rotation, recovery, and non-Docker procedures.
 
 ## Container egress policy
 
@@ -274,7 +286,7 @@ escape hatch, not an enterprise-safe mode.
 | Path | Compose volume | Contents | Required visibility |
 | --- | --- | --- | --- |
 | `/code/_storage` | `database_workdir` | Plaintext database dump/restore work, database run logs and lane-local locks | Read/write only in `worker-database`; absent from every other runtime role |
-| `/code/_storage` | `files_workdir` | Plaintext website/WordPress/Basecamp work, website incremental cache, files-lane run logs and locks | Read/write only in `worker-files`; absent from every other runtime role |
+| `/code/_storage` | `files_workdir` | Plaintext website/Basecamp work, website incremental cache, files-lane run logs and locks | Read/write only in `worker-files`; absent from every other runtime role |
 | `/code/_storage` | `storage_workdir` | Storage-private BSE1 materialization, provider transfer work and destination-upload run logs | Read/write only in `worker-storage`; absent from every other runtime role |
 | `/var/lib/backupsheep/transfer/database` | `database_ciphertext_transfer` | Fenced, published BSE1 handoff from database to storage | Read/write in `worker-database`, read-only in `worker-storage`; absent elsewhere |
 | `/var/lib/backupsheep/transfer/files` | `files_ciphertext_transfer` | Fenced, published BSE1 handoff from files to storage | Read/write in `worker-files`, read-only in `worker-storage`; absent elsewhere |
@@ -366,9 +378,9 @@ or application-signing flows:
 API-host and OAuth-endpoint variables have public defaults in settings. Override them only
 for a reviewed provider change, proxy or test environment.
 
-`WORDPRESS_INTEGRATION_ENABLED` and `BASECAMP_INTEGRATION_ENABLED` both default to `false`.
-They are compatibility switches, not enterprise feature switches: either source is usable
-only when enterprise mode is explicitly false, artifact mode is `legacy-only`, and legacy
+`BASECAMP_INTEGRATION_ENABLED` defaults to `false`. It is a compatibility switch, not an
+enterprise feature switch: the source is usable only when enterprise mode is explicitly
+false, artifact mode is `legacy-only`, and legacy
 restore/download is explicitly enabled. Enterprise/BSE1 installs ignore a true family
 switch, hide the source choices, reject every new-protection/backup initiation boundary,
 and preserve existing records for inspection.

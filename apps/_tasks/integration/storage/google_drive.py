@@ -25,6 +25,7 @@ from apps._tasks.exceptions import (
     NodeGoogleDriveUploadFailedError,
     NodeSnapshotDeleteFailed,
 )
+from apps._tasks.artifact_encryption import storage_artifact_identity
 from apps.api.v1.utils.api_helpers import bs_decrypt, bs_encrypt
 from apps.api.v1.utils.http import request_timeout
 from apps._tasks.integration.storage.s3_verified import (
@@ -32,9 +33,9 @@ from apps._tasks.integration.storage.s3_verified import (
     S3UploadReconciliationRequired,
 )
 from apps.console.backup.models import (
+    CoreBackupArtifact,
     CoreDatabaseBackup,
     CoreWebsiteBackup,
-    CoreWordPressBackup,
 )
 
 
@@ -341,15 +342,23 @@ def _get_file(client, file_id):
     return payload
 
 
-def _marker_values(backup_uuid, identity, *, role, node_slug=None):
+def _marker_values(artifact_identity, identity, *, role, node_slug=None):
     values = {
         "backupsheep_namespace": NAMESPACE,
         "backupsheep_role": role,
-        "backupsheep_backup_uuid": backup_uuid,
         "backupsheep_sha256": identity["sha256"],
         "backupsheep_bytes": str(identity["size_bytes"]),
     }
-    if node_slug is not None:
+    if not hasattr(artifact_identity, "artifact_format"):
+        values["backupsheep_backup_uuid"] = str(artifact_identity)
+    elif artifact_identity.artifact_format == CoreBackupArtifact.Format.BSE1:
+        values["backupsheep_artifact_id"] = artifact_identity.ownership_marker
+    else:
+        values["backupsheep_backup_uuid"] = artifact_identity.identifier
+    if node_slug is not None and (
+        not hasattr(artifact_identity, "artifact_format")
+        or artifact_identity.artifact_format != CoreBackupArtifact.Format.BSE1
+    ):
         values["backupsheep_node_slug"] = node_slug
     return values
 
@@ -370,6 +379,10 @@ def _validate_owned(item, *, name, parent_id, markers, mime_type=None):
         raise GoogleDriveOwnershipFailure()
     actual = _properties(item)
     if any(actual.get(key) != str(value) for key, value in markers.items()):
+        raise GoogleDriveOwnershipFailure()
+    if "backupsheep_artifact_id" in markers and (
+        "backupsheep_backup_uuid" in actual or "backupsheep_node_slug" in actual
+    ):
         raise GoogleDriveOwnershipFailure()
     return item
 
@@ -481,8 +494,12 @@ def _google_drive_delete_state(stored_backup):
 def _google_drive_delete_context(stored_backup, upload_state):
     """Build the immutable application/provider identity for one delete."""
     expected = stored_backup.committed_integrity_identity()
-    backup_uuid = _backup_uuid(stored_backup)
-    node_slug = _safe_node_slug(stored_backup)
+    artifact_identity = storage_artifact_identity(stored_backup.backup)
+    node_slug = (
+        None
+        if artifact_identity.artifact_format == CoreBackupArtifact.Format.BSE1
+        else _safe_node_slug(stored_backup)
+    )
     backup = stored_backup.backup
     node = backup.node
     storage = stored_backup.storage
@@ -509,19 +526,19 @@ def _google_drive_delete_context(stored_backup, upload_state):
         "account_id": str(account_id),
         "node_id": str(node.pk),
         "backup_id": str(backup.pk),
-        "backup_uuid": backup_uuid,
+        "backup_uuid": _backup_uuid(stored_backup),
         "storage_id": str(storage.pk),
         "provider_id": provider_id,
         "parent_id": parent_id,
-        "name": f"{backup_uuid}.zip",
-        "mime_type": ZIP_MIME,
+        "name": artifact_identity.filename,
+        "mime_type": artifact_identity.content_type,
         "version_id": version_id,
         "revision": str(upload_state.get("revision") or ""),
         "size_bytes": int(expected["size_bytes"]),
         "sha256": str(expected["sha256"]).lower(),
         "node_slug": node_slug,
         "markers": _marker_values(
-            backup_uuid,
+            artifact_identity,
             expected,
             role="backup",
             node_slug=node_slug,
@@ -818,16 +835,22 @@ def _verify_and_commit(
     provider_path,
     parent_id,
     session,
+    artifact_identity,
 ):
-    backup_uuid = _backup_uuid(stored_backup)
-    node_slug = _safe_node_slug(stored_backup)
-    markers = _marker_values(backup_uuid, identity, role="backup", node_slug=node_slug)
+    node_slug = (
+        None
+        if artifact_identity.artifact_format == CoreBackupArtifact.Format.BSE1
+        else _safe_node_slug(stored_backup)
+    )
+    markers = _marker_values(
+        artifact_identity, identity, role="backup", node_slug=node_slug
+    )
     _validate_owned(
         item,
-        name=f"{backup_uuid}.zip",
+        name=artifact_identity.filename,
         parent_id=parent_id,
         markers=markers,
-        mime_type=ZIP_MIME,
+        mime_type=artifact_identity.content_type,
     )
     _remote_identity(client, item["id"], identity)
     metadata = dict(stored_backup.metadata or {})
@@ -883,9 +906,11 @@ def _verify_and_commit(
     return state
 
 
-def _upload_resumable(stored_backup, client, file_id, identity, state):
+def _upload_resumable(
+    stored_backup, client, file_id, identity, state, artifact_identity
+):
     storage = stored_backup.storage
-    local_zip = f"_storage/{_backup_uuid(stored_backup)}.zip"
+    local_artifact = f"_storage/{artifact_identity.filename}"
     session = state.get("session")
     session_url = _unseal_session(storage, session)
     if not session_url:
@@ -894,12 +919,15 @@ def _upload_resumable(stored_backup, client, file_id, identity, state):
             "patch",
             f"{DRIVE_UPLOAD_API}/files/{quote(str(file_id), safe='')}?uploadType=resumable",
             data=json.dumps(
-                {"name": f"{_backup_uuid(stored_backup)}.zip", "mimeType": ZIP_MIME},
+                {
+                    "name": artifact_identity.filename,
+                    "mimeType": artifact_identity.content_type,
+                },
                 separators=(",", ":"),
             ),
             headers={
                 "Content-Type": "application/json; charset=UTF-8",
-                "X-Upload-Content-Type": ZIP_MIME,
+                "X-Upload-Content-Type": artifact_identity.content_type,
                 "X-Upload-Content-Length": str(identity["size_bytes"]),
             },
         )
@@ -918,7 +946,9 @@ def _upload_resumable(stored_backup, client, file_id, identity, state):
         if existing and int(existing.get("size") or 0) == identity["size_bytes"]:
             return existing
         _restart_session(stored_backup, state, file_id)
-        return _upload_resumable(stored_backup, client, file_id, identity, state)
+        return _upload_resumable(
+            stored_backup, client, file_id, identity, state, artifact_identity
+        )
     if offset_result == "complete":
         return completed_item
     offset = int(offset_result)
@@ -927,7 +957,7 @@ def _upload_resumable(stored_backup, client, file_id, identity, state):
     state["uploaded_bytes"] = offset
     _save_state(stored_backup, state, storage_file_id=file_id)
 
-    with open(local_zip, "rb") as source:
+    with open(local_artifact, "rb") as source:
         while offset < identity["size_bytes"]:
             source.seek(offset)
             chunk = source.read(min(CHUNK_SIZE, identity["size_bytes"] - offset))
@@ -957,7 +987,14 @@ def _upload_resumable(stored_backup, client, file_id, identity, state):
                     return completed_item
                 if status_result == "expired":
                     _restart_session(stored_backup, state, file_id)
-                    return _upload_resumable(stored_backup, client, file_id, identity, state)
+                    return _upload_resumable(
+                        stored_backup,
+                        client,
+                        file_id,
+                        identity,
+                        state,
+                        artifact_identity,
+                    )
                 offset = int(status_result)
                 state["next_offset"] = offset
                 state["uploaded_bytes"] = offset
@@ -977,7 +1014,14 @@ def _upload_resumable(stored_backup, client, file_id, identity, state):
                         if status_result == "complete":
                             return completed_item
                         _restart_session(stored_backup, state, file_id)
-                        return _upload_resumable(stored_backup, client, file_id, identity, state)
+                        return _upload_resumable(
+                            stored_backup,
+                            client,
+                            file_id,
+                            identity,
+                            state,
+                            artifact_identity,
+                        )
                     next_offset = int(status_result)
                 else:
                     next_offset = int(match.group(1)) + 1
@@ -993,18 +1037,26 @@ def _upload_resumable(stored_backup, client, file_id, identity, state):
                 if existing and int(existing.get("size") or 0) == identity["size_bytes"]:
                     return existing
                 _restart_session(stored_backup, state, file_id)
-                return _upload_resumable(stored_backup, client, file_id, identity, state)
+                return _upload_resumable(
+                    stored_backup,
+                    client,
+                    file_id,
+                    identity,
+                    state,
+                    artifact_identity,
+                )
             _raise_response(response, "upload chunk")
     raise GoogleDriveUploadFailure("PROVIDER_MALFORMED_RESPONSE", retryable=False)
 
 
 def storage_google_drive(stored_backup):
     """Upload one verified archive, adopting a single owned Drive file on retry."""
-    local_zip = f"_storage/{_backup_uuid(stored_backup)}.zip"
+    artifact_identity = storage_artifact_identity(stored_backup.backup)
+    local_artifact = f"_storage/{artifact_identity.filename}"
     try:
-        identity = _source_identity(stored_backup, local_zip)
-        backup_uuid = _backup_uuid(stored_backup)
-        node_slug = _safe_node_slug(stored_backup)
+        identity = _source_identity(stored_backup, local_artifact)
+        is_bse1 = artifact_identity.artifact_format == CoreBackupArtifact.Format.BSE1
+        node_slug = None if is_bse1 else _safe_node_slug(stored_backup)
         storage = stored_backup.storage
         client = storage.storage_google_drive.get_client()
         root_id = _ensure_folder(
@@ -1013,18 +1065,24 @@ def storage_google_drive(stored_backup):
             parent_id="root",
             markers={"backupsheep_namespace": NAMESPACE, "backupsheep_role": "root"},
         )
-        node_id = _ensure_folder(
-            client,
-            name=node_slug,
-            parent_id=root_id,
-            markers={
-                "backupsheep_namespace": NAMESPACE,
-                "backupsheep_role": "node",
-                "backupsheep_node_slug": node_slug,
-            },
+        if is_bse1:
+            parent_id = root_id
+            provider_path = f"BackupSheep/{artifact_identity.filename}"
+        else:
+            parent_id = _ensure_folder(
+                client,
+                name=node_slug,
+                parent_id=root_id,
+                markers={
+                    "backupsheep_namespace": NAMESPACE,
+                    "backupsheep_role": "node",
+                    "backupsheep_node_slug": node_slug,
+                },
+            )
+            provider_path = f"BackupSheep/{node_slug}/{artifact_identity.filename}"
+        markers = _marker_values(
+            artifact_identity, identity, role="backup", node_slug=node_slug
         )
-        provider_path = f"BackupSheep/{node_slug}/{backup_uuid}.zip"
-        markers = _marker_values(backup_uuid, identity, role="backup", node_slug=node_slug)
         metadata = dict(stored_backup.metadata or {})
         state = dict(metadata.get(STATE_KEY) or {})
         state.update(
@@ -1034,8 +1092,8 @@ def storage_google_drive(stored_backup):
                 "phase": state.get("phase") or "preparing",
                 "provider_path": provider_path,
                 "root_folder_id": root_id,
-                "node_folder_id": node_id,
-                "parent_id": node_id,
+                "node_folder_id": parent_id if not is_bse1 else "",
+                "parent_id": parent_id,
                 "sha256": identity["sha256"],
                 "size_bytes": identity["size_bytes"],
                 "checksum_algorithm": "sha256",
@@ -1049,18 +1107,18 @@ def storage_google_drive(stored_backup):
             if item:
                 _validate_owned(
                     item,
-                    name=f"{backup_uuid}.zip",
-                    parent_id=node_id,
+                    name=artifact_identity.filename,
+                    parent_id=parent_id,
                     markers=markers,
-                    mime_type=ZIP_MIME,
+                    mime_type=artifact_identity.content_type,
                 )
         if item is None:
             item = _find_owned_or_collision(
                 client,
-                name=f"{backup_uuid}.zip",
-                parent_id=node_id,
+                name=artifact_identity.filename,
+                parent_id=parent_id,
                 markers=markers,
-                mime_type=ZIP_MIME,
+                mime_type=artifact_identity.content_type,
             )
         if item:
             provider_id = item["id"]
@@ -1076,18 +1134,19 @@ def storage_google_drive(stored_backup):
                     item,
                     identity,
                     provider_path=provider_path,
-                    parent_id=node_id,
+                    parent_id=parent_id,
                     session=state.get("session"),
+                    artifact_identity=artifact_identity,
                 )
         else:
-            if not os.path.isfile(local_zip):
-                raise FileNotFoundError(local_zip)
+            if not os.path.isfile(local_artifact):
+                raise FileNotFoundError(local_artifact)
             item = _create_file(
                 client,
                 {
-                    "name": f"{backup_uuid}.zip",
-                    "mimeType": ZIP_MIME,
-                    "parents": [node_id],
+                    "name": artifact_identity.filename,
+                    "mimeType": artifact_identity.content_type,
+                    "parents": [parent_id],
                     "appProperties": markers,
                 },
             )
@@ -1096,7 +1155,9 @@ def storage_google_drive(stored_backup):
             state["object_key"] = str(provider_id)
             state["phase"] = "placeholder_created"
             _save_state(stored_backup, state, storage_file_id=provider_id)
-        _upload_resumable(stored_backup, client, provider_id, identity, state)
+        _upload_resumable(
+            stored_backup, client, provider_id, identity, state, artifact_identity
+        )
         # The resumable response can be partial or lost.  Re-read the
         # authoritative Drive resource before accepting ownership or completion.
         final_item = _get_file(client, provider_id)
@@ -1108,8 +1169,9 @@ def storage_google_drive(stored_backup):
             final_item,
             identity,
             provider_path=provider_path,
-            parent_id=node_id,
+            parent_id=parent_id,
             session=state.get("session"),
+            artifact_identity=artifact_identity,
         )
     except FileNotFoundError:
         try:
@@ -1141,7 +1203,6 @@ def storage_google_drive_delete(node, backup_name):
     for backup_model, owner_relation, storage_relation in (
         (CoreWebsiteBackup, "website", "stored_website_backups"),
         (CoreDatabaseBackup, "database", "stored_database_backups"),
-        (CoreWordPressBackup, "wordpress", "stored_wordpress_backups"),
     ):
         backup = (
             backup_model.objects.filter(

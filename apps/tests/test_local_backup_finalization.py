@@ -22,8 +22,6 @@ from apps.console.backup.models import (
     CoreDatabaseBackupStoragePoints,
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
-    CoreWordPressBackup,
-    CoreWordPressBackupStoragePoints,
 )
 from apps.console.account.models import CoreAccount
 from apps.console.node.models import (
@@ -31,7 +29,6 @@ from apps.console.node.models import (
     CoreDatabase,
     CoreNode,
     CoreWebsite,
-    CoreWordPress,
 )
 from apps.console.storage.models import CoreStorageLocal
 from apps.console.utils.models import (
@@ -63,7 +60,6 @@ class LocalBackupFinalizationTests(BaseTestCase):
         node_type = {
             "website": CoreNode.Type.WEBSITE,
             "database": CoreNode.Type.DATABASE,
-            "wordpress": CoreNode.Type.SAAS,
             "basecamp": CoreNode.Type.SAAS,
         }[kind]
         node = CoreNode.objects.create(
@@ -90,16 +86,6 @@ class LocalBackupFinalizationTests(BaseTestCase):
             backup = backup_model.objects.create(
                 database=source,
                 uuid=f"local-database-{suffix}",
-                status=UtilBackup.Status.UPLOAD_IN_PROGRESS,
-                type=UtilBackup.Type.ON_DEMAND,
-            )
-        elif kind == "wordpress":
-            source = CoreWordPress.objects.create(node=node, name="local-wordpress")
-            backup_model = CoreWordPressBackup
-            point_model = CoreWordPressBackupStoragePoints
-            backup = backup_model.objects.create(
-                wordpress=source,
-                uuid=f"local-wordpress-{suffix}",
                 status=UtilBackup.Status.UPLOAD_IN_PROGRESS,
                 type=UtilBackup.Type.ON_DEMAND,
             )
@@ -140,7 +126,6 @@ class LocalBackupFinalizationTests(BaseTestCase):
         cases = (
             ("website", CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE),
             ("database", CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE),
-            ("wordpress", CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE),
             ("basecamp", CoreBasecampBackupStoragePoints.Status.UPLOAD_COMPLETE),
         )
 

@@ -49,7 +49,7 @@ Amazon S3 immutability options.
 
 The setup wizard has three steps: choose a provider, connect the account or
 service, and select/create source nodes. Provider connections discover eligible
-resources. Website, database, WordPress, and Basecamp setup collects
+resources. Website, database, and Basecamp setup collects
 source-specific choices instead.
 
 The source inventory can be filtered by type, node name, integration name,

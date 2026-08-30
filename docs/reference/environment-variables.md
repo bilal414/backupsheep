@@ -13,7 +13,7 @@ or other process values are merged into that object. The stock installer and sec
 Compose wrapper reject this alternate source and stock Compose pins it blank.
 
 Compose supplies non-secret and optional integration values from `.env` to application
-roles. Its required installation secrets, separate database/files KMS credentials and
+roles. Its required installation secrets, separate database/files artifact keyrings, and
 optional lane-specific managed SSH identities are file-backed under `.secrets`; see below. After
 editing configuration on an existing installation, validate and recreate the web/guard
 pair:
@@ -55,7 +55,7 @@ These values control Compose/installer behavior rather than Django application f
 | `BACKUPSHEEP_COMPOSE_PROJECT_NAME` | blank sample; installer pins the requested/default `backupsheep` name | Stable lowercase Compose ownership namespace. The wrapper reads only this protected `.env` witness and supplies the same explicit `--project-name`; ambient `COMPOSE_PROJECT_NAME` and caller project overrides are refused. Do not edit it to adopt, rename or recover resources. |
 | `BACKUPSHEEP_INSTALLATION_ID` | blank sample; installer generates it | Stable random 64-character lowercase hexadecimal ownership marker. Required by stock Compose; do not rotate or copy it between installations |
 | `BACKUPSHEEP_POSTGRES_STORAGE_GENERATION` | blank sample; installer records `18-alpine-icu-v1` through a pending state | Fail-closed bundled-database runtime/storage generation. Never advance it manually; completion follows an in-volume marker and, for upgrades, a verified logical-migration receipt |
-| `BACKUPSHEEP_POSTGRES_STORAGE_INTENT` | blank sample; installer records `new-empty-v1` or `migrated-debian-v1` | Immutable origin of the active `postgres_data_v1` volume, included in the storage witness |
+| `BACKUPSHEEP_POSTGRES_STORAGE_INTENT` | blank sample; installer records `new-empty-v1`, `migrated-debian-v1`, or `migrated-debian-generation2-v1` | Immutable origin and exact source-identity contract of the active `postgres_data_v1` volume, included in the installation-bound storage witness; blank shared-superuser sources are not eligible for automatic runtime migration |
 | `BACKUPSHEEP_POSTGRES_STORAGE_WITNESS` | blank sample; installer derives it | SHA-256 binding of installation ID, Compose project, logical volume, Alpine/ICU generation and intent; do not copy or edit it |
 | `BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID` | blank for fresh installs; installer records an exact `sha256:` ID during migration | Exact Debian/UID-999 runtime retained with detached legacy `pgdata` for rollback proof; never substitute a tag or delete it before the retention decision |
 | `BACKUPSHEEP_DATABASE_IDENTITY_GENERATION` | blank sample; installer records `3` | Stock PostgreSQL identity/ACL/RLS contract witness. Never set it manually on an existing installation to bypass provisioning |
@@ -160,7 +160,7 @@ API token is issued.
 | `DB_BEAT_USER` | `backupsheep_beat` | Scheduler lane; workers cannot read or mutate its schedule tables |
 | `DB_CLOUD_USER` | `backupsheep_cloud` | Explicit remote-provider worker lane |
 | `DB_DATABASE_USER` | `backupsheep_database` | Database source/backup/restore lane |
-| `DB_FILES_USER` | `backupsheep_files` | Website, WordPress and Basecamp source lane |
+| `DB_FILES_USER` | `backupsheep_files` | Website and Basecamp source lane |
 | `DB_STORAGE_USER` | `backupsheep_storage` | Local storage/artifact handoff lane |
 | `DB_LOGS_USER` | `backupsheep_logs` | Run-log/notification and bounded replay-retention lane |
 | `DB_USER` | `backupsheep_app` | Compatibility alias used by non-Compose deployments; stock Compose pins each service to its lane user |
@@ -202,6 +202,7 @@ options may instead be supplied in the `DATABASE_URL` query string.
 | `BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION` | blank sample / installer-owned positive integer | Active public-registry/key generation; increments after every reviewed rotation |
 | `BACKUPSHEEP_CELERY_SECURITY_REQUIRED` | `true` in stock Compose | Requires signed lane-bound task envelopes; do not disable in stock Docker |
 | `BACKUPSHEEP_CELERY_LANE` | service-owned | Fixed app, Beat, preflight, or worker identity used for credential/key selection |
+| `BACKUPSHEEP_RUNTIME_ROLE` | service-owned | Exact runtime/staging identity (`web`, `migration`, `preflight`, `beat`, `cloud`, `database`, `files`, `storage`, or `logs`); production BSE1 source roles require the matching Celery lane |
 | `CELERY_TASK_REPLAY_RETENTION_SECONDS` | `1209600` | Retains terminal replay identities for 14 days; cannot be shorter than the seven-day signed lifetime plus clock skew |
 | `CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE` | `1000` | Bounded terminal replay rows deleted by one logs-lane cleanup run (`1`-`10000`) |
 | `RABBITMQ_VHOST` | `backupsheep` | Dedicated virtual host; components are URL encoded |
@@ -216,32 +217,43 @@ TLS query-string overrides are rejected. Production accepts one broker URL; put 
 high availability behind one certificate-valid load-balancer/DNS endpoint instead of a
 semicolon failover list whose members could cross transport trust boundaries.
 
-## Artifact encryption and KMS
+## Artifact encryption and local-file keys
 
 | Variable | Stock value/default | Meaning |
 | --- | --- | --- |
 | `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE` | `bse1` | Requires the versioned chunked AES-256-GCM-SIV envelope; stock production does not write legacy plaintext artifacts |
-| `BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE` | `true` | Enforces BSE1, standard-endpoint AWS KMS and legacy-restore denial |
+| `BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE` | `true` | Enforces BSE1, lane-scoped local-file keys and legacy-restore denial |
 | `BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE` | `false` | Must remain false in enterprise mode; an old non-BSE1 object fails closed |
-| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER` | `aws-kms` | Stock production key provider. `local-development` is rejected in production/enterprise mode |
+| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER` | `local-file` | Current runtime providers are production `local-file` and development/test-only `local-development`; production/enterprise mode rejects the latter. Historical `aws-kms` is recognized only by migration/rollback handling and is not selectable at runtime |
+| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION` | blank sample; production requires sealed `1` | Provider-policy generation. The installer owns it for Docker. A fresh direct deployment derives generation `1` with the reviewed lifecycle command; `1-pending-empty` disables long-lived roles and is reserved for the installer's stopped-operations adoption proof. Never edit it to bypass a transition |
+| `BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS` | blank sample; production requires SHA-256 witness | Installation-ID, provider and generation-bound policy witness. Settings and preflight recompute it and fail closed on drift. Docker uses the installer-owned value; fresh direct deployments use `manage_artifact_keyring.py policy-witness`. Never copy it between installations or synthesize it to bypass a pending transition |
 | `BACKUPSHEEP_ARTIFACT_CHUNK_SIZE` | `4194304` | Authenticated-record plaintext bytes; accepted range is 64 KiB through 64 MiB |
-| `BACKUPSHEEP_ARTIFACT_KMS_KEY_ID` | installer-required | Resolved symmetric KMS key ARN used for new data-key wraps; aliases are not accepted by the installer |
-| `BACKUPSHEEP_ARTIFACT_KMS_REGION` | installer-required | AWS region containing every allowlisted artifact key |
-| `BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS` | installer-required | Comma-separated resolved ARNs accepted for restore and key-wrap rotation; include the active key |
-| `BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL` | blank | Custom endpoint; enterprise mode requires blank |
-| `BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT` | `false` | Insecure endpoint opt-in; enterprise mode requires false |
-| `BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS` | `5` | KMS connect timeout, maximum 60 seconds |
-| `BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS` | `20` from `.env_sample` | KMS read timeout, maximum 120 seconds |
-| `BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS` | `3` | Bounded KMS client attempts, maximum 5 |
+| `BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH` | blank globally; exact `/run/secrets/...` in a source worker | Never set in shared `.env`; Compose injects only the matching database/files path |
+| `BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY` | blank | Development-only compatibility setting; forbidden with `local-file` and never stores a production root key |
+| `BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID` | `local-v1` | Development-only compatibility ID; the production active ID comes from the keyring |
 
-AWS credentials never belong in `.env`. The installer requires two different canonical
-user-owned source files and stores them as
-`.secrets/artifact_kms_database_aws_credentials` and
-`.secrets/artifact_kms_files_aws_credentials`. Only the matching source worker receives
-each file; storage and every other role receive neither. IAM identity policy and the KMS
-key policy must restrict actions by the exact `bse:lane` and complete encryption-context
-key set. See [Private staging and ciphertext handoff](../security/staging-isolation.md)
+The installer stores the production keyrings as
+`.secrets/artifact_local_file_database_keyring` and
+`.secrets/artifact_local_file_files_keyring`. Only the matching source worker receives
+each file; storage and every other role receive neither. Back up both keyrings with the
+database recovery set. See [Private staging and ciphertext handoff](../security/staging-isolation.md)
 before enabling operations or rotating a key wrap.
+
+The `local-file` artifact provider requires no AWS account, credentials, or KMS service.
+AWS credentials are needed only for optional AWS sources, storage destinations, or Amazon
+SES email that an operator explicitly configures. The historical `aws-kms` identifier in
+schema migrations and installer rollback handling does not load a current KMS provider or
+convert old ciphertext.
+
+The two local-file roots are exportable software keys, not non-exportable HSM/KMS keys.
+The matching source lane necessarily reads its own root, and the Docker daemon or host
+administrator can access mounted key material. Protect those boundaries and the separately
+encrypted off-host recovery copies; the stock runtime does not currently offer a
+hardware-backed artifact-key provider.
+
+Direct production deployments also default an omitted encryption mode to `bse1` when
+`DJANGO_SERVER=prod`. `legacy-only` must be selected explicitly for a bounded
+non-enterprise historical-restore transition; it is not a secure production default.
 
 ## Per-role egress guards
 
@@ -300,7 +312,7 @@ stores `django_secret_key`, `db_bootstrap_password`, `db_migrator_password`,
 the eight `db_<lane>_password` files, `rabbitmq_bootstrap_password`, the eight
 `rabbitmq_<lane>_password` files, seven lane signing keys,
 `celery_trusted_public_keys`, `onboarding_token`, and the two required lane-specific
-artifact-KMS credential files as separate owner-owned, non-linked, mode-`0444` files. It
+artifact local-file keyrings as separate owner-owned, non-linked, mode-`0444` files. It
 also creates empty optional `ssh_managed_database_private_key` and
 `ssh_managed_files_private_key` files with the same ownership/link/mode rules. The private
 parent prevents host directory traversal while Docker bind-mounts each file read-only only
@@ -339,9 +351,7 @@ not be repointed through `.env`.
 | `BS_LOCAL_STORAGE_PATH` | `/backups` | Stock Local Storage root, mounted read/write only in `worker-storage`; every other runtime role must have no `/backups` mount |
 | `LOG_RETENTION_DAYS` | `30` | Days before files/database/storage private run logs and PostgreSQL `CoreLog` activity rows are pruned |
 | `S3_DOWNLOAD_URL_EXPIRES` | `300` | Compatibility-only provider-signed URL lifetime for an explicitly enabled non-enterprise legacy artifact; hard maximum `3600`. Stock BSE1 direct download is refused |
-| `WORDPRESS_INTEGRATION_ENABLED` | `false` | Explicit non-enterprise compatibility opt-in for WordPress secure connector v2; it has no effect in enterprise/BSE1 mode or unless legacy artifact download is enabled |
 | `BASECAMP_INTEGRATION_ENABLED` | `false` | Explicit non-enterprise compatibility opt-in for Basecamp; it has no effect in enterprise/BSE1 mode or unless legacy artifact download is enabled |
-| `WORDPRESS_PRIVATE_TARGET_CIDRS` | blank | Exact RFC1918/ULA CIDRs permitted for DNS-pinned, certificate-verified HTTPS WordPress targets; special/metadata ranges remain denied |
 | `ALLOW_INSECURE_FTP` | `false` | Explicit legacy compatibility opt-in for plaintext FTP; prefer SFTP or certificate-verified FTPS |
 | `SSH_KNOWN_HOSTS_PATH` | `_storage/ssh_known_hosts` outside stock Compose | Compatibility-only file setting for separately reviewed non-stock deployments. Stock Compose ignores this shared-file model: approvals and append-only audit events are account-scoped PostgreSQL records, and each SSH operation receives only its exact approved keys in a transient mode-`0600` private-runtime file |
 | `SSH_MANAGED_DATABASE_PUBLIC_KEY` | blank | Public half of the optional database-worker Ed25519 identity; it must match `.secrets/ssh_managed_database_private_key` and differ from the files identity |
@@ -355,17 +365,13 @@ compatible, Google Cloud, Azure, Alibaba or Tencent signature. Dropbox, OneDrive
 similar APIs may issue provider-bounded temporary links in that legacy path without
 accepting a caller-selected lifetime.
 
-WordPress and Basecamp do not currently have an authenticated BSE1 plaintext-export or
-automatic-restore action. Their family switches take effect only when all of the following
-are explicit: `BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=false`,
+Basecamp does not currently have an authenticated BSE1 plaintext-export or automatic-
+restore action. Its family switch takes effect only when all of the following are explicit:
+`BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=false`,
 `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=legacy-only`, and
-`BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true`. Stock enterprise mode hides both choices
+`BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true`. Stock enterprise mode hides the choice
 and rejects direct API, schedule, outbox, retry, and worker-task bypasses while retaining
 existing records for inspection.
-
-WordPress credentials never use plaintext HTTP. Public HTTPS targets work by default.
-Private targets require the smallest practical comma-separated CIDR allowlist in
-`WORDPRESS_PRIVATE_TARGET_CIDRS`; DNS failures and mixed public/private answers fail closed.
 
 ## Durable execution and recovery
 

@@ -14,6 +14,10 @@ from django.utils import timezone
 from requests import exceptions as requests_exceptions
 from sentry_sdk import capture_exception
 
+from apps._tasks.artifact_encryption import (
+    storage_artifact_identity,
+    validate_storage_object_key,
+)
 from apps._tasks.exceptions import NodeOneDriveUploadFailedError
 from apps.api.v1.utils.api_helpers import bs_decrypt, bs_encrypt
 from apps.api.v1.utils.http import request_timeout, requests
@@ -21,6 +25,7 @@ from apps._tasks.integration.storage.s3_verified import (
     S3ObjectIntegrityError,
     S3UploadReconciliationRequired,
 )
+from apps.console.backup.models import CoreBackupArtifact
 
 
 STATE_KEY = "onedrive_upload"
@@ -73,14 +78,6 @@ class _SourceArtifactInvalid(OneDriveUploadFailure, S3ObjectIntegrityError):
             retryable=False,
             message="The committed local backup artifact failed integrity validation.",
         )
-
-
-def _backup_uuid(stored_backup):
-    backup = stored_backup.backup
-    value = str(getattr(backup, "uuid_str", None) or getattr(backup, "uuid", ""))
-    if not value or value in {".", ".."} or "/" in value or "\\" in value or "\x00" in value:
-        raise OneDriveUploadFailure("INVALID_BACKUP_ID", retryable=False)
-    return value
 
 
 def _node_slug(stored_backup):
@@ -219,11 +216,14 @@ def _client_headers(storage):
     return headers
 
 
-def _marker(backup_uuid, identity):
-    return (
-        f"BackupSheep backup uuid={backup_uuid};"
-        f"sha256={identity['sha256']};bytes={identity['size_bytes']}"
-    )
+def _marker(artifact_identity, identity):
+    if not hasattr(artifact_identity, "artifact_format"):
+        owner = f"backup uuid={artifact_identity}"
+    elif artifact_identity.artifact_format == CoreBackupArtifact.Format.BSE1:
+        owner = f"artifact={artifact_identity.ownership_marker}"
+    else:
+        owner = f"backup uuid={artifact_identity.identifier}"
+    return f"BackupSheep {owner};sha256={identity['sha256']};bytes={identity['size_bytes']}"
 
 
 def _validate_item(item, *, target_path, marker, allow_missing_marker=False):
@@ -544,8 +544,16 @@ def _create_session(stored_backup, storage, target_path, identity, marker, state
     return session_url
 
 
-def _upload_session(stored_backup, storage, target_path, identity, marker, state):
-    local_zip = f"_storage/{_backup_uuid(stored_backup)}.zip"
+def _upload_session(
+    stored_backup,
+    storage,
+    target_path,
+    identity,
+    marker,
+    state,
+    artifact_identity,
+):
+    local_artifact = f"_storage/{artifact_identity.filename}"
     session_url = _unseal_session(storage, state.get("session"))
     if not session_url:
         session_url = _create_session(stored_backup, storage, target_path, identity, marker, state)
@@ -553,7 +561,15 @@ def _upload_session(stored_backup, storage, target_path, identity, marker, state
     status_result, completed_item, ranges = _session_status(session_url, identity["size_bytes"])
     if status_result == "expired":
         _restart_session(stored_backup, state, target_path)
-        return _upload_session(stored_backup, storage, target_path, identity, marker, state)
+        return _upload_session(
+            stored_backup,
+            storage,
+            target_path,
+            identity,
+            marker,
+            state,
+            artifact_identity,
+        )
     if status_result == "complete":
         return completed_item
     offset = int(status_result)
@@ -569,7 +585,7 @@ def _upload_session(stored_backup, storage, target_path, identity, marker, state
     )
     _save_state(stored_backup, state, storage_file_id=target_path)
 
-    with open(local_zip, "rb") as source:
+    with open(local_artifact, "rb") as source:
         while offset < identity["size_bytes"]:
             # The first missing range may be bounded.  Never send bytes outside
             # that range, and never infer acceptance from a timed-out request.
@@ -608,7 +624,15 @@ def _upload_session(stored_backup, storage, target_path, identity, marker, state
                     return completed_item
                 if status_result == "expired":
                     _restart_session(stored_backup, state, target_path)
-                    return _upload_session(stored_backup, storage, target_path, identity, marker, state)
+                    return _upload_session(
+                        stored_backup,
+                        storage,
+                        target_path,
+                        identity,
+                        marker,
+                        state,
+                        artifact_identity,
+                    )
                 offset = int(status_result)
                 state["next_offset"] = offset
                 state["uploaded_bytes"] = offset
@@ -642,7 +666,15 @@ def _upload_session(stored_backup, storage, target_path, identity, marker, state
                     return completed_item
                 if status_result == "expired":
                     _restart_session(stored_backup, state, target_path)
-                    return _upload_session(stored_backup, storage, target_path, identity, marker, state)
+                    return _upload_session(
+                        stored_backup,
+                        storage,
+                        target_path,
+                        identity,
+                        marker,
+                        state,
+                        artifact_identity,
+                    )
                 offset = int(status_result)
                 state["next_offset"] = offset
                 state["uploaded_bytes"] = offset
@@ -657,7 +689,15 @@ def _upload_session(stored_backup, storage, target_path, identity, marker, state
                 if existing:
                     return existing
                 _restart_session(stored_backup, state, target_path)
-                return _upload_session(stored_backup, storage, target_path, identity, marker, state)
+                return _upload_session(
+                    stored_backup,
+                    storage,
+                    target_path,
+                    identity,
+                    marker,
+                    state,
+                    artifact_identity,
+                )
             if status == 409:
                 # A second session can race after a worker lost the first
                 # session-creation response.  Reconcile the deterministic path;
@@ -682,12 +722,19 @@ def _upload_session(stored_backup, storage, target_path, identity, marker, state
 
 def storage_onedrive(stored_backup):
     """Upload/adopt one deterministic path and commit verified destination evidence."""
-    local_zip = f"_storage/{_backup_uuid(stored_backup)}.zip"
+    artifact_identity = storage_artifact_identity(stored_backup.backup)
+    local_artifact = f"_storage/{artifact_identity.filename}"
     try:
-        identity = _source_identity(stored_backup, local_zip)
-        backup_uuid = _backup_uuid(stored_backup)
-        target_path = f"backupsheep/{_node_slug(stored_backup)}/{backup_uuid}.zip"
-        marker = _marker(backup_uuid, identity)
+        identity = _source_identity(stored_backup, local_artifact)
+        if artifact_identity.artifact_format == CoreBackupArtifact.Format.BSE1:
+            target_path = f"backupsheep/{artifact_identity.filename}"
+        else:
+            target_path = (
+                f"backupsheep/{_node_slug(stored_backup)}/"
+                f"{artifact_identity.filename}"
+            )
+        validate_storage_object_key(stored_backup.backup, target_path)
+        marker = _marker(artifact_identity, identity)
         storage = stored_backup.storage
         state = dict((stored_backup.metadata or {}).get(STATE_KEY) or {})
         state.update(
@@ -724,10 +771,16 @@ def storage_onedrive(stored_backup):
                 session=state.get("session"),
             )
 
-        if not os.path.isfile(local_zip):
-            raise FileNotFoundError(local_zip)
+        if not os.path.isfile(local_artifact):
+            raise FileNotFoundError(local_artifact)
         final_item = _upload_session(
-            stored_backup, storage, target_path, identity, marker, state
+            stored_backup,
+            storage,
+            target_path,
+            identity,
+            marker,
+            state,
+            artifact_identity,
         )
         # The final response may be lost or may omit description/eTag fields;
         # reconcile through the deterministic path before accepting completion.

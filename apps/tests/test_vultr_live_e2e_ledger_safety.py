@@ -14,6 +14,7 @@ from scripts.vultr_live_e2e import (
     MutationIntentStore,
     ProviderNotFound,
     ProviderTransientFailure,
+    _credential_scope,
     _validate_vultr_api_base,
     _validate_vultr_object_storage_hostname,
     _request_fingerprint,
@@ -329,6 +330,26 @@ class VultrLiveE2ELedgerSafetyTests(TestCase):
         harness.object_client = None
         harness.object_credentials = {}
         return harness
+
+    def test_credential_scope_is_stable_but_not_a_fast_token_digest(self):
+        scope = _credential_scope(
+            "https://api.vultr.com/v2", RUN_ID, "unit-test-token"
+        )
+
+        self.assertEqual(
+            scope,
+            _credential_scope(
+                "https://api.vultr.com/v2", RUN_ID, "unit-test-token"
+            ),
+        )
+        self.assertNotIn("unit-test-token", scope)
+        self.assertNotEqual(
+            scope,
+            _credential_scope(
+                "https://api.vultr.com/v2", RUN_ID, "different-unit-test-token"
+            ),
+        )
+        self.assertRegex(scope, r":credential-scrypt-[0-9a-f]{64}$")
 
     @staticmethod
     def _intent(marker, operation, *, request=None, kind=""):

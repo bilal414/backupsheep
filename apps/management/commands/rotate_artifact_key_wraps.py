@@ -1,4 +1,4 @@
-"""Safely rotate active BSE1 data-key wraps to another AWS KMS key."""
+"""Safely rewrap active BSE1 data keys to a local-file keyring's active key."""
 
 from __future__ import annotations
 
@@ -18,61 +18,41 @@ from apps.console.backup.models import (
 from backupsheep.artifact_crypto import WrappedDataKey
 
 
-_KMS_KEY_ARN = re.compile(
-    r"^arn:(?P<partition>[a-z0-9-]+):kms:(?P<region>[a-z0-9-]+):"
-    r"(?P<account>[0-9]{12}):key/(?P<key_id>[A-Za-z0-9-]+)$"
-)
+_KEY_ID = re.compile(r"^lfk-[0-9a-f]{32}$")
 _INSTALLATION_ID = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _validated_rotation_scope(
-    *, source_key: str, destination_key: str, witness: str
-) -> None:
-    source_match = _KMS_KEY_ARN.fullmatch(source_key)
-    destination_match = _KMS_KEY_ARN.fullmatch(destination_key)
-    if source_match is None or destination_match is None:
-        raise CommandError("Source and destination must be resolved AWS KMS key ARNs.")
-    if source_key == destination_key:
-        raise CommandError("Source and destination AWS KMS keys must be different.")
-    region = str(getattr(settings, "BACKUPSHEEP_ARTIFACT_KMS_REGION", ""))
-    if (
-        source_match.group("region") != region
-        or destination_match.group("region") != region
-    ):
-        raise CommandError("Both AWS KMS keys must be in the configured artifact region.")
-    allowed = set(
-        getattr(settings, "BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS", ())
-    )
-    if source_key not in allowed or destination_key not in allowed:
-        raise CommandError(
-            "Both AWS KMS key ARNs must be present in the configured rotation allowlist."
-        )
+def _validated_rotation_scope(*, source_key: str, witness: str, lane: str) -> None:
+    if _KEY_ID.fullmatch(source_key) is None:
+        raise CommandError("The expected source key ID is invalid.")
     installation_id = str(getattr(settings, "BACKUPSHEEP_INSTALLATION_ID", ""))
     if not _INSTALLATION_ID.fullmatch(witness) or witness != installation_id:
         raise CommandError(
             "The installation identity witness does not match this deployment."
         )
+    if lane not in {"database", "files"}:
+        raise CommandError("The artifact keyring lane is invalid.")
     if (
         getattr(settings, "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE", "") != "bse1"
-        or getattr(settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER", "") != "aws-kms"
+        or getattr(settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER", "")
+        != "local-file"
     ):
-        raise CommandError("AWS KMS BSE1 artifact custody is not active.")
+        raise CommandError("Production local-file BSE1 artifact custody is not active.")
 
 
 @contextmanager
-def _configured_provider():
-    # Keep provider construction in the same fail-closed registry used by sealing
-    # and restore so a management path cannot silently select a different backend.
+def _configured_provider(*, lane: str):
+    # Reuse the same fail-closed construction path used by seal and restore.
     from apps._tasks.artifact_encryption import _configured_provider as provider_factory
 
     with provider_factory() as provider:
         if (
-            getattr(provider, "name", None) != CoreBackupKeyWrap.Provider.AWS_KMS
-            or getattr(provider, "external", None) is not True
+            getattr(provider, "name", None) != CoreBackupKeyWrap.Provider.LOCAL_FILE
             or getattr(provider, "enterprise_eligible", None) is not True
+            or getattr(provider, "lane", None) != lane
         ):
             raise CommandError(
-                "The configured artifact key provider is not enterprise AWS KMS."
+                "The configured artifact key provider does not match this source lane."
             )
         yield provider
 
@@ -115,7 +95,7 @@ def _rotate_one(
         if current.wrapping_key_id == destination_key:
             return "already-rotated"
         if (
-            current.provider != CoreBackupKeyWrap.Provider.AWS_KMS
+            current.provider != CoreBackupKeyWrap.Provider.LOCAL_FILE
             or current.wrapping_key_id != source_key
         ):
             raise CommandError(
@@ -134,24 +114,25 @@ def _rotate_one(
             )
         except Exception as error:
             raise CommandError(
-                f"AWS KMS could not rewrap envelope {envelope.pk}; no database state changed."
+                f"The local-file provider could not rewrap envelope {envelope.pk}; "
+                "no database state changed."
             ) from error
         if (
-            rewrapped.provider_name != CoreBackupKeyWrap.Provider.AWS_KMS
+            rewrapped.provider_name != CoreBackupKeyWrap.Provider.LOCAL_FILE
             or rewrapped.wrapping_key_id != destination_key
             or not isinstance(rewrapped.ciphertext, bytes)
             or not rewrapped.ciphertext
             or len(rewrapped.ciphertext) > 8192
         ):
             raise CommandError(
-                f"AWS KMS returned an invalid destination wrap for envelope {envelope.pk}."
+                f"The local-file provider returned an invalid wrap for envelope {envelope.pk}."
             )
 
         next_generation = max((item.generation for item in wraps), default=0) + 1
         replacement = CoreBackupKeyWrap(
             envelope=envelope,
             generation=next_generation,
-            provider=CoreBackupKeyWrap.Provider.AWS_KMS,
+            provider=CoreBackupKeyWrap.Provider.LOCAL_FILE,
             wrapping_key_id=destination_key,
             wrapped_data_key=rewrapped.ciphertext,
             wrapped_key_sha256=hashlib.sha256(rewrapped.ciphertext).hexdigest(),
@@ -180,21 +161,20 @@ def _rotate_one(
 
 class Command(BaseCommand):
     help = (
-        "Rewrap active BSE1 data keys under another allowlisted AWS KMS key. "
-        "The default is a read-only plan; --apply performs bounded rotations."
+        "Rewrap active BSE1 data keys from one retained local-file key to the "
+        "keyring's active key. The default is a read-only plan; --apply performs "
+        "bounded rotations."
     )
 
     def add_arguments(self, parser):
-        parser.add_argument("--expected-source-key-arn", required=True)
-        parser.add_argument("--destination-key-arn", required=True)
+        parser.add_argument("--expected-source-key-id", required=True)
         parser.add_argument("--installation-id-witness", required=True)
         parser.add_argument("--lane", required=True, choices=("database", "files"))
         parser.add_argument("--limit", type=int, default=100)
         parser.add_argument("--apply", action="store_true")
 
     def handle(self, *args, **options):
-        source_key = str(options["expected_source_key_arn"])
-        destination_key = str(options["destination_key_arn"])
+        source_key = str(options["expected_source_key_id"])
         installation_id = str(options["installation_id_witness"])
         lane = str(options["lane"])
         limit = options["limit"]
@@ -202,38 +182,49 @@ class Command(BaseCommand):
             raise CommandError("--limit must be between 1 and 10000.")
         _validated_rotation_scope(
             source_key=source_key,
-            destination_key=destination_key,
             witness=installation_id,
+            lane=lane,
         )
 
-        candidates = list(
-            CoreBackupEncryptionEnvelope.objects.filter(
+        with _configured_provider(lane=lane) as provider:
+            destination_key = str(provider.active_key_id)
+            if destination_key == source_key:
+                raise CommandError(
+                    "The expected source key is already the keyring's active key."
+                )
+            if source_key not in provider.key_ids:
+                raise CommandError(
+                    "The expected source key is absent from this lane keyring."
+                )
+            candidates = list(
+                CoreBackupEncryptionEnvelope.objects.filter(
+                    status=CoreBackupEncryptionEnvelope.Status.ACTIVE,
+                    key_wraps__status=CoreBackupKeyWrap.Status.ACTIVE,
+                    key_wraps__provider=CoreBackupKeyWrap.Provider.LOCAL_FILE,
+                    key_wraps__wrapping_key_id=source_key,
+                    context_canonical_json__contains=f'"lane":"{lane}"',
+                )
+                .order_by("pk")
+                .values_list("pk", flat=True)[:limit]
+            )
+            remaining = CoreBackupEncryptionEnvelope.objects.filter(
                 status=CoreBackupEncryptionEnvelope.Status.ACTIVE,
                 key_wraps__status=CoreBackupKeyWrap.Status.ACTIVE,
-                key_wraps__provider=CoreBackupKeyWrap.Provider.AWS_KMS,
+                key_wraps__provider=CoreBackupKeyWrap.Provider.LOCAL_FILE,
                 key_wraps__wrapping_key_id=source_key,
                 context_canonical_json__contains=f'"lane":"{lane}"',
-            )
-            .order_by("pk")
-            .values_list("pk", flat=True)[:limit]
-        )
-        remaining = CoreBackupEncryptionEnvelope.objects.filter(
-            status=CoreBackupEncryptionEnvelope.Status.ACTIVE,
-            key_wraps__status=CoreBackupKeyWrap.Status.ACTIVE,
-            key_wraps__provider=CoreBackupKeyWrap.Provider.AWS_KMS,
-            key_wraps__wrapping_key_id=source_key,
-            context_canonical_json__contains=f'"lane":"{lane}"',
-        ).count()
-        if not options["apply"]:
-            self.stdout.write(
-                f"Artifact key-wrap rotation plan: lane={lane} selected={len(candidates)} "
-                f"remaining_source={remaining}; no KMS or database mutation performed."
-            )
-            return
+            ).count()
+            if not options["apply"]:
+                self.stdout.write(
+                    "Artifact key-wrap rotation plan: "
+                    f"lane={lane} source={source_key} destination={destination_key} "
+                    f"selected={len(candidates)} remaining_source={remaining}; "
+                    "no keyring or database mutation performed."
+                )
+                return
 
-        rotated = 0
-        already_rotated = 0
-        with _configured_provider() as provider:
+            rotated = 0
+            already_rotated = 0
             for envelope_id in candidates:
                 result = _rotate_one(
                     envelope_id,
@@ -250,7 +241,7 @@ class Command(BaseCommand):
         remaining_after = CoreBackupEncryptionEnvelope.objects.filter(
             status=CoreBackupEncryptionEnvelope.Status.ACTIVE,
             key_wraps__status=CoreBackupKeyWrap.Status.ACTIVE,
-            key_wraps__provider=CoreBackupKeyWrap.Provider.AWS_KMS,
+            key_wraps__provider=CoreBackupKeyWrap.Provider.LOCAL_FILE,
             key_wraps__wrapping_key_id=source_key,
             context_canonical_json__contains=f'"lane":"{lane}"',
         ).count()

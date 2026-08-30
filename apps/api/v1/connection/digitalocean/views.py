@@ -19,9 +19,7 @@ from apps.console.node.models import CoreDigitalOcean, CoreNode
 from .filters import CoreDigitalOceanFilter
 from .permissions import CoreDigitalOceanViewPermissions
 from .serializers import CoreDigitalOceanConnectionReadSerializer, CoreDigitalOceanConnectionWriteSerializer
-from .client import DigitalOceanAPIError, list_eligible_objects
-from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
-    IntegrationValidationError
+from .client import list_eligible_objects
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 from ...utils.api_permissions import member_has_perm
@@ -114,15 +112,22 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
-        try:
-            connection = self.get_object()
-            validation = connection.validate()
-            if validation:
-                return Response({"detail": "Validation passed. Integration is good for backups."}, status=status.HTTP_200_OK)
-            else:
-                return Response({"detail": "Validation failed. Backups will fail. Check integration details immediately."}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            raise IntegrationValidationError(e.__str__())
+        connection = self.get_object()
+        validation = connection.validate()
+        if validation:
+            return Response(
+                {"detail": "Validation passed. Integration is good for backups."},
+                status=status.HTTP_200_OK,
+            )
+        return Response(
+            {
+                "detail": (
+                    "Validation failed. Backups will fail. Check integration "
+                    "details immediately."
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     @action(detail=True, methods=["get"])
     @safe_connection_action(stage="object_discovery")
@@ -133,27 +138,20 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 {"detail": "object_type must be either cloud or volume."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        try:
-            connection = self.get_object()
-            eligible_objects = list_eligible_objects(
-                headers=connection.auth_digitalocean.get_verified_client(),
-                object_type=object_type,
+        connection = self.get_object()
+        eligible_objects = list_eligible_objects(
+            headers=connection.auth_digitalocean.get_verified_client(),
+            object_type=object_type,
+        )
+        attached_ids = {
+            str(value)
+            for value in CoreDigitalOcean.objects.filter(
+                node__connection=connection,
             )
-            attached_ids = {
-                str(value)
-                for value in CoreDigitalOcean.objects.filter(
-                    node__connection=connection,
-                )
-                .exclude(node__status=CoreNode.Status.DELETE_REQUESTED)
-                .values_list("unique_id", flat=True)
-            }
-            for eligible_object in eligible_objects:
-                if str(eligible_object["id"]) in attached_ids:
-                    eligible_object["_bs_attached"] = True
-            return Response(eligible_objects)
-        except DigitalOceanAPIError as error:
-            raise NodeConnectionErrorEligibleObjects(str(error)) from error
-        except Exception as error:
-            raise NodeConnectionErrorEligibleObjects(
-                "DigitalOcean object discovery could not be completed."
-            ) from error
+            .exclude(node__status=CoreNode.Status.DELETE_REQUESTED)
+            .values_list("unique_id", flat=True)
+        }
+        for eligible_object in eligible_objects:
+            if str(eligible_object["id"]) in attached_ids:
+                eligible_object["_bs_attached"] = True
+        return Response(eligible_objects)

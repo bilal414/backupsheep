@@ -5,6 +5,15 @@
 *.pyc
 /.env
 /.secrets/
+/.release-evidence/
+/.release-evidence.download.*/
+/.release-evidence.verify.*/
+/.env.image-source.new
+/.env.fresh.new
+/.env-update.*
+/.env-artifact-policy.*
+/.release-request
+/.release-request.new
 /_storage/
 /docker-compose.override.yml
 /node_modules

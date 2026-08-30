@@ -1,10 +1,10 @@
 # Storage destinations
 
 Storage destinations receive authenticated BSE1 ciphertext artifacts produced for
-website, logical database, WordPress, and Basecamp nodes. One run can target multiple
+website, logical database, and Basecamp nodes. One run can target multiple
 destinations; uploads are dispatched independently and finalized only after all accepted
 destination states are terminal. Destination workers store ciphertext and do not receive
-the source-lane KMS identity needed to decrypt it.
+the source-lane root-key ring needed to unwrap its data key.
 
 ## Destination catalog
 

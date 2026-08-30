@@ -55,17 +55,20 @@ Stock Compose has no shared trust volume or global `known_hosts` file.
    ciphertext even when a backup UUID is known.
 3. It calls `artifact_crypto.seal_file` with the private work root as
    `trusted_source_root`, the fence as `trusted_destination_root`, and the canonical
-   backup UUID as the BSE1 envelope ID. The completed output must use a bounded
-   `*.bse1` name and remains private mode `0600`.
+   backup context in the wrapping AAD. Sealing generates an independent random
+   envelope UUID; the completed output is named `<envelope_uuid>.bse1` and remains
+   private mode `0600`. The public envelope ID is never the backup UUID.
 4. Only after the durable envelope/key record is ready, it calls
    `publish_ciphertext`. Publication checks the marker, owner, group, mode, link
-   count, no-follow path, BSE1 structure and fence-bound envelope UUID before the
-   single `0600 -> 0640` transition.
+   count, no-follow path, BSE1 structure and exact filename-to-envelope-UUID binding
+   before the single `0600 -> 0640` transition. Storage cannot validate the encrypted
+   private context digest; the source lane proves that during authenticated restore.
 5. The storage worker calls `private_storage_root()` and `open_ciphertext` with the
    durable source lane, checks it against the durable
    envelope record, and atomically materializes those same BSE1 bytes in its private
-   `/code/_storage/<uuid>.zip`. The historical extension exists only for adapter
-   compatibility: provider objects contain BSE1 ciphertext, never a decrypted ZIP.
+   `/code/_storage/<envelope_uuid>.bse1`. The random envelope UUID is also the only
+   application-derived identity used by new provider object keys; provider objects
+   contain BSE1 ciphertext, never a decrypted ZIP.
    The storage role can read a published envelope but cannot write or delete the
    source fence.
 6. Storage deletes only its private ciphertext copy. A task routed to the recorded source
@@ -81,53 +84,61 @@ canonical fence marker. Symlinks, hard links, unexpected names, unsafe modes,
 cross-installation/root reuse, lane/root mismatches and partial/unpublished
 ciphertext all fail closed.
 
-## KMS credential and encryption-context boundary
+## Local-file root-key boundary
 
-The installer requires two different canonical AWS credential inputs and stores
-them as `artifact_kms_database_aws_credentials` and
-`artifact_kms_files_aws_credentials`. Compose mounts only the database secret into
-the database worker and only the files secret into the files worker. Web, cloud,
-storage, logs, Beat, migration and preflight receive neither secret, and the image
-entrypoint rejects a wrong-lane or unexpected credential mount. The installer also
-rejects identical files and identical AWS access-key IDs. This is a container
-boundary, not proof of the upstream IAM principal's permissions.
+The installer generates two independent 256-bit root keys in strict versioned
+keyrings named `artifact_local_file_database_keyring` and
+`artifact_local_file_files_keyring`. Compose mounts only the matching keyring into
+each database/files source worker. Web, cloud, storage, logs, Beat, migration and
+preflight receive neither a keyring nor a keyring path. The image entrypoint rejects
+wrong-lane mounts, links, unexpected ownership or mode, and any keyring visible to a
+non-source role.
 
-Operators must use two AWS principals and enforce the same lane separation in both
-their identity policies and the KMS key policy. Each allow statement for
-`kms:GenerateDataKey`, `kms:Decrypt`, `kms:ReEncryptFrom` and `kms:ReEncryptTo` must
-at least require these exact encryption-context conditions (substitute the stable
-installation ID and one lane):
+Each keyring is bound to one installation ID and one lane, and contains one active key ID
+followed by at most seven retained legacy key IDs. AES-256-GCM-SIV wraps authenticate the complete canonical
+artifact context and the wrapping key ID. A database keyring therefore cannot unwrap
+a files artifact, and changing the installation, account, node, backup, model, lane,
+purpose, key ID, nonce, or ciphertext fails authentication.
 
-```json
-{
-  "StringEquals": {
-    "kms:EncryptionContext:bse:installation-id": "<64-hex-installation-id>",
-    "kms:EncryptionContext:bse:lane": "database",
-    "kms:EncryptionContext:bse:purpose": "backup-artifact-v1"
-  },
-  "ForAllValues:StringEquals": {
-    "kms:EncryptionContextKeys": [
-      "bse:account-id", "bse:backup-id", "bse:backup-model",
-      "bse:context-sha256", "bse:installation-id", "bse:lane",
-      "bse:node-id", "bse:purpose"
-    ]
-  }
-}
-```
+Keyring creation is no-clobber and atomic. Installer reruns validate and preserve the
+exact bytes; a missing keyring in an existing installation is treated as key loss and
+is never silently regenerated. Keep protected, encrypted, independently access-audited
+copies of both keyrings with the PostgreSQL recovery set. Losing one keyring makes every
+BSE1 artifact in that lane whose required key is absent cryptographically unrecoverable.
+These roots are exportable software keys. The lane mount boundary prevents unrelated
+containers from receiving them, but it is not equivalent to a non-exportable HSM/KMS:
+code in the matching source lane, the Docker daemon, and host administrators can read that
+lane's keyring. The stock runtime has no hardware-backed artifact provider, so host and
+off-host keyring custody remain explicit trust assumptions.
 
-The files principal uses the same condition with `bse:lane` equal to `files`.
-Do not grant either principal an unconditional KMS cryptographic action through a
-second identity policy, key-policy statement, grant, role, instance profile or
-container credential endpoint. Validate both allowed-lane and denied-cross-lane
-calls before enabling operations.
+Rotation is lane-scoped and deliberately two-phase:
 
-Key-wrap rotation is lane-scoped. Run the read-only plan and then `--apply` inside
-the matching worker with `--lane database` or `--lane files`; the command filters
-and revalidates every durable artifact context before KMS use. Rotate both lanes
-separately. Keep the old KMS key enabled and in the allowlist until each lane reports
-`remaining_source=0`, then wait through the maximum in-flight backup/restore retry
-and retention grace before disabling it. Key deletion remains an operator-controlled
-AWS action and is never performed by BackupSheep.
+1. use the reviewed Compose wrapper to bring the entire operations profile down and
+   remove its worker containers, then run `install.sh --rotate-artifact-keyring
+   database` or `files`; stopped, paused, and restarting containers are also refused
+   because they retain the old bind-mounted inode. Rotation atomically prepends a
+   random active key while retaining every prior key;
+2. run `rotate_artifact_key_wraps` first as a read-only plan and then with `--apply`
+   inside the matching source role, using the old key ID, exact lane, and installation-ID
+   witness until it reports `remaining_source=0`;
+3. retain the legacy key through the maximum in-flight backup/restore retry and retention
+   grace. BackupSheep provides no automatic eviction operation. A separately reviewed
+   prune may occur only after a current complete database query proves that zero
+   non-retired wraps (`pending`, `active`, or `manual_review`) in that lane reference its
+   ID. Pending and manual-review generations must be reconciled or explicitly retired
+   first.
+
+The keyring is capped at eight entries and another rotation refuses rather than evicting
+recovery material. The non-Docker `scripts/manage_artifact_keyring.py` tool provides the
+same create, inspect, and rotate rules for owner-controlled mode-`0700` directories and
+mode-`0400` keyrings; it prints IDs and counts, never root key material.
+
+Rotation is not crypto-erasure: it retains the old root in the keyring and retired wraps
+in PostgreSQL so old recovery state remains usable. Even a later reviewed prune proves
+only that BackupSheep no longer needs that root for any non-retired wrap; it does not erase
+copies in snapshots, encrypted recovery sets, process memory, or previously exported
+material. Dispose of those copies under the operator's separately audited retention and
+media-destruction policy.
 
 ## Restore ciphertext handoff
 
@@ -148,7 +159,7 @@ restore lanes.
 fence invariants. Storage first downloads or copies a provider/local BSE1 object into
 its private work volume and verifies its exact durable byte count and SHA-256. It
 then copies into the storage-owned fence at mode `0600`; publication validates BSE1
-framing and the backup-bound envelope ID before mode `0640`. The target source opens
+framing and the exact random-envelope filename binding before mode `0640`. The target source opens
 a held read-only descriptor, copies and re-hashes it into its private volume, and
 only then performs full authenticated decryption. Source cannot modify or delete the
 handoff. Storage cleanup validates the complete inventory and is idempotent only for
@@ -160,6 +171,23 @@ blocks/inodes available to the unprivileged caller. Configured byte/inode reserv
 are additive to the current operation's
 declared requirement. Fence creation and publication recheck transfer headroom, so
 an exhausted filesystem fails before another handoff is exposed.
+
+## Linux anonymous-staging preflight
+
+BSE1 sealing and restore require Linux `O_TMPFILE` plus `linkat(AT_EMPTY_PATH)` on the
+actual destination filesystem. BackupSheep never falls back to a discoverable named
+partial file when the kernel, C library, mount, or filesystem lacks those primitives. A
+settings check or healthy container cannot prove this filesystem behavior.
+
+Before enabling operations, treat a disposable same-lane backup and isolated restore as
+the operational preflight for each database/files lane on its exact production mounts and
+under its exact worker identity. Verify the restored data digest/content, not only task
+status; also prove that swapping keyrings or crossing lanes is denied before plaintext is
+published. Repeat this proof after changing the container runtime, kernel, filesystem,
+volume driver, or mount options. A native non-Docker deployment must run these workers on
+Linux; a non-Linux host is acceptable only when its container/VM supplies the required
+Linux filesystem semantics. An `O_TMPFILE` refusal is a compatibility failure to fix, not
+a gate to bypass.
 
 ## Existing installations
 

@@ -12,7 +12,10 @@ from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps._tasks.helper import tasks as helper_tasks
-from apps._tasks.exceptions import NodeBackupFailedError
+from apps._tasks.exceptions import (
+    NodeBackupFailedError,
+    NodeConnectionErrorEligibleObjects,
+)
 from apps._tasks.integration.digitalocean import (
     DIGITALOCEAN_REQUEST_METADATA_KEY,
     _digitalocean_create_callback,
@@ -2385,6 +2388,23 @@ class DigitalOceanAdapterDatabaseTests(BaseTestCase):
 
         self.assertEqual(response.status_code, 400)
         listing.assert_not_called()
+
+    def test_model_object_discovery_never_exposes_caught_exception_text(self):
+        canary = "digitalocean-provider-secret-canary"
+        auth = self.node.connection.auth_digitalocean
+        with mock.patch.object(
+            auth,
+            "get_verified_client",
+            return_value={"Authorization": "Bearer test-token"},
+        ), mock.patch(
+            "apps.api.v1.connection.digitalocean.client.list_eligible_objects",
+            side_effect=ValueError(canary),
+        ):
+            with self.assertRaises(NodeConnectionErrorEligibleObjects) as raised:
+                auth.get_eligible_objects()
+
+        self.assertNotIn(canary, str(raised.exception))
+        self.assertIn("could not be completed", str(raised.exception))
 
 
 class DigitalOceanMutationPreflightTests(SimpleTestCase):

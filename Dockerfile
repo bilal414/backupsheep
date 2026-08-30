@@ -623,6 +623,10 @@ RUN --network=none \
 # pip is a build/install tool, not an application runtime dependency. Its
 # vendored package set is otherwise a second, hidden dependency tree that can
 # retain fixed vulnerabilities after the application lock is updated.
+# Setuptools also ships Windows-only PE launchers. They cannot execute in this
+# Linux image, are not part of BackupSheep's runtime, and otherwise appear as
+# anonymous binary packages in the SBOM. Remove only the reviewed launcher set
+# and fail the build if its contents change or another PE launcher appears.
 RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
     python -m pip --isolated install \
         --no-cache-dir \
@@ -637,8 +641,17 @@ RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
         /usr/local/bin/pip \
         /usr/local/bin/pip3 \
         /usr/local/bin/pip3.14 \
+    && for launcher in \
+        cli.exe cli-32.exe cli-64.exe cli-arm64.exe \
+        gui.exe gui-32.exe gui-64.exe gui-arm64.exe; do \
+        launcher_path="/usr/local/lib/python3.14/site-packages/setuptools/${launcher}"; \
+        test -f "$launcher_path"; \
+        rm -- "$launcher_path"; \
+    done \
     && test ! -e /usr/local/lib/python3.14/site-packages/pip \
-    && test -z "$(find /usr/local/bin -maxdepth 1 -type f -name 'pip*' -print -quit)"
+    && test -z "$(find /usr/local/bin -maxdepth 1 -type f -name 'pip*' -print -quit)" \
+    && test -z "$(find /usr/local/lib/python3.14/site-packages/setuptools \
+        -type f -name '*.exe' -print -quit)"
 
 RUN groupadd --gid 10001 backupsheep \
     && groupadd --gid 10002 backupsheep-database \

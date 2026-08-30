@@ -7,7 +7,7 @@
 #   worker-cloud .... API-only provider snapshots (DigitalOcean, Hetzner, AWS, …) plus
 #                     general default-queue tasks. Stateless.
 #   worker-database . database dumps (pg_dump/mysqldump). Heavy CPU/disk.
-#   worker-files .... website/wordpress/basecamp dumps. Heavy CPU/disk.
+#   worker-files .... website/basecamp dumps. Heavy CPU/disk.
 #   worker-storage .. uploads each finished dump to the storage backends + cleanup.
 #                     Recreate its exact namespace pair when changing scale:
 #                         ./backupsheep-compose --profile operations up --detach --no-deps --force-recreate --scale worker-storage=4 storage-egress-guard worker-storage
@@ -74,10 +74,13 @@ x-egress-guard-runtime: &egress-guard-runtime
   user: "0:0"
   privileged: false
   read_only: true
+  init: false
   cgroup: private
   ipc: private
   pids_limit: 32
   mem_limit: 64m
+  memswap_limit: 64m
+  mem_swappiness: 0
   cpus: "0.25"
   cap_drop:
     - ALL
@@ -132,6 +135,7 @@ x-app-runtime: &app-runtime
   cgroup: private
   ipc: private
   pids_limit: "${BACKUPSHEEP_PIDS_LIMIT:-512}"
+  mem_swappiness: 0
   cap_drop:
     - ALL
   security_opt:
@@ -219,9 +223,7 @@ x-app-configuration-environment: &app-configuration-environment
   BACKUP_CREATE_LEASE_SECONDS: "${BACKUP_CREATE_LEASE_SECONDS:-3600}"
   BACKUP_STORAGE_STALE_SECONDS: "${BACKUP_STORAGE_STALE_SECONDS:-21600}"
   S3_DOWNLOAD_URL_EXPIRES: "${S3_DOWNLOAD_URL_EXPIRES:-300}"
-  WORDPRESS_INTEGRATION_ENABLED: "${WORDPRESS_INTEGRATION_ENABLED:-false}"
   BASECAMP_INTEGRATION_ENABLED: "${BASECAMP_INTEGRATION_ENABLED:-false}"
-  WORDPRESS_PRIVATE_TARGET_CIDRS: "${WORDPRESS_PRIVATE_TARGET_CIDRS:-}"
   ALLOW_INSECURE_FTP: "${ALLOW_INSECURE_FTP:-false}"
   SSH_CONNECT_TIMEOUT: "${SSH_CONNECT_TIMEOUT:-15}"
   SSH_BANNER_TIMEOUT: "${SSH_BANNER_TIMEOUT:-15}"
@@ -328,21 +330,15 @@ x-app-secret-environment: &app-secret-environment
   SSH_MANAGED_DATABASE_PUBLIC_KEY: "${SSH_MANAGED_DATABASE_PUBLIC_KEY:-}"
   SSH_MANAGED_FILES_PUBLIC_KEY: "${SSH_MANAGED_FILES_PUBLIC_KEY:-}"
   SSH_MANAGED_LANE_ISOLATION_REQUIRED: "true"
-  # Stock enterprise custody is BSE1-only. Key identifiers and the decrypt allowlist
-  # are non-secret configuration. Database/files receive distinct credentials whose
-  # IAM policies must condition KMS access on their exact bse:lane context.
+  # Stock enterprise custody is BSE1-only. Database and files receive distinct
+  # bounded local-file keyrings; no other role receives root wrapping material.
   BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE: bse1
   BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE: "true"
   BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE: "false"
-  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER: aws-kms
-  BACKUPSHEEP_ARTIFACT_KMS_KEY_ID: "${BACKUPSHEEP_ARTIFACT_KMS_KEY_ID:?BACKUPSHEEP_ARTIFACT_KMS_KEY_ID is required}"
-  BACKUPSHEEP_ARTIFACT_KMS_REGION: "${BACKUPSHEEP_ARTIFACT_KMS_REGION:?BACKUPSHEEP_ARTIFACT_KMS_REGION is required}"
-  BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS: "${BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS:?BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS is required}"
-  BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL: ""
-  BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT: "false"
-  BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS: "${BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS:-5}"
-  BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS: "${BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS:-20}"
-  BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS: "${BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS:-3}"
+  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER: local-file
+  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION: "${BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION:-}"
+  BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS: "${BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS:-}"
+  BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH: ""
   BACKUPSHEEP_PLAINTEXT_ROOT: /code/_storage
   BACKUPSHEEP_DATABASE_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/transfer/database
   BACKUPSHEEP_FILES_CIPHERTEXT_TRANSFER_ROOT: /var/lib/backupsheep/transfer/files
@@ -353,8 +349,9 @@ x-app-secret-environment: &app-secret-environment
   BACKUPSHEEP_TRANSFER_MIN_FREE_INODES: "${BACKUPSHEEP_TRANSFER_MIN_FREE_INODES:-1024}"
   BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES: "${BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_BYTES:-536870912}"
   BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES: "${BACKUPSHEEP_RESTORE_TRANSFER_MIN_FREE_INODES:-1024}"
-  # Empty every ambient AWS credential/role/metadata/endpoint source. Each source
-  # lane overrides only AWS_SHARED_CREDENTIALS_FILE below.
+  # Empty every ambient AWS SDK credential, role, metadata, and endpoint source.
+  # Provider integrations use their own scoped credentials stored by BackupSheep;
+  # no container inherits a shared SDK credential path.
   AWS_ACCESS_KEY_ID: ""
   AWS_SECRET_ACCESS_KEY: ""
   AWS_SESSION_TOKEN: ""
@@ -374,7 +371,6 @@ x-app-secret-environment: &app-secret-environment
   AWS_CONTAINER_AUTHORIZATION_TOKEN: ""
   AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: ""
   AWS_ENDPOINT_URL: ""
-  AWS_ENDPOINT_URL_KMS: ""
   AWS_EC2_METADATA_DISABLED: "true"
   AWS_EC2_METADATA_V1_DISABLED: "true"
   AWS_IGNORE_CONFIGURED_ENDPOINT_URLS: "true"
@@ -449,6 +445,7 @@ x-stateful-runtime: &stateful-runtime
   labels: *installation-labels
   privileged: false
   read_only: true
+  init: false
   # Do not inject Docker's root-owned init shim here. Both vendor entrypoints
   # exec their long-running server after dropping privileges, so the server can
   # be non-root PID 1 and handle its own documented shutdown path.
@@ -532,6 +529,8 @@ services:
       - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=70,gid=70
     pids_limit: "${POSTGRES_PIDS_LIMIT:-256}"
     mem_limit: "${POSTGRES_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${POSTGRES_MEMORY_LIMIT:-2g}"
+    mem_swappiness: 0
     cpus: "${POSTGRES_CPU_LIMIT:-2.0}"
     shm_size: "${POSTGRES_SHM_SIZE:-256m}"
     stop_grace_period: "${POSTGRES_STOP_GRACE_PERIOD:-1m}"
@@ -559,7 +558,7 @@ services:
   rabbitmq-volume-init:
     <<: *stateful-runtime
     user: "100:101"
-    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
     environment:
       BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
       BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:?BACKUPSHEEP_RABBITMQ_DATA_GENERATION is required}"
@@ -571,6 +570,8 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
     pids_limit: 32
     mem_limit: 64m
+    memswap_limit: 64m
+    mem_swappiness: 0
     cpus: "0.25"
     network_mode: none
     logging: *default-logging
@@ -579,7 +580,7 @@ services:
   rabbitmq:
     <<: *stateful-runtime
     user: "100:101"
-    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
     # RabbitMQ derives its durable node database path from the node hostname.
     # Container IDs change on recreation, so keep the hostname stable or the same
     # named volume will appear to contain a brand-new, empty broker.
@@ -611,6 +612,8 @@ services:
       - /run/backupsheep-rabbitmq:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=100,gid=101
     pids_limit: "${RABBITMQ_PIDS_LIMIT:-512}"
     mem_limit: "${RABBITMQ_MEMORY_LIMIT:-1g}"
+    memswap_limit: "${RABBITMQ_MEMORY_LIMIT:-1g}"
+    mem_swappiness: 0
     cpus: "${RABBITMQ_CPU_LIMIT:-1.0}"
     stop_grace_period: "${RABBITMQ_STOP_GRACE_PERIOD:-3m}"
     healthcheck:
@@ -644,7 +647,7 @@ services:
   rabbitmq-provision:
     <<: *stateful-runtime
     user: "100:101"
-    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
     environment:
       HOME: /var/lib/rabbitmq
       RABBITMQ_LEGACY_USER: "${RABBITMQ_LEGACY_USER:-backupsheep}"
@@ -669,6 +672,8 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
     pids_limit: 128
     mem_limit: 256m
+    memswap_limit: 256m
+    mem_swappiness: 0
     cpus: "0.5"
     depends_on:
       rabbitmq:
@@ -750,6 +755,8 @@ services:
           nocopy: true
     pids_limit: 64
     mem_limit: 128m
+    memswap_limit: 128m
+    mem_swappiness: 0
     cpus: "0.25"
     network_mode: none
     logging: *default-logging
@@ -811,6 +818,7 @@ services:
       - db_logs_password
     command: ["python", "-m", "backupsheep.database_identity", "provision"]
     mem_limit: "${DB_PROVISION_MEMORY_LIMIT:-512m}"
+    memswap_limit: "${DB_PROVISION_MEMORY_LIMIT:-512m}"
     cpus: "${DB_PROVISION_CPU_LIMIT:-0.5}"
     depends_on:
       db:
@@ -844,8 +852,9 @@ services:
       - django_secret_key
       - db_migrator_password
       - rabbitmq_preflight_password
-    command: ["python", "manage.py", "migrate", "--noinput"]
+    command: ["python", "manage.py", "migrate_and_verify_artifact_provider"]
     mem_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
     cpus: "${MIGRATE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -908,6 +917,7 @@ services:
       - db_logs_password
     command: ["python", "-m", "backupsheep.database_identity", "seal"]
     mem_limit: "${DB_SEAL_MEMORY_LIMIT:-1g}"
+    memswap_limit: "${DB_SEAL_MEMORY_LIMIT:-1g}"
     cpus: "${DB_SEAL_CPU_LIMIT:-1.0}"
     depends_on:
       db:
@@ -945,6 +955,7 @@ services:
       - celery_trusted_public_keys
     command: ["python", "manage.py", "docker_preflight"]
     mem_limit: "${PREFLIGHT_MEMORY_LIMIT:-1g}"
+    memswap_limit: "${PREFLIGHT_MEMORY_LIMIT:-1g}"
     cpus: "${PREFLIGHT_CPU_LIMIT:-1.0}"
     depends_on:
       db:
@@ -1090,6 +1101,7 @@ services:
       app-egress-guard:
         condition: service_healthy
     mem_limit: "${APP_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${APP_MEMORY_LIMIT:-2g}"
     cpus: "${APP_CPU_LIMIT:-2.0}"
     volumes:
       # Empty, read-only sentinel volume whose immutable Docker label lets the
@@ -1167,6 +1179,7 @@ services:
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_CLOUD_MEMORY_LIMIT:-1g}"
+    memswap_limit: "${WORKER_CLOUD_MEMORY_LIMIT:-1g}"
     cpus: "${WORKER_CLOUD_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -1228,7 +1241,7 @@ services:
       BACKUPSHEEP_DATABASE_LANE: database
       DB_USER: "${DB_DATABASE_USER:-backupsheep_database}"
       DB_PASSWORD_FILE: /run/secrets/db_database_password
-      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_database_aws_credentials
+      BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH: /run/secrets/artifact_local_file_database_keyring
       BACKUPSHEEP_CELERY_LANE: database
       RABBITMQ_USER: backupsheep_database
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_database_password
@@ -1240,10 +1253,11 @@ services:
       - celery_signing_database_private_key
       - celery_trusted_public_keys
       - ssh_managed_database_private_key
-      - artifact_kms_database_aws_credentials
+      - artifact_local_file_database_keyring
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_DATABASE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -1303,7 +1317,7 @@ services:
       files-egress:
         gw_priority: 1
 
-  # Website / WordPress / Basecamp source material stays private to the files UID.
+  # Website / Basecamp source material stays private to the files UID.
   worker-files:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
@@ -1321,7 +1335,7 @@ services:
       BACKUPSHEEP_DATABASE_LANE: files
       DB_USER: "${DB_FILES_USER:-backupsheep_files}"
       DB_PASSWORD_FILE: /run/secrets/db_files_password
-      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/artifact_kms_files_aws_credentials
+      BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH: /run/secrets/artifact_local_file_files_keyring
       BACKUPSHEEP_CELERY_LANE: files
       RABBITMQ_USER: backupsheep_files
       RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_files_password
@@ -1335,10 +1349,11 @@ services:
       - celery_signing_files_private_key
       - celery_trusted_public_keys
       - ssh_managed_files_private_key
-      - artifact_kms_files_aws_credentials
+      - artifact_local_file_files_keyring
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_FILES_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -1445,6 +1460,7 @@ services:
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_STORAGE_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${WORKER_STORAGE_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_STORAGE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
@@ -1565,6 +1581,7 @@ services:
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_LOGS_MEMORY_LIMIT:-512m}"
+    memswap_limit: "${WORKER_LOGS_MEMORY_LIMIT:-512m}"
     cpus: "${WORKER_LOGS_CPU_LIMIT:-1.0}"
     depends_on:
       db:
@@ -1610,6 +1627,7 @@ services:
     command: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "backupsheep.scheduler:BackupDatabaseScheduler"]
     profiles: ["operations"]
     mem_limit: "${BEAT_MEMORY_LIMIT:-512m}"
+    memswap_limit: "${BEAT_MEMORY_LIMIT:-512m}"
     cpus: "${BEAT_CPU_LIMIT:-0.5}"
     depends_on:
       db:
@@ -1754,7 +1772,7 @@ secrets:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_database_private_key
   ssh_managed_files_private_key:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_files_private_key
-  artifact_kms_database_aws_credentials:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_kms_database_aws_credentials
-  artifact_kms_files_aws_credentials:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_kms_files_aws_credentials
+  artifact_local_file_database_keyring:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_local_file_database_keyring
+  artifact_local_file_files_keyring:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/artifact_local_file_files_keyring

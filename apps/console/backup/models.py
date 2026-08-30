@@ -97,6 +97,20 @@ def _stop_legacy_backup_container(container_name):
         return
 
 
+def _cancel_storage_point_uploads(storage_points):
+    """Cancel deliveries without overwriting durable provider-boundary evidence."""
+
+    for storage_point in storage_points:
+        with transaction.atomic():
+            current = storage_point.__class__.objects.select_for_update().get(
+                pk=storage_point.pk
+            )
+            task_id = current.celery_task_id
+            current.status = current.Status.CANCELLED
+            current.save(update_fields=["status", "modified"])
+        app.control.revoke(task_id, terminate=True)
+
+
 class StoragePointLeaseLostError(RuntimeError):
     """A stale storage worker attempted to persist after losing its fence."""
 
@@ -847,9 +861,9 @@ class CoreBackupExecution(TimeStampedModel):
 
 
 class CoreBackupEncryptionEnvelope(TimeStampedModel):
-    """Durable identity and authenticated-header witness for one backup.
+    """Durable identity and authenticated envelope witness for one backup.
 
-    Wrapped data keys are separate generation records so a KMS rotation never
+    Wrapped data keys are separate generation records so a root-key rotation never
     requires rewriting a potentially multi-terabyte backup object.
     """
 
@@ -865,7 +879,7 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
         related_name="encryption_envelope",
         on_delete=models.CASCADE,
     )
-    format_version = models.PositiveSmallIntegerField(default=1)
+    format_version = models.PositiveSmallIntegerField(default=2)
     algorithm = models.CharField(max_length=32, default="AES-256-GCM-SIV")
     chunk_size = models.PositiveIntegerField(default=4 * 1024 * 1024)
     context_canonical_json = models.CharField(max_length=2048)
@@ -884,7 +898,7 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(
-                    format_version=1, algorithm="AES-256-GCM-SIV"
+                    format_version=2, algorithm="AES-256-GCM-SIV"
                 ),
                 name="backup_envelope_bse1_algorithm",
             ),
@@ -951,6 +965,10 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
             if context.sha256 != self.context_sha256:
                 errors["context_sha256"] = (
                     "The artifact context digest does not match its canonical context."
+                )
+            if str(self.uuid) == context.backup_id:
+                errors["uuid"] = (
+                    "The encryption envelope identifier must be independent of the backup identifier."
                 )
         if self.status == self.Status.ACTIVE and self.sealed_at is None:
             errors["sealed_at"] = "An active encryption envelope must be sealed."
@@ -1059,10 +1077,10 @@ class CoreBackupEncryptionEnvelope(TimeStampedModel):
 
 
 class CoreBackupKeyWrap(TimeStampedModel):
-    """One externally wrapped generation of a backup's random data key."""
+    """One authenticated wrapping generation of a backup's random data key."""
 
     class Provider(models.TextChoices):
-        AWS_KMS = "aws-kms", "AWS KMS"
+        LOCAL_FILE = "local-file", "Local file"
         LOCAL_DEVELOPMENT = "local-development", "Local development"
 
     class Status(models.TextChoices):
@@ -1116,7 +1134,7 @@ class CoreBackupKeyWrap(TimeStampedModel):
                 name="backup_key_wrap_status_valid",
             ),
             models.CheckConstraint(
-                condition=models.Q(provider__in=("aws-kms", "local-development")),
+                condition=models.Q(provider__in=("local-file", "local-development")),
                 name="backup_key_wrap_provider_valid",
             ),
             models.CheckConstraint(
@@ -4984,7 +5002,6 @@ def _soft_delete_storage_backed_backup(backup, relation_name):
     model_key = {
         "stored_website_backups": "website",
         "stored_database_backups": "database",
-        "stored_wordpress_backups": "wordpress",
         "stored_basecamp_backups": "basecamp",
     }[relation_name]
     with transaction.atomic():
@@ -5084,20 +5101,12 @@ class CoreWebsiteBackup(UtilBackup):
         """
         First cancel the storage point uploads
         """
-        for stored_website_backup in self.stored_website_backups.all():
-            try:
-                stored_website_backup.status = (
-                    CoreWebsiteBackupStoragePoints.Status.CANCELLED
-                )
-                stored_website_backup.save()
-                app.control.revoke(stored_website_backup.celery_task_id, terminate=True)
-            except IntegrityError:
-                stored_website_backup.delete()
+        _cancel_storage_point_uploads(self.stored_website_backups.all())
         """
         Set backup status to cancelled
         """
         self.status = self.Status.CANCELLED
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
         """
         Delete files
@@ -5110,7 +5119,6 @@ class CoreWebsiteBackup(UtilBackup):
         Reset the node status
         """
         self.website.node.backup_complete_reset()
-        self.save()
 
         """
         Stop docker container if any
@@ -5274,14 +5282,28 @@ class BaseBackupStoragePoints(TimeStampedModel):
 
     def verify_s3_head_ownership(self, head):
         """Fail closed unless HEAD proves this exact object belongs to this row."""
+        from apps._tasks.artifact_encryption import storage_artifact_identity
+
+        artifact_identity = storage_artifact_identity(self.backup)
         metadata = {
             str(key).lower(): str(value)
             for key, value in (head.get("Metadata") or {}).items()
         }
-        backup_marker = metadata.get("backupsheep-backup-id") or metadata.get(
-            "backup"
-        )
-        if backup_marker != str(self.backup_id):
+        if artifact_identity.artifact_format == CoreBackupArtifact.Format.BSE1:
+            if "backupsheep-backup-id" in metadata or "backup" in metadata:
+                raise RuntimeError(
+                    "Storage object exposes ambiguous legacy ownership metadata."
+                )
+            backup_marker = metadata.get("backupsheep-artifact-id")
+        else:
+            if "backupsheep-artifact-id" in metadata:
+                raise RuntimeError(
+                    "Legacy storage object exposes ambiguous ownership metadata."
+                )
+            backup_marker = metadata.get("backupsheep-backup-id") or metadata.get(
+                "backup"
+            )
+        if backup_marker != artifact_identity.ownership_marker:
             raise RuntimeError(
                 "Storage object ownership marker does not match this backup."
             )
@@ -5315,8 +5337,11 @@ class BaseBackupStoragePoints(TimeStampedModel):
 
     def delete_owned_s3_object(self, client, **kwargs):
         """HEAD, verify ownership/integrity, then delete the exact object version."""
+        from apps._tasks.artifact_encryption import validate_storage_object_key
+
         if str(kwargs.get("Key") or "") != str(self.storage_file_id or ""):
             raise RuntimeError("Storage delete key does not match this backup.")
+        validate_storage_object_key(self.backup, kwargs["Key"])
         head_args = dict(kwargs)
         head_args.update(self.committed_version_kwargs())
         try:
@@ -5672,10 +5697,17 @@ class BaseBackupStoragePoints(TimeStampedModel):
             else:
                 return None
         elif self.storage.type.code == "pcloud":
-            url = f"https://my.pcloud.com/#page=filemanager" \
-                  f"&q=name:{self.backup.uuid_str}" \
-                  f"&folderid={self.metadata.get('parentfolderid')}" \
-                  f"&filter=all"
+            from apps._tasks.artifact_encryption import storage_artifact_identity
+            from apps._tasks.integration.storage.pcloud import PCLOUD_METADATA_KEY
+
+            artifact_identity = storage_artifact_identity(self.backup)
+            state = dict((self.metadata or {}).get(PCLOUD_METADATA_KEY) or {})
+            url = (
+                "https://my.pcloud.com/#page=filemanager"
+                f"&q=name:{artifact_identity.filename}"
+                f"&folderid={state.get('parentfolderid') or ''}"
+                "&filter=all"
+            )
             return url
         elif self.storage.type.code == "onedrive":
             onedrive_path = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.storage.storage_onedrive.drive_id}/root:/{self.storage_file_id}"
@@ -6128,6 +6160,10 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         Key=f"{self.storage_file_id}",
                     )
                 elif self.storage.type.code == "dropbox":
+                    from apps._tasks.artifact_encryption import (
+                        storage_artifact_identity,
+                        validate_storage_object_key,
+                    )
                     from apps._tasks.integration.storage.dropbox import (
                         DROPBOX_METADATA_KEY,
                         _dropbox_timeout,
@@ -6139,9 +6175,12 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         (self.metadata or {}).get(DROPBOX_METADATA_KEY) or {}
                     )
                     expected = self.committed_integrity_identity()
+                    artifact_identity = storage_artifact_identity(self.backup)
+                    expected_marker = f"backupsheep:{artifact_identity.identifier}"
+                    validate_storage_object_key(self.backup, state.get("path"))
                     if (
                         state.get("ownership_marker")
-                        != f"backupsheep:{self.backup.uuid_str}"
+                        != expected_marker
                         or str(state.get("provider_id") or "")
                         != str(self.storage_file_id)
                         or expected is None
@@ -6215,6 +6254,10 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         )
                         return False
                 elif self.storage.type.code == "pcloud":
+                    from apps._tasks.artifact_encryption import (
+                        storage_artifact_identity,
+                        validate_storage_object_key,
+                    )
                     from apps._tasks.integration.storage.pcloud import (
                         PCLOUD_METADATA_KEY,
                         PCloudStorageAdapterError,
@@ -6226,6 +6269,9 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         (self.metadata or {}).get(PCLOUD_METADATA_KEY) or {}
                     )
                     expected = self.committed_integrity_identity()
+                    artifact_identity = storage_artifact_identity(self.backup)
+                    expected_marker = f"backupsheep:{artifact_identity.identifier}"
+                    validate_storage_object_key(self.backup, state.get("path"))
                     file_id = str(
                         state.get("fileid")
                         or state.get("file_id")
@@ -6234,7 +6280,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     )
                     if (
                         state.get("ownership_marker")
-                        != f"backupsheep:{self.backup.uuid_str}"
+                        != expected_marker
                         or not file_id
                         or expected is None
                     ):
@@ -6266,7 +6312,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                             token,
                             candidate,
                             str(state.get("folder") or ""),
-                            f"{self.backup.uuid_str}.zip",
+                            artifact_identity.filename,
                             expected,
                         )
                         if (
@@ -6288,6 +6334,10 @@ class BaseBackupStoragePoints(TimeStampedModel):
                             data={"fileid": file_id},
                         )
                 elif self.storage.type.code == "onedrive":
+                    from apps._tasks.artifact_encryption import (
+                        storage_artifact_identity,
+                        validate_storage_object_key,
+                    )
                     from apps._tasks.integration.storage.onedrive import (
                         STATE_KEY,
                         _client_headers,
@@ -6306,7 +6356,9 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     session_fingerprint = str(
                         state.get("session_fingerprint") or ""
                     )
-                    marker = _marker(self.backup.uuid_str, expected or {})
+                    artifact_identity = storage_artifact_identity(self.backup)
+                    validate_storage_object_key(self.backup, target_path)
+                    marker = _marker(artifact_identity, expected or {})
                     if (
                         state.get("phase") != "committed"
                         or target_path != str(self.storage_file_id or "")
@@ -6548,187 +6600,6 @@ class CoreWebsiteBackupStoragePoints(BaseBackupStoragePoints):
         ]
 
 
-class CoreWordPressBackup(UtilBackup):
-    UNZIP_REQUEST = Choices("requested", "in_progress", "available", "disable")
-    wordpress = models.ForeignKey(
-        "CoreWordPress", related_name="backups", on_delete=models.CASCADE
-    )
-    schedule = models.ForeignKey(
-        "CoreSchedule",
-        related_name="wordpress_backups",
-        null=True,
-        on_delete=models.SET_NULL,
-    )
-    size = models.BigIntegerField(null=True)
-    zip_size = models.BigIntegerField(null=True)
-    raw_size = models.BigIntegerField(null=True)
-    total_files = models.BigIntegerField(null=True)
-    total_folders = models.BigIntegerField(null=True)
-    total_files_n_folders_calculated = models.BooleanField(null=True)
-    excludes = models.JSONField(null=True)
-    paths = models.JSONField(null=True)
-    file_list_json = models.JSONField(null=True)
-    file_list_path = models.JSONField(null=True)
-    all_paths = models.BooleanField(null=True)
-    unzip_request = StatusField(choices_name="UNZIP_REQUEST", default=None, null=True)
-    unzip_sftp_time = models.BigIntegerField(null=True)
-    unzip_sftp_docker = models.CharField(null=True, max_length=2048)
-    unzip_sftp_user = models.CharField(null=True, max_length=2048)
-    unzip_sftp_pass = models.CharField(null=True, max_length=2048)
-    unzip_sftp_host = models.CharField(null=True, max_length=2048)
-    unzip_sftp_port = models.IntegerField(null=True)
-    unique_id = models.CharField(max_length=255, null=True)
-    storage_points = models.ManyToManyField(
-        CoreStorage,
-        related_name="wordpress_backups",
-        through="CoreWordPressBackupStoragePoints",
-    )
-    metadata = models.JSONField(null=True)
-
-    class Meta:
-        db_table = "core_wordpress_backup"
-
-    def soft_delete(self):
-        return _soft_delete_storage_backed_backup(
-            self, "stored_wordpress_backups"
-        )
-
-    def all_storage_points_uploaded(self):
-        return self.stored_wordpress_backups.all().count() == self.stored_wordpress_backups.filter(
-            status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE).count()
-
-    def partial_storage_points_uploaded(self):
-        return self.stored_wordpress_backups.filter(
-            status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE).count() > 0
-
-    def storage_points_uploaded(self):
-        return self.stored_wordpress_backups.filter(
-            status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE).count()
-
-
-    @property
-    def node(self):
-        return self.wordpress.node
-
-    def cancel(self):
-        app.control.revoke(self.celery_task_id, terminate=True)
-
-        """
-        First cancel the storage point uploads
-        """
-        for stored_wordpress_backup in self.stored_wordpress_backups.all():
-            stored_wordpress_backup.status = (
-                CoreWordPressBackupStoragePoints.Status.CANCELLED
-            )
-            stored_wordpress_backup.save()
-            app.control.revoke(stored_wordpress_backup.celery_task_id, terminate=True)
-
-        """
-        Set backup status to cancelled
-        """
-        self.status = self.Status.CANCELLED
-        self.save()
-
-        """
-        Delete files
-        """
-        delete_from_disk.apply_async(
-            args=[self.uuid_str, "both"],
-        )
-
-        """
-        Reset the node status
-        """
-        self.wordpress.node.backup_complete_reset()
-        self.save()
-
-        """
-        Stop main docker container if any
-        """
-        _stop_legacy_backup_container(self.uuid_str)
-
-        """
-        Stop upload docker container if any
-        """
-        _stop_legacy_backup_container(f"{self.uuid_str}-storage")
-
-        """
-        Delete files from wordpress
-        """
-        auth_wordpress = self.wordpress.node.connection.auth_wordpress
-        try:
-            result = auth_wordpress.request(
-                "files",
-                params={"backup_uuid": self.uuid_str, "t": time.time()},
-                timeout=180,
-            )
-            if result.status_code == 200:
-                try:
-                    backup_files = result.json().get("files", [])
-                    for backup_file in backup_files:
-                        if not isinstance(backup_file, str) or not backup_file:
-                            continue
-                        # delete the downloaded file from WordPress
-                        r_delete = auth_wordpress.request(
-                            "delete",
-                            params={
-                                "backup_file": backup_file,
-                                "backup_uuid": self.uuid_str,
-                                "t": time.time(),
-                            },
-                        )
-                        if r_delete.status_code == 200:
-                            if r_delete.json().get("deleted"):
-                                msg = f"Cancelled backup - Deleted file from WordPress: {backup_file}"
-                                self.wordpress.node.connection.account.create_backup_log(msg, self.wordpress.node, self)
-                except Exception as e:
-                    pass
-        except Exception as e:
-            pass
-
-
-class CoreWordPressBackupStoragePoints(BaseBackupStoragePoints):
-    class Status(models.IntegerChoices):
-        UPLOAD_READY = 1, "Ready For Upload"
-        UPLOAD_RETRY = 9, "Retrying Upload"
-        UPLOAD_IN_PROGRESS = 2, "Upload In Progress"
-        UPLOAD_COMPLETE = 3, "Upload Complete"
-        UPLOAD_VALIDATION = 13, "Upload Validation"
-        UPLOAD_FAILED = 4, "Upload Failed"
-        UPLOAD_FAILED_STORAGE_LIMIT = 10, "Upload Failed - Storage Limit"
-        UPLOAD_FAILED_FILE_NOT_FOUND = 11, "Upload Failed - File Not Found"
-        UPLOAD_TIME_LIMIT_REACHED = 12, "Upload Failed - Time Limit Reached"
-        DELETE_REQUESTED = 5, "Delete REQUESTED"
-        DELETE_COMPLETED = 7, "Delete Completed"
-        DELETE_FAILED = 8, "Delete Failed"
-        CANCELLED = 6, "Cancelled"
-        STORAGE_VALIDATION_FAILED = 30, "Storage Validation Failed"
-        TRANSFERRED = 40, "Transferred"
-
-    backup = models.ForeignKey(
-        CoreWordPressBackup,
-        on_delete=models.CASCADE,
-        related_name="stored_wordpress_backups",
-    )
-    storage = models.ForeignKey(
-        CoreStorage, on_delete=models.CASCADE, related_name="stored_wordpress_backups"
-    )
-
-    status = models.IntegerField(choices=Status.choices, default=Status.UPLOAD_READY)
-    storage_file_id = models.CharField(max_length=255, null=True)
-    celery_task_id = models.CharField(max_length=255, null=True)
-    metadata = models.JSONField(null=True)
-
-    class Meta:
-        db_table = "core_wordpress_backup_mtm_storage_points"
-        constraints = [
-            UniqueConstraint(
-                fields=["backup", "storage"],
-                name="unique_stored_wordpress_backups",
-            ),
-        ]
-
-
 class CoreBasecampBackup(UtilBackup):
     UNZIP_REQUEST = Choices("requested", "in_progress", "available", "disable")
     basecamp = models.ForeignKey("CoreBasecamp", related_name="backups", on_delete=models.CASCADE)
@@ -6794,16 +6665,13 @@ class CoreBasecampBackup(UtilBackup):
         """
         First cancel the storage point uploads
         """
-        for stored_basecamp_backup in self.stored_basecamp_backups.all():
-            stored_basecamp_backup.status = CoreBasecampBackupStoragePoints.Status.CANCELLED
-            stored_basecamp_backup.save()
-            app.control.revoke(stored_basecamp_backup.celery_task_id, terminate=True)
+        _cancel_storage_point_uploads(self.stored_basecamp_backups.all())
 
         """
         Set backup status to cancelled
         """
         self.status = self.Status.CANCELLED
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
         """
         Delete files
@@ -6816,7 +6684,6 @@ class CoreBasecampBackup(UtilBackup):
         Reset the node status
         """
         self.basecamp.node.backup_complete_reset()
-        self.save()
 
         """
         Stop main docker container if any
@@ -6941,18 +6808,13 @@ class CoreDatabaseBackup(UtilBackup):
         """
         First cancel the storage point uploads
         """
-        for stored_database_backup in self.stored_database_backups.all():
-            stored_database_backup.status = (
-                CoreDatabaseBackupStoragePoints.Status.CANCELLED
-            )
-            stored_database_backup.save()
-            app.control.revoke(stored_database_backup.celery_task_id, terminate=True)
+        _cancel_storage_point_uploads(self.stored_database_backups.all())
 
         """
         Set backup status to cancelled
         """
         self.status = self.Status.CANCELLED
-        self.save()
+        self.save(update_fields=["status", "modified"])
 
         """
         Delete files
@@ -6965,7 +6827,6 @@ class CoreDatabaseBackup(UtilBackup):
         Reset the node status
         """
         self.database.node.backup_complete_reset()
-        self.save()
 
 
 class CoreDatabaseBackupStoragePoints(BaseBackupStoragePoints):

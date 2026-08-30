@@ -71,9 +71,9 @@
                                     <td class="whitespace-nowrap px-4 py-3 text-slate-600">{{ storage.stats_database_count|default:0|intcomma }}
                                         - {{ storage.stats_database_backup_count|default:0|intcomma }}
                                         - {{ storage.stats_database_size|filesizeformat }}</td>
-                                    <td class="whitespace-nowrap px-4 py-3 text-slate-600">{{ storage.stats_wordpress_count|default:0|intcomma }}
-                                        - {{ storage.stats_wordpress_backup_count|default:0|intcomma }}
-                                        - {{ storage.stats_wordpress_size|filesizeformat }}</td>
+                                    <td class="whitespace-nowrap px-4 py-3 text-slate-600">{{ storage.stats_saas_count|default:0|intcomma }}
+                                        - {{ storage.stats_saas_backup_count|default:0|intcomma }}
+                                        - {{ storage.stats_saas_size|filesizeformat }}</td>
                                     <td class="whitespace-nowrap px-4 py-3">
                                         <p class="text-sm font-medium text-slate-900">
                                             ${{ storage.cost_estimate.estimated_monthly_storage_usd|floatformat:4 }}
@@ -187,8 +187,7 @@
                 <p class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Setup your first {{ storage.name }}
                     Integration!</p>
                 <p class="mx-auto mt-3 max-w-2xl text-sm text-slate-500">
-                    Store unlimited backups of <span class="font-medium text-indigo-600">website</span>,
-                    <span class="font-medium text-indigo-600">wordpress</span>
+                    Store unlimited backups of <span class="font-medium text-indigo-600">website</span>
                     and <span class="font-medium text-indigo-600">database</span> on
                     your {{ storage.name }}.
                 </p>

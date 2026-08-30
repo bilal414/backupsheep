@@ -5,6 +5,11 @@ The verified installer deliberately never changes an existing checkout to anothe
 this runbook is the operator-controlled manual upgrade path. The `migrate` and security
 `preflight` one-shots must complete before the new app, workers or Beat can start.
 
+This runbook applies to local-build installations only. Signed-release installations do not
+support in-place upgrade or rollback: their consumer rejects stage/upgrade options before
+Docker or installation mutation. Move a signed deployment by restoring into another fresh,
+independently verified signed-release project while preserving the old project.
+
 ## Before the change
 
 1. Read release notes and compare the exact current and target revisions.
@@ -162,7 +167,7 @@ above and create the verified encrypted rollback set. The historical `backup_wor
 empty. If it is not empty, keep operations disabled and quarantine or reconcile the entire
 volume under an approved incident/data-handling process; do not move its entries into a new
 lane volume. When constructing `INSTALL_ARGS` in the next section, append the one-time
-authorization alongside the normal KMS and identity-migration arguments:
+authorization alongside any required identity-migration arguments:
 
 ```bash
 INSTALL_ARGS+=(--migrate-staging-layout)
@@ -191,14 +196,61 @@ overwrite or delete an unexplained local file. The wrapper intentionally discard
 ambient `BACKUPSHEEP_IMAGE`, so atomically persist the exact tag in the already protected
 deployment `.env` *before* rendering or building the model:
 
+This release replaces the prerelease artifact key-provider model with two local-file
+keyrings. An existing installation that records a blank, development-only or retired
+provider may transition only through `--migrate-artifact-key-provider-empty`. The
+current runtime provider registry contains only production `local-file` and
+development/test-only `local-development`; the historical `aws-kms` identifier is
+recognized only by this migration/rollback gate and cannot be selected by current code.
+This is an exact-empty adoption, not a KMS decrypt/rewrap conversion. The
+`migrate` one-shot applies schema changes and then performs a fresh current-state query;
+it succeeds only when `CoreBackupEncryptionEnvelope` and `CoreBackupKeyWrap` each contain
+exactly zero rows, including orphan, retired, pending and manual-review rows;
+`CoreBackupArtifact` contains no `legacy_zip` row of any role; and all historical
+database/files backup and storage-point tables are empty:
+`core_website_backup`, `core_website_backup_mtm_storage_points`,
+`core_basecamp_backup`, `core_basecamp_backup_mtm_storage_points`,
+`core_database_backup`, `core_database_backup_mtm_storage_points`,
+`core_wordpress_backup`, and `core_wordpress_backup_mtm_storage_points`. The last two
+remain as retained database tables even after WordPress runtime removal. The unmanaged
+historical `core_hosting_backup` table must also be empty when it exists. A previously
+recorded schema migration cannot bypass this current-state proof. Any wrap, plaintext
+artifact, or unledgered historical backup/storage point blocks the transition: neither
+the installer nor migration invents a cryptographic conversion or silently retires a
+recorded backup.
+
+The same exact-empty boundary introduces internal BSE1 format version 2. Version 2 keeps
+the plaintext and context digests inside its authenticated encrypted terminal payload and
+uses an independent random envelope UUID for each `.bse1` object name. Version 1 is a
+prerelease format and is rejected rather than heuristically converted. The explicit
+legacy-only runtime keeps historical plaintext `.zip` read/delete naming only for records
+that have not entered the encrypted provider migration; new encrypted uploads never reuse
+those paths or their backup-UUID ownership metadata. A mixed, mismatched or ambiguous
+legacy/encrypted identity stops reconciliation and deletion.
+
+Migration `0049_local_file_artifact_key_provider` is immutable historical schema and may
+already have been applied by a prerelease installation; it continues to describe the
+format-v1 constraint it originally shipped with. Migration
+`0050_bse2_private_terminal_metadata` performs the format-v2 transition. Before changing
+the default or constraint in either direction, `0050` enumerates every envelope and wrap
+and refuses when even one orphan, pending, manual, retired, or otherwise unreferenced row
+exists. This makes an already-applied empty `0049` database upgrade safely while preventing
+schema history from being mistaken for proof that no v1 custody data exists. Do not fake,
+delete, or edit migration-history rows to bypass this gate.
+
+Preserve the old release, database, credentials, key service, legacy archive objects and
+ciphertext as encrypted rollback evidence. If any wrap or legacy record exists,
+restore/reseal, export, or explicitly retire it under the old release in a separately
+reviewed migration before trying again. Verify the corresponding remote/local object and
+retention evidence before retirement. A backup row without a BSE1 artifact ledger is not
+proof that no remote ZIP exists; it must be exported or retired under the old release too.
+Never edit provider names, artifact formats,
+generation or witness values in `.env` or PostgreSQL; labels do not transform wrapped key
+material.
+
 ```bash
 TARGET_COMMIT='<40-character-reviewed-release-commit>'
 CURRENT_DOMAIN='<existing-public-hostname>'
-ARTIFACT_KMS_KEY_ARN='<resolved-symmetric-kms-key-arn>'
-ARTIFACT_KMS_REGION='<aws-region>'
-ARTIFACT_KMS_ALLOWED_KEY_ARNS="${ARTIFACT_KMS_KEY_ARN}"
-DATABASE_KMS_CREDENTIALS_FILE='<canonical-private-database-lane-credentials-file>'
-FILES_KMS_CREDENTIALS_FILE='<different-canonical-private-files-lane-credentials-file>'
 git fetch --no-tags --depth=1 origin "${TARGET_COMMIT}"
 test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "${TARGET_COMMIT}"
 git checkout --detach "${TARGET_COMMIT}"
@@ -213,14 +265,16 @@ INSTALL_ARGS=(
   --project-name backupsheep
   --domain "${CURRENT_DOMAIN}"
   --skip-start
-  --artifact-kms-key-id "${ARTIFACT_KMS_KEY_ARN}"
-  --artifact-kms-region "${ARTIFACT_KMS_REGION}"
-  --artifact-kms-allowed-key-arns "${ARTIFACT_KMS_ALLOWED_KEY_ARNS}"
-  --artifact-kms-database-aws-credentials-file "${DATABASE_KMS_CREDENTIALS_FILE}"
-  --artifact-kms-files-aws-credentials-file "${FILES_KMS_CREDENTIALS_FILE}"
 )
-# When and only when this installation predates PostgreSQL identity generation 3:
-# INSTALL_ARGS+=(--migrate-database-identities)
+# A retained Debian/UID-999 pgdata volume with exact identity generation 2 requires
+# both one-time flags in the same invocation:
+# INSTALL_ARGS+=(--migrate-postgres-runtime --migrate-database-identities)
+# A retained Debian/UID-999 pgdata volume already sealed at identity generation 3
+# requires only the runtime flag:
+# INSTALL_ARGS+=(--migrate-postgres-runtime)
+# A blank shared-superuser identity generation is intentionally unsupported by the
+# runtime migrator. Keep that project stopped/intact and create a clean install
+# directory under a new exact Compose project namespace; do not set either marker.
 # Existing pre-v3 staging layouts also require the one-time gate documented above:
 # INSTALL_ARGS+=(--migrate-staging-layout)
 # An installation without BACKUPSHEEP_EGRESS_POLICY_GENERATION=2 requires the
@@ -228,6 +282,8 @@ INSTALL_ARGS=(
 # INSTALL_ARGS+=(--migrate-egress-policy)
 # An existing shared RabbitMQ login also requires the coordinated pending gate:
 # INSTALL_ARGS+=(--migrate-rabbitmq-identities)
+# A blank/development/retired artifact provider requires the exact-empty archive-inventory gate:
+# INSTALL_ARGS+=(--migrate-artifact-key-provider-empty)
 # If and only if the reviewed deployment override exists:
 # INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")
 ./install.sh "${INSTALL_ARGS[@]}"
@@ -238,9 +294,48 @@ INSTALL_ARGS=(
 # the normal already-hardened image-switch block below during that coordinated transition.
 ```
 
-That pre-hardening bootstrap must stage every applicable database generation-3,
-staging-v3, RabbitMQ identity-generation-2 and task-auth-generation-3 transition in the
-same pending state. The [RabbitMQ migration guide](rabbitmq-upgrade.md) owns the exact
+If the staging run used `--skip-start`, an artifact-provider transition intentionally
+remains at installation-bound generation `1-pending-empty`; web, workers, Beat and security
+preflight stay disabled. After completing any database/broker prerequisites, rerun the same
+installer arguments with `--skip-start` removed and keep
+`--migrate-artifact-key-provider-empty`. The installer starts only the core, waits for the
+fresh `migrate_and_verify_artifact_provider` proof, then seals generation `1` while
+retaining `.secrets/artifact_provider_transition_rollback` and any prior credential files.
+They are retired only after the rendered model, authenticated security preflight and
+healthy core succeed while operations remain disabled. The migration flag cannot be
+combined with `--enable-operations`. A failed/interrupted retry retains the
+installation-bound rollback policy, both generated keyrings and prior credentials
+byte-for-byte; keep operations down and retry with the same flag. After accepted cleanup,
+review the provider configuration and rerun without the migration flag and with
+`--enable-operations`; source-worker startup then proves the database/files keyring mount,
+lane and retained-key-ID boundaries. Preserve an independent encrypted off-host recovery
+copy even after successful cleanup. Do not invoke a long-lived service or edit pending
+metadata by hand.
+
+A crash can occur after generation `1` is activated but before local rollback/credential
+cleanup. In that state the protected `artifact_provider_transition_rollback` file remains,
+and the next installer run refuses ordinary startup. Keep operations disabled and rerun
+the same reviewed target with `--migrate-artifact-key-provider-empty`; the installer
+revalidates the rollback digest, sealed local-file database state, rendered model,
+authenticated preflight and healthy core before cleanup. Do not delete the marker or
+legacy credential files, edit generation/witness values, or rerun without the flag to
+force activation.
+
+Accepted installer cleanup retires only the validated local legacy credential files and
+rollback policy; it cannot revoke anything in AWS. As a separate post-retirement operator
+action, disable/revoke the legacy IAM access keys or role access, remove AWS KMS grants and
+key-policy permissions, and verify the remote identities no longer authorize use. Scope
+that action to the exact retired artifact-KMS principal; do not revoke credentials still
+used by an explicitly configured AWS source, storage destination, or Amazon SES. Do not
+disable or schedule deletion of a KMS key while any approved old-release rollback,
+retention, legal-hold, or recovery set still depends on it; key deletion is a separate
+destructive decision with its own evidence and approval.
+
+For an eligible generation-2 database, that pre-hardening bootstrap must stage every
+applicable database generation-3, staging-v3, RabbitMQ identity-generation-2 and
+task-auth-generation-3 transition in the same pending state. A blank shared-superuser
+database instead requires the separate fresh-project boundary described above. The
+[RabbitMQ migration guide](rabbitmq-upgrade.md) owns the exact
 3.13 -> 4.2 -> 4.3 wrapper validation and final installer reconciliation; do not splice
 the normal upgrade commands below into it.
 
@@ -433,7 +528,10 @@ The stock image uses PostgreSQL 18.6 on Alpine 3.24, UID/GID `70:70`, ICU `und`,
 installation-witnessed `postgres_data_v1` volume. It never mounts the retired
 Debian/UID-999 `pgdata` volume. Follow the explicit
 [PostgreSQL Alpine/ICU migration gate](postgres-runtime-migration.md) for that one-time
-transition. Other major-version or non-stock database changes require a separately
+transition. The automatic gate accepts only exact witnessed generation-2 or
+generation-3 sources; blank shared-superuser sources require a clean installation
+directory and new Compose project namespace, with the old project retained offline.
+Other major-version or non-stock database changes require a separately
 reviewed logical dump/restore or supported `pg_upgrade` plan; never change an image tag
 against an old data directory. Rehearse on a copy and preserve the old volume and exact
 image until database verification and a restore test pass.

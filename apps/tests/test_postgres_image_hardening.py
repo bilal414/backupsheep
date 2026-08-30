@@ -41,7 +41,8 @@ class PostgresImageHardeningContractTests(TestCase):
             'exec su-exec postgres "$BASH_SOURCE" "$@"',
             self.dockerfile,
         )
-        self.assertIn("apk add --no-cache 'su-exec=0.3-r0'", self.dockerfile)
+        self.assertIn("apk add --no-cache \\", self.dockerfile)
+        self.assertIn("'su-exec=0.3-r0'", self.dockerfile)
         self.assertIn("grep -Fxq 'su-exec-0.3-r0'", self.dockerfile)
         self.assertNotIn("apk upgrade", self.dockerfile)
         self.assertIn("rm -f -- /usr/local/bin/gosu", self.dockerfile)
@@ -55,6 +56,12 @@ class PostgresImageHardeningContractTests(TestCase):
             'com.backupsheep.postgres.runtime-generation="18.6-alpine3.24-icu-v1"',
             self.dockerfile,
         )
+        self.assertIn(
+            'com.backupsheep.postgres.openssl-package-version="3.5.8-r0"',
+            self.dockerfile,
+        )
+        self.assertIn("'libcrypto3=3.5.8-r0'", self.dockerfile)
+        self.assertIn("'libssl3=3.5.8-r0'", self.dockerfile)
         self.assertIn("deploy/postgres/entrypoint.sh", self.dockerfile)
         self.assertIn("deploy/postgres/storage-witness.sh", self.dockerfile)
         self.assertIn(

@@ -25,7 +25,6 @@ from apps.console.backup.models import (
     CoreVultrBackup,
     CoreVultrDatabaseBackup,
     CoreWebsiteBackup,
-    CoreWordPressBackup,
 )
 from apps.console.utils.models import UtilBackup
 
@@ -41,7 +40,6 @@ class BackupActivityView(APIView):
         ),
         "Website": (
             (CoreWebsiteBackup, "website"),
-            (CoreWordPressBackup, "wordpress"),
         ),
         "Cloud": (
             (CoreBasecampBackup, "basecamp"),

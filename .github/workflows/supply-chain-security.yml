@@ -37,9 +37,6 @@ jobs:
       BACKUPSHEEP_EGRESS_POLICY_GENERATION: "2"
       BACKUPSHEEP_STAGING_LAYOUT_INTENT: "new-empty-v3"
       BACKUPSHEEP_STAGING_LAYOUT_WITNESS: "421e9ec501ca8cdcf91e0dcbc9c25b462a5f3569bc1a3ec214e8a8b19ffb571f"
-      BACKUPSHEEP_ARTIFACT_KMS_KEY_ID: "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001"
-      BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS: "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001"
-      BACKUPSHEEP_ARTIFACT_KMS_REGION: "us-east-1"
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -48,10 +45,18 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
-          cache: pip
+
+      - name: Attack signed-release checkout index concealment
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v git >/dev/null
+          git --version >/dev/null
+          python -m unittest \
+            apps.tests.test_installer_security.InstallerSecurityContractTests.test_signed_consumer_attests_exact_clean_source_checkout_even_with_skip_worktree
 
       - name: Audit Python dependency resolution
         run: |
@@ -86,9 +91,9 @@ jobs:
           sed -i "s/^DJANGO_SECRET_KEY=.*/DJANGO_SECRET_KEY='ci-only-not-a-secret'/" .env
           sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD='ci-only-not-a-secret'/" .env
           sed -i "s/^RABBITMQ_PASSWORD=.*/RABBITMQ_PASSWORD='ci-only-not-a-secret'/" .env
-          bash -n install.sh init.sh startup.sh deploy/postgres/migrate-runtime.sh deploy/staging/provision-volumes.sh deploy/staging/test-provision-volumes.sh deploy/staging/test-cross-uid.sh
+          bash -n install.sh init.sh deploy/postgres/migrate-runtime.sh deploy/ci/run-postgres-runtime-migration-e2e.sh deploy/staging/provision-volumes.sh deploy/staging/test-provision-volumes.sh deploy/staging/test-cross-uid.sh
           sh -n deploy/postgres/entrypoint.sh deploy/postgres/storage-witness.sh
-          node -e 'for (const f of ["package.json", "package-lock.json", "app.json", "deploy/railway/web.railway.json", "deploy/railway/worker.railway.json", "deploy/railway/beat.railway.json"]) JSON.parse(require("fs").readFileSync(f, "utf8"))'
+          node -e 'for (const f of ["package.json", "package-lock.json"]) JSON.parse(require("fs").readFileSync(f, "utf8"))'
           docker compose config --quiet
           docker build --check .
           python -m unittest apps.tests.test_deployment_hardening -v
@@ -142,7 +147,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 
@@ -161,9 +166,11 @@ jobs:
             --policy deploy/release-policy.json \
             --destination "$CI_SOURCE_SCAN_TOOL_DIR" \
             --tool actionlint \
-            --tool trivy
+            --tool trivy \
+            --tool oras
           test "$("$CI_SOURCE_SCAN_TOOL_DIR/actionlint" -version | sed -n '1p')" = "1.7.12"
           "$CI_SOURCE_SCAN_TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          test "$("$CI_SOURCE_SCAN_TOOL_DIR/oras" version | sed -n '1s/^Version: *//p')" = '1.3.3'
           echo 'ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356  '"$CI_SOURCE_SCAN_TOOL_DIR/empty-actionlint.yaml" \
             | sha256sum -c -
           echo '1ac8b7ca6758d27c826f2e2389d315d2449b636596ca15557871d9992e47bb04  '"$CI_SOURCE_SCAN_TOOL_DIR/empty-bandit.ini" \
@@ -310,6 +317,7 @@ jobs:
           CI_SOURCE_SCAN_EVIDENCE_DIR: "${{ runner.temp }}/backupsheep-source-scan-evidence"
           CI_SOURCE_SCAN_CACHE_DIR: "${{ runner.temp }}/backupsheep-source-scan-cache"
           CI_SOURCE_SCAN_HOME: "${{ runner.temp }}/backupsheep-source-scan-home"
+          CI_SOURCE_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-source-trivy-db-evidence.json"
         run: |
           set -euo pipefail
           export LC_ALL=C
@@ -321,7 +329,8 @@ jobs:
             "$CI_SOURCE_SCAN_PRIVATE_DIR" \
             "$CI_SOURCE_SCAN_EVIDENCE_DIR" \
             "$CI_SOURCE_SCAN_CACHE_DIR" \
-            "$CI_SOURCE_SCAN_HOME"; do
+            "$CI_SOURCE_SCAN_HOME" \
+            "$CI_SOURCE_TRIVY_DB_EVIDENCE"; do
             if [ -e "$path" ] || [ -L "$path" ]; then
               printf '%s\n' 'Refusing a pre-existing source-scan evidence path.' >&2
               exit 1
@@ -330,8 +339,12 @@ jobs:
           install -d -m 0700 \
             "$CI_SOURCE_SCAN_PRIVATE_DIR" \
             "$CI_SOURCE_SCAN_EVIDENCE_DIR" \
-            "$CI_SOURCE_SCAN_CACHE_DIR" \
             "$CI_SOURCE_SCAN_HOME"
+          python3 scripts/prepare_trivy_db.py prepare \
+            --lock deploy/trivy-db-lock.json \
+            --oras "$CI_SOURCE_SCAN_TOOL_DIR/oras" \
+            --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+            --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           private_report="$CI_SOURCE_SCAN_PRIVATE_DIR/vulnerability-misconfiguration.json"
           secret_report="$CI_SOURCE_SCAN_PRIVATE_DIR/all-severity-secrets.json"
           canary_report="$CI_SOURCE_SCAN_PRIVATE_DIR/secret-canaries.json"
@@ -352,6 +365,10 @@ jobs:
               --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
               --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
               --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+              --skip-db-update \
+              --skip-java-db-update \
+              --skip-check-update \
+              --offline-scan \
               --scanners vuln,misconfig \
               --severity HIGH,CRITICAL \
               --ignore-unfixed=false \
@@ -367,6 +384,10 @@ jobs:
               --output "$private_report" \
               . \
             || trivy_status=$?
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+            --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           if [ "$trivy_status" -ne 0 ] && [ "$trivy_status" -ne 7 ]; then
             printf '%s\n' "Trivy returned unexpected scanner status $trivy_status." >&2
             exit 1
@@ -383,6 +404,7 @@ jobs:
               --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
               --secret-config "$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml" \
               --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+              --skip-check-update \
               --scanners secret \
               --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
               --disable-telemetry \
@@ -434,6 +456,7 @@ jobs:
                 --config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml" \
                 --secret-config "$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml" \
                 --ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore" \
+                --skip-check-update \
                 --scanners secret \
                 --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
                 --disable-telemetry \
@@ -457,6 +480,10 @@ jobs:
           test ! -L "$secret_report"
           test -f "$canary_report"
           test ! -L "$canary_report"
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
+            --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           chmod 0600 "$private_report" "$secret_report" "$canary_report"
           python3 scripts/validate_source_scan.py \
             --report "$private_report" \
@@ -465,6 +492,8 @@ jobs:
             --policy deploy/source-scan-policy.json \
             --repository-root "$GITHUB_WORKSPACE" \
             --source-revision "$GITHUB_SHA" \
+            --trivy-db-lock deploy/trivy-db-lock.json \
+            --trivy-db-evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE" \
             --summary "$summary"
           test "$trivy_status" -eq 7
           test "$secret_status" -eq 0
@@ -476,7 +505,7 @@ jobs:
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
       - name: Retain zero-sensitive final-SHA source-scan evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-source-evidence-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/backupsheep-source-scan-evidence/summary.json
@@ -490,11 +519,16 @@ jobs:
     env:
       TEST_APP_IMAGE: "backupsheep-ci-app:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_POSTGRES_IMAGE: "backupsheep-ci-postgres:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_LEGACY_POSTGRES_IMAGE: "backupsheep-ci-postgres-legacy:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_EGRESS_IMAGE: "backupsheep-ci-egress:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RABBITMQ_IMAGE: "backupsheep-ci-rabbitmq:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RABBITMQ_UPGRADE_IMAGE: "backupsheep-ci-rabbitmq-upgrade:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RELEASE_VERIFIER_IMAGE: "backupsheep-ci-release-verifier:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_NETWORK: "backupsheep-ci-net-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_POSTGRES_CONTAINER: "backupsheep-ci-postgres-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_APPLICATION_CONTAINER: "backupsheep-ci-tests-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_TOPOLOGY_PROJECT: "bs-ci-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_POSTGRES_MIGRATION_PREFIX: "bs-pgm-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_OWNERSHIP_VALUE: "${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
     steps:
       - name: Check out the exact source under test
@@ -503,7 +537,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - name: Build the production application, PostgreSQL, and egress images
+      - name: Build every first-party production and release-verification image
         shell: bash
         run: |
           set -euo pipefail
@@ -528,7 +562,7 @@ jobs:
             printf '%s\n' "Refusing a pre-existing CI network-name collision: $TEST_NETWORK" >&2
             exit 1
           fi
-          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE"; do
+          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RELEASE_VERIFIER_IMAGE"; do
             if docker image inspect "$image" >/dev/null 2>&1; then
               printf '%s\n' "Refusing a pre-existing CI image-tag collision: $image" >&2
               exit 1
@@ -542,10 +576,39 @@ jobs:
             --file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE" .
           docker build --pull --no-cache \
             --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file deploy/ci/Dockerfile.postgres-runtime-source \
+            --tag "$TEST_LEGACY_POSTGRES_IMAGE" .
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
             --file Dockerfile.egress --tag "$TEST_EGRESS_IMAGE" .
-          test "$(docker image inspect --format '{{.Architecture}}' "$TEST_APP_IMAGE")" = amd64
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE" .
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE" .
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.release-verifier --tag "$TEST_RELEASE_VERIFIER_IMAGE" .
+          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RELEASE_VERIFIER_IMAGE"; do
+            test "$(docker image inspect --format '{{.Architecture}}' "$image")" = amd64
+          done
+          test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_IMAGE")" = '100:101'
+          test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_UPGRADE_IMAGE")" = '100:101'
+          test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RELEASE_VERIFIER_IMAGE")" = '65532:65532'
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$TEST_RELEASE_VERIFIER_IMAGE")" = '["/ko-app/cosign"]'
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --entrypoint rabbitmqctl "$TEST_RABBITMQ_IMAGE" version | grep -Fxq '4.3.5'
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --entrypoint rabbitmqctl "$TEST_RABBITMQ_UPGRADE_IMAGE" version | grep -Fxq '4.2.9'
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \
+            "$TEST_RELEASE_VERIFIER_IMAGE" version | grep -Fq 'v3.1.3-backupsheep.1'
 
-      - name: Install hash-verified Syft 1.51.0 and Trivy 0.74.0
+      - name: Install hash-verified Syft, Trivy, and ORAS
         shell: bash
         env:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
@@ -556,18 +619,42 @@ jobs:
             --policy deploy/release-policy.json \
             --destination "$CI_SCAN_TOOL_DIR" \
             --tool syft \
-            --tool trivy
+            --tool trivy \
+            --tool oras
           "$CI_SCAN_TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
           "$CI_SCAN_TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          test "$("$CI_SCAN_TOOL_DIR/oras" version | sed -n '1s/^Version: *//p')" = '1.3.3'
           grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-syft.yaml"
           grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-trivy.yaml"
           test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"
+
+      - name: Prepare the exact reviewed Trivy vulnerability database
+        shell: bash
+        env:
+          CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
+          CI_TRIVY_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-trivy-cache"
+          CI_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-trivy-db-evidence.json"
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/prepare_trivy_db.py prepare \
+            --lock deploy/trivy-db-lock.json \
+            --oras "$CI_SCAN_TOOL_DIR/oras" \
+            --cache-dir "$CI_TRIVY_CACHE_DIR" \
+            --evidence "$CI_TRIVY_DB_EVIDENCE"
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$CI_TRIVY_CACHE_DIR" \
+            --evidence "$CI_TRIVY_DB_EVIDENCE"
 
       - name: Generate SBOMs and reject HIGH or CRITICAL findings in exact images
         shell: bash
         env:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
           CI_SCAN_DIR: "${{ runner.temp }}/backupsheep-ci-image-evidence"
+          CI_TRIVY_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-trivy-cache"
+          CI_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-trivy-db-evidence.json"
+          CI_TRIVY_HOME: "${{ runner.temp }}/backupsheep-ci-trivy-home"
         run: |
           set -euo pipefail
           export LC_ALL=C
@@ -599,7 +686,14 @@ jobs:
             printf '%s\n' 'Refusing a pre-existing exact-image evidence path.' >&2
             exit 1
           fi
+          if [ -e "$CI_TRIVY_HOME" ] || [ -L "$CI_TRIVY_HOME" ]; then
+            printf '%s\n' 'Refusing a pre-existing Trivy home path.' >&2
+            exit 1
+          fi
           install -d -m 0700 "$CI_SCAN_DIR"
+          install -d -m 0700 "$CI_TRIVY_HOME"
+          install -m 0600 deploy/trivy-db-lock.json "$CI_SCAN_DIR/trivy-db-lock.json"
+          install -m 0600 "$CI_TRIVY_DB_EVIDENCE" "$CI_SCAN_DIR/trivy-db-evidence.json"
           cleanup_archives() {
             find "$CI_SCAN_DIR" -maxdepth 1 -type f -name '*.tar' -delete
           }
@@ -624,12 +718,20 @@ jobs:
                 --output "syft-json=$syft_report"
 
             trivy_status=0
-            XDG_CACHE_HOME="$RUNNER_TEMP/backupsheep-ci-trivy-cache" \
+            env -i \
+              HOME="$CI_TRIVY_HOME" \
+              PATH="$CI_SCAN_TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
               TRIVY_SKIP_VERSION_CHECK=true \
               "$CI_SCAN_TOOL_DIR/trivy" \
+                --cache-dir "$CI_TRIVY_CACHE_DIR" \
                 --config "$CI_SCAN_TOOL_DIR/empty-trivy.yaml" image \
                 --input "$archive" \
                 --ignorefile "$CI_SCAN_TOOL_DIR/empty-trivy.ignore" \
+                --skip-db-update \
+                --skip-java-db-update \
+                --skip-check-update \
+                --offline-scan \
                 --quiet \
                 --scanners vuln \
                 --pkg-types os,library \
@@ -641,6 +743,10 @@ jobs:
                 --output "$trivy_report" \
               || trivy_status=$?
 
+            python3 scripts/prepare_trivy_db.py verify \
+              --lock deploy/trivy-db-lock.json \
+              --cache-dir "$CI_TRIVY_CACHE_DIR" \
+              --evidence "$CI_TRIVY_DB_EVIDENCE"
             python3 deploy/ci/validate-image-scan.py \
               --image-kind "$image_kind" \
               --image-id "$image_id" \
@@ -648,6 +754,8 @@ jobs:
               --syft "$syft_report" \
               --trivy "$trivy_report" \
               --requirements-lock "$GITHUB_WORKSPACE/requirements.lock" \
+              --trivy-db-lock "$CI_SCAN_DIR/trivy-db-lock.json" \
+              --trivy-db-evidence "$CI_SCAN_DIR/trivy-db-evidence.json" \
               --summary "$summary"
             [[ "$trivy_status" -eq 0 ]]
             chmod 0600 "$syft_report" "$trivy_report" "$summary"
@@ -656,6 +764,9 @@ jobs:
           app	$TEST_APP_IMAGE
           postgres	$TEST_POSTGRES_IMAGE
           egress	$TEST_EGRESS_IMAGE
+          rabbitmq	$TEST_RABBITMQ_IMAGE
+          rabbitmq-upgrade	$TEST_RABBITMQ_UPGRADE_IMAGE
+          release-verifier	$TEST_RELEASE_VERIFIER_IMAGE
           EOF
 
           trap - EXIT HUP INT TERM
@@ -663,7 +774,7 @@ jobs:
 
       - name: Retain exact-image SBOM and vulnerability evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-image-evidence-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/backupsheep-ci-image-evidence
@@ -825,7 +936,6 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/bruno,target=/code/bruno,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/deploy,target=/code/deploy,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/docs,target=/code/docs,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/integrations,target=/code/integrations,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/scripts,target=/code/scripts,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/.dockerignore,target=/code/.dockerignore,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/.gitignore,target=/code/.gitignore,readonly" \
@@ -834,21 +944,20 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.egress,target=/code/Dockerfile.egress,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.egress.dockerignore,target=/code/Dockerfile.egress.dockerignore,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.postgres,target=/code/Dockerfile.postgres,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.rabbitmq,target=/code/Dockerfile.rabbitmq,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.rabbitmq-upgrade,target=/code/Dockerfile.rabbitmq-upgrade,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.release-verifier,target=/code/Dockerfile.release-verifier,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/LICENSE,target=/code/LICENSE,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/README.md,target=/code/README.md,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/SECURITY.md,target=/code/SECURITY.md,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/app.json,target=/code/app.json,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/backupsheep-compose,target=/code/backupsheep-compose,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/docker-compose.yml,target=/code/docker-compose.yml,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/heroku.yml,target=/code/heroku.yml,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/init.sh,target=/code/init.sh,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/install.sh,target=/code/install.sh,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/package-lock.json,target=/code/package-lock.json,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/package.json,target=/code/package.json,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/render.yaml,target=/code/render.yaml,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/requirements.lock,target=/code/requirements.lock,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/requirements.txt,target=/code/requirements.txt,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/startup.sh,target=/code/startup.sh,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/tailwind.config.js,target=/code/tailwind.config.js,readonly" \
             --workdir /code \
             --env PYTHONPATH=/code \
@@ -1038,10 +1147,9 @@ jobs:
             --env BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=bse1 \
             --env BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=true \
             --env BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=false \
-            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER=aws-kms \
-            --env BACKUPSHEEP_ARTIFACT_KMS_KEY_ID=arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001 \
-            --env BACKUPSHEEP_ARTIFACT_KMS_REGION=us-east-1 \
-            --env BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS=arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001 \
+            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER=local-file \
+            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION=1 \
+            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS=7be66c9e49880f4d40748ec3b4823d351333e4b6c855171d9647d24cef25ef18 \
             --env AWS_EC2_METADATA_DISABLED=true \
             --env AWS_EC2_METADATA_V1_DISABLED=true \
             --env AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true \
@@ -1053,6 +1161,10 @@ jobs:
       - name: Exercise the isolated production web and worker topology
         shell: bash
         run: deploy/ci/run-security-topology.sh
+
+      - name: Exercise witnessed PostgreSQL runtime migration and crash recovery
+        shell: bash
+        run: timeout --signal=TERM --kill-after=30s 45m deploy/ci/run-postgres-runtime-migration-e2e.sh
 
       - name: Attack the exact built egress-policy image
         shell: bash
@@ -1119,8 +1231,20 @@ jobs:
           if owned_image "$TEST_POSTGRES_IMAGE"; then
             docker image rm --force "$TEST_POSTGRES_IMAGE" >/dev/null 2>&1 || true
           fi
+          if owned_image "$TEST_LEGACY_POSTGRES_IMAGE"; then
+            docker image rm --force "$TEST_LEGACY_POSTGRES_IMAGE" >/dev/null 2>&1 || true
+          fi
           if owned_image "$TEST_EGRESS_IMAGE"; then
             docker image rm --force "$TEST_EGRESS_IMAGE" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_RABBITMQ_IMAGE"; then
+            docker image rm --force "$TEST_RABBITMQ_IMAGE" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_RABBITMQ_UPGRADE_IMAGE"; then
+            docker image rm --force "$TEST_RABBITMQ_UPGRADE_IMAGE" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_RELEASE_VERIFIER_IMAGE"; then
+            docker image rm --force "$TEST_RELEASE_VERIFIER_IMAGE" >/dev/null 2>&1 || true
           fi
           storage_owner="$GITHUB_WORKSPACE/_storage/.backupsheep-ci-owner"
           if [ -f "$storage_owner" ] && [ ! -L "$storage_owner" ] \

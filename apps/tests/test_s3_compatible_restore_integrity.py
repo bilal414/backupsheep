@@ -10,7 +10,19 @@ from unittest import mock
 from botocore.exceptions import ClientError
 from django.test import SimpleTestCase
 
+from apps._tasks.artifact_encryption import StorageArtifactIdentity
 from apps._tasks.integration import restore_common
+from apps.console.backup.models import CoreWebsiteBackupStoragePoints
+
+
+BSE_ENVELOPE_UUID = "23cc9ced-eb5a-4b3a-959a-6c4f72fa1337"
+BSE_IDENTITY = StorageArtifactIdentity(
+    identifier=BSE_ENVELOPE_UUID,
+    filename=f"{BSE_ENVELOPE_UUID}.bse1",
+    artifact_format="bse1",
+    ownership_marker=f"bse2:{BSE_ENVELOPE_UUID}",
+    content_type="application/octet-stream",
+)
 
 
 class _ArtifactQuery:
@@ -72,9 +84,13 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
         }
         return values[provider]
 
-    def _point(self, provider, *, version_id="version-1", records=()):
+    def _point(self, provider, *, version_id="version-1", records=(), bse=False):
         config = self._provider_config(provider)
-        key = f"backups/{provider}/exact.zip"
+        key = (
+            f"backups/{provider}/{BSE_IDENTITY.filename}"
+            if bse
+            else f"backups/{provider}/exact.zip"
+        )
         backup_id = 417
         state = {
             "phase": "committed",
@@ -83,7 +99,9 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
             "sha256": self.checksum,
             "size_bytes": len(self.payload),
             "checksum_algorithm": "sha256",
-            "ownership_marker": str(backup_id),
+            "ownership_marker": (
+                BSE_IDENTITY.ownership_marker if bse else str(backup_id)
+            ),
             "etag": '"etag-committed"',
             "version_id": version_id,
         }
@@ -94,8 +112,12 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
         )
         backup = SimpleNamespace(
             id=backup_id,
+            uuid_str="exact",
             artifact_records=_ArtifactQuery(records),
         )
+        if bse:
+            backup.uuid_str = "c05995a5-b5ca-498c-9e54-47708063e46a"
+            backup.get_execution_state = mock.Mock()
         point = SimpleNamespace(
             backup=backup,
             backup_id=backup_id,
@@ -117,18 +139,44 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
         return point, config, key, state
 
     def _head(self, point, state, **overrides):
+        marker_key = (
+            "backupsheep-artifact-id"
+            if str(state["ownership_marker"]).startswith("bse2:")
+            else "backupsheep-backup-id"
+        )
         head = {
             "ContentLength": len(self.payload),
             "ETag": state["etag"],
             "VersionId": state["version_id"],
             "Metadata": {
-                "backupsheep-backup-id": state["ownership_marker"],
+                marker_key: state["ownership_marker"],
                 "backupsheep-sha256": self.checksum,
                 "backupsheep-bytes": str(len(self.payload)),
             },
         }
         head.update(overrides)
         return head
+
+    @staticmethod
+    def _bse_context(point):
+        active = SimpleNamespace(
+            envelope=SimpleNamespace(uuid=BSE_ENVELOPE_UUID),
+        )
+        stack = ExitStack()
+        stack.enter_context(
+            mock.patch(
+                "apps._tasks.artifact_encryption._load_active_source_state",
+                return_value=active,
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                restore_common,
+                "restore_encryption_plan",
+                return_value=None,
+            )
+        )
+        return stack
 
     @staticmethod
     def _client_patch(stack, module, client):
@@ -170,6 +218,140 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
         for provider, _state_key, _module, _label in PROVIDERS:
             with self.subTest(provider=provider):
                 self._run_success(provider)
+
+    def test_bse_exact_restore_uses_opaque_marker_and_key_for_all_providers(self):
+        for provider, _state_key, _module, _label in PROVIDERS:
+            with self.subTest(provider=provider):
+                point, config, key, state = self._point(provider, bse=True)
+                head = self._head(point, state)
+                client = mock.Mock(name=f"{provider}-bse-client")
+                client.head_object.side_effect = [dict(head), dict(head)]
+                client.get_object.return_value = {
+                    **head,
+                    "Body": io.BytesIO(self.payload),
+                }
+                destination = os.path.join(self.tmp, f"{provider}-bse.zip")
+
+                with self._bse_context(point) as stack:
+                    self._client_patch(stack, provider, client)
+                    restore_common.fetch_backup_zip(point, destination)
+
+                request = {
+                    "Bucket": config.bucket_name,
+                    "Key": key,
+                    "VersionId": "version-1",
+                }
+                client.get_object.assert_called_once_with(**request)
+                self.assertEqual(
+                    head["Metadata"]["backupsheep-artifact-id"],
+                    BSE_IDENTITY.ownership_marker,
+                )
+                self.assertNotIn("backupsheep-backup-id", head["Metadata"])
+                self.assertNotIn(str(point.backup_id), key)
+                self.assertFalse(key.endswith(".zip"))
+
+    def test_bse_restore_rejects_ambiguous_legacy_marker_before_get(self):
+        point, _config, _key, state = self._point("do_spaces", bse=True)
+        head = self._head(point, state)
+        head["Metadata"]["backupsheep-backup-id"] = str(point.backup_id)
+        client = mock.Mock(name="do-spaces-ambiguous-bse-client")
+        client.head_object.return_value = head
+
+        with self._bse_context(point) as stack:
+            self._client_patch(stack, "do_spaces", client)
+            with self.assertRaises(restore_common.RestoreError) as raised:
+                restore_common.fetch_backup_zip(
+                    point,
+                    os.path.join(self.tmp, "ambiguous-bse.zip"),
+                )
+
+        self.assertEqual(raised.exception.code, "PROVIDER_OWNERSHIP_MISMATCH")
+        client.get_object.assert_not_called()
+
+    def test_aws_bse_restore_uses_only_committed_opaque_identity(self):
+        key = f"backups/{BSE_IDENTITY.filename}"
+        state = {
+            "phase": "committed",
+            "bucket": "aws-bse-bucket",
+            "object_key": key,
+            "sha256": self.checksum,
+            "size_bytes": len(self.payload),
+            "ownership_marker": BSE_IDENTITY.ownership_marker,
+            "etag": '"etag-committed"',
+            "version_id": "version-1",
+        }
+        head = {
+            "ContentLength": len(self.payload),
+            "ETag": state["etag"],
+            "VersionId": state["version_id"],
+            "Metadata": {
+                "backupsheep-artifact-id": BSE_IDENTITY.ownership_marker,
+                "backupsheep-sha256": self.checksum,
+                "backupsheep-bytes": str(len(self.payload)),
+            },
+        }
+        client = mock.Mock(name="aws-bse-client")
+        client.head_object.side_effect = [dict(head), dict(head)]
+        client.get_object.return_value = {
+            **head,
+            "Body": io.BytesIO(self.payload),
+        }
+        storage_config = SimpleNamespace(
+            _connection_values=mock.Mock(
+                return_value={
+                    "bucket_name": "aws-bse-bucket",
+                    "expected_bucket_owner": "123456789012",
+                }
+            ),
+            _s3_client=mock.Mock(return_value=client),
+            expected_bucket_owner_kwargs=mock.Mock(
+                return_value={"ExpectedBucketOwner": "123456789012"}
+            ),
+        )
+        point = SimpleNamespace(
+            metadata={"aws_s3_object": state},
+            storage=SimpleNamespace(storage_aws_s3=storage_config),
+            storage_file_id=key,
+            storage_id=23,
+            backup_id=417,
+            backup=SimpleNamespace(
+                id=417,
+                uuid_str="c05995a5-b5ca-498c-9e54-47708063e46a",
+                artifact_records=_ArtifactQuery(),
+                get_execution_state=mock.Mock(),
+            ),
+            committed_version_id=mock.Mock(return_value="version-1"),
+            committed_integrity_identity=mock.Mock(
+                return_value={
+                    "size_bytes": len(self.payload),
+                    "sha256": self.checksum,
+                }
+            ),
+        )
+        point.verify_s3_head_ownership = lambda value: (
+            CoreWebsiteBackupStoragePoints.verify_s3_head_ownership(point, value)
+        )
+        destination = os.path.join(self.tmp, "aws-bse.zip")
+
+        with self._bse_context(point):
+            restore_common._aws_s3_download(
+                point,
+                destination,
+                {"size_bytes": len(self.payload), "sha256": self.checksum},
+            )
+
+        request = {
+            "Bucket": "aws-bse-bucket",
+            "Key": key,
+            "ExpectedBucketOwner": "123456789012",
+            "VersionId": "version-1",
+        }
+        client.get_object.assert_called_once_with(**request)
+        self.assertEqual(client.head_object.call_count, 2)
+        visible = repr({"key": key, "metadata": head["Metadata"]})
+        self.assertNotIn(point.backup.uuid_str, visible)
+        self.assertNotIn(str(point.backup_id), visible)
+        self.assertNotIn(".zip", visible)
 
     def test_vultr_multipart_zero_length_head_still_requires_exact_get_stream(self):
         point, config, key, state = self._point("vultr")
@@ -580,7 +762,11 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
             storage=SimpleNamespace(storage_aws_s3=storage_config),
             storage_file_id=key,
             storage_id=23,
-            backup=SimpleNamespace(artifact_records=_ArtifactQuery()),
+            backup=SimpleNamespace(
+                id=417,
+                uuid_str="exact",
+                artifact_records=_ArtifactQuery(),
+            ),
             committed_version_id=mock.Mock(return_value="version-1"),
             verify_s3_head_ownership=mock.Mock(),
             save=mock.Mock(),
@@ -617,6 +803,7 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
             },
             storage=SimpleNamespace(storage_aws_s3=storage_config),
             storage_file_id="backups/aws/exact.zip",
+            backup=SimpleNamespace(id=417, uuid_str="exact"),
         )
 
         with self.assertRaises(restore_common.RestoreError) as raised:

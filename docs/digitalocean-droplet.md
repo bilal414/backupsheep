@@ -25,10 +25,6 @@ stock stack.
 
    ```bash
    COMMIT='<40-character-reviewed-release-commit>'
-   KMS_KEY_ARN='arn:aws:kms:us-east-1:123456789012:key/<reviewed-key-id>'
-   KMS_REGION='us-east-1'
-   KMS_DATABASE_CREDENTIALS='/absolute/protected/kms-database.credentials'
-   KMS_FILES_CREDENTIALS='/absolute/protected/kms-files.credentials'
    curl -fSLo install.sh \
      "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
    less install.sh
@@ -37,24 +33,18 @@ stock stack.
      --ref "${COMMIT}" \
      --install-dir "$HOME/.local/share/backupsheep" \
      --project-name backupsheep \
-     --domain backups.example.com \
-     --artifact-kms-key-id "${KMS_KEY_ARN}" \
-     --artifact-kms-region "${KMS_REGION}" \
-     --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
-     --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-     --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
+     --domain backups.example.com
    ```
 
-   The two credential inputs must be distinct, canonical, user-owned mode-`0400`/`0600`
-   files for separate AWS identities whose IAM/KMS policies enforce the matching lane
-   encryption context.
+   The installer generates separate local database/files artifact keyrings. Back up both
+   keyrings with the PostgreSQL recovery set before enabling operations.
 
 The installer changes no host settings. It verifies the exact checkout, generates
 file-backed application/database/broker/onboarding secrets, builds the reviewed image and
 starts only the core stack. When the web service is healthy, it prints an SSH-tunnel and
 trusted-shell token retrieval command without writing the token to logs. Provider workers
 and Beat remain stopped until the operator reviews recovery/queue state and explicitly
-reruns the same exact command (including domain, project and KMS inputs) with
+reruns the same exact command (including domain and project) with
 `--enable-operations` appended.
 
 ## Production notes

@@ -16,6 +16,7 @@ from backupsheep.artifact_crypto import ArtifactContext, encrypt_file
 INSTALLATION_ID = "a" * 64
 BACKUP_UUID = "11111111-2222-4333-8444-555555555555"
 HANDOFF_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+ENVELOPE_UUID = "99999999-8888-4777-8666-555555555555"
 
 
 class StagingIsolationTests(SimpleTestCase):
@@ -194,7 +195,7 @@ class StagingIsolationTests(SimpleTestCase):
         self.assertEqual(candidate.stat().st_mode & 0o7777, 0o640)
         validate.assert_called_once()
         self.assertIsInstance(validate.call_args.args[0], int)
-        self.assertEqual(validate.call_args.args[1], fence)
+        self.assertEqual(validate.call_args.args[1], candidate.name)
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
         with mock.patch.object(staging, "_validate_bse1_descriptor"):
@@ -208,7 +209,7 @@ class StagingIsolationTests(SimpleTestCase):
         source = self.private / "source.zip"
         source.write_bytes(b"private backup payload" * 4096)
         os.chmod(source, 0o600)
-        destination = fence.path / "archive.bse1"
+        destination = fence.path / f"{ENVELOPE_UUID}.bse1"
         context = ArtifactContext(
             installation_id=INSTALLATION_ID,
             account_id="account-17",
@@ -222,12 +223,21 @@ class StagingIsolationTests(SimpleTestCase):
             destination,
             data_key=bytes(range(32)),
             context=context,
-            envelope_id=BACKUP_UUID,
+            envelope_id=ENVELOPE_UUID,
             chunk_size=64 * 1024,
             trusted_source_root=self.private,
             trusted_destination_root=fence.path,
         )
         self.assertEqual(destination.stat().st_mode & 0o7777, 0o600)
+        wrong_name = fence.path / "77777777-6666-4555-8444-333333333333.bse1"
+        wrong_name.write_bytes(destination.read_bytes())
+        os.chmod(wrong_name, 0o600)
+        with self.assertRaisesRegex(
+            staging.StagingIsolationError,
+            "random envelope identity",
+        ):
+            staging.publish_ciphertext(BACKUP_UUID, wrong_name.name)
+        wrong_name.unlink()
         staging.publish_ciphertext(BACKUP_UUID, destination.name)
         self.assertEqual(destination.stat().st_mode & 0o7777, 0o640)
 
@@ -278,7 +288,7 @@ class StagingIsolationTests(SimpleTestCase):
     def test_publish_and_open_reject_named_inode_swap_after_held_fd_validation(self):
         fence, candidate = self._fence_with_private_candidate()
 
-        def swap_private(_descriptor, _fence):
+        def swap_private(_descriptor, _artifact_name):
             replacement = fence.path / "replacement.bse1"
             replacement.write_bytes(b"BSE1replacement-envelope")
             os.chmod(replacement, staging.PRIVATE_FILE_MODE)
@@ -299,7 +309,7 @@ class StagingIsolationTests(SimpleTestCase):
             staging.publish_ciphertext(BACKUP_UUID, candidate.name)
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
 
-        def swap_published(_descriptor, _fence):
+        def swap_published(_descriptor, _artifact_name):
             replacement = fence.path / "replacement.bse1"
             replacement.write_bytes(b"BSE1second-replacement")
             os.chmod(replacement, staging.PUBLISHED_FILE_MODE)
@@ -369,7 +379,7 @@ class StagingIsolationTests(SimpleTestCase):
             self.assertTrue(staging.cleanup_ciphertext_fence(BACKUP_UUID))
         validate.assert_called_once()
         self.assertIsInstance(validate.call_args.args[0], int)
-        self.assertEqual(validate.call_args.args[1], fence)
+        self.assertEqual(validate.call_args.args[1], candidate.name)
         self.assertFalse(fence.path.exists())
         self.assertFalse(staging.cleanup_ciphertext_fence(BACKUP_UUID))
 
@@ -404,7 +414,7 @@ class StagingIsolationTests(SimpleTestCase):
         self.assertEqual(candidate.stat().st_mode & 0o7777, 0o640)
         validate.assert_called_once()
         self.assertIsInstance(validate.call_args.args[0], int)
-        self.assertEqual(validate.call_args.args[1], fence)
+        self.assertEqual(validate.call_args.args[1], candidate.name)
 
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "files"
         with self.assertRaisesRegex(staging.StagingIsolationError, "does not own"):
@@ -472,12 +482,12 @@ class StagingIsolationTests(SimpleTestCase):
             source,
             data_key=bytes(range(32)),
             context=context,
-            envelope_id=BACKUP_UUID,
+            envelope_id=ENVELOPE_UUID,
             chunk_size=64 * 1024,
             trusted_source_root=self.private,
             trusted_destination_root=self.private,
         )
-        destination = fence.path / "restore.bse1"
+        destination = fence.path / f"{ENVELOPE_UUID}.bse1"
         destination.write_bytes(source.read_bytes())
         os.chmod(destination, 0o600)
         staging.publish_restore_ciphertext(

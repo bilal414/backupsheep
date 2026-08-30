@@ -2,13 +2,13 @@ from botocore.config import Config
 
 from apps._tasks.exceptions import NodeSnapshotDeleteFailed, StorageWasabiUploadFailedError
 from apps._tasks.integration.storage.s3_verified import upload_verified_s3
+from apps._tasks.artifact_encryption import storage_artifact_identity
 from apps._tasks.integration.storage.vultr import _safe_upload_exception
 from apps.api.v1.utils.api_helpers import bs_decrypt
 from apps.api.v1.utils.boto import bounded_boto3_client
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreWebsiteBackup,
-    CoreWordPressBackup,
 )
 from apps.console.node.models import CoreNode
 
@@ -40,14 +40,15 @@ def storage_wasabi(stored_backup):
         prefix = wasabi.prefix or ""
         if prefix and not prefix.endswith("/"):
             prefix += "/"
-        key = f"{prefix}{stored_backup.backup.uuid}.zip"
+        artifact_identity = storage_artifact_identity(stored_backup.backup)
+        key = f"{prefix}{artifact_identity.filename}"
 
         upload_verified_s3(
             stored_backup,
             client=_s3_client(wasabi, storage.account.get_encryption_key()),
             bucket=wasabi.bucket_name,
             key=key,
-            local_path=f"_storage/{stored_backup.backup.uuid}.zip",
+            local_path=f"_storage/{artifact_identity.filename}",
             metadata_key=WASABI_OBJECT_METADATA_KEY,
             supports_checksum=False,
         )
@@ -69,9 +70,6 @@ def storage_wasabi_delete(node, backup_name):
             backup = CoreWebsiteBackup.objects.get(uuid=backup_name)
         elif node.type == CoreNode.Type.DATABASE:
             backup = CoreDatabaseBackup.objects.get(uuid=backup_name)
-        elif node.type == CoreNode.Type.SAAS:
-            backup = CoreWordPressBackup.objects.get(uuid=backup_name)
-
         if backup:
             wasabi = backup.storage_byo.storage_wasabi
             s3_client = _s3_client(wasabi, encryption_key)

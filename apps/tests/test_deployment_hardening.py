@@ -146,13 +146,63 @@ class DeploymentHardeningContractTests(TestCase):
             "d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
             postgres_dockerfile,
         )
-        self.assertIn("apk add --no-cache 'su-exec=0.3-r0'", postgres_dockerfile)
+        self.assertIn("apk add --no-cache \\", postgres_dockerfile)
+        self.assertIn("'su-exec=0.3-r0'", postgres_dockerfile)
         self.assertNotIn("apk upgrade", postgres_dockerfile)
         self.assertIn("USER 70:70", postgres_dockerfile)
         database = self.service_block("db")
         self.assertIn("--locale-provider=icu --icu-locale=und", database)
         self.assertIn("postgres_data_v1:/var/lib/postgresql", database)
         self.assertNotIn("pgdata:/var/lib/postgresql", database)
+
+    def test_bundled_rabbitmq_derivatives_patch_exact_upstream_runtimes(self):
+        expected = {
+            "Dockerfile.rabbitmq": (
+                "rabbitmq:4.3.5-alpine@sha256:"
+                "d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7",
+                'runtime-generation="4.3.5-alpine3.23-openssl-v1"',
+            ),
+            "Dockerfile.rabbitmq-upgrade": (
+                "rabbitmq:4.2.9-alpine@sha256:"
+                "f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095",
+                'runtime-generation="4.2.9-alpine3.23-openssl-v1"',
+            ),
+        }
+        for path, (base, generation) in expected.items():
+            with self.subTest(path=path):
+                dockerfile = (ROOT / path).read_text(encoding="utf-8")
+                self.assertIn(f"FROM {base}", dockerfile)
+                self.assertIn(generation, dockerfile)
+                self.assertIn("'libcrypto3=3.5.8-r0'", dockerfile)
+                self.assertIn("'libssl3=3.5.8-r0'", dockerfile)
+                self.assertIn("USER 100:101", dockerfile)
+                self.assertNotIn("apk upgrade", dockerfile)
+
+    def test_release_verifier_rebuilds_exact_cosign_source_with_fixed_graph(self):
+        dockerfile = (ROOT / "Dockerfile.release-verifier").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            "golang:1.26.6-alpine3.23@sha256:"
+            "e57c41c1d5864341031181b0db34b9a537bb5773eb6428e4e5bdaea0f9135406",
+            "11926fa5bbbbde47e88fc006b625a17769b743b2",
+            "3a718446bac51466efff6853639e1ca108b456ecbf07cd92938f548715d22d6b",
+            "golang.org/x/mod@v0.40.0",
+            "golang.org/x/text@v0.40.0",
+            "google.golang.org/grpc@v1.82.1",
+            "894396e4119d1620852793d03419a7130f4c62881ae5e11301b36c2a775aa6f2",
+            "FROM scratch",
+            "USER 65532:65532",
+            'ENTRYPOINT ["/ko-app/cosign"]',
+            "--chmod=a=r",
+            "--chmod=a=rx",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, dockerfile)
+        self.assertIn("GOTOOLCHAIN=local", dockerfile)
+        self.assertNotIn("--chmod=0444", dockerfile)
+        self.assertNotIn("--chmod=0555", dockerfile)
+        self.assertNotIn("apk upgrade", dockerfile)
 
     def test_postgres_logical_runtime_migration_is_deterministic_and_fail_closed(self):
         migration = (
@@ -171,37 +221,43 @@ class DeploymentHardeningContractTests(TestCase):
 
         self.assertIn("BackupSheep/postgres-dump-restrict/v1", migration)
         self.assertIn("openssl dgst -sha256", migration)
-        self.assertGreaterEqual(migration.count("--restrict-key=\"$"), 2)
-        self.assertGreaterEqual(migration.count("--restrict-key=$4"), 3)
+        self.assertEqual(migration.count('--restrict-key="$6"'), 1)
         for exact_header in (
             "^-- Dumped from database version .*",
             "^-- Dumped by pg_dump version .*",
-            "^-- Dumped by pg_dumpall version .*",
         ):
             self.assertIn(exact_header, migration)
+        self.assertNotIn("pg_dumpall", migration)
 
-        marker_read = migration.index(
-            'marker_status="$(sed -n \'1p\' <<< "$evidence")"'
+        evidence_classification = migration.index(
+            'classified_evidence="$(classify_existing_target_evidence'
+        )
+        state_read = migration.index(
+            'evidence_state="$(sed -n \'1p\' <<< "$classified_evidence")"'
         )
         complete_branch = migration.index(
-            "if [[ \"$marker_status\" == 'status=complete' ]]"
+            'if [[ "$evidence_state" == complete ]]'
         )
         pending_reset = migration.index(
             '"$docker_bin" volume rm "$target_volume"'
         )
-        self.assertLess(marker_read, complete_branch)
+        self.assertLess(evidence_classification, state_read)
+        self.assertLess(state_read, complete_branch)
         self.assertLess(complete_branch, pending_reset)
         self.assertIn(
-            '[[ -z "$marker_status" || "$marker_status" == \'status=pending\' ]]',
+            '[[ "$evidence_state" == absent || "$evidence_state" == pending-empty ]]',
             migration,
         )
+        self.assertIn('if [[ "$evidence_state" == pending-receipt ]]', migration)
+        self.assertNotIn('marker_status="', migration)
 
-        self.assertIn("migration-target.XXXXXXXX", migration)
+        self.assertIn("migration-bootstrap.XXXXXXXX", migration)
+        self.assertIn("migration-restore.XXXXXXXX", migration)
         self.assertIn("/run/secrets/source_password:ro", migration)
-        self.assertIn("/run/secrets/target_password:ro", migration)
+        self.assertIn("/run/secrets/restore_password:ro", migration)
         self.assertIn("legacy source server must not mount a plaintext credential", migration)
-        self.assertIn("ephemeral target credential remains after migration", migration)
-        self.assertIn('grep -Fxq -- "$bootstrap_user"', migration)
+        self.assertIn("ephemeral restore credential remains after migration", migration)
+        self.assertIn("bootstrap role is not first in the ordered stock inventory", migration)
         self.assertIn('grep -Fxq -- "$database_owner"', migration)
         self.assertIn('grep -Fxq -- "${data_volume}|${data_target}"', migration)
         self.assertIn("__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__", migration)
@@ -237,10 +293,12 @@ class DeploymentHardeningContractTests(TestCase):
         migrate_runner = installer.split(
             "run_postgres_runtime_migration() {", 1
         )[1].split("\n}\n", 1)[0]
-        self.assertIn(
-            "prove legacy PostgreSQL detachment immediately before migration",
-            migrate_runner,
-        )
+        self.assertNotIn("prove legacy PostgreSQL detachment", migrate_runner)
+        self.assertIn("is_exact_interrupted_postgres_source", ownership)
+        self.assertIn("pg_catalog.pg_attribute", migration)
+        self.assertNotIn("REVOKE ALL ON ALL TYPES", migration)
+        self.assertIn("REVOKE USAGE ON TYPE %I.%I FROM PUBLIC", migration)
+        self.assertEqual(migration.count("pg_catalog.array_subscript_handler"), 2)
 
     def test_postgres_migration_hostile_label_bytes_never_reach_deletion(self):
         migration = ROOT / "deploy" / "postgres" / "migrate-runtime.sh"
@@ -289,6 +347,10 @@ if arguments and (
     raise SystemExit(97)
 
 if arguments and arguments[0] == "ps":
+    raise SystemExit(0)
+
+if arguments[:2] == ["info", "--format"]:
+    print("Docker Desktop|linux")
     raise SystemExit(0)
 
 if arguments[:2] == ["volume", "inspect"]:
@@ -345,6 +407,8 @@ raise SystemExit(99)
                         "backupsheep_bootstrap",
                         roles,
                         storage_witness,
+                        "migrated-debian-v1",
+                        "3",
                     ],
                     check=False,
                     capture_output=True,
@@ -407,6 +471,12 @@ raise SystemExit(99)
             "--env DB_HOST=db",
             '--file Dockerfile --tag "$TEST_APP_IMAGE"',
             '--file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE"',
+            '--file deploy/ci/Dockerfile.postgres-runtime-source',
+            '--tag "$TEST_LEGACY_POSTGRES_IMAGE"',
+            '--file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE"',
+            '--file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE"',
+            '--file Dockerfile.release-verifier --tag "$TEST_RELEASE_VERIFIER_IMAGE"',
+            "run: timeout --signal=TERM --kill-after=30s 45m deploy/ci/run-postgres-runtime-migration-e2e.sh",
             "docker network create --driver bridge --internal",
             'docker create \\\n',
             "--tmpfs /code/_storage:rw,noexec,nosuid,nodev",
@@ -441,7 +511,7 @@ raise SystemExit(99)
         self.assertNotIn("--network-alias database", gate)
         self.assertNotIn("--env DB_HOST=database", gate)
 
-        self.assertEqual(gate.count("docker build --pull --no-cache"), 3)
+        self.assertEqual(gate.count("docker build --pull --no-cache"), 7)
         self.assertNotIn("continue-on-error", gate)
         self.assertNotIn("--privileged", gate)
         self.assertNotIn("docker.sock", gate)
@@ -654,6 +724,28 @@ raise SystemExit(99)
             "preflight:\n        condition: service_completed_successfully", app
         )
 
+    def test_migrate_one_shot_rechecks_artifact_provider_rows_every_run(self):
+        migrate = self.service_block("migrate")
+        self.assertIn(
+            'command: ["python", "manage.py", "migrate_and_verify_artifact_provider"]',
+            migrate,
+        )
+        self.assertNotIn('command: ["python", "manage.py", "migrate"]', migrate)
+
+    def test_manual_production_install_uses_fresh_artifact_provider_proof(self):
+        guide = (ROOT / "docs" / "guides" / "installation.md").read_text(
+            encoding="utf-8"
+        )
+        manual = guide.split("## Manual process installation (advanced)", 1)[1]
+        migration_command = (
+            "BACKUPSHEEP_RUNTIME_ROLE=migration "
+            "\\\n  python manage.py migrate_and_verify_artifact_provider"
+        )
+        self.assertIn(migration_command, manual)
+        self.assertNotIn("python manage.py migrate --noinput", manual)
+        self.assertIn("Generation `1-pending-empty`", manual)
+        self.assertIn("rollback transaction are installer-owned", manual)
+
     def test_installation_secrets_are_files_not_inspectable_environment_values(self):
         secrets = self.compose.split("\nsecrets:\n", 1)[1]
         for name in (
@@ -680,8 +772,8 @@ raise SystemExit(99)
             "onboarding_token",
             "ssh_managed_database_private_key",
             "ssh_managed_files_private_key",
-            "artifact_kms_database_aws_credentials",
-            "artifact_kms_files_aws_credentials",
+            "artifact_local_file_database_keyring",
+            "artifact_local_file_files_keyring",
         ):
             with self.subTest(secret=name):
                 self.assertIn(
@@ -784,11 +876,32 @@ raise SystemExit(99)
         reviewed_keys.update(
             re.findall(r"^\s+([A-Z][A-Z0-9_]*):", self.compose, re.MULTILINE)
         )
+        # These values are installer/wrapper evidence, bootstrap state, or inputs to
+        # separately approved overlays. They must remain absent from the base
+        # application-container environment rather than being interpolated merely to
+        # satisfy this completeness check.
+        installer_only_keys = {
+            "BACKUPSHEEP_IMAGE_MODE",
+            "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE",
+            "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE",
+            "BACKUPSHEEP_RELEASE_APP_IMAGE",
+            "BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256",
+            "BACKUPSHEEP_RELEASE_EGRESS_IMAGE",
+            "BACKUPSHEEP_RELEASE_POSTGRES_IMAGE",
+            "BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE",
+            "BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE",
+            "BACKUPSHEEP_RELEASE_SOURCE_COMMIT",
+            "BACKUPSHEEP_RELEASE_TAG",
+        }
         # This compatibility-only path is deliberately unavailable in stock Compose;
         # managed SSH trust is materialized per operation from PostgreSQL instead.
         self.assertEqual(
             sample_keys - reviewed_keys,
-            {"SSH_KNOWN_HOSTS_PATH", "BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID"},
+            {
+                "SSH_KNOWN_HOSTS_PATH",
+                "BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID",
+                *installer_only_keys,
+            },
         )
         self.assertNotIn("BACKUPSHEEP_UNREVIEWED_SECRET", reviewed_keys)
 
@@ -847,9 +960,6 @@ raise SystemExit(99)
         model = json.loads(rendered.stdout)
         for service, allowed in INTEGRATION_CREDENTIAL_ALLOWLIST.items():
             service_environment = model["services"][service]["environment"]
-            self.assertEqual(
-                service_environment.get("WORDPRESS_INTEGRATION_ENABLED"), "true"
-            )
             self.assertEqual(
                 service_environment.get("BASECAMP_INTEGRATION_ENABLED"), "true"
             )
@@ -1127,6 +1237,16 @@ raise SystemExit(99)
             "timeout --version | grep -Fqx 'timeout (GNU coreutils) 9.7'",
             dockerfile,
         )
+        self.assertIn(
+            'com.backupsheep.egress.openssl-package-version="3.5.8-r0"',
+            dockerfile,
+        )
+        self.assertEqual(dockerfile.count("libcrypto3=3.5.8-r0"), 2)
+        self.assertEqual(dockerfile.count("libssl3=3.5.8-r0"), 2)
+        self.assertEqual(
+            dockerfile.count("grep -Fxq 'libcrypto3-3.5.8-r0'"), 2
+        )
+        self.assertEqual(dockerfile.count("grep -Fxq 'libssl3-3.5.8-r0'"), 2)
         self.assertIn(
             "meta skuid != 10020 meta skuid != @strict_workload_lease reject",
             entrypoint,
@@ -1454,18 +1574,44 @@ raise SystemExit(99)
         self.assertNotIn("--user 0:0", guide)
         self.assertNotIn("chown -R 10001:10001 /code/_storage /backups", guide)
 
-    def test_all_supported_paas_manifests_use_crash_safe_scheduler(self):
-        expected = "backupsheep.scheduler:BackupDatabaseScheduler"
-        for relative in (
+    def test_unsupported_one_click_paas_templates_are_not_shipped_or_advertised(self):
+        retired_paths = (
+            "app.json",
             "heroku.yml",
             "render.yaml",
+            "startup.sh",
+            "deploy/railway/web.railway.json",
+            "deploy/railway/worker.railway.json",
             "deploy/railway/beat.railway.json",
+        )
+        for relative in retired_paths:
+            with self.subTest(path=relative):
+                self.assertFalse((ROOT / relative).exists())
+
+        for relative in ("docs/render.md", "docs/heroku.md", "docs/railway.md"):
+            with self.subTest(tombstone=relative):
+                tombstone = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("does not support or ship", tombstone)
+                self.assertIn("split-role manual process contract", tombstone)
+
+        advertised_surfaces = "\n".join(
+            (ROOT / relative).read_text(encoding="utf-8")
+            for relative in (
+                "README.md",
+                "docs/README.md",
+                ".github/workflows/supply-chain-security.yml",
+            )
+        )
+        for retired_reference in (
+            "render.com/deploy",
+            "heroku.com/deploy",
+            "docs/render.md",
+            "docs/heroku.md",
+            "docs/railway.md",
+            "deploy/railway/",
         ):
-            with self.subTest(manifest=relative):
-                self.assertIn(
-                    expected,
-                    (ROOT / relative).read_text(encoding="utf-8"),
-                )
+            with self.subTest(reference=retired_reference):
+                self.assertNotIn(retired_reference, advertised_surfaces)
 
     def test_onboarding_token_is_not_printed_by_installer(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")

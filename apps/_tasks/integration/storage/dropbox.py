@@ -1,10 +1,10 @@
 """Crash-safe, integrity-verified Dropbox backup uploads.
 
-Dropbox does not expose user-defined object metadata for ordinary app files.  The
-immutable ownership marker for a BackupSheep object is therefore its exact,
-deterministic path (``/<backup uuid>.zip``), combined with the verified byte
-count and SHA-256 recorded in the storage point.  Uploads use ``add`` mode so a
-retry can never overwrite an object already present at that path.
+Dropbox does not expose user-defined object metadata for ordinary app files. The
+immutable ownership marker for an encrypted BackupSheep object is therefore its
+exact opaque ``/<random envelope uuid>.bse1`` path, combined with the verified
+byte count and SHA-256 recorded in the storage point. Uploads use ``add`` mode so
+a retry can never overwrite an object already present at that path.
 """
 
 from __future__ import annotations
@@ -31,11 +31,11 @@ from apps._tasks.exceptions import (
     NodeDropboxUploadFailedError,
     NodeSnapshotDeleteFailed,
 )
+from apps._tasks.artifact_encryption import storage_artifact_identity
 from apps.api.v1.utils.api_helpers import bs_decrypt
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreWebsiteBackup,
-    CoreWordPressBackup,
 )
 from apps.console.node.models import CoreNode
 from django.utils import timezone
@@ -143,22 +143,22 @@ def _dropbox_chunk_size():
     return max(1, min(configured, 150 * 1024 * 1024))
 
 
-def _backup_identifier(backup):
-    identifier = str(getattr(backup, "uuid_str", None) or getattr(backup, "uuid", ""))
+def _artifact_filename(backup):
+    filename = storage_artifact_identity(backup).filename
     if (
-        not identifier
-        or identifier in {".", ".."}
-        or "\x00" in identifier
-        or "/" in identifier
-        or "\\" in identifier
-        or os.path.basename(identifier) != identifier
+        not filename
+        or filename in {".", ".."}
+        or "\x00" in filename
+        or "/" in filename
+        or "\\" in filename
+        or os.path.basename(filename) != filename
     ):
-        raise _DropboxIntegrityError("The backup identifier is invalid.")
-    return identifier
+        raise _DropboxIntegrityError("The artifact object name is invalid.")
+    return filename
 
 
-def _deterministic_path(identifier):
-    return f"/{identifier}.zip"
+def _deterministic_path(filename):
+    return f"/{filename}"
 
 
 def _file_identity(path):
@@ -394,8 +394,12 @@ def _dropbox_candidates(dbx, path):
                 # A renamed UUID object is evidence of a prior collision.  It is
                 # intentionally included so the retry fails closed instead of
                 # silently creating a second object.
-                stem = filename[:-4] if filename.endswith(".zip") else filename
-                is_uuid_variant = name.startswith(f"{stem} (") and name.endswith(".zip")
+                stem, suffix = os.path.splitext(filename)
+                is_uuid_variant = bool(
+                    suffix
+                    and name.startswith(f"{stem} (")
+                    and name.endswith(suffix)
+                )
                 if normalized["path_lower"] == expected_path.lower() or name == filename or is_uuid_variant:
                     _append_unique(candidates, entry)
             has_more = bool(_value(page, "has_more", False))
@@ -662,9 +666,11 @@ def storage_dropbox(stored_backup):
     """Upload one backup, adopting a verified Dropbox object on every retry."""
     try:
         backup = stored_backup.backup
-        identifier = _backup_identifier(backup)
-        local_zip = os.path.join("_storage", f"{identifier}.zip")
-        path = _deterministic_path(identifier)
+        filename = _artifact_filename(backup)
+        artifact_identity = storage_artifact_identity(backup)
+        identifier = artifact_identity.identifier
+        local_zip = os.path.join("_storage", filename)
+        path = _deterministic_path(filename)
         metadata, state = _state(stored_backup)
         persisted_identity = _expected_identity(state)
         identity = persisted_identity
@@ -676,7 +682,7 @@ def storage_dropbox(stored_backup):
             }
         )
         path = state["path"]
-        if _normalize_path(path).lower() != _normalize_path(_deterministic_path(identifier)).lower():
+        if _normalize_path(path).lower() != _normalize_path(_deterministic_path(filename)).lower():
             raise _DropboxIntegrityError("The persisted Dropbox path is not this backup's deterministic destination.")
         if identity is None:
             identity = _file_identity(local_zip)
@@ -799,9 +805,6 @@ def storage_dropbox_delete(node, backup_name):
             backup = CoreWebsiteBackup.objects.get(uuid=backup_name)
         elif node.type == CoreNode.Type.DATABASE:
             backup = CoreDatabaseBackup.objects.get(uuid=backup_name)
-        elif node.type == CoreNode.Type.SAAS:
-            backup = CoreWordPressBackup.objects.get(uuid=backup_name)
-
         if backup:
             dbx = dropbox.Dropbox(
                 oauth2_access_token=bs_decrypt(

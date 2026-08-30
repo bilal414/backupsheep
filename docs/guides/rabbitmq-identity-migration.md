@@ -62,7 +62,7 @@ from the RabbitMQ data-format upgrade:
    completes this identity transition after the 4.3 witness; do not run a competing
    identity-only command in parallel.
 4. When the data witness is already `4.3`, run the exact installer once with all normal
-   domain/project/KMS inputs plus `--migrate-rabbitmq-identities`. Also pass
+   domain/project inputs plus `--migrate-rabbitmq-identities`. Also pass
    `--migrate-database-identities` and/or `--migrate-staging-layout` when those current
    gates are pending. Do not enable operations on this run.
 5. Wait for `rabbitmq-volume-init`, `rabbitmq-provision`, `staging-provision`, database

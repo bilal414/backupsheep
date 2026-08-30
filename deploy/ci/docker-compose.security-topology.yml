@@ -1,7 +1,7 @@
 # CI-only assertions layered over the stock deployment model.  The application,
 # PostgreSQL, egress and RabbitMQ service definitions still come from the production
 # Compose file; this overlay only removes the host listener and supplies an observable
-# readiness check for the one worker exercised by the gate.
+# readiness checks for the workers exercised by the gate.
 services:
   app-egress-guard:
     ports: !reset []
@@ -28,6 +28,28 @@ services:
       BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
 
   worker-cloud:
+    env_file: !reset []
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+    healthcheck:
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker-database:
+    env_file: !reset []
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+    healthcheck:
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker-files:
     env_file: !reset []
     environment:
       BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"

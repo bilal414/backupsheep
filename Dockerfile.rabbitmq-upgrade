@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
+
+# This image exists only for the explicitly witnessed RabbitMQ 4.2 compatibility
+# hop. It is built and signed independently from the normal 4.3 runtime so an
+# approved Compose override cannot substitute it into the steady-state service.
+FROM rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095
+
+LABEL org.opencontainers.image.title="BackupSheep RabbitMQ upgrade runtime" \
+      org.opencontainers.image.description="RabbitMQ 4.2.9 compatibility hop with reviewed security package updates" \
+      org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
+      org.opencontainers.image.licenses="MPL-2.0" \
+      com.backupsheep.rabbitmq.runtime-generation="4.2.9-alpine3.23-openssl-v1" \
+      com.backupsheep.rabbitmq.base-index-digest="sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095" \
+      com.backupsheep.rabbitmq.openssl-package-version="3.5.8-r0"
+
+RUN set -eux; \
+    apk add --no-cache \
+        'libcrypto3=3.5.8-r0' \
+        'libssl3=3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libcrypto3-3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libssl3-3.5.8-r0'; \
+    test "$(id -u rabbitmq):$(id -g rabbitmq)" = '100:101'; \
+    test -x /usr/local/bin/docker-entrypoint.sh; \
+    test -x /opt/rabbitmq/sbin/rabbitmq-server
+
+USER 100:101

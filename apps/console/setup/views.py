@@ -17,6 +17,7 @@ from apps.api.v1.utils.oauth_security import (
     validated_https_endpoint,
 )
 from backupsheep.source_recovery_policy import (
+    RETIRED_SOURCE_FAMILIES,
     SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
     source_backup_creation_available,
 )
@@ -30,9 +31,6 @@ class IntegrationSelectView(LoginRequiredMixin, TemplateView):
 
         context["heading"] = "Integrations"
         context["active_url"] = "setup"
-        context["wordpress_source_protection_available"] = (
-            source_backup_creation_available("wordpress")
-        )
         context["basecamp_source_protection_available"] = (
             source_backup_creation_available("basecamp")
         )
@@ -55,8 +53,17 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
         i_name = self.request.GET.get("i_name")
         member = self.request.user.member
 
-        if CoreIntegration.objects.filter(code=integration_code).exists():
-            integration = CoreIntegration.objects.get(code=integration_code)
+        if integration_code in RETIRED_SOURCE_FAMILIES:
+            return redirect("console:setup:integration_select")
+
+        if CoreIntegration.objects.filter(
+            code=integration_code,
+            enabled=True,
+        ).exists():
+            integration = CoreIntegration.objects.get(
+                code=integration_code,
+                enabled=True,
+            )
             source_protection_available = source_backup_creation_available(
                 integration.code
             )
@@ -187,7 +194,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                 for field_name, category_name in (
                     ("website", "website"),
                     ("database", "database"),
-                    ("wordpress", "saas"),
+                    ("saas", "saas"),
                 ):
                     usage = categories.get(category_name, {})
                     setattr(
@@ -332,7 +339,10 @@ class IntegrationCreateNodeView(LoginRequiredMixin, TemplateView):
 
         member = self.request.user.member
 
-        integration = CoreIntegration.objects.get(code=integration_code)
+        integration = CoreIntegration.objects.get(
+            code=integration_code,
+            enabled=True,
+        )
 
         query = Q(
             account=member.get_current_account(),
@@ -364,9 +374,15 @@ class IntegrationModifyNodeView(LoginRequiredMixin, TemplateView):
         connection_id = self.kwargs.get("connection_id")
         node_id = self.kwargs.get("node_id")
 
+        if integration_code in RETIRED_SOURCE_FAMILIES:
+            return redirect("console:setup:integration_select")
+
         member = self.request.user.member
 
-        integration = CoreIntegration.objects.get(code=integration_code)
+        integration = CoreIntegration.objects.get(
+            code=integration_code,
+            enabled=True,
+        )
 
         query = Q(
             account=member.get_current_account(),

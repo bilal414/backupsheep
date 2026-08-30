@@ -12,7 +12,7 @@ worker, scheduler, or preflight container receives another lane's password.
 | Beat | Long-lived scheduler | Beat tables plus narrowly scoped scheduled-backup occurrence/outbox writes; no member, destination-configuration, source-worker, notification, or replay-row access |
 | Cloud | Cloud/default worker | Explicit remote-provider tables and only cloud-scoped shared rows |
 | Database | Database worker | Database source/backup/restore rows and database-scoped shared rows; no destination-configuration reads |
-| Files | Files worker | Website, WordPress and Basecamp source rows and files-scoped shared rows; no destination-configuration reads |
+| Files | Files worker | Website and Basecamp source rows and files-scoped shared rows; no destination-configuration reads |
 | Storage | Storage worker | Storage configuration, local artifact handoff, deletion and recovery rows; no user/session/token, source-auth, cloud-auth, notification-secret, or Beat tables |
 | Logs | Logs worker | Run-log/notification delivery rows and bounded terminal replay cleanup |
 
@@ -54,9 +54,15 @@ limit causes `db-seal` or preflight to fail closed.
 ## Scope
 
 Fresh verified installs create generation 3 automatically. This runbook covers an
-existing stock Docker database on generation 2 or the older shared-superuser model.
-It does not automatically rewrite identities for external/managed PostgreSQL or a
-deployment using `DATABASE_URL`; that operator owns its roles and equivalent grants.
+existing stock database on the same reviewed PostgreSQL runtime at generation 2 or the
+older shared-superuser model. It does not make the shared-superuser database eligible
+for the separate Debian-to-Alpine runtime migration: that combined path is refused
+because the application-held superuser made its database body untrusted. Follow the
+[runtime migration guide](postgres-runtime-migration.md#unsupported-shared-superuser-databases)
+and use a new installation directory/project namespace or a separately reviewed
+data-only recovery. This runbook also does not automatically rewrite identities for
+external/managed PostgreSQL or a deployment using `DATABASE_URL`; that operator owns
+its roles and equivalent grants.
 
 The provisioner accepts only the reviewed stock database shape: application objects
 in `public`, the expected Django tables/routines/triggers, and ownership by the marked
@@ -84,27 +90,17 @@ RLS. Before starting:
 ## Stage the transition
 
 Run the verified installer with the explicit database migration flag and all normal
-installation/KMS arguments. `--skip-start` is useful for a change-review pause:
+installation arguments. `--skip-start` is useful for a change-review pause:
 
 ```bash
 TARGET_COMMIT='<40-character-reviewed-release-commit>'
 CURRENT_DOMAIN='<existing-public-hostname>'
-KMS_KEY_ARN='<resolved-symmetric-kms-key-arn>'
-KMS_REGION='<aws-region>'
-KMS_ALLOWED_KEY_ARNS="${KMS_KEY_ARN}"
-KMS_DATABASE_CREDENTIALS='<canonical-private-database-lane-credentials-file>'
-KMS_FILES_CREDENTIALS='<different-canonical-private-files-lane-credentials-file>'
 ./install.sh \
   --ref "${TARGET_COMMIT}" \
   --install-dir "$PWD" \
   --project-name backupsheep \
   --domain "${CURRENT_DOMAIN}" \
   --migrate-database-identities \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_ALLOWED_KEY_ARNS}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --skip-start
 ```
 
@@ -134,11 +130,6 @@ existing-install transition remains pending:
   --install-dir "$PWD" \
   --project-name backupsheep \
   --domain "${CURRENT_DOMAIN}" \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_ALLOWED_KEY_ARNS}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --migrate-database-identities
 ```
 

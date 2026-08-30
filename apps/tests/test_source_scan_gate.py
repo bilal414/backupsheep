@@ -156,6 +156,30 @@ class SourceScanGateTests(TestCase):
                     "Type": "dockerfile",
                     "MisconfSummary": {"Successes": 20, "Failures": 0},
                 },
+                {
+                    "Target": "Dockerfile.rabbitmq",
+                    "Class": "config",
+                    "Type": "dockerfile",
+                    "MisconfSummary": {"Successes": 20, "Failures": 0},
+                },
+                {
+                    "Target": "Dockerfile.rabbitmq-upgrade",
+                    "Class": "config",
+                    "Type": "dockerfile",
+                    "MisconfSummary": {"Successes": 20, "Failures": 0},
+                },
+                {
+                    "Target": "Dockerfile.release-verifier",
+                    "Class": "config",
+                    "Type": "dockerfile",
+                    "MisconfSummary": {"Successes": 20, "Failures": 0},
+                },
+                {
+                    "Target": "deploy/ci/Dockerfile.postgres-runtime-source",
+                    "Class": "config",
+                    "Type": "dockerfile",
+                    "MisconfSummary": {"Successes": 20, "Failures": 0},
+                },
             ],
         }
         self.secret_report = {
@@ -583,6 +607,7 @@ class SourceScanGateTests(TestCase):
             "scripts/install_release_tools.py",
             "--tool actionlint",
             "--tool trivy",
+            "--tool oras",
             "actionlint\" -version",
             "Validate every GitHub Actions workflow",
             "empty-actionlint.yaml",
@@ -601,6 +626,13 @@ class SourceScanGateTests(TestCase):
             '--config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml"',
             '--secret-config "$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml"',
             '--ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore"',
+            "scripts/prepare_trivy_db.py prepare",
+            "scripts/prepare_trivy_db.py verify",
+            "deploy/trivy-db-lock.json",
+            "--skip-db-update",
+            "--skip-java-db-update",
+            "--skip-check-update",
+            "--offline-scan",
             "--scanners vuln,misconfig",
             "--scanners secret",
             "--severity HIGH,CRITICAL",
@@ -615,12 +647,14 @@ class SourceScanGateTests(TestCase):
             "python3 -m unittest apps.tests.test_source_scan_gate -v",
             '--secret-report "$secret_report"',
             '--canary-report "$canary_report"',
+            '--trivy-db-lock deploy/trivy-db-lock.json',
+            '--trivy-db-evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"',
             "deploy/source-scan-policy.json",
             'test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"',
             'test ! -L "$private_report"',
             "Refusing a pre-existing source-scan tool path.",
             "backupsheep-source-scan-evidence/summary.json",
-            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, static_job)

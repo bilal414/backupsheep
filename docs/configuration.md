@@ -3,14 +3,14 @@
 Configuration is resolved at boot. Stock Compose reads non-secret and optional
 integration values from `.env`, then blanks known integration credential families and
 restores only each role's exact family, while Django, per-lane database/broker/signing,
-onboarding, database/files KMS and optional managed-SSH-key values come from separate
+onboarding, database/files artifact keyrings, and optional managed-SSH-key values come from separate
 read-only files under `.secrets`. Prefer the exact-ref installer; for a reviewed manual
 pause follow the [installer-staged Compose setup](guides/installation.md#manual-docker-compose-installation).
 
-**How keys are read.** `.env_sample` also supplies the non-secret defaults when a platform
-injects environment variables without mounting a `.env` file (such as Render or Railway).
-A real `.env` and then process environment override those defaults. File-backed values
-then override the allowlisted direct secrets. For a stock manual install, keep
+**How keys are read.** `.env_sample` also supplies the non-secret defaults when a reviewed
+process manager injects environment variables without mounting a `.env` file. A real
+`.env` and then process environment override those defaults. File-backed values then
+override the allowlisted direct secrets. For a stock manual install, keep
 `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
 `ONBOARDING_INSTALL_TOKEN` blank in `.env`; Compose sets fixed `/run/secrets/...` pointers
 and grants each role only the files it needs.
@@ -87,17 +87,16 @@ durable sweeps.
 
 ## Task queue (Celery / RabbitMQ)
 
-BackupSheep supports RabbitMQ only. Use either a complete AMQP URL or the connection
-fragments supplied by hosted-platform templates. When `RABBITMQ_HOST` is set, the fragment
-variables take precedence and BackupSheep URL-encodes the username, password, and virtual
-host before constructing the AMQP URL. The Heroku template's RabbitMQ-specific CloudAMQP
-plan supplies `CLOUDAMQP_URL`; it takes precedence over the Compose default URL when no
-fragments are present.
+BackupSheep supports RabbitMQ only. Use either a complete AMQP URL or reviewed connection
+fragments. When `RABBITMQ_HOST` is set, the fragment variables take precedence and
+BackupSheep URL-encodes the username, password, and virtual host before constructing the
+AMQP URL. `CLOUDAMQP_URL` remains a generic managed-RabbitMQ compatibility input and takes
+precedence over the Compose default URL when no fragments are present.
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|
 | `CELERY_BROKER_URL` | optional | blank | Full managed/external RabbitMQ AMQP URL (`amqp://` or `amqps://`). |
-| `CLOUDAMQP_URL` | optional | unset | RabbitMQ AMQP URL injected by the Heroku CloudAMQP add-on. |
+| `CLOUDAMQP_URL` | optional | unset | Compatibility input for a managed RabbitMQ AMQP URL. |
 | `RABBITMQ_HOST` | Compose | `rabbitmq` | RabbitMQ hostname for fragment-based configuration. |
 | `RABBITMQ_PORT` | optional | `5672` | RabbitMQ AMQP port for fragment-based configuration. |
 | `RABBITMQ_SCHEME` | optional | `amqp` | Use `amqps` for any broker outside the stock Compose/loopback boundary. |
@@ -111,7 +110,6 @@ fragments are present.
 | `RABBITMQ_CA_CERT` | optional | system roots | Private CA bundle for `amqps`; hostname verification is always enabled. |
 | `LOG_RETENTION_DAYS` | optional | `30` | Days to keep run logs in the files/database/storage private work volumes and activity rows in PostgreSQL. Lane tasks prune files at 03:00, database at 03:05 and storage at 03:10; `delete_old_db_logs` prunes `CoreLog` rows at 03:30. |
 | `S3_DOWNLOAD_URL_EXPIRES` | optional | `300` | Compatibility-only provider-signed URL lifetime for explicitly enabled non-enterprise legacy artifacts; values above `3600` are rejected. It does not enable stock BSE1 direct download. |
-| `WORDPRESS_PRIVATE_TARGET_CIDRS` | optional | blank | Exact comma-separated RFC1918/ULA CIDRs allowed for HTTPS WordPress origins. Blank rejects all private targets; loopback, link-local, reserved and metadata addresses are always rejected. |
 | `ALLOW_INSECURE_FTP` | optional | `false` | Compatibility escape hatch for plaintext FTP. Keep disabled; prefer SFTP or certificate-verified FTPS because FTP exposes credentials and backup data in transit. |
 | `SSH_KNOWN_HOSTS_PATH` | compatibility only | `_storage/ssh_known_hosts` outside stock Compose | Separately reviewed non-stock file setting. Stock Compose uses account-scoped PostgreSQL approvals/audit and transient exact per-operation private-runtime trust files instead. |
 | `SSH_MANAGED_DATABASE_PUBLIC_KEY` | optional | blank | Public half of the database-worker Ed25519 identity; must match its lane secret and differ from the files identity. |
@@ -122,19 +120,46 @@ Production allows plaintext AMQP only on loopback or the exact stock `rabbitmq` 
 service. External and multi-host brokers must use `amqps`; certificate validation and
 hostname matching are mandatory. System trust roots are used unless a private CA is set.
 
-## Artifact encryption and KMS
+## Artifact encryption and local-file keys
 
-Stock production requires BSE1 chunked AES-256-GCM-SIV envelopes, enterprise mode,
-AWS KMS and legacy restore disabled. The exact installer requires a resolved symmetric
-KMS key ARN, its region, an ARN allowlist containing every key still required for
-restore/rotation, and two distinct canonical private AWS credential files. Only the
-matching database/files source lane receives each resulting secret; storage receives
-ciphertext and no KMS identity.
+Stock production requires BSE1 format-v2 chunked AES-256-GCM-SIV envelopes, enterprise mode, the
+`local-file` provider, and legacy restore disabled. The installer atomically generates
+independent database/files 256-bit keyrings under `.secrets`; Compose grants each only to
+its matching source worker. Storage receives ciphertext and no root key. This artifact
+encryption path requires no AWS account, AWS credentials, or AWS KMS; AWS is used only
+when an operator separately configures an optional AWS source, storage destination, or
+Amazon SES email integration.
 
-IAM and key policy must restrict cryptographic actions by the complete encryption-context
-key set and exact `bse:lane` value. Prove same-lane success and cross-lane denial before
-enabling operations. Enterprise mode rejects custom/insecure KMS endpoints and the local
-development key provider. See [Private staging and ciphertext handoff](security/staging-isolation.md).
+BSE1 v2 keeps the plaintext SHA-256, artifact-context SHA-256, and backup UUID out
+of its readable header. Each ciphertext handoff uses a distinct random envelope
+UUID; the private digests are authenticated inside the encrypted terminal record
+and checked by the decrypting source lane before plaintext publication. Storage
+still necessarily observes ciphertext size, chunk geometry, transfer timing, and
+the random envelope identity. Format-v1 artifacts are rejected rather than
+silently accepted or converted.
+
+The current runtime provider registry contains only `local-file` and
+`local-development`. `local-file` is the stock production provider;
+`local-development` is for development/test and is rejected in production enterprise
+mode. `aws-kms` is not an active runtime provider: the exact historical identifier remains
+only so the installer and schema history can recognize a legacy policy for a fail-closed
+migration or rollback. It does not load an AWS KMS client or convert an existing KMS wrap.
+
+When `DJANGO_SERVER=prod`, omitting `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE` defaults to
+`bse1`; a direct deployment does not silently write plaintext. `legacy-only` remains an
+explicit non-enterprise upgrade compatibility setting and must never be treated as a
+hardened production default.
+
+Back up both keyrings with the PostgreSQL recovery set. Reruns preserve their exact bytes,
+and a missing keyring in an existing installation fails closed rather than generating a
+replacement. Enterprise mode rejects the environment-backed local-development provider.
+These are exportable software keys stored on filesystems, not non-exportable HSM/KMS
+keys. Code in the matching source lane, the Docker daemon, or host administrators can
+access that lane's root material; protect the host and independently encrypted off-host
+copies accordingly. The stock runtime does not currently provide a hardware-backed
+artifact-key provider.
+See [Private staging and ciphertext handoff](security/staging-isolation.md) for rotation,
+legacy-key retention, loss consequences, and non-Docker operation.
 
 ## Container egress
 
@@ -175,17 +200,6 @@ review dependencies and authorize the safe reset once with `--migrate-egress-pol
 all six roles become `deny` and all lists are cleared. Customized or mixed legacy policy
 must be reviewed and manually reset first, and the migration flag is rejected once
 generation 2 is active.
-
-WordPress integration keys and optional HTTP Basic credentials are sent only over
-certificate-verified HTTPS. BackupSheep resolves each target once, rejects the entire DNS
-answer if any address violates the target policy, and connects to one approved IP while
-retaining TLS SNI and hostname verification. Private WordPress sites require an explicit
-`WORDPRESS_PRIVATE_TARGET_CIDRS` entry; do not use a broader network than the site needs.
-This application revision requires a BackupSheep WordPress plugin release that reads the
-integration key from `X-BackupSheep-Key`; the legacy query-only v1.8 plugin fails closed
-and must be upgraded before rolling this application change out to WordPress users.
-Pinned WordPress traffic also ignores ambient HTTP(S) proxy variables because a proxy
-would replace the verified connection peer.
 
 Stock Compose stores host-key approvals and their append-only audit in PostgreSQL, then
 materializes the exact current approval only for the operation that needs it. Optional
@@ -233,7 +247,8 @@ and Cloudflare R2). Optional; backup *run* logs are kept on local disk regardles
 
 The **Local Storage** provider keeps BSE1 ciphertext archives on this server (no external
 bucket). It needs no destination credential, but source-lane artifact encryption still
-uses the required external-KMS policy. Only the storage worker may access the archive root.
+uses its required local-file root-key ring. Only the storage worker may access the archive
+root, and it receives no artifact keyring.
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|

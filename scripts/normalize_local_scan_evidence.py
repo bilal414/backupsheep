@@ -14,8 +14,10 @@ from pathlib import Path
 
 from build_release_manifest import _platform_digests, _write_json
 from verify_release import (
+    CONSUMER_VERIFIER_IMAGE_NAME,
     MAX_CONTROL_FILE_BYTES,
     MAX_EVIDENCE_FILE_BYTES,
+    RELEASE_IMAGE_NAMES,
     ReleaseVerificationError,
     _digest,
     _load_json,
@@ -45,20 +47,34 @@ def _decoded_json(value: object, label: str) -> tuple[bytes, dict]:
 def normalize(
     *,
     policy: dict,
-    index_path: Path,
+    index_path: Path | None,
     image_name: str,
     platform: str,
     syft_path: Path,
     trivy_path: Path,
 ) -> None:
     policy = _validate_policy(policy)
-    if image_name not in policy["images"] or platform not in policy["platforms"]:
+    if platform not in policy["platforms"]:
         raise ReleaseVerificationError("the scan image or platform is not authorized")
-    child_digest = _digest(
-        _platform_digests(index_path, policy["platforms"])[platform],
-        "child manifest digest",
-    )
-    reference = f"{policy['images'][image_name]['quarantine_repository']}@{child_digest}"
+    expected_config_digest: str | None = None
+    if image_name == CONSUMER_VERIFIER_IMAGE_NAME:
+        if index_path is not None:
+            raise ReleaseVerificationError("the consumer verifier scan must not accept a release OCI index")
+        verifier = policy["consumer"]["cosign_image"]
+        child = verifier["platforms"][platform]
+        child_digest = _digest(child["manifest_digest"], "consumer verifier child digest")
+        expected_config_digest = _digest(
+            child["config_digest"], "consumer verifier config digest"
+        )
+        reference = f"{verifier['repository']}@{child_digest}"
+    else:
+        if image_name not in policy["images"] or index_path is None:
+            raise ReleaseVerificationError("the release scan requires an authorized image and OCI index")
+        child_digest = _digest(
+            _platform_digests(index_path, policy["platforms"])[platform],
+            "child manifest digest",
+        )
+        reference = f"{policy['images'][image_name]['quarantine_repository']}@{child_digest}"
 
     syft = _mapping(
         _load_json(syft_path, maximum_bytes=MAX_EVIDENCE_FILE_BYTES), "Syft report"
@@ -74,6 +90,8 @@ def normalize(
         raise ReleaseVerificationError("Syft embedded manifest has the wrong digest")
     config = _mapping(manifest.get("config"), "OCI child config")
     config_digest = _digest(config.get("digest"), "OCI child config digest")
+    if expected_config_digest is not None and config_digest != expected_config_digest:
+        raise ReleaseVerificationError("consumer verifier config does not match the policy trust record")
     if metadata.get("imageID") != config_digest:
         raise ReleaseVerificationError("Syft image ID does not match the child config")
     manifest_layers = manifest.get("layers")
@@ -106,8 +124,12 @@ def normalize(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
-    parser.add_argument("--index", type=Path, required=True)
-    parser.add_argument("--image", choices=("app", "postgres", "egress"), required=True)
+    parser.add_argument("--index", type=Path)
+    parser.add_argument(
+        "--image",
+        choices=(*RELEASE_IMAGE_NAMES, CONSUMER_VERIFIER_IMAGE_NAME),
+        required=True,
+    )
     parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     parser.add_argument("--syft", type=Path, required=True)
     parser.add_argument("--trivy", type=Path, required=True)

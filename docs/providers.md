@@ -60,15 +60,14 @@ complete, restorable BSE1 artifact) or
 [Usage → Website backup modes](usage.md#website-backup-modes).
 
 ### SaaS apps
-- **WordPress** (`wordpress`) — unavailable in stock enterprise/BSE1 mode because no
-  complete authenticated export or automatic restore exists.
-- **Basecamp** (`basecamp`) — unavailable in stock enterprise/BSE1 mode for the same
-  recovery reason; legacy compatibility also needs a 37signals OAuth app
+- **Basecamp** (`basecamp`) — unavailable in stock enterprise/BSE1 mode because no
+  complete authenticated export or automatic restore exists; legacy compatibility also
+  needs a 37signals OAuth app
   (`BASECAMP_CLIENT_ID/SECRET`).
 
-Both choices are hidden and all new-protection/backup dispatch boundaries fail closed in
+The choice is hidden and all new-protection/backup dispatch boundaries fail closed in
 enterprise mode. Existing rows remain inspectable. A non-enterprise operator can opt into
-the existing authenticated legacy-download workflow only by enabling the matching family
+the existing authenticated legacy-download workflow only by enabling the family
 flag together with `legacy-only`, legacy restore enabled, and enterprise mode disabled.
 
 > `zendesk` and `slack` rows are seeded but their console tiles are disabled

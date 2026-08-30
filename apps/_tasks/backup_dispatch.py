@@ -18,7 +18,7 @@ from django.db.models import Q
 from django.utils import timezone
 from sentry_sdk import capture_exception
 from backupsheep.source_recovery_policy import (
-    RECOVERY_INCOMPLETE_SOURCE_FAMILIES,
+    SOURCE_CREATION_POLICY_FAMILIES,
     SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
     source_backup_creation_available,
     require_source_backup_creation,
@@ -86,7 +86,7 @@ def _backup_request_ineligible_q():
     )
     unavailable_families = [
         code
-        for code in RECOVERY_INCOMPLETE_SOURCE_FAMILIES
+        for code in SOURCE_CREATION_POLICY_FAMILIES
         if not source_backup_creation_available(code)
     ]
     if unavailable_families:

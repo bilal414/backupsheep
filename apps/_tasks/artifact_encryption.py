@@ -1,7 +1,7 @@
 """Fail-closed BSE1 integration for source, storage, and restore workers.
 
 Plaintext ZIPs exist only in a source/restore lane's private work volume.  A
-source validates the ZIP before asking KMS for a data key, publishes one BSE1
+source validates the ZIP before generating a wrapped data key, publishes one BSE1
 envelope through the ciphertext fence, and then activates its database ledger
 in one transaction.  Storage workers materialize only those ciphertext bytes.
 Restore authenticates the full envelope into anonymous private staging before a
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import os
 import stat
 import uuid
@@ -32,12 +33,12 @@ from apps.console.backup.models import (
     CoreBackupKeyWrap,
 )
 from backupsheep.artifact_crypto import (
-    AWSKMSConfig,
-    AWSKMSKeyProvider,
     ArtifactContext,
     EnvelopeExpectation,
     LocalDevelopmentKeyProvider,
+    LocalFileKeyProvider,
     WrappedDataKey,
+    artifact_provider_policy_witness,
     open_artifact_source,
     read_envelope_header,
     seal_file,
@@ -69,6 +70,17 @@ class RestoreEncryptionPlan:
     envelope: CoreBackupEncryptionEnvelope
     context: ArtifactContext
     wrapped_data_key: WrappedDataKey
+
+
+@dataclass(frozen=True, slots=True)
+class StorageArtifactIdentity:
+    """The only filename/object identity an adapter may expose for this artifact."""
+
+    identifier: str
+    filename: str
+    artifact_format: str
+    ownership_marker: str
+    content_type: str
 
 
 def local_restore_phase_task_id(restore, phase: str) -> str:
@@ -118,7 +130,7 @@ def restore_ciphertext_handoff_identity(
         "handoff_uuid": handoff_uuid,
         "backup_uuid": plan.context.backup_id,
         "target_lane": target_lane,
-        "artifact_name": f"{plan.context.backup_id}.bse1",
+        "artifact_name": f"{plan.envelope.uuid}.bse1",
         "envelope_id": str(plan.envelope.uuid),
         "context_sha256": plan.envelope.context_sha256,
         "size_bytes": plan.artifact.byte_count,
@@ -176,48 +188,63 @@ def _artifact_context(backup) -> ArtifactContext:
         ) from error
 
 
+def _new_envelope_id(backup_id: str) -> uuid.UUID:
+    """Generate a v4 object identity that cannot reveal the backup identifier."""
+
+    try:
+        backup_uuid = uuid.UUID(str(backup_id))
+    except (AttributeError, TypeError, ValueError):
+        raise ArtifactPipelineError("The backup identifier is invalid.") from None
+    for _attempt in range(4):
+        candidate = uuid.uuid4()
+        if candidate != backup_uuid:
+            return candidate
+    raise ArtifactPipelineError(
+        "A distinct random encryption envelope identifier could not be generated."
+    )
+
+
 @contextmanager
 def _configured_provider():
     provider_name = str(
         getattr(settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER", "")
     )
-    if provider_name == "aws-kms":
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id=getattr(settings, "BACKUPSHEEP_ARTIFACT_KMS_KEY_ID", ""),
-                region_name=getattr(
-                    settings, "BACKUPSHEEP_ARTIFACT_KMS_REGION", ""
-                ),
-                allowed_key_ids=tuple(
+    if provider_name == "local-file":
+        runtime_role = str(os.environ.get("BACKUPSHEEP_RUNTIME_ROLE", ""))
+        if runtime_role not in {"database", "files"}:
+            raise ArtifactPipelineError(
+                "The local-file artifact provider is restricted to a source lane."
+            )
+        installation_id = _installation_id()
+        generation = str(
+            getattr(settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION", "")
+        )
+        witness = str(
+            getattr(settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS", "")
+        )
+        if generation != "1" or not hmac.compare_digest(
+            witness,
+            artifact_provider_policy_witness(installation_id, "1"),
+        ):
+            raise ArtifactPipelineError(
+                "The local-file artifact provider generation is not sealed to this installation."
+            )
+        try:
+            provider = LocalFileKeyProvider(
+                str(
                     getattr(
                         settings,
-                        "BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS",
-                        (),
+                        "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH",
+                        "",
                     )
                 ),
-                endpoint_url=getattr(
-                    settings, "BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL", None
-                ),
-                connect_timeout_seconds=getattr(
-                    settings,
-                    "BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS",
-                    5,
-                ),
-                read_timeout_seconds=getattr(
-                    settings,
-                    "BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS",
-                    30,
-                ),
-                max_attempts=getattr(
-                    settings, "BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS", 3
-                ),
-                allow_insecure_endpoint=getattr(
-                    settings,
-                    "BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT",
-                    False,
-                ),
+                lane=runtime_role,
+                installation_id=installation_id,
             )
-        )
+        except Exception as error:
+            raise ArtifactPipelineError(
+                "The lane-scoped artifact keyring is invalid."
+            ) from error
     elif provider_name == "local-development":
         if _enterprise_mode() or str(getattr(settings, "DJANGO_SERVER", "")) == "prod":
             raise ArtifactPipelineError(
@@ -290,14 +317,14 @@ def _expectation(envelope: CoreBackupEncryptionEnvelope) -> EnvelopeExpectation:
     )
 
 
-def _validate_descriptor(descriptor, envelope: CoreBackupEncryptionEnvelope) -> None:
+def _validate_public_descriptor(
+    descriptor, envelope: CoreBackupEncryptionEnvelope
+) -> None:
     expected = _expectation(envelope)
     if (
         descriptor.envelope_id != expected.envelope_id
         or descriptor.header_sha256 != expected.header_sha256
         or descriptor.plaintext_size != expected.plaintext_size
-        or descriptor.plaintext_sha256 != expected.plaintext_sha256
-        or descriptor.context_sha256 != envelope.context_sha256
         or descriptor.ciphertext_size != envelope.ciphertext_byte_count
         or descriptor.chunk_size != envelope.chunk_size
         or descriptor.version != envelope.format_version
@@ -305,6 +332,19 @@ def _validate_descriptor(descriptor, envelope: CoreBackupEncryptionEnvelope) -> 
     ):
         raise ArtifactPipelineError(
             "The BSE1 envelope does not match its durable encryption ledger."
+        )
+
+
+def _validate_authenticated_descriptor(
+    descriptor, envelope: CoreBackupEncryptionEnvelope
+) -> None:
+    _validate_public_descriptor(descriptor, envelope)
+    if (
+        descriptor.plaintext_sha256 != envelope.plaintext_sha256
+        or descriptor.context_sha256 != envelope.context_sha256
+    ):
+        raise ArtifactPipelineError(
+            "The authenticated BSE1 metadata does not match its durable encryption ledger."
         )
 
 
@@ -340,7 +380,10 @@ def _load_active_source_state(backup, *, allow_absent: bool) -> ActiveArtifactSt
         raise ArtifactPipelineError(
             "The backup encryption custody ledger is incomplete."
         ) from error
-    if context != _artifact_context(backup) or envelope.uuid != uuid.UUID(str(backup.uuid_str)):
+    if (
+        context != _artifact_context(backup)
+        or envelope.uuid == uuid.UUID(context.backup_id)
+    ):
         raise ArtifactPipelineError(
             "The encryption envelope is bound to a different backup context."
         )
@@ -349,7 +392,7 @@ def _load_active_source_state(backup, *, allow_absent: bool) -> ActiveArtifactSt
             "The backup must have exactly one durable source artifact."
         )
     artifact = source_rows[0]
-    transfer_name = f"{backup.uuid_str}.bse1"
+    transfer_name = f"{envelope.uuid}.bse1"
     if (
         artifact.artifact_format != CoreBackupArtifact.Format.BSE1
         or artifact.encryption_envelope_id != envelope.pk
@@ -364,6 +407,78 @@ def _load_active_source_state(backup, *, allow_absent: bool) -> ActiveArtifactSt
             "The BSE1 source artifact ledger is incomplete or inconsistent."
         )
     return ActiveArtifactState(artifact, envelope, key_wrap, context, transfer_name)
+
+
+def storage_artifact_identity(backup) -> StorageArtifactIdentity:
+    """Resolve a destination-safe name from the durable source custody ledger.
+
+    BSE1 writes use only the random envelope UUID. The backup UUID filename is
+    retained solely for an explicitly enabled legacy-plaintext operation.
+    """
+
+    if callable(getattr(backup, "get_execution_state", None)):
+        state = _load_active_source_state(backup, allow_absent=True)
+    else:
+        state = None
+    if state is not None:
+        identifier = str(state.envelope.uuid)
+        return StorageArtifactIdentity(
+            identifier=identifier,
+            filename=f"{identifier}.bse1",
+            artifact_format=CoreBackupArtifact.Format.BSE1,
+            ownership_marker=f"bse2:{identifier}",
+            content_type="application/octet-stream",
+        )
+    if _mode() != "legacy-only" or _enterprise_mode():
+        raise ArtifactPipelineError(
+            "The storage object identity has no active encrypted source ledger."
+        )
+    identifier = str(getattr(backup, "uuid_str", "") or "")
+    if (
+        not identifier
+        or len(identifier) > 255
+        or identifier in {".", ".."}
+        or "\x00" in identifier
+        or "/" in identifier
+        or "\\" in identifier
+    ):
+        raise ArtifactPipelineError(
+            "The legacy storage object identity is invalid."
+        )
+    return StorageArtifactIdentity(
+        identifier=identifier,
+        filename=f"{identifier}.zip",
+        artifact_format=CoreBackupArtifact.Format.LEGACY_ZIP,
+        ownership_marker=str(
+            getattr(backup, "pk", None) or getattr(backup, "id", None) or ""
+        ),
+        content_type="application/zip",
+    )
+
+
+def validate_storage_object_key(backup, object_key: object) -> StorageArtifactIdentity:
+    """Require a new encrypted provider key to end in its opaque BSE1 name."""
+
+    identity = storage_artifact_identity(backup)
+    value = str(object_key or "")
+    if not value or "\x00" in value or "\\" in value:
+        raise ArtifactPipelineError("The storage object key is invalid.")
+    basename = value.rstrip("/").rsplit("/", 1)[-1]
+    if identity.artifact_format == CoreBackupArtifact.Format.BSE1:
+        if basename != identity.filename:
+            raise ArtifactPipelineError(
+                "The storage object key is not bound to its artifact identity."
+            )
+        backup_uuid = str(uuid.UUID(str(backup.uuid_str)))
+        if backup_uuid in value or value.endswith(".zip"):
+            raise ArtifactPipelineError(
+                "An encrypted storage object key exposes a private backup identity."
+            )
+    elif not basename.endswith(".zip"):
+        raise ArtifactPipelineError(
+            "The legacy storage object key is not a ZIP artifact."
+        )
+    return identity
 
 
 def _delete_private_plaintext(archive_path: Path) -> None:
@@ -400,7 +515,7 @@ def _validate_published_source(state: ActiveArtifactState) -> None:
     )
     path = fence.path / state.transfer_name
     descriptor = read_envelope_header(path, trusted_source_root=fence.path)
-    _validate_descriptor(descriptor, state.envelope)
+    _validate_public_descriptor(descriptor, state.envelope)
     byte_count, checksum = _file_identity(path)
     if (
         byte_count != state.artifact.byte_count
@@ -575,7 +690,7 @@ def seal_or_validate_source_artifact(backup, archive_path, *, zip_verifier):
         raise ArtifactPipelineError(
             "The local backup archive is not a private regular file."
         )
-    # The cheapest validation runs before any KMS operation.
+    # The cheapest validation runs before opening lane root-key material.
     zip_verifier(str(archive))
     plaintext_size, plaintext_sha256 = _file_identity(archive)
     context = _artifact_context(backup)
@@ -584,7 +699,7 @@ def seal_or_validate_source_artifact(backup, archive_path, *, zip_verifier):
     )
     chunk_count = (plaintext_size + chunk_size - 1) // chunk_size
     # Reserve the full plaintext payload plus a conservative maximum header and
-    # per-record framing before KMS can generate a key or sealing can consume IO.
+    # per-record framing before the provider can generate a key or sealing can consume IO.
     require_transfer_capacity(
         required_bytes=plaintext_size + (64 * 1024) + (chunk_count * 64) + 128,
         required_inodes=3,
@@ -593,7 +708,8 @@ def seal_or_validate_source_artifact(backup, archive_path, *, zip_verifier):
         backup.uuid_str,
         installation_id=context.installation_id,
     )
-    transfer_name = f"{backup.uuid_str}.bse1"
+    envelope_id = _new_envelope_id(backup.uuid_str)
+    transfer_name = f"{envelope_id}.bse1"
     if any(name != ".backupsheep-ciphertext-fence-v1.json" for name in os.listdir(fence.path)):
         # No database ledger owns this inventory, so it can only be a complete
         # crash orphan.  The staging boundary validates every entry before delete.
@@ -613,7 +729,7 @@ def seal_or_validate_source_artifact(backup, archive_path, *, zip_verifier):
             provider=provider,
             context=context,
             enterprise_mode=_enterprise_mode(),
-            envelope_id=uuid.UUID(str(backup.uuid_str)),
+            envelope_id=envelope_id,
             chunk_size=chunk_size,
             trusted_source_root=root,
             trusted_destination_root=fence.path,
@@ -712,7 +828,8 @@ def storage_upload_artifact(backup, *, legacy_verifier):
         required_bytes=state.artifact.byte_count,
         required_inodes=2,
     )
-    destination = root / f"{backup.uuid_str}.zip"
+    object_identity = storage_artifact_identity(backup)
+    destination = root / object_identity.filename
     try:
         with open_ciphertext(
             backup.uuid_str,
@@ -722,7 +839,7 @@ def storage_upload_artifact(backup, *, legacy_verifier):
         ) as source:
             _copy_ciphertext_atomically(source, destination, state.artifact)
         descriptor = read_envelope_header(destination, trusted_source_root=root)
-        _validate_descriptor(descriptor, state.envelope)
+        _validate_public_descriptor(descriptor, state.envelope)
         yield state.artifact
     finally:
         try:
@@ -1135,7 +1252,7 @@ def materialize_local_restore_ciphertext_handoff(restore, *, task_id: str) -> bo
     ) as source:
         _copy_ciphertext_atomically(source, destination, plan.artifact)
     descriptor = read_envelope_header(destination, trusted_source_root=fence.path)
-    _validate_descriptor(descriptor, plan.envelope)
+    _validate_public_descriptor(descriptor, plan.envelope)
     published = Path(
         publish_restore_ciphertext(
             expected["handoff_uuid"],
@@ -1285,9 +1402,9 @@ def unseal_downloaded_artifact(
             "The restore artifact path escapes the private plaintext root."
         ) from None
     descriptor = read_envelope_header(ciphertext, trusted_source_root=root)
-    _validate_descriptor(descriptor, plan.envelope)
+    _validate_public_descriptor(descriptor, plan.envelope)
     with _configured_provider() as provider:
-        unseal_file(
+        authenticated = unseal_file(
             ciphertext,
             plaintext,
             provider=provider,
@@ -1298,3 +1415,4 @@ def unseal_downloaded_artifact(
             trusted_source_root=root,
             trusted_destination_root=root,
         )
+    _validate_authenticated_descriptor(authenticated, plan.envelope)

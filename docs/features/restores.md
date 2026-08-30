@@ -14,7 +14,7 @@ never changes or consumes the backup record itself.
 | AWS S3/DynamoDB | Uses AWS Backup recovery metadata and a distinct target bucket/table | No source overwrite; S3 target must be an existing empty versioned bucket |
 | Vultr Managed Database | Creates a new managed-database fork | No |
 | Lightsail bucket replication | Copies a selected replication run back to a configured target prefix | May write objects under the selected target prefix; tracked separately from node restores |
-| WordPress or Basecamp archive | No enterprise recovery action; stock enterprise mode blocks all new protection and backup initiation while retaining existing rows for inspection | Direct BSE1 download is disabled; no automatic restore/authenticated plaintext export exists, and the transfer UI has no complete server action/task. Only explicit non-enterprise `legacy-only` compatibility mode can create a plaintext artifact for the authenticated legacy download action |
+| Basecamp archive | No enterprise recovery action; stock enterprise mode blocks all new protection and backup initiation while retaining existing rows for inspection | Direct BSE1 download is disabled; no automatic restore/authenticated plaintext export exists, and the transfer UI has no complete server action/task. Only explicit non-enterprise `legacy-only` compatibility mode can create a plaintext artifact for the authenticated legacy download action |
 
 Every restore-start action requires a completed/eligible backup or replication
 run plus explicit request data. Node restores require the `backup_create` group

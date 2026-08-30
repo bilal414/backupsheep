@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 import io
 import base64
+import hmac
 import ipaddress
 import json
 import os
@@ -110,44 +111,6 @@ def _bounded_positive_int(name, default, maximum):
             f"{name} must be between 1 and {maximum} seconds."
         )
     return value
-
-
-def _private_network_allowlist(name):
-    """Parse an explicit list of private networks; public catch-alls are invalid."""
-
-    private_supernets = tuple(
-        ipaddress.ip_network(value)
-        for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
-    )
-    raw_value = config.get(name, "")
-    values = (
-        raw_value
-        if isinstance(raw_value, (list, tuple))
-        else str(raw_value).split(",")
-    )
-    networks = []
-    for value in values:
-        value = str(value).strip()
-        if not value:
-            continue
-        try:
-            network = ipaddress.ip_network(value, strict=True)
-        except ValueError as error:
-            raise ImproperlyConfigured(
-                f"{name} must contain exact comma-separated CIDR networks."
-            ) from error
-        if not any(
-            network.version == private_supernet.version
-            and network.subnet_of(private_supernet)
-            for private_supernet in private_supernets
-        ):
-            raise ImproperlyConfigured(
-                f"{name} may contain only RFC1918 IPv4 or ULA IPv6 networks."
-            )
-        networks.append(network)
-    if len(networks) > 32:
-        raise ImproperlyConfigured(f"{name} may contain at most 32 networks.")
-    return tuple(networks)
 
 
 def _trusted_proxy_network_allowlist(name):
@@ -548,12 +511,15 @@ APP_DOMAIN = config["APP_DOMAIN"]
 APP_PROTOCOL = config["APP_PROTOCOL"]
 APP_URL = f"{APP_PROTOCOL}{APP_DOMAIN}"
 
-# Backup artifacts have one explicit wire-policy.  The stock hardened Docker
-# deployment sets enterprise mode and therefore cannot start or dispatch work in
-# legacy-only mode.  The compatibility mode remains available to non-enterprise
-# upgrades solely so operators can restore historical plaintext ZIP objects.
+# Backup artifacts have one explicit wire-policy. Production defaults to BSE1 so
+# a direct/PaaS deployment cannot silently write new plaintext artifacts merely
+# because it omitted this setting. The compatibility mode remains available only
+# as an explicit non-enterprise upgrade choice for historical plaintext objects.
 BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE = str(
-    config.get("BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE", "legacy-only")
+    config.get(
+        "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE",
+        "bse1" if DJANGO_SERVER == "prod" else "legacy-only",
+    )
 ).strip().lower()
 if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE not in {"bse1", "legacy-only"}:
     raise ImproperlyConfigured(
@@ -573,15 +539,24 @@ BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE = _strict_bool(
 BACKUPSHEEP_ARTIFACT_KEY_PROVIDER = str(
     config.get(
         "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER",
-        "aws-kms" if DJANGO_SERVER == "prod" else "local-development",
+        "local-file" if DJANGO_SERVER == "prod" else "local-development",
     )
 ).strip().lower()
-if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER not in {"aws-kms", "local-development"}:
+if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER not in {
+    "local-file",
+    "local-development",
+}:
     raise ImproperlyConfigured(
-        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER must be aws-kms or local-development."
+        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER must be local-file or local-development."
     )
 
 BACKUPSHEEP_INSTALLATION_ID = str(config.get("BACKUPSHEEP_INSTALLATION_ID", ""))
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION = str(
+    config.get("BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS = str(
+    config.get("BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS", "")
+).strip()
 BACKUPSHEEP_ARTIFACT_CHUNK_SIZE = _bounded_positive_int(
     "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE", 4 * 1024 * 1024, 64 * 1024 * 1024
 )
@@ -590,36 +565,9 @@ if BACKUPSHEEP_ARTIFACT_CHUNK_SIZE < 64 * 1024:
         "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE must be at least 65536 bytes."
     )
 
-BACKUPSHEEP_ARTIFACT_KMS_KEY_ID = str(
-    config.get("BACKUPSHEEP_ARTIFACT_KMS_KEY_ID", "")
+BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH = str(
+    config.get("BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH", "")
 ).strip()
-BACKUPSHEEP_ARTIFACT_KMS_REGION = str(
-    config.get("BACKUPSHEEP_ARTIFACT_KMS_REGION", "")
-).strip()
-BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS = tuple(
-    value.strip()
-    for value in str(
-        config.get("BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS", "")
-    ).split(",")
-    if value.strip()
-)
-BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL = (
-    str(config.get("BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL", "")).strip() or None
-)
-BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT = _strict_bool(
-    "BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT",
-    config.get("BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT"),
-    default=False,
-)
-BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS = _bounded_positive_int(
-    "BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS", 5, 60
-)
-BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS = _bounded_positive_int(
-    "BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS", 30, 120
-)
-BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS = _bounded_positive_int(
-    "BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS", 3, 5
-)
 BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY = str(
     config.get("BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY", "")
 ).strip()
@@ -632,14 +580,20 @@ if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1":
         raise ImproperlyConfigured(
             "BSE1 encryption requires a stable 64-character BACKUPSHEEP_INSTALLATION_ID."
         )
-    if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "aws-kms":
-        if not (
-            BACKUPSHEEP_ARTIFACT_KMS_KEY_ID
-            and BACKUPSHEEP_ARTIFACT_KMS_REGION
-            and BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS
+    if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "local-file":
+        if (
+            BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY
+            or BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID != "local-v1"
         ):
             raise ImproperlyConfigured(
-                "BSE1 AWS KMS encryption requires a key, region, and resolved key-ARN allowlist."
+                "The production local-file provider forbids wrapping keys and key IDs in settings."
+            )
+        if (
+            BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH
+            and not os.path.isabs(BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH)
+        ):
+            raise ImproperlyConfigured(
+                "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH must be absolute."
             )
     else:
         if DJANGO_SERVER == "prod" or BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE:
@@ -663,14 +617,88 @@ if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1":
 
 if BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE and (
     BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE != "bse1"
-    or BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "aws-kms"
+    or BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "local-file"
     or BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE
-    or BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL is not None
-    or BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT
 ):
     raise ImproperlyConfigured(
-        "Enterprise artifact policy requires BSE1, standard-endpoint AWS KMS, and no legacy restore."
+        "Enterprise artifact policy requires BSE1, lane-scoped local-file keys, and no legacy restore."
     )
+
+_artifact_runtime_role = str(os.environ.get("BACKUPSHEEP_RUNTIME_ROLE", ""))
+_artifact_celery_lane = str(os.environ.get("BACKUPSHEEP_CELERY_LANE", ""))
+if (
+    (DJANGO_SERVER == "prod" or BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE)
+    and BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1"
+    and BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "local-file"
+    and not BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION
+):
+    raise ImproperlyConfigured(
+        "Production BSE1 requires an explicit sealed artifact key-provider generation."
+    )
+if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION:
+    if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION not in {"1", "1-pending-empty"}:
+        raise ImproperlyConfigured(
+            "The artifact key-provider generation is unsupported."
+        )
+    if (
+        BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION == "1-pending-empty"
+        and _artifact_runtime_role != "migration"
+    ):
+        raise ImproperlyConfigured(
+            "Artifact key-provider migration is pending and long-lived roles are disabled."
+        )
+    from backupsheep.artifact_crypto import artifact_provider_policy_witness
+
+    _artifact_policy_witness = artifact_provider_policy_witness(
+        BACKUPSHEEP_INSTALLATION_ID,
+        BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION,
+    )
+    if not hmac.compare_digest(
+        BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS,
+        _artifact_policy_witness,
+    ):
+        raise ImproperlyConfigured(
+            "The artifact key-provider witness does not match this installation."
+        )
+    del _artifact_policy_witness
+
+# Only the database and files source/restore workers may receive a production
+# root-key path. Loading and immediately destroying the keyring here makes bad
+# contents or metadata a startup failure rather than a first-backup surprise.
+if (
+    BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1"
+    and BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "local-file"
+):
+    if _artifact_runtime_role in {"database", "files"}:
+        if _artifact_celery_lane != _artifact_runtime_role:
+            raise ImproperlyConfigured(
+                "A BSE1 source worker requires an explicit matching BACKUPSHEEP_CELERY_LANE."
+            )
+        if not BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH:
+            raise ImproperlyConfigured(
+                "The source worker requires its lane-scoped local-file keyring."
+            )
+        from backupsheep.artifact_crypto.providers import LocalFileKeyProvider
+
+        try:
+            _artifact_provider = LocalFileKeyProvider(
+                BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH,
+                lane=_artifact_runtime_role,
+                installation_id=BACKUPSHEEP_INSTALLATION_ID,
+            )
+        except Exception as error:
+            raise ImproperlyConfigured(
+                "The source worker local-file keyring is invalid."
+            ) from error
+        finally:
+            if "_artifact_provider" in locals():
+                _artifact_provider.destroy()
+                del _artifact_provider
+    elif BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH:
+        raise ImproperlyConfigured(
+            "Only database and files workers may receive a local-file keyring path."
+        )
+del _artifact_runtime_role, _artifact_celery_lane
 
 
 def _sentry_sample_rate(name):
@@ -733,6 +761,8 @@ ONBOARDING_INSTALL_TOKEN_FILE = os.path.join(BASE_DIR, "_storage", "install_toke
 
 LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/healthz/',
+    r'/.well-known/security.txt',
+    r'/security.txt',
     r'/login',
     r'/reset',
     r'/django-admin/',
@@ -922,9 +952,9 @@ def _resolve_celery_broker_url(values):
             broker_url = f"{scheme}://{user}:{password}@{host}:{port}//"
         return _validate_broker_transport(broker_url, values)
 
-    # The Heroku template provisions CloudAMQP's RabbitMQ plan, which exposes its
-    # canonical AMQP URL as CLOUDAMQP_URL. Prefer it over the Compose fallback from
-    # .env_sample, while still allowing an explicitly supplied RabbitMQ URL elsewhere.
+    # Some managed RabbitMQ services expose their canonical URL as CLOUDAMQP_URL.
+    # Prefer it over the Compose fallback from .env_sample while still allowing an
+    # explicitly supplied RabbitMQ URL elsewhere.
     broker_url = str(
         values.get("CLOUDAMQP_URL")
         or values.get("CELERY_BROKER_URL")
@@ -1091,7 +1121,6 @@ CELERY_IMPORTS = (
     "apps._tasks.integration.vultr",
     "apps._tasks.integration.vultr_database",
     "apps._tasks.integration.website",
-    "apps._tasks.integration.wordpress",
     "apps._tasks.integration.storage.tasks",
 )
 # Local scheduled backups are driven by BackupSheep's django-celery-beat database
@@ -1323,27 +1352,13 @@ S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
     60 * 60,
 )
 
-# WordPress and Basecamp have no enterprise BSE1 plaintext-export/restore path.
-# Their feature switches are compatibility opt-ins only; the shared recovery
-# capability gate additionally requires non-enterprise legacy-only artifacts with
-# legacy download enabled. Security-policy booleans are strict so a typo cannot
-# accidentally enable an incomplete source family.
-WORDPRESS_INTEGRATION_ENABLED = _strict_bool(
-    "WORDPRESS_INTEGRATION_ENABLED",
-    config.get("WORDPRESS_INTEGRATION_ENABLED"),
-    default=False,
-)
+# Basecamp has no enterprise BSE1 plaintext-export/restore path. Its feature switch
+# is a compatibility opt-in only; the shared recovery capability gate additionally
+# requires non-enterprise legacy-only artifacts with legacy download enabled.
 BASECAMP_INTEGRATION_ENABLED = _strict_bool(
     "BASECAMP_INTEGRATION_ENABLED",
     config.get("BASECAMP_INTEGRATION_ENABLED"),
     default=False,
-)
-
-# WordPress targets are public HTTPS origins by default. Self-hosters that must
-# reach a private WordPress origin can enumerate only the required private CIDRs;
-# loopback, link-local, reserved and metadata targets remain forbidden regardless.
-WORDPRESS_PRIVATE_TARGET_CIDRS = _private_network_allowlist(
-    "WORDPRESS_PRIVATE_TARGET_CIDRS"
 )
 
 # Plain FTP sends credentials and backup contents without transport encryption.
@@ -1668,7 +1683,7 @@ CELERY_BEAT_SCHEDULE = {
 #   cloud ..... API-only provider snapshots + general/misc tasks; scales horizontally
 #   database .. database dumps (heavy CPU/disk); isolated so a big dump can't starve
 #               file backups
-#   files ..... website / wordpress / basecamp dumps (heavy CPU/disk); isolated
+#   files ..... website / basecamp dumps (heavy CPU/disk); isolated
 #   storage ... uploads each dump to the storage backends + every local-artifact
 #               mutation/cleanup; scalable pool sharing _storage with dump workers
 #   logs ...... DB log entries and Slack/Telegram notifications; no artifact volume

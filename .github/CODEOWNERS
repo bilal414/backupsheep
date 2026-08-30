@@ -1,0 +1,15 @@
+# Default ownership keeps every change visible to the project maintainer.
+* @bilal414
+
+# Security-sensitive release, runtime, identity, and cryptography boundaries.
+/.github/ @bilal414
+/Dockerfile* @bilal414
+/docker-compose*.yml @bilal414
+/install.sh @bilal414
+/backupsheep-compose @bilal414
+/deploy/ @bilal414
+/backupsheep/artifact_crypto/ @bilal414
+/backupsheep/celery_security.py @bilal414
+/backupsheep/database_identity.py @bilal414
+/backupsheep/staging.py @bilal414
+/utils/middleware.py @bilal414

@@ -87,11 +87,8 @@ with transaction.atomic():
 
 print(
     {
-        "created": created,
-        "node_id": benchmark.pk,
-        "database_id": database.pk,
-        "connection_id": benchmark.connection_id,
-        "name": benchmark.name,
-        "option_skip_opt": database.option_skip_opt,
+        "run_id": RUN_ID,
+        "result": "exact-owned MySQL benchmark node is ready",
+        "option_skip_opt": True,
     }
 )

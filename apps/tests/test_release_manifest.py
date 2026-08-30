@@ -7,9 +7,11 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -18,10 +20,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import build_release_manifest as builder  # noqa: E402
+import build_release_descriptor as descriptor_builder  # noqa: E402
 import collect_release_evidence as collector  # noqa: E402
 import install_release_tools as installer  # noqa: E402
 import normalize_local_scan_evidence as normalizer  # noqa: E402
+import prepare_trivy_db as trivy_db  # noqa: E402
 import promote_release_images as promoter  # noqa: E402
+import release_transition as transition  # noqa: E402
+import release_subprocess  # noqa: E402
 import push_quarantine_layouts as quarantine_pusher  # noqa: E402
 import stage_release_images as stager  # noqa: E402
 import verify_release as verifier  # noqa: E402
@@ -32,7 +38,15 @@ class ReleaseFixtureMixin:
         super().setUp()
         self.temporary_directory = Path(tempfile.mkdtemp(prefix="backupsheep-release-"))
         self.artifacts = self.temporary_directory / "artifacts"
-        for directory in ("oci", "sbom", "scans", "provenance", "bundles"):
+        for directory in (
+            "oci",
+            "sbom",
+            "scans",
+            "provenance",
+            "bundles",
+            "vulnerability",
+            "transition",
+        ):
             (self.artifacts / directory).mkdir(parents=True, mode=0o700, exist_ok=True)
         self.policy = json.loads((ROOT / "deploy" / "release-policy.json").read_text(encoding="utf-8"))
         self.commit = "a" * 40
@@ -45,9 +59,34 @@ class ReleaseFixtureMixin:
             "app": {"linux/amd64": "sha256:" + "2" * 64, "linux/arm64": "sha256:" + "3" * 64},
             "postgres": {"linux/amd64": "sha256:" + "5" * 64, "linux/arm64": "sha256:" + "6" * 64},
             "egress": {"linux/amd64": "sha256:" + "7" * 64, "linux/arm64": "sha256:" + "8" * 64},
+            "rabbitmq": {"linux/amd64": "sha256:" + "a" * 64, "linux/arm64": "sha256:" + "b" * 64},
+            "rabbitmq-upgrade": {
+                "linux/amd64": "sha256:" + "c" * 64,
+                "linux/arm64": "sha256:" + "d" * 64,
+            },
         }
         self.statements = {}
+        self._write_vulnerability_database_evidence()
+        self._write_consumer_evidence()
         self._write_evidence()
+        shutil.copyfile(
+            ROOT / "deploy" / "release-transition-policy.json",
+            self.artifacts / "transition" / "reviewed-policy.json",
+        )
+        (self.artifacts / "transition" / "reviewed-policy.json").chmod(0o600)
+        migrations = ["apps.0001_initial", "apps.0002_next"]
+        leaves = ["apps.0002_next"]
+        self._json(
+            self.artifacts / "transition" / "django-migrations.json",
+            {
+                "schema_version": 1,
+                "all_migrations_atomic": True,
+                "migrations": migrations,
+                "migration_set_sha256": transition.migration_digest(migrations),
+                "leaves": leaves,
+                "leaf_set_sha256": transition.migration_digest(leaves, leaves=True),
+            },
+        )
         self.manifest = self._build_manifest()
 
     def tearDown(self):
@@ -121,6 +160,83 @@ class ReleaseFixtureMixin:
                 },
             },
         }
+
+    def _write_vulnerability_database_evidence(self):
+        vulnerability = self.artifacts / "vulnerability"
+        lock_source = ROOT / "deploy" / "trivy-db-lock.json"
+        lock_copy = vulnerability / "trivy-db-lock.json"
+        lock_copy.write_bytes(lock_source.read_bytes())
+        lock_copy.chmod(0o600)
+        self.assertEqual(
+            self._hash(lock_copy),
+            self.policy["vulnerability_policy"]["database"]["lock_sha256"],
+        )
+        lock = json.loads(lock_copy.read_text(encoding="utf-8"))
+        prepared_at = datetime(2026, 8, 29, 13, 12, tzinfo=timezone.utc)
+        evidence = trivy_db.evidence_for(
+            lock,
+            self._hash(lock_copy).removeprefix("sha256:"),
+            prepared_at,
+        )
+        self._json(vulnerability / "trivy-db-evidence.json", evidence)
+
+    def _write_consumer_evidence(self):
+        consumer = self.artifacts / "consumer"
+        consumer.mkdir(mode=0o700, exist_ok=True)
+        trusted_root = ROOT / "deploy" / "release" / "sigstore-trusted-root.json"
+        trusted_copy = consumer / "sigstore-trusted-root.json"
+        trusted_copy.write_bytes(trusted_root.read_bytes())
+        trusted_copy.chmod(0o600)
+        verifier_policy = self.policy["consumer"]["cosign_image"]
+        for platform, identity in verifier_policy["platforms"].items():
+            slug = platform.replace("/", "-")
+            reference = f"{verifier_policy['repository']}@{identity['manifest_digest']}"
+            self._json(
+                consumer / f"release-verifier-{slug}.syft.json",
+                {
+                    "artifacts": [
+                        {
+                            "id": f"release-verifier-{slug}-cosign",
+                            "name": "github.com/sigstore/cosign/v3",
+                        }
+                    ],
+                    "artifactRelationships": [],
+                    "source": {
+                        "type": "image",
+                        "metadata": {
+                            "userInput": reference,
+                            "manifestDigest": identity["manifest_digest"],
+                            "imageID": identity["config_digest"],
+                        },
+                    },
+                    "descriptor": {"name": "syft", "version": "1.51.0"},
+                },
+            )
+            self._json(
+                consumer / f"release-verifier-{slug}.trivy.json",
+                {
+                    "SchemaVersion": 2,
+                    "ArtifactName": reference,
+                    "ArtifactType": "container_image",
+                    "Metadata": {
+                        "ImageID": identity["config_digest"],
+                    },
+                    "Results": [
+                        {
+                            "Target": "/ko-app/cosign",
+                            "Class": "lang-pkgs",
+                            "Type": "gobinary",
+                            "Packages": [
+                                {
+                                    "Name": "github.com/sigstore/cosign/v3",
+                                    "Version": "v3.1.3",
+                                }
+                            ],
+                            "Vulnerabilities": [],
+                        }
+                    ],
+                },
+            )
 
     def _write_evidence(self):
         self.index_digests = {}
@@ -251,7 +367,7 @@ class ReleaseFixtureMixin:
             tag=self.tag,
             source_commit=self.commit,
             workflow_run="https://github.com/bilal414/backupsheep/actions/runs/123/attempts/1",
-            created_at="2026-08-25T12:34:56Z",
+            created_at="2026-08-29T13:15:00Z",
             image_inputs={
                 image: (self.index_digests[image], self.artifacts / "oci" / f"{image}.index.json")
                 for image in self.policy["images"]
@@ -265,11 +381,227 @@ class ReleaseFixtureMixin:
 class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
     def test_complete_index_bound_manifest_passes_offline_validation(self):
         result = verifier.validate_release(self.policy, self.manifest, self.artifacts)
+        self.assertEqual(tuple(result["manifest"]["images"]), verifier.RELEASE_IMAGE_NAMES)
         self.assertEqual(result["manifest"]["images"]["app"]["digest"], self.index_digests["app"])
+        self.assertEqual(result["transition"]["release_epoch"], 1)
         self.assertEqual(
             set(result["attestation_predicates"]["postgres"]["provenance"]),
             {"linux/amd64", "linux/arm64"},
         )
+        self.assertEqual(
+            result["consumer"]["manifest"]["cosign_image"]["index_digest"],
+            self.policy["consumer"]["cosign_image"]["index_digest"],
+        )
+        self.assertEqual(
+            result["vulnerability_database"]["lock"]["manifest"]["digest"],
+            json.loads(
+                (ROOT / "deploy" / "trivy-db-lock.json").read_text(encoding="utf-8")
+            )["manifest"]["digest"],
+        )
+
+    def test_vulnerability_database_lock_and_preparation_time_are_mandatory(self):
+        manifest = copy.deepcopy(self.manifest)
+        record = manifest["vulnerability_database"]["preparation_evidence"]
+        path = self.artifacts / record["file"]
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+        evidence["prepared_at"] = "2026-08-29T13:16:00Z"
+        self._json(path, evidence)
+        record["sha256"] = self._hash(path)
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError,
+            "Trivy DB evidence preparation time is inconsistent",
+        ):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+        manifest = copy.deepcopy(self.manifest)
+        manifest["vulnerability_database"]["lock"]["sha256"] = "sha256:" + "f" * 64
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "lock digest differs from policy"
+        ):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+    def test_descriptor_v1_cannot_be_reinterpreted_as_the_five_image_contract(self):
+        old_v1 = (
+            "BACKUPSHEEP-SIGNED-RELEASE-V1\n"
+            f"release_tag={self.tag}\n"
+            f"source_commit={self.commit}\n"
+            "release_manifest_sha256=sha256:"
+            + "1" * 64
+            + "\napp_image=ghcr.io/bilal414/backupsheep@sha256:"
+            + "2" * 64
+            + "\npostgres_image=ghcr.io/bilal414/backupsheep-postgres@sha256:"
+            + "3" * 64
+            + "\negress_image=ghcr.io/bilal414/backupsheep-egress@sha256:"
+            + "4" * 64
+            + "\n"
+        ).encode("ascii")
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "exact canonical V2 payload"
+        ):
+            descriptor_builder.validate_descriptor_payload(
+                self.policy,
+                self.manifest,
+                "sha256:" + "1" * 64,
+                old_v1,
+            )
+
+        downgraded = copy.deepcopy(self.policy)
+        downgraded["consumer"]["descriptor_filename"] = (
+            "backupsheep-release-descriptor-v1.txt"
+        )
+        downgraded["consumer"]["descriptor_bundle_filename"] = (
+            "backupsheep-release-descriptor-v1.sigstore.json"
+        )
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "canonical consumer filename"
+        ):
+            verifier._validate_policy(downgraded)
+
+    def test_release_image_repositories_and_dockerfiles_are_exact_and_distinct(self):
+        self.assertEqual(self.policy["images"], verifier.EXPECTED_RELEASE_IMAGES)
+        tampered = copy.deepcopy(self.policy)
+        tampered["images"]["rabbitmq-upgrade"]["dockerfile"] = "Dockerfile.rabbitmq"
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "exact release contract"
+        ):
+            verifier._validate_policy(tampered)
+
+    def test_v2_descriptor_exactly_binds_five_images_verifier_graph_and_trusted_root(self):
+        manifest_path = self.artifacts / "release-manifest.json"
+        builder._write_json(manifest_path, self.manifest)
+        descriptor_path = self.artifacts / self.policy["consumer"]["descriptor_filename"]
+        arguments = [
+            "--policy",
+            str(ROOT / "deploy" / "release-policy.json"),
+            "--manifest",
+            str(manifest_path),
+            "--artifacts-dir",
+            str(self.artifacts),
+            "--output",
+            str(descriptor_path),
+        ]
+        self.assertEqual(descriptor_builder.main(arguments), 0)
+        lines = descriptor_path.read_text(encoding="ascii").splitlines()
+        self.assertEqual(len(lines), 16)
+        self.assertEqual(lines[0], "BACKUPSHEEP-SIGNED-RELEASE-V2")
+        self.assertEqual(
+            lines[4:9],
+            [
+                f"{image.replace('-', '_')}_image={self.manifest['images'][image]['official_reference']}"
+                for image in verifier.RELEASE_IMAGE_NAMES
+            ],
+        )
+        verifier_policy = self.policy["consumer"]["cosign_image"]
+        self.assertEqual(lines[9], f"release_verifier_image={verifier_policy['reference']}")
+        self.assertEqual(
+            lines[10],
+            "release_verifier_runtime_contract_version=1",
+        )
+        self.assertEqual(
+            lines[11],
+            "release_verifier_linux_amd64_manifest="
+            + verifier_policy["platforms"]["linux/amd64"]["manifest_digest"],
+        )
+        self.assertEqual(
+            lines[15],
+            "trusted_root_sha256=sha256:"
+            + self.policy["consumer"]["trusted_root"]["sha256"],
+        )
+        self.assertEqual(descriptor_builder.main([*arguments, "--verify"]), 0)
+
+        descriptor_path.write_bytes(descriptor_path.read_bytes() + b"unknown=value\n")
+        self.assertEqual(descriptor_builder.main([*arguments, "--verify"]), 1)
+
+    def test_consumer_verifier_evidence_is_exactly_policy_and_config_bound(self):
+        unsupported = copy.deepcopy(self.policy)
+        unsupported["consumer"]["cosign_image"]["runtime_contract_version"] = 2
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "runtime contract is not supported"
+        ):
+            verifier._validate_policy(unsupported)
+
+        manifest = copy.deepcopy(self.manifest)
+        manifest["consumer"]["cosign_image"]["platforms"][0]["config_digest"] = (
+            "sha256:" + "e" * 64
+        )
+        with self.assertRaisesRegex(verifier.ReleaseVerificationError, "differs from policy"):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+        manifest = copy.deepcopy(self.manifest)
+        record = manifest["consumer"]["cosign_image"]["platforms"][0][
+            "source_catalog"
+        ]
+        path = self.artifacts / record["file"]
+        catalog = json.loads(path.read_text())
+        catalog["source"]["metadata"]["imageID"] = "sha256:" + "e" * 64
+        self._json(path, catalog)
+        record["sha256"] = self._hash(path)
+        with self.assertRaisesRegex(verifier.ReleaseVerificationError, "config-digest bound"):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+    def test_manifest_cli_requires_and_accepts_the_complete_five_image_set(self):
+        output = self.artifacts / "cli-release-manifest.json"
+        arguments = [
+            "--policy",
+            str(ROOT / "deploy" / "release-policy.json"),
+            "--artifacts-dir",
+            str(self.artifacts),
+            "--output",
+            str(output),
+            "--tag",
+            self.tag,
+            "--source-commit",
+            self.commit,
+            "--workflow-run",
+            "https://github.com/bilal414/backupsheep/actions/runs/123/attempts/1",
+            "--created-at",
+            "2026-08-29T13:14:00Z",
+        ]
+        for image in ("app", "postgres", "egress", "rabbitmq", "rabbitmq-upgrade"):
+            arguments.extend(
+                (
+                    f"--{image}-digest",
+                    self.index_digests[image],
+                    f"--{image}-index",
+                    str(self.artifacts / "oci" / f"{image}.index.json"),
+                )
+            )
+        self.assertEqual(builder.main(arguments), 0)
+        generated = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(tuple(generated["images"]), tuple(self.policy["images"]))
+        self.assertEqual(generated["transition"], self.manifest["transition"])
+
+    def test_signed_transition_record_and_reviewed_source_are_mandatory(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["transition"]["migration_contract"]["leaf_set_sha256"] = (
+            "sha256:" + "f" * 64
+        )
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError,
+            "manifest transition authorization is invalid",
+        ):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+        reviewed_path = self.artifacts / "transition" / "reviewed-policy.json"
+        self._json(
+            reviewed_path,
+            {"schema_version": 1, "release_epoch": 2, "accepted_predecessors": []},
+        )
+        migration_path = self.artifacts / "transition" / "django-migrations.json"
+        manifest = copy.deepcopy(self.manifest)
+        manifest["transition"] = transition.build_transition_record(
+            reviewed_policy=transition.load_json(reviewed_path),
+            migration_contract=transition.load_json(migration_path),
+            reviewed_policy_file="transition/reviewed-policy.json",
+            reviewed_policy_sha256=self._hash(reviewed_path),
+            migration_contract_file="transition/django-migrations.json",
+            migration_contract_sha256=self._hash(migration_path),
+        )
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError,
+            "does not byte-match the reviewed source input",
+        ):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
 
     def test_raw_index_hash_and_every_child_membership_are_mandatory(self):
         manifest = copy.deepcopy(self.manifest)
@@ -453,6 +785,24 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
                 predicate=predicate,
             )
 
+    def test_image_signature_output_is_exactly_one_digest_bound_record(self):
+        digest = "sha256:" + "a" * 64
+        record = {
+            "critical": {"image": {"docker-manifest-digest": digest}}
+        }
+        verifier._require_one_verified_signature(json.dumps([record]), digest=digest)
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "exactly one verified image signature"
+        ):
+            verifier._require_one_verified_signature(
+                json.dumps([record, record]), digest=digest
+            )
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "does not bind exact digest"
+        ):
+            verifier._require_one_verified_signature(
+                json.dumps([record]), digest="sha256:" + "b" * 64
+            )
 
 class ReleaseToolInstallerTests(TestCase):
     def test_installer_verifies_asset_hash_extracts_only_regular_member_and_uses_private_modes(self):
@@ -603,6 +953,8 @@ class ReleasePromotionRecoveryTests(ReleaseFixtureMixin, TestCase):
             [
                 f"{self.manifest['images']['postgres']['official_repository']}:{self.tag}",
                 f"{self.manifest['images']['egress']['official_repository']}:{self.tag}",
+                f"{self.manifest['images']['rabbitmq']['official_repository']}:{self.tag}",
+                f"{self.manifest['images']['rabbitmq-upgrade']['official_repository']}:{self.tag}",
             ],
         )
 
@@ -711,6 +1063,75 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
                 policy=self.policy,
                 index_path=index_path,
                 image_name=image,
+                platform=platform,
+                syft_path=syft_path,
+                trivy_path=trivy_path,
+            )
+
+    def test_consumer_verifier_scan_normalization_uses_only_exact_policy_children(self):
+        platform = "linux/amd64"
+        config_digest = "sha256:" + "e" * 64
+        layer_digest = "sha256:" + "f" * 64
+        child_manifest = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"digest": config_digest, "size": 123},
+            "layers": [{"digest": layer_digest, "size": 456}],
+        }
+        manifest_bytes = json.dumps(child_manifest, separators=(",", ":")).encode()
+        child_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        policy = copy.deepcopy(self.policy)
+        identity = policy["consumer"]["cosign_image"]["platforms"][platform]
+        identity["manifest_digest"] = child_digest
+        identity["config_digest"] = config_digest
+        reference = f"{policy['consumer']['cosign_image']['repository']}@{child_digest}"
+
+        syft_path = self.temporary_directory / "consumer-verifier.syft.json"
+        trivy_path = self.temporary_directory / "consumer-verifier.trivy.json"
+        self._json(
+            syft_path,
+            {
+                "source": {
+                    "type": "image",
+                    "metadata": {
+                        "userInput": "registry:" + reference,
+                        "manifestDigest": child_digest,
+                        "imageID": config_digest,
+                        "manifest": base64.b64encode(manifest_bytes).decode(),
+                    },
+                }
+            },
+        )
+        self._json(
+            trivy_path,
+            {
+                "ArtifactName": reference,
+                "Metadata": {
+                    "ImageID": config_digest,
+                    "Layers": [{"Digest": layer_digest}],
+                },
+            },
+        )
+        normalizer.normalize(
+            policy=policy,
+            index_path=None,
+            image_name="release-verifier",
+            platform=platform,
+            syft_path=syft_path,
+            trivy_path=trivy_path,
+        )
+        self.assertEqual(
+            json.loads(syft_path.read_text())["source"]["metadata"]["userInput"],
+            reference,
+        )
+
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "must not accept a release OCI index"
+        ):
+            normalizer.normalize(
+                policy=policy,
+                index_path=self.artifacts / "oci" / "app.index.json",
+                image_name="release-verifier",
                 platform=platform,
                 syft_path=syft_path,
                 trivy_path=trivy_path,
@@ -844,6 +1265,27 @@ class ReleaseWorkflowContractTests(TestCase):
             with self.subTest(action=action):
                 self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
 
+    def test_python_release_subprocess_timeout_kills_descendant_group(self):
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-python-tool-tree-"
+        ) as directory:
+            descendant = Path(directory) / "descendant.pid"
+            with self.assertRaises(subprocess.TimeoutExpired):
+                release_subprocess.run_text(
+                    [
+                        "sh",
+                        "-c",
+                        'trap "" TERM; printf "%s\\n" "$$" > "$1"; sleep 30',
+                        "child",
+                        str(descendant),
+                    ],
+                    environment={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+                    timeout=1,
+                )
+            descendant_pid = int(descendant.read_text(encoding="ascii").strip())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+
     def test_every_release_checkout_is_detached_at_the_event_sha(self):
         self.assertEqual(
             self.workflow.count(
@@ -892,6 +1334,28 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertIn("deploy/static-analysis-policy.json", static_job)
         self.assertIn("uses: ./.github/workflows/supply-chain-security.yml", self.workflow)
 
+    def test_git_checkout_concealment_attack_runs_on_the_host_not_in_the_runtime_image(self):
+        test_name = (
+            "apps.tests.test_installer_security.InstallerSecurityContractTests."
+            "test_signed_consumer_attests_exact_clean_source_checkout_even_with_skip_worktree"
+        )
+        dependency_job = self.supply_chain_workflow.split(
+            "  dependency-and-deployment-checks:", 1
+        )[1].split("  static-python-security:", 1)[0]
+        self.assertIn("Attack signed-release checkout index concealment", dependency_job)
+        attack_step = dependency_job.split(
+            "      - name: Attack signed-release checkout index concealment\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("set -euo pipefail", attack_step)
+        self.assertIn("command -v git >/dev/null", attack_step)
+        self.assertIn("git --version >/dev/null", attack_step)
+        self.assertEqual(attack_step.count(test_name), 1)
+        self.assertLess(attack_step.index("command -v git"), attack_step.index(test_name))
+        self.assertIn(
+            "Unexpected Git executable in the production application image",
+            self.supply_chain_workflow,
+        )
+
     def test_release_is_dormant_and_signing_permissions_are_separated(self):
         self.assertIn("vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'", self.workflow)
         self.assertIn("github.repository == 'bilal414/backupsheep'", self.workflow)
@@ -901,9 +1365,9 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertNotIn("id-token: write", build_job)
         self.assertNotIn("packages: write", build_job)
         self.assertNotIn("docker/login-action", build_job)
-        self.assertEqual(build_job.count("push: false"), 3)
-        self.assertEqual(build_job.count("type=oci,dest="), 3)
-        self.assertEqual(build_job.count("tar=false"), 3)
+        self.assertEqual(build_job.count("push: false"), 5)
+        self.assertEqual(build_job.count("type=oci,dest="), 5)
+        self.assertEqual(build_job.count("tar=false"), 5)
         self.assertIn("scripts/normalize_local_scan_evidence.py", build_job)
         protected_job = self.workflow.split("  sign_promote:", 1)[1].split(
             "  publish_evidence:", 1
@@ -928,9 +1392,13 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertIn("backupsheep-quarantine:candidate-", self.workflow)
         self.assertIn("backupsheep-postgres-quarantine:candidate-", self.workflow)
         self.assertIn("backupsheep-egress-quarantine:candidate-", self.workflow)
+        self.assertIn("backupsheep-rabbitmq-quarantine:candidate-", self.workflow)
+        self.assertIn("backupsheep-rabbitmq-upgrade-quarantine:candidate-", self.workflow)
         self.assertNotIn("backupsheep:candidate-", self.workflow)
         self.assertNotIn("backupsheep-postgres:candidate-", self.workflow)
         self.assertNotIn("backupsheep-egress:candidate-", self.workflow)
+        self.assertNotIn("backupsheep-rabbitmq:candidate-", self.workflow)
+        self.assertNotIn("backupsheep-rabbitmq-upgrade:candidate-", self.workflow)
         verify_position = self.workflow.index("Verify quarantine before any official write")
         stage_position = self.workflow.index("Stage exact verified indexes")
         sign_position = self.workflow.index("Sign official digests")
@@ -943,14 +1411,43 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertIn("scripts/promote_release_images.py", self.workflow)
 
     def test_buildkit_provenance_is_real_remote_source_bound_mode_max(self):
-        self.assertEqual(self.workflow.count("provenance: mode=max,version=v1,builder-id="), 3)
+        self.assertEqual(self.workflow.count("provenance: mode=max,version=v1,builder-id="), 5)
         self.assertEqual(
             self.workflow.count("context: https://github.com/${{ github.repository }}.git#${{ github.sha }}"),
-            3,
+            6,
         )
         self.assertIn("scripts/collect_release_evidence.py", self.workflow)
         self.assertIn("--statement \"$ARTIFACT_DIR/$statement\"", self.workflow)
         self.assertNotIn("mobyproject.org/buildkit@v1", self.workflow)
+
+    def test_transition_migrations_are_emitted_by_the_exact_built_child_and_archived(self):
+        app_build = self.workflow.index("Build application candidate from exact remote commit")
+        materialize = self.workflow.index(
+            "Materialize the exact amd64 application child for migration inventory"
+        )
+        collect = self.workflow.index("Collect raw OCI indexes and actual BuildKit provenance")
+        transition = self.workflow.index(
+            "Generate the exact transactional migration transition evidence"
+        )
+        manifest = self.workflow.index("Build and verify the digest-bound candidate manifest")
+        archive = self.workflow.index(
+            "Create and verify the complete signed publication"
+        )
+        self.assertLess(app_build, materialize)
+        self.assertLess(materialize, collect)
+        self.assertLess(collect, transition)
+        self.assertLess(transition, manifest)
+        self.assertLess(manifest, archive)
+        transition_step = self.workflow[transition:manifest]
+        self.assertIn("scripts/collect_release_transition.py", transition_step)
+        collector_source = (ROOT / "scripts/collect_release_transition.py").read_text()
+        self.assertIn('"--network",\n            "none"', collector_source)
+        self.assertIn('"--read-only"', collector_source)
+        self.assertIn("transition/reviewed-policy.json", self.workflow[transition:archive])
+        self.assertIn("transition/django-migrations.json", self.workflow[transition:archive])
+        archive_step = self.workflow[archive:]
+        self.assertIn("grep -Fx './transition/reviewed-policy.json'", archive_step)
+        self.assertIn("grep -Fx './transition/django-migrations.json'", archive_step)
 
     def test_scanners_cannot_auto_load_repository_config_or_ignore_files(self):
         self.assertGreaterEqual(self.workflow.count("env -i"), 2)
@@ -962,9 +1459,189 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertIn("--exit-code 1", self.workflow)
         self.assertNotIn("--ignore-unfixed", self.workflow)
 
+    def test_every_release_scan_uses_one_exact_offline_trivy_database(self):
+        database = self.policy["vulnerability_policy"]["database"]
+        lock_path = ROOT / database["lock_path"]
+        self.assertEqual(
+            "sha256:" + hashlib.sha256(lock_path.read_bytes()).hexdigest(),
+            database["lock_sha256"],
+        )
+        build_job = self.workflow.split("  sign_promote:", 1)[0]
+        prepare_position = build_job.index(
+            "Prepare the exact reviewed Trivy vulnerability database"
+        )
+        image_scan_position = build_job.index(
+            "Scan exact child digests and generate complete SBOMs"
+        )
+        verifier_scan_position = build_job.index(
+            "Freshly scan the separately bootstrapped consumer verifier"
+        )
+        bind_position = build_job.index(
+            "Bind private scanner state to runner scratch space"
+        )
+        build_job_environment = build_job.split("  build_scan:", 1)[1].split(
+            "    steps:", 1
+        )[0]
+        self.assertLess(prepare_position, image_scan_position)
+        self.assertLess(image_scan_position, verifier_scan_position)
+        self.assertLess(bind_position, prepare_position)
+        self.assertNotIn("${{ runner.temp }}", build_job_environment)
+        self.assertIn(
+            '"$RUNNER_TEMP/backupsheep-release-trivy-cache" >>"$GITHUB_ENV"',
+            build_job,
+        )
+        self.assertIn(
+            '"$RUNNER_TEMP/backupsheep-release-trivy-db-evidence.json" '
+            '>>"$GITHUB_ENV"',
+            build_job,
+        )
+        self.assertIn(
+            '"$RUNNER_TEMP/backupsheep-release-trivy-home" >>"$GITHUB_ENV"',
+            build_job,
+        )
+        self.assertEqual(build_job.count("--skip-db-update"), 2)
+        self.assertEqual(build_job.count("--skip-java-db-update"), 2)
+        self.assertEqual(build_job.count("--skip-check-update"), 2)
+        self.assertEqual(build_job.count("--offline-scan"), 2)
+        self.assertEqual(build_job.count('--cache-dir "$TRIVY_CACHE_DIR"'), 6)
+        self.assertEqual(
+            build_job.count("python3 scripts/prepare_trivy_db.py verify"), 3
+        )
+        self.assertIn(
+            '"$ARTIFACT_DIR/vulnerability/trivy-db-lock.json"', build_job
+        )
+        self.assertIn(
+            '"$ARTIFACT_DIR/vulnerability/trivy-db-evidence.json"', build_job
+        )
+
     def test_evidence_is_retained_and_published_durably(self):
         self.assertGreaterEqual(self.workflow.count("retention-days: 90"), 2)
         self.assertIn("signed-release-evidence.tar.gz", self.workflow)
         self.assertIn("scripts/publish_release_evidence.py", self.workflow)
         self.assertIn("tar --sort=name", self.workflow)
         self.assertNotIn("chmod 0644", self.workflow)
+
+    def test_verifier_is_a_separate_exact_consumer_trust_root_and_is_freshly_scanned(self):
+        self.assertEqual(tuple(self.policy["images"]), verifier.RELEASE_IMAGE_NAMES)
+        pinned = self.policy["consumer"]["cosign_image"]
+        self.assertEqual(
+            pinned["reference"],
+            f"{pinned['repository']}@{pinned['index_digest']}",
+        )
+        self.assertEqual(list(pinned["platforms"]), ["linux/amd64", "linux/arm64"])
+        for platform, record in pinned["platforms"].items():
+            with self.subTest(platform=platform):
+                self.assertRegex(record["manifest_digest"], r"^sha256:[0-9a-f]{64}$")
+                self.assertRegex(record["config_digest"], r"^sha256:[0-9a-f]{64}$")
+
+        build_job = self.workflow.split("  sign_promote:", 1)[0]
+        verifier_scan = build_job.split(
+            "      - name: Freshly scan the separately bootstrapped consumer verifier\n",
+            1,
+        )[1].split("      - name: Build and verify the digest-bound candidate manifest\n", 1)[0]
+        self.assertIn('scan "registry:$reference"', verifier_scan)
+        self.assertIn("--image-src remote", verifier_scan)
+        self.assertIn("--image release-verifier", verifier_scan)
+        self.assertIn("--platform \"$platform\"", verifier_scan)
+        self.assertIn("env -i", verifier_scan)
+        self.assertNotIn("DOCKER_CONFIG", verifier_scan)
+        self.assertNotIn("Dockerfile.release-verifier", self.workflow)
+        self.assertNotIn("backupsheep-release-verifier-quarantine", self.workflow)
+        protected_job = self.workflow.split("  sign_promote:", 1)[1].split(
+            "  publish_evidence:", 1
+        )[0]
+        self.assertNotIn("backupsheep-release-verifier", protected_job)
+
+    def test_signed_v2_consumer_is_a_durable_pre_execution_release_asset(self):
+        consumer = self.policy["consumer"]
+        self.assertEqual(
+            consumer["consumer_script_filename"],
+            "backupsheep-consume-signed-release-v2.sh",
+        )
+        self.assertEqual(
+            consumer["consumer_script_bundle_filename"],
+            "backupsheep-consume-signed-release-v2.sigstore.json",
+        )
+        copy_position = self.workflow.index(
+            'install -m 0600 deploy/release/consume-signed-release.sh'
+        )
+        sign_position = self.workflow.index(
+            '--bundle "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sigstore.json"'
+        )
+        publish_position = self.workflow.index(
+            '--asset "$PUBLICATION_DIR/backupsheep-consume-signed-release-v2.sh"'
+        )
+        self.assertLess(copy_position, sign_position)
+        self.assertLess(sign_position, publish_position)
+        publisher = self.workflow.split("  publish_evidence:", 1)[1]
+        self.assertIn("cosign\" verify-blob", publisher)
+        self.assertIn(
+            '"$PUBLICATION_DIR/backupsheep-consume-signed-release-v2.sh"',
+            publisher,
+        )
+
+    def test_complete_signed_publication_precedes_semver_promotion(self):
+        protected_job = self.workflow.split("  sign_promote:", 1)[1].split(
+            "  publish_evidence:", 1
+        )[0]
+        publication_position = protected_job.index(
+            "Create and verify the complete signed publication"
+        )
+        consumer_signature_position = protected_job.index(
+            '--bundle "$ARTIFACT_DIR/backupsheep-consume-signed-release-v2.sigstore.json"'
+        )
+        archive_position = protected_job.index("tar --sort=name")
+        archive_signature_position = protected_job.index(
+            '--bundle "$PUBLICATION_DIR/signed-release-evidence.tar.gz.bundle.json"'
+        )
+        promotion_position = protected_job.index(
+            "Publish signed official digests under SemVer tags last"
+        )
+        upload_position = protected_job.index("Retain signed publication evidence")
+        self.assertLess(publication_position, consumer_signature_position)
+        self.assertLess(consumer_signature_position, archive_position)
+        self.assertLess(archive_position, archive_signature_position)
+        self.assertLess(archive_signature_position, promotion_position)
+        self.assertLess(promotion_position, upload_position)
+
+    def test_consumer_policy_pins_first_party_cosign_verifier_by_version_and_digest(self):
+        self.assertEqual(self.policy["schema_version"], 4)
+        reference = self.policy["consumer"]["cosign_image"]["reference"]
+        self.assertRegex(
+            reference,
+            r"^ghcr\.io/bilal414/backupsheep-release-verifier@sha256:[0-9a-f]{64}$",
+        )
+        consumer_script = (
+            ROOT / "deploy/release/consume-signed-release.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(reference, consumer_script)
+        self.assertIn("--network none", consumer_script)
+
+    def test_v2_descriptor_is_built_signed_verified_and_published(self):
+        consumer = self.policy["consumer"]
+        self.assertEqual(
+            consumer["descriptor_filename"],
+            "backupsheep-release-descriptor-v2.txt",
+        )
+        self.assertEqual(
+            consumer["descriptor_bundle_filename"],
+            "backupsheep-release-descriptor-v2.sigstore.json",
+        )
+        build_position = self.workflow.index("python3 scripts/build_release_descriptor.py")
+        sign_position = self.workflow.index(
+            '--bundle "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.sigstore.json"'
+        )
+        verify_position = self.workflow.index(
+            '--output "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt" \\\n            --verify'
+        )
+        stage_position = self.workflow.index("Stage exact verified indexes")
+        publish_position = self.workflow.index(
+            '--asset "$PUBLICATION_DIR/backupsheep-release-descriptor-v2.txt"'
+        )
+        self.assertLess(build_position, sign_position)
+        self.assertLess(sign_position, verify_position)
+        self.assertLess(verify_position, stage_position)
+        self.assertLess(stage_position, publish_position)
+        self.assertNotIn("BACKUPSHEEP-SIGNED-RELEASE-V1", self.workflow)
+        publisher = self.workflow.split("  publish_evidence:", 1)[1]
+        self.assertIn("backupsheep-release-descriptor-v2.sigstore.json", publisher)

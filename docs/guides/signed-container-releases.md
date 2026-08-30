@@ -28,7 +28,11 @@ permission boundaries:
    pushes the exact verified layouts only to the explicit `*-quarantine`
    repositories, signs those digests, and verifies them online. Only then does it
    copy the exact OCI index digest to an official SemVer tag. It signs the official
-   digest separately and reruns the complete online verifier.
+   digest separately and reruns the complete online verifier. Before promotion it
+   also creates a canonical sixteen-line V2 consumer descriptor binding the tag,
+   source commit, release-manifest SHA-256, all five official digest references,
+   and the independently distributed verifier contract. It signs that descriptor
+   as a blob with the same OIDC identity and verifies the bundle exactly.
 4. `publish_evidence` can write GitHub release contents but cannot write packages
    or request an OIDC token. It verifies the signed archive before publishing it.
 
@@ -43,9 +47,10 @@ registry errors as failures, not as evidence that a tag is absent. Regression su
 is necessary but is not release proof: the digest-bound build, scan, signing,
 promotion, and evidence gates must also succeed.
 
-The release set is completeness-gated and resumable, and contains three separately
-scanned and signed images: the application, its PostgreSQL runtime, and the no-secret
-egress guard. An interruption can leave a partial set of exact SemVer tags; a rerun
+The release set is completeness-gated and resumable, and contains five separately
+scanned and signed images: the application, its PostgreSQL runtime, the no-secret
+egress guard, RabbitMQ 4.3 runtime, and the isolated RabbitMQ 4.2 upgrade helper.
+An interruption can leave a partial set of exact SemVer tags; a rerun
 verifies every existing digest and publishes only the missing exact tags. A missing or
 unverifiable image blocks completion and release-evidence publication.
 
@@ -74,12 +79,78 @@ blob. It does not synthesize a replacement predicate. The verifier requires:
 These fields follow BuildKit's documented [SLSA provenance
 definition](https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md).
 
+## Signed transition authorization
+
+Manifest schema 4 carries a bounded transition record; a SemVer comparison is never
+upgrade authorization. The reviewed source input is
+`deploy/release-transition-policy.json`. It assigns one positive, monotonically increasing
+release epoch and either an empty predecessor list (fresh installs only) or at most eight
+exact predecessor tuples. Each tuple binds the source tag, epoch, commit, manifest,
+descriptor and descriptor-bundle digests, complete migration-set and leaf-set digests, and
+the source verifier's immutable index, platform/config, runtime-contract and trusted-root
+identity. Ranges, wildcards, mutable references, equal/higher source epochs, duplicates and
+unknown keys are rejected.
+
+The build job materializes the release application's exact amd64 child from the same
+content-addressed BuildKit cache as the retained multi-platform OCI layout. Before running
+it, the collector requires the local image configuration ID to equal the config digest in
+that exact OCI child and checks the release source/revision/version labels. It then executes
+the immutable image ID—not its mutable local tag—with no network, a read-only root,
+dropped capabilities, `no-new-privileges`, bounded memory/CPU/PIDs and a private hardened
+tmpfs. The model-free inventory command loads Django's complete migration graph without a
+database, refuses replacement or non-transactional migrations, and emits canonical sorted
+complete and leaf sets with domain-separated SHA-256 digests.
+
+The reviewed policy bytes and generated migration contract are private, no-clobber files
+under `transition/`. Their hashes and normalized content are embedded in the manifest and
+revalidated before signing; both files are also required members of the deterministic
+signed evidence archive. Editing the reviewed policy or migration artifact after generation
+therefore invalidates the release. The initial checked-in epoch has no accepted predecessor,
+so it authorizes fresh installation only. Adding a predecessor requires explicit security
+review of every exact field. This publication metadata does not enable runtime mutation.
+Automatic signed-to-signed upgrade and rollback are intentionally unsupported, and the
+application image contains no staged-upgrade controller or source/target journal.
+
 ## Scanner and SBOM policy
 
 Trivy and Syft run in a cleared environment with explicit trusted empty config
 files. Trivy also receives an explicit empty ignore file. Repository-local
 `.syft.yaml`, `trivy.yaml`, `.trivyignore`, environment overrides, and a hidden
 `--ignore-unfixed` flag cannot silently weaken the gate.
+
+The recurring source and exact-image gates do not let Trivy resolve or update its
+mutable default vulnerability database. `deploy/trivy-db-lock.json` records one reviewed
+`ghcr.io/aquasecurity/trivy-db` OCI manifest, its only layer, the compressed layer
+size/hash, both extracted file sizes/hashes, and the database timestamps. The pinned
+ORAS binary fetches the manifest and blob by those digests with an empty home and
+Docker configuration. `scripts/prepare_trivy_db.py` then rejects links, paths other
+than `trivy.db` and `metadata.json`, duplicate/archive-extension records, unexpected
+types, size drift, hash drift, metadata drift, and a stale `NextUpdate`. Trivy runs
+against that isolated cache with database, Java-database, and check updates disabled
+and with offline scanning enabled. The cache is rehashed after every image scan, and
+each retained source/image summary binds the lock, manifest, layer, database, and
+preparation evidence hashes.
+
+The upstream database artifact is digest-locked; this control does not claim that
+upstream signs it. A lock refresh is therefore a deliberate reviewed change, never an
+automatic acceptance of whatever `:2` points to:
+
+1. Resolve the current official `trivy-db:2` manifest and review its raw OCI structure,
+   media types, creation time, single layer, and schema-2 metadata using the policy-
+   pinned ORAS version and the official
+   [Trivy database documentation](https://github.com/aquasecurity/trivy/blob/main/docs/guide/configuration/db.md)
+   and [database repository](https://github.com/aquasecurity/trivy-db).
+2. Independently hash the raw manifest, compressed layer, `metadata.json`, and
+   `trivy.db`; record the exact byte sizes and `UpdatedAt`/`NextUpdate` values in the
+   lock. Never copy only a mutable tag or a digest printed by an unreviewed script.
+3. Review the lock diff and focused archive/freshness tests in a pull request. Until a
+   fresh lock is merged, the scan is intentionally red once its exact `NextUpdate` is
+   reached.
+
+The lock checked in on 2026-08-29 uses manifest
+`sha256:b494387b91d0e201f9a8945709a02eb66558cba454efa265b4638e7edde45132`
+and expires at `2026-08-30T13:02:57.331758258Z`. It is evidence for that bounded
+window, not a permanent vulnerability result.
 
 Every exact platform child must have:
 
@@ -126,6 +197,67 @@ provenance, and SBOM signatures against the GitHub workflow/tag/commit identity.
 file hashes only. Its success message states that registry state and signatures
 were not checked. Offline success is not release authorization.
 
+## Docker installer consumption
+
+`install.sh --ref COMMIT --release-tag TAG` is the current in-checkout signed-release
+consumer entry point.
+It requires the exact v-prefixed SemVer tag and the tag's exact lowercase 40-character
+commit. Local build remains the default when `--release-tag` is absent.
+
+The installer downloads only the V2 descriptor, descriptor bundle, and release manifest
+from immutable GitHub release asset names. It bootstraps only BackupSheep's reviewed
+first-party verifier, built from Cosign 3.1.3 and pinned by OCI index plus exact
+amd64/arm64 child and configuration digests in `deploy/release-policy.json`. That
+container runs as UID/GID 65532 with no Docker socket, a read-only root, all capabilities
+dropped, `no-new-privileges`, bounded PIDs/CPU/memory, and a private `noexec,nosuid,nodev`
+tmpfs. It runs with `--network none` and receives only read-only copies of the public
+descriptor, bundle, and reviewed root in `deploy/release/sigstore-trusted-root.json`.
+
+The descriptor blob signature must match the exact workflow URL for the tag, GitHub Actions
+OIDC issuer, repository, workflow SHA, tag ref, and `push` trigger. The
+descriptor parser accepts only its sixteen-line fixed order and five exact official
+repositories. Its verifier fields are assertions against the independently distributed
+bootstrap policy and cannot select the verifier that authenticates the descriptor; it
+does not use `eval`, `source`, JSON interpolation, or tag-based image selection. The
+workflow has already verified every official image signature online before signing that
+descriptor. The consumer verifies the descriptor bundle offline; its authenticated digest
+references then make Docker's content-addressed pulls the only registry operation. The
+manifest hash, local `RepoDigests`,
+image IDs, and OCI labels must also match. Compose is
+then rendered through `deploy/release/signed-release.compose.yml`, which is forced last,
+resets all application/PostgreSQL/egress/RabbitMQ build definitions, uses only the five
+pre-pulled first-party digests, and sets `pull_policy: never`.
+
+The same bounded client pre-pulls and records the descriptor-bound first-party RabbitMQ
+4.3 runtime and 4.2 migration-hop digests. Signed Compose models set `pull_policy: never` for every
+RabbitMQ service, including the migration overlay, so startup cannot trigger an implicit
+registry request outside the watchdog. This guarantee is specific to signed-release mode.
+The default local-build path still delegates `compose build --pull` to the operator's Docker
+daemon and has no portable installer-side deadline for a daemon-side base-image transfer;
+operators must enforce Docker/build network timeouts at the host or CI layer.
+
+Rollback is not an `.env` image edit. The consumer accepts only the exact fresh-install
+interface. Former stage/upgrade forms and every other argument shape are rejected before a
+mutation lock is created, Docker is contacted, or installation files are changed. BackupSheep
+does not ship an automatic signed-upgrade controller or journal because an incomplete
+checkout + evidence + configuration + database transition would create an unsafe recovery
+boundary. Do not apply the generic source-upgrade procedure to a signed-release installation
+and do not edit the provenance fields. Use signed-release mode only for a fresh project whose
+recovery plan is a separately verified restore into another fresh project; preserve the old
+project intact. This limitation means the signed consumer is not an enterprise
+security-patching channel.
+
+### Sigstore trust-root rotation
+
+The consumer never trusts a root downloaded beside release assets. The checked-in root is
+copied from `sigstore/root-signing` commit
+`0d8bd7c40a20b5291c18fb80fbe8c9f598685a2c`, path `targets/trusted_root.json`, and its
+required SHA-256 is pinned in both policy and consumer code. A rotation requires a dedicated
+security review of the root-signing/TUF history and key validity, then one atomic source
+change updating the reviewed bytes, source commit, and hash. Release publishers or assets
+cannot override it. The fresh-cache, network-disabled Cosign acceptance gate must pass before
+the rotated root can authorize a release.
+
 ## Administrator-owned controls and remaining rollout gates
 
 Repository code cannot enforce these external controls. Before opt-in:
@@ -147,19 +279,8 @@ Run one protected pre-release tag as a controlled acceptance test before product
 use. Confirm the read-only `release_regression` job completes before `build_scan`
 and cannot publish packages or release contents. Then confirm GitHub OIDC issuance,
 GHCR referrer behavior, ORAS graph copying, BuildKit's complete `mode=max` fields
-for all three Dockerfiles, Cosign bundle verification, official tag refusal on
-replay, and GitHub release asset publication. This checked-in foundation does not
+for all five Dockerfiles, Cosign bundle verification, official tag refusal on
+replay, fresh-cache descriptor verification under `--network none` using the checked-in
+trust root, and GitHub release asset publication. This checked-in foundation does not
 itself configure those GitHub/GHCR controls and has not published or deployed a
 release.
-
-## WordPress connector publication hook
-
-The WordPress connector under `integrations/wordpress/backupsheep-v2` has its own
-package contract and publication lifecycle. This container workflow intentionally
-does not publish a WordPress ZIP or imply that a container release also shipped the
-plugin. A future plugin release job should run only after its focused package and
-protocol tests, build from the exact Git tree with `scripts/build_wordpress_plugin.py`,
-record the archive SHA-256 in a small plugin manifest, keyless-sign both files under
-the same protected tag identity, and attach them to the GitHub release. WordPress.org
-or marketplace publication remains a separately approved operation with separate
-credentials and acceptance evidence.

@@ -23,7 +23,8 @@ domain it is intended to recover.
 | Material | Why it matters | Recommended protection |
 | --- | --- | --- |
 | PostgreSQL | All product configuration, encrypted credentials, schedules, backup/restore rows and durable orchestration | Frequent logical dumps or managed-PostgreSQL PITR, encrypted off-host |
-| `.env`, `.secrets` / secret-manager object | Runtime/integration settings plus file-backed Django, DB, broker, signing, onboarding and optional lane-specific managed-SSH secrets | Encrypted secret backup with tightly audited access; preserve ownership and modes |
+| `.secrets/artifact_local_file_database_keyring` and `.secrets/artifact_local_file_files_keyring` | The distinct root keys required to unwrap every BSE1 database/files data key, including retained legacy keys | Back up the exact bytes, ownership and modes with PostgreSQL as one encrypted, access-audited cryptographic recovery set; never regenerate or substitute either file |
+| `.env`, remaining `.secrets` / secret-manager object | Runtime/integration settings plus file-backed Django, DB, broker, signing, onboarding and optional lane-specific managed-SSH secrets | Encrypted secret backup with tightly audited access; preserve ownership and modes |
 | Deployment metadata | Exact Git revision/image, Compose overrides, proxy and firewall configuration | Versioned infrastructure repository or encrypted configuration backup |
 | `backup_storage` | Archives stored by the Local Storage destination | Filesystem snapshot/backup to a second system; never the only archive copy |
 | `database_workdir`, `files_workdir`, `storage_workdir` | Lane-private in-flight material, run logs, website caches and BSE1 materialization | Snapshot the exact lane volumes if preserving in-progress local jobs/caches is required |
@@ -99,6 +100,14 @@ git rev-parse HEAD > /secure/backups/backupsheep.git-revision
 Also protect reverse-proxy, DNS, firewall and external-database/broker configuration. Do
 not place the resulting directory in the repository.
 
+The PostgreSQL dump and both exact artifact keyrings are one inseparable cryptographic
+recovery set. PostgreSQL identifies each wrapping key and stores the authenticated data-key
+wrap; only the matching lane keyring supplies that root key. Losing, replacing, pruning or
+regenerating either keyring is irreversible for every retained artifact that references a
+missing key, even when its ciphertext and the database both survive.
+The files are exportable software keys rather than non-exportable HSM/KMS keys; protect
+host access and every off-host copy as part of the custody boundary.
+
 ### 3. Protect Local Storage and work material
 
 Identify the exact mounted volumes and destinations instead of guessing Compose-generated
@@ -141,9 +150,15 @@ production provider resources.
 
 - provide operator-managed Docker Engine 28.0.0+ and Compose 2.33.1+ on a supported host;
 - check out the recorded BackupSheep revision (or a reviewed compatible newer release);
-- restore `.env` with mode `0600`, `.secrets` as mode `0700`, every required owner-owned
-  file and the two optional lane-specific managed-key sources as mode `0444`; empty
-  optional files mean disabled; restore deployment overrides;
+- restore `.env` with mode `0600` and `.secrets` as mode `0700`; restore the exact bytes of
+  `artifact_local_file_database_keyring` and `artifact_local_file_files_keyring`, plus
+  every other required owner-owned secret file and the two optional lane-specific
+  managed-key sources, as mode `0444`; preserve the original owner and single-link
+  metadata, and never generate a replacement for a missing artifact keyring; empty
+  optional managed-key files mean disabled; restore deployment overrides;
+- restore the original `BACKUPSHEEP_INSTALLATION_ID`; both keyring headers and every
+  authenticated artifact context are bound to it, so generating a replacement ID makes
+  the recovered keyrings intentionally unusable;
 - restore the three private work volumes, three ciphertext-transfer volumes, staging
   witness and storage-only Local Storage with their exact identities and metadata; let the
   v3 provisioner validate them rather than adding cross-lane mounts;
@@ -225,6 +240,17 @@ Verify:
 - Local Storage BSE1 objects are present, match their recorded storage-point evidence and
   complete an authenticated restore through the exact database/files reverse lane; direct
   browser/ZIP download remains disabled;
+- each recovered BSE1 object is format v2, its random envelope UUID differs from the
+  durable backup UUID, and its public header exposes neither the backup UUID nor the
+  private plaintext/context digests; the decrypting lane must prove those digests from
+  the encrypted terminal record before publishing plaintext;
+- an isolated known database artifact unwraps only with the restored database keyring and
+  a known files artifact unwraps only with the restored files keyring; swapping the two
+  keyrings or crossing either lane is rejected before any plaintext is released;
+- BSE1 sealing and isolated restore on each exact recovered worker mount succeeds under
+  its real worker identity, proving Linux `O_TMPFILE` plus `linkat(AT_EMPTY_PATH)` support;
+  verify the restored data digest/content rather than accepting container health or task
+  completion as filesystem/recovery proof;
 - account-scoped SSH approvals and append-only approval events are present in PostgreSQL;
   an operation receives only its exact current approval in a transient private-runtime
   file, and unknown or changed keys remain rejected;
@@ -255,6 +281,16 @@ revalidated.
 Per-account keys live in PostgreSQL. A database copy without those rows cannot decrypt
 stored connection/storage credentials. Reconnect providers with newly issued, narrowly
 scoped credentials and rotate any credentials whose confidentiality is uncertain.
+
+### Lost artifact keyring
+
+There is no password reset or reconstruction path for a lost
+`artifact_local_file_database_keyring` or `artifact_local_file_files_keyring`. Do not create
+a new file under the missing name and do not prune retained legacy keys speculatively. A
+replacement key protects only future wraps and permanently strands all prior artifacts
+whose recorded key ID is absent. Recover the exact keyring bytes from the cryptographic
+recovery set; if that is impossible, mark the affected lane's artifacts unrecoverable and
+make that data-loss boundary explicit to operators.
 
 ### Lost onboarding token
 

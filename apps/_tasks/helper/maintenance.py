@@ -54,13 +54,11 @@ def retry_protected_storage_deletes(self):
         CoreBasecampBackupStoragePoints,
         CoreDatabaseBackupStoragePoints,
         CoreWebsiteBackupStoragePoints,
-        CoreWordPressBackupStoragePoints,
     )
 
     point_models = (
         CoreWebsiteBackupStoragePoints,
         CoreDatabaseBackupStoragePoints,
-        CoreWordPressBackupStoragePoints,
         CoreBasecampBackupStoragePoints,
     )
     now_iso = timezone.now().isoformat()

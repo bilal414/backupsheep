@@ -9,6 +9,7 @@ import uuid
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
+from apps._tasks.artifact_encryption import StorageArtifactIdentity
 from apps._tasks.integration.storage import dropbox as dropbox_module
 from apps._tasks.integration.storage import pcloud as pcloud_module
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints
@@ -53,6 +54,7 @@ class _DropboxFake:
         self.upload_calls = 0
         self.lost_upload_response = False
         self.duplicate_entries = None
+        self.delete_calls = []
 
     @staticmethod
     def _metadata(path, object_id, content, *, rev="rev-1", content_hash="dbx-hash"):
@@ -69,9 +71,12 @@ class _DropboxFake:
 
     def files_get_metadata(self, path):
         path = str(path)
-        if path not in self.objects:
-            raise NotFoundError()
-        return dict(self.objects[path])
+        if path in self.objects:
+            return dict(self.objects[path])
+        for item in self.objects.values():
+            if path == str(item["id"]):
+                return dict(item)
+        raise NotFoundError()
 
     def files_list_folder(self, path, recursive=False):
         entries = (
@@ -99,6 +104,11 @@ class _DropboxFake:
                 return dict(item), _DropboxResponse(item["content"])
         raise NotFoundError()
 
+    def files_delete_v2(self, path, *, parent_rev):
+        self.delete_calls.append((path, parent_rev))
+        self.objects.pop(path, None)
+        return None
+
 
 class _PCloudFake:
     def __init__(self):
@@ -107,6 +117,7 @@ class _PCloudFake:
         self.lost_upload_response = False
         self.duplicate_entries = None
         self.calls = []
+        self.last_upload_content_type = None
 
     def _object(self, path, content, file_id=None, *, provider_hash="pc-hash"):
         return {
@@ -127,7 +138,17 @@ class _PCloudFake:
             return {"result": 0, "metadata": {"folderid": 17}}
         if operation == "stat":
             path = data.get("path")
+            file_id = str(data.get("fileid") or "")
             object_data = self.objects.get(path)
+            if object_data is None and file_id:
+                object_data = next(
+                    (
+                        item
+                        for item in self.objects.values()
+                        if str(item["fileid"]) == file_id
+                    ),
+                    None,
+                )
             if object_data is None:
                 return {"result": 2009}
             return {"result": 0, "metadata": dict(object_data)}
@@ -156,6 +177,20 @@ class _PCloudFake:
                 "hosts": ["c1.pcloud.com"],
                 "path": "/download/test",
             }
+        if operation == "deletefile":
+            file_id = str(data.get("fileid") or "")
+            path = next(
+                (
+                    key
+                    for key, item in self.objects.items()
+                    if str(item["fileid"]) == file_id
+                ),
+                None,
+            )
+            if path is None:
+                return {"result": 2009}
+            self.objects.pop(path)
+            return {"result": 0}
         raise AssertionError(f"unexpected pCloud operation: {operation}")
 
     def get(self, url, *, params=None, **kwargs):
@@ -171,7 +206,8 @@ class _PCloudFake:
             return _Response(self._payload(operation, data))
         self.upload_calls += 1
         file_tuple = (files or {})["file"]
-        filename, source, _content_type = file_tuple
+        filename, source, content_type = file_tuple
+        self.last_upload_content_type = content_type
         content = source.read()
         folder = data["path"].rstrip("/")
         path = f"{folder}/{filename}" if folder else f"/{filename}"
@@ -184,8 +220,13 @@ class _PCloudFake:
 
 
 class _Account:
+    id = 7
+
     def get_encryption_key(self):
         return "encryption-key"
+
+    def create_storage_log(self, *args, **kwargs):
+        return None
 
 
 class _Backup:
@@ -215,10 +256,13 @@ class _PCloudConfig:
 
 class _Storage:
     def __init__(self, provider):
+        self.id = 9
+        self.name = f"{provider} storage"
         self.account = _Account()
         self.storage_dropbox = _DropboxConfig()
         self.storage_pcloud = _PCloudConfig()
-        self.type = SimpleNamespace(code=provider)
+        self.type = SimpleNamespace(id=10, code=provider, name=provider)
+        self.is_air_gapped = False
 
 
 class _Point:
@@ -239,6 +283,24 @@ class _Point:
             raise OSError("database-body=secret-at-db.internal")
         self.events.append(("save", self.status, dict(self.metadata)))
 
+    def committed_integrity_identity(self):
+        state = next(
+            (
+                value
+                for value in (self.metadata or {}).values()
+                if isinstance(value, dict)
+                and value.get("sha256")
+                and value.get("size_bytes") is not None
+            ),
+            None,
+        )
+        if state is None:
+            return None
+        return {
+            "sha256": str(state["sha256"]),
+            "size_bytes": int(state["size_bytes"]),
+        }
+
 
 class DropboxPCloudHardeningTests(TestCase):
     def setUp(self):
@@ -253,6 +315,23 @@ class DropboxPCloudHardeningTests(TestCase):
     def _point(self, provider, *, lose_final_save=False):
         events = []
         return _Point(provider, self.identifier, events, lose_final_save=lose_final_save), events
+
+    def _bse_identity(self):
+        identifier = "12345678-1234-4abc-8def-1234567890ab"
+        return StorageArtifactIdentity(
+            identifier=identifier,
+            filename=f"{identifier}.bse1",
+            artifact_format="bse1",
+            ownership_marker=f"bse2:{identifier}",
+            content_type="application/octet-stream",
+        )
+
+    def _write_bse_fixture(self, artifact):
+        path = os.path.join("_storage", artifact.filename)
+        with open(path, "wb") as source:
+            source.write(self.payload)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
 
     @staticmethod
     def _assert_artifact_before_complete(test_case, events):
@@ -285,6 +364,66 @@ class DropboxPCloudHardeningTests(TestCase):
         self._assert_artifact_before_complete(self, events)
         artifact = next(event[1] for event in events if event[0] == "artifact")
         self.assertEqual(artifact["object_key"], point.storage_file_id)
+
+    def test_dropbox_encrypted_path_is_random_and_opaque(self):
+        artifact = self._bse_identity()
+        self._write_bse_fixture(artifact)
+        point, _events = self._point("dropbox")
+        provider = _DropboxFake()
+        with mock.patch.object(
+            dropbox_module, "storage_artifact_identity", return_value=artifact
+        ), mock.patch.object(
+            dropbox_module.dropbox, "Dropbox", return_value=provider
+        ), mock.patch.object(dropbox_module, "bs_decrypt", return_value="token"):
+            dropbox_module.storage_dropbox(point)
+
+        state = point.metadata[dropbox_module.DROPBOX_METADATA_KEY]
+        self.assertEqual(state["path"], f"/{artifact.filename}")
+        self.assertEqual(
+            state["ownership_marker"], f"backupsheep:{artifact.identifier}"
+        )
+        remote = next(iter(provider.objects.values()))
+        visible = repr(
+            {
+                "name": remote["name"],
+                "path_display": remote["path_display"],
+                "path_lower": remote["path_lower"],
+            }
+        )
+        self.assertNotIn(self.identifier, visible)
+        self.assertNotIn("hardening-node", visible)
+        self.assertNotIn(".zip", visible)
+
+    def test_dropbox_encrypted_delete_uses_opaque_path_and_provider_id(self):
+        artifact = self._bse_identity()
+        self._write_bse_fixture(artifact)
+        point, _events = self._point("dropbox")
+        provider = _DropboxFake()
+        with mock.patch.object(
+            dropbox_module, "storage_artifact_identity", return_value=artifact
+        ), mock.patch.object(
+            dropbox_module.dropbox, "Dropbox", return_value=provider
+        ), mock.patch.object(
+            dropbox_module, "bs_decrypt", return_value="token"
+        ), mock.patch(
+            "apps.console.backup.models.bs_decrypt", return_value="token"
+        ), mock.patch(
+            "apps._tasks.artifact_encryption.storage_artifact_identity",
+            return_value=artifact,
+        ), mock.patch(
+            "apps._tasks.artifact_encryption.validate_storage_object_key",
+            return_value=artifact,
+        ):
+            dropbox_module.storage_dropbox(point)
+            self.assertTrue(CoreWebsiteBackupStoragePoints.soft_delete(point))
+
+        self.assertEqual(
+            provider.delete_calls, [(f"/{artifact.filename}", "rev-1")]
+        )
+        visible = repr(provider.delete_calls)
+        self.assertNotIn(self.identifier, visible)
+        self.assertNotIn("hardening-node", visible)
+        self.assertNotIn(".zip", visible)
 
     def test_dropbox_worker_crash_before_status_persistence_adopts_completed_object(self):
         point, _events = self._point("dropbox", lose_final_save=True)
@@ -375,6 +514,61 @@ class DropboxPCloudHardeningTests(TestCase):
             )
             self.assertFalse(kwargs["allow_redirects"])
         self._assert_artifact_before_complete(self, events)
+
+    def test_pcloud_encrypted_path_progress_and_mime_are_opaque(self):
+        artifact = self._bse_identity()
+        self._write_bse_fixture(artifact)
+        point, _events = self._point("pcloud")
+        provider = _PCloudFake()
+        with mock.patch.object(
+            pcloud_module, "storage_artifact_identity", return_value=artifact
+        ), mock.patch.object(pcloud_module, "requests", provider):
+            pcloud_module.storage_pcloud(point)
+
+        state = point.metadata[pcloud_module.PCLOUD_METADATA_KEY]
+        self.assertEqual(state["folder"], "/")
+        self.assertEqual(state["path"], f"/{artifact.filename}")
+        self.assertEqual(
+            state["progress_hash"], f"backupsheep-{artifact.identifier}"
+        )
+        self.assertEqual(provider.last_upload_content_type, "application/octet-stream")
+        visible_calls = repr(
+            [
+                (method, url, parameters)
+                for method, url, parameters, _kwargs in provider.calls
+            ]
+        )
+        self.assertNotIn(self.identifier, visible_calls)
+        self.assertNotIn("hardening-node", visible_calls)
+        self.assertNotIn(".zip", visible_calls)
+
+    def test_pcloud_encrypted_delete_uses_opaque_file_id(self):
+        artifact = self._bse_identity()
+        self._write_bse_fixture(artifact)
+        point, _events = self._point("pcloud")
+        provider = _PCloudFake()
+        with mock.patch.object(
+            pcloud_module, "storage_artifact_identity", return_value=artifact
+        ), mock.patch.object(
+            pcloud_module, "requests", provider
+        ), mock.patch(
+            "apps._tasks.artifact_encryption.storage_artifact_identity",
+            return_value=artifact,
+        ), mock.patch(
+            "apps._tasks.artifact_encryption.validate_storage_object_key",
+            return_value=artifact,
+        ):
+            pcloud_module.storage_pcloud(point)
+            self.assertTrue(CoreWebsiteBackupStoragePoints.soft_delete(point))
+
+        delete_calls = [
+            call for call in provider.calls if call[1].endswith("/deletefile")
+        ]
+        self.assertEqual(len(delete_calls), 1)
+        visible = repr(delete_calls)
+        self.assertNotIn(self.identifier, visible)
+        self.assertNotIn("hardening-node", visible)
+        self.assertNotIn(".zip", visible)
 
     def test_pcloud_endpoint_rejects_non_official_hosts_before_network(self):
         for hostname in (

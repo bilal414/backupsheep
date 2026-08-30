@@ -521,7 +521,6 @@ class ExecutionStatusApiTests(BaseTestCase):
             "apps.api.v1.backup.vultr": "CoreVultrBackupSerializer",
             "apps.api.v1.backup.vultr_database": "CoreVultrDatabaseBackupSerializer",
             "apps.api.v1.backup.website": "CoreWebsiteBackupSerializer",
-            "apps.api.v1.backup.wordpress": "CoreWordPressBackupSerializer",
         }
         for module_name, class_name in serializers.items():
             with self.subTest(serializer=class_name):

@@ -205,6 +205,31 @@ def _request_fingerprint(value: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_request(value).encode("utf-8")).hexdigest()
 
 
+def _credential_scope(api_base: str, run_id: str, token: str) -> str:
+    """Bind a durable ledger to this credential without storing a fast hash.
+
+    API tokens are high-entropy credentials, but a truncated unsalted digest still
+    gives anyone who obtains the ledger a cheap offline token oracle. A run-scoped
+    scrypt fingerprint preserves deterministic crash recovery while making that
+    oracle deliberately expensive and domain-separated from every other use.
+    """
+
+    token_bytes = str(token or "").encode("utf-8")
+    if not token_bytes:
+        raise HarnessError("A Vultr credential is required for the ledger scope.")
+    salt = f"backupsheep:vultr-live-e2e:{require_run_id(run_id)}".encode("utf-8")
+    fingerprint = hashlib.scrypt(
+        token_bytes,
+        salt=salt,
+        n=2**14,
+        r=8,
+        p=1,
+        maxmem=64 * 1024 * 1024,
+        dklen=32,
+    ).hex()
+    return f"{api_base}:credential-scrypt-{fingerprint}"
+
+
 def _retry_after_seconds(value: Any, *, now: dt.datetime | None = None) -> int | None:
     """Parse Retry-After seconds or HTTP-date, bounded for this harness."""
 
@@ -475,10 +500,7 @@ class LiveVultrHarness:
             os.environ.get("BACKUPSHEEP_E2E_LEDGER_PATH")
             or str(ROOT / "_storage" / "e2e-ledgers" / f"{self.prefix}.json")
         )
-        scope = (
-            f"{self.api_base}:token-"
-            f"{hashlib.sha256(self.token.encode()).hexdigest()[:16]}"
-        )
+        scope = _credential_scope(self.api_base, self.prefix, self.token)
         self.ledger = DurableResourceLedger(
             ledger_path,
             provider="vultr",

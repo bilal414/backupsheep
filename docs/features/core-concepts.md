@@ -23,8 +23,8 @@ A **connection** stores the credentials and endpoint context used to reach a
 provider or service. It belongs to an account and an integration, and may also
 be associated with the BackupSheep execution location that will run work.
 
-Examples include a cloud API credential, an SFTP login, a database login, a
-WordPress plugin connection, and a Basecamp OAuth connection. A connection can
+Examples include a cloud API credential, an SFTP login, a database login, and a
+Basecamp OAuth connection. A connection can
 expose multiple eligible resources from which nodes are created. Connection
 validation tests the configured provider or service before a backup is started.
 
@@ -39,7 +39,7 @@ categories:
 - **Website**: files and directories reached through FTPS or SFTP; plaintext FTP is
   a default-off legacy compatibility mode.
 - **Database**: one or more logical MySQL, MariaDB, or PostgreSQL databases.
-- **SaaS**: currently WordPress or Basecamp.
+- **SaaS**: currently Basecamp.
 
 A node carries its display name, timezone, status, success/failure notification
 switches, and provider-specific configuration. Its status can distinguish
@@ -51,7 +51,7 @@ deleting its history.
 
 A **storage destination** is an account-owned place for an archive produced by
 BackupSheep. It can be local disk, object storage, or a supported drive service.
-One website, logical database, WordPress, or Basecamp backup can be sent to
+One website, logical database, or Basecamp backup can be sent to
 multiple destinations. Each resulting copy has its own storage-point record and
 upload status.
 

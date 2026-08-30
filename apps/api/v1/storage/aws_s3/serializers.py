@@ -17,7 +17,12 @@ from apps.api.v1.utils.api_helpers import (
 from apps._tasks.helper.maintenance import storage_aws_s3_sync_lifecycle
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints
 from apps.console.connection.models import CoreAWSRegion
-from apps.console.storage.models import CoreStorageAWSS3, CoreStorage, CoreStorageType
+from apps.console.storage.models import (
+    CoreStorage,
+    CoreStorageAWSS3,
+    CoreStorageType,
+    S3StorageConfigurationError,
+)
 
 
 class CoreAWSRegionSerializer(serializers.ModelSerializer):
@@ -117,13 +122,18 @@ class CoreStorageAWSS3WriteSerializer(StorageCredentialWriteSerializerMixin, ser
 
             data["access_key"] = bs_encrypt(data["access_key"], self.context["encryption_key"])
             data["secret_key"] = bs_encrypt(data["secret_key"], self.context["encryption_key"])
-        except ValueError as e:
+        except S3StorageConfigurationError as error:
             # Configuration problems (Object Lock / lifecycle settings, or a failed
             # bucket permission probe) are client errors: surface them as a 400 with
-            # the real reason instead of an unhandled 500.
-            raise serializers.ValidationError(str(e))
-        except Exception as e:
-            raise serializers.ValidationError("Unable to authenticate with the storage provider. Verify the credentials and configuration.")
+            # a fixed, reviewed reason instead of provider exception text.
+            raise serializers.ValidationError(
+                S3StorageConfigurationError.public_message(error.code)
+            ) from error
+        except Exception as error:
+            raise serializers.ValidationError(
+                "Unable to authenticate with the storage provider. Verify the "
+                "credentials and configuration."
+            ) from error
         return data
 
 

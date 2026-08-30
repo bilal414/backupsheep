@@ -29,7 +29,7 @@
         <div class="mt-12 flex flex-wrap items-center justify-between gap-3">
             <div class="min-w-0">
                 <h3 class="text-base font-semibold text-slate-900">
-                    {{ integration.name }} Integrations {% if "wordpress" in integration.code %}(<a target="_blank" class="font-medium text-indigo-600 transition hover:text-indigo-700" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
+                    {{ integration.name }} Integrations
                 </h3>
                 <p class="mt-1 text-sm text-slate-500">Existing connections for this provider.</p>
             </div>
@@ -239,11 +239,6 @@
                             We support backup automation of SFTP, FTP and FTPS <span
                                 class="font-medium text-indigo-600">web/file servers</span>.
                         </p>
-                    {% elif integration.code == "wordpress" %}
-                        <p class="mt-2 text-sm text-slate-500">
-                            We support backup automation of {{ integration.name }} <span
-                                class="font-medium text-indigo-600">full website backups</span>.
-                        </p>
                     {% elif integration.code == "basecamp" %}
                         <p class="mt-2 text-sm text-slate-500">
                             We support backup automation of <span
@@ -296,8 +291,6 @@
                             {% elif integration.code == "website" %}
                                 Create website nodes with multiple directories and folders. You can also rule to exclude
                                 specific files.
-                            {% elif integration.code == "wordpress" %}
-                                Create WordPress nodes which includes all files and database.
                             {% else %}
                                 Choose which {{ integration.name }} servers and volumes you want to link to automate
                                 snapshots.
@@ -321,9 +314,6 @@
                             {% elif integration.code == "website" %}
                                 Automate backups of {{ integration.name }} nodes using schedule(s), and you can also
                                 create on-demand backups.
-                            {% elif integration.code == "wordpress" %}
-                                Automate backups of {{ integration.name }} nodes using schedule(s), and you can also
-                                create on-demand backups.
                             {% else %}
                                 Automate backups of {{ integration.name }} nodes using schedule(s). Save $$ in
                                 {{ integration.name }} backup fees.
@@ -345,9 +335,6 @@
                                 Store backups on Free Storage included in your plan, or you can bring your storage
                                 as well.
                             {% elif integration.code == "database" %}
-                                Store backups on Free Storage included in your plan, or you can bring your storage
-                                as well.
-                            {% elif integration.code == "wordpress" %}
                                 Store backups on Free Storage included in your plan, or you can bring your storage
                                 as well.
                             {% else %}
@@ -467,7 +454,7 @@
                         </div>
                         <div class="sm:col-span-6">
                             <label for="name" class="block text-sm font-medium text-slate-700">
-                                Name {% if "wordpress" in integration.code %}(<a target="_blank" class="font-medium text-indigo-600 transition hover:text-indigo-700" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
+                                Name
                             </label>
                             <input x-model="connection.name" type="text" name="name" id="name" autocomplete="name"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
@@ -547,75 +534,6 @@
                                x-text="connectionErrors?.location"></p>
                         </div>
 
-                        <div class="sm:col-span-6"
-                             x-show="integrationCode === 'wordpress'">
-                            <label for="url" class="block text-sm font-medium text-slate-700">
-                                WordPress URL
-                                {% if "wordpress" in integration.code %} (<a target="_blank" class="font-medium text-indigo-600 transition hover:text-indigo-700" href="https://wordpress.org/plugins/backupsheep/">Download BackupSheep Plugin</a>){% endif %}
-                            </label>
-                            <input x-model="selectedAuth.url" type="text" name="url" id="url"
-                                   autocomplete="url"
-                                   class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                            <p x-show="connectionErrors.auth?.url" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="url-error" x-text="connectionErrors.auth?.url"></p>
-                        </div>
-                        <div class="sm:col-span-6"
-                             x-show="integrationCode === 'wordpress'">
-                            <label for="key" class="block text-sm font-medium text-slate-700">
-                                 <a class="inline-flex cursor-pointer items-center text-indigo-600 transition hover:text-indigo-700" @click="copyToClipboard(selectedAuth.key)" aria-label="Copy WordPress key">
-                                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                  <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 01-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 011.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 00-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 01-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 00-3.375-3.375h-1.5a1.125 1.125 0 01-1.125-1.125v-1.5a3.375 3.375 0 00-3.375-3.375H9.75"/>
-                                </svg>
-                            </a> WordPress Key (add this to BackupSheep plugin page)
-                            </label>
-                            <input  x-model="selectedAuth.key" type="text" name="key" id="key"
-                                   autocomplete="key"
-                                   class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                            <p x-show="connectionErrors.auth?.key" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="key-error" x-text="connectionErrors.auth?.key"></p>
-                        </div>
-                        <div class="sm:col-span-6"
-                             x-show="integrationCode === 'wordpress'">
-                            <div class="flex items-start gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800" role="alert">
-                                <svg class="mt-0.5 h-5 w-5 flex-none text-sky-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12v-.008z"/>
-                                </svg>
-                                <div class="min-w-0 flex-1">
-                                    <p class="leading-6">
-                                        If your website is password protected then add your
-                                        user and password below.
-                                        <strong>This is not WordPress admin password. </strong>
-                                    </p>
-                                    <p class="mt-1">
-                                        <a target="_blank" href="https://support.backupsheep.com/docs/password-protected-wordpress-sites" class="font-semibold text-sky-800 underline transition hover:text-sky-900">
-                                            Learn More
-                                        </a>
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="sm:col-span-3"
-                             x-show="integrationCode === 'wordpress'">
-                            <label for="http_user" class="block text-sm font-medium text-slate-700">
-                                User (not required)
-                            </label>
-                            <input  x-model="selectedAuth.http_user" type="text" name="http_user" id="http_user"
-                                   autocomplete="http_user"
-                                   class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                            <p x-show="connectionErrors.auth?.http_user" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="http_user-error" x-text="connectionErrors.auth?.http_user"></p>
-                        </div>
-                        <div class="sm:col-span-3"
-                             x-show="integrationCode === 'wordpress'">
-                            <label for="http_pass" class="block text-sm font-medium text-slate-700">
-                                Password (not required)
-                            </label>
-                            <input  x-model="selectedAuth.http_pass" type="text" name="http_pass" id="http_pass"
-                                   autocomplete="http_pass"
-                                   class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                            <p x-show="connectionErrors.auth?.http_pass" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="http_pass-error" x-text="connectionErrors.auth?.http_pass"></p>
-                        </div>
 
                         <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
                             <label for="profile" class="block text-sm font-medium text-slate-700">
@@ -2087,12 +2005,6 @@
                                 }
                             }
 
-                            if (this.integrationCode === "wordpress") {
-                                if (!this.selectedAuth.key || action_type === 'copy') {
-                                    await this.getWordPressKey();
-                                }
-                            }
-
                             /**
                              * Open Modal
                              */
@@ -2122,9 +2034,6 @@
                                 this.selectAWSRegions = true;
                             }
 
-                            if (this.integrationCode === "wordpress") {
-                                await this.getWordPressKey();
-                            }
                         }
                     }
                 }
@@ -2449,27 +2358,6 @@
                     this.discoveryLoading = false;
                 }
             },
-            async getWordPressKey() {
-                const url = "/api/v1/saas/" + this.integrationCode + "/generate_key/?";
-                this.discoveryLoading = true;
-                try {
-                    const json = await this.requestJSON(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'GET',
-                    });
-                    this.selectedAuth.key = json.key;
-                    return true;
-                } catch (error) {
-                    this.notifyConnectionFailure(error, 'Unable to generate the WordPress connection key');
-                    return false;
-                } finally {
-                    this.discoveryLoading = false;
-                }
-            },
-
             toggleEndpointDropdown() {
                 this.openEndpoint = !this.openEndpoint;
                 this.endpointActiveIndex = null;
