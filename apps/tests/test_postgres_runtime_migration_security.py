@@ -515,6 +515,11 @@ class PostgresSourceIdentityContractTests(TestCase):
         self.assertEqual(source.count("pg_catalog.array_subscript_handler"), 2)
         self.assertIn('"$target_migrator_user" "$target_migrator_user"', source)
 
+    def test_default_acl_object_types_are_explicitly_serialized_as_text(self):
+        source = MIGRATOR.read_text(encoding="utf-8")
+        self.assertEqual(source.count("defaults.defaclobjtype::text"), 2)
+        self.assertNotIn("defaults.defaclobjtype ||", source)
+
 
 class PostgresInterruptedMigrationRecoveryTests(TestCase):
     @staticmethod

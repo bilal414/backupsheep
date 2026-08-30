@@ -123,6 +123,10 @@ class PostgresRuntimeMigrationE2EContractTests(TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.runner)
 
+    def test_internal_catalog_char_values_are_cast_before_serialization(self):
+        self.assertIn("type.typtype::text ||", self.runner)
+        self.assertNotIn("type.typtype ||", self.runner)
+
     def test_hostile_role_object_and_acl_have_independent_refusal_runs(self):
         attacks = (
             (
