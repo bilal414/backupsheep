@@ -1334,6 +1334,28 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertIn("deploy/static-analysis-policy.json", static_job)
         self.assertIn("uses: ./.github/workflows/supply-chain-security.yml", self.workflow)
 
+    def test_git_checkout_concealment_attack_runs_on_the_host_not_in_the_runtime_image(self):
+        test_name = (
+            "apps.tests.test_installer_security.InstallerSecurityContractTests."
+            "test_signed_consumer_attests_exact_clean_source_checkout_even_with_skip_worktree"
+        )
+        dependency_job = self.supply_chain_workflow.split(
+            "  dependency-and-deployment-checks:", 1
+        )[1].split("  static-python-security:", 1)[0]
+        self.assertIn("Attack signed-release checkout index concealment", dependency_job)
+        attack_step = dependency_job.split(
+            "      - name: Attack signed-release checkout index concealment\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("set -euo pipefail", attack_step)
+        self.assertIn("command -v git >/dev/null", attack_step)
+        self.assertIn("git --version >/dev/null", attack_step)
+        self.assertEqual(attack_step.count(test_name), 1)
+        self.assertLess(attack_step.index("command -v git"), attack_step.index(test_name))
+        self.assertIn(
+            "Unexpected Git executable in the production application image",
+            self.supply_chain_workflow,
+        )
+
     def test_release_is_dormant_and_signing_permissions_are_separated(self):
         self.assertIn("vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'", self.workflow)
         self.assertIn("github.repository == 'bilal414/backupsheep'", self.workflow)

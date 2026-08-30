@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1151,6 +1151,10 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
                     self.assertFalse(Path(f"{install_dir}.backupsheep-mutation-lock").exists())
                     self.assertEqual(snapshot(), expected)
 
+    @skipUnless(
+        shutil.which("git"),
+        "requires the host Git executable intentionally absent from the runtime image",
+    )
     def test_signed_consumer_attests_exact_clean_source_checkout_even_with_skip_worktree(self):
         consumer = ROOT / "deploy/release/consume-signed-release.sh"
         with tempfile.TemporaryDirectory(prefix="backupsheep-consumer-source-") as directory:

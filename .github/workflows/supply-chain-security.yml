@@ -49,6 +49,15 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Attack signed-release checkout index concealment
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v git >/dev/null
+          git --version >/dev/null
+          python -m unittest \
+            apps.tests.test_installer_security.InstallerSecurityContractTests.test_signed_consumer_attests_exact_clean_source_checkout_even_with_skip_worktree
+
       - name: Audit Python dependency resolution
         run: |
           echo '123d99c57ebca7ae13478cf0a4dfbb5925fa2ea08769d7aa9117b91393a5d540  deploy/dependency-audit-requirements.lock' \
