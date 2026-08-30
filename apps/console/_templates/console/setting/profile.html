@@ -1,33 +1,13 @@
-{% extends "console/_master.html" %}
+{% extends "console/setting/_base.html" %}
 {% block title %}Settings - Profile{% endblock %}
 {% block meta_title %}Settings - Profile{% endblock %}
 {% block meta_description %}Settings - Profile{% endblock %}
 {% block meta_keywords %}Settings - Profile{% endblock %}
-{% block page_class %}page_settings{% endblock %}
-{% block content %}
-    <div class="space-y-6" x-data="settingsProfile()">
-        <!-- Page header -->
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Profile</h2>
-                <p class="mt-1 text-sm text-slate-500">Your profile settings and preferences.</p>
-            </div>
-        </div>
-
-        <!-- Settings navigation -->
-        <div class="border-b border-slate-200">
-            <nav class="-mb-px flex gap-6 overflow-x-auto whitespace-nowrap" aria-label="Settings">
-                <a href="{% url 'console:settings:profile' %}" aria-current="page" class="flex-none border-b-2 border-indigo-600 px-1 pb-3 text-sm font-medium text-indigo-600 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Profile</a>
-                <a href="{% url 'console:settings:account' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Account</a>
-                <a href="{% url 'console:settings:multifactor' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Multi-Factor Auth</a>
-                <a href="{% url 'console:settings:password' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Password</a>
-                <a href="{% url 'console:settings:group' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Groups</a>
-                <a href="{% url 'console:settings:user' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Users</a>
-                <a href="{% url 'console:settings:invite' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Invites</a>
-                <a href="{% url 'console:settings:notification' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Notifications</a>
-            </nav>
-        </div>
-
+{% block settings_page_title %}Profile{% endblock %}
+{% block settings_page_description %}Manage identity details and your current-workspace delivery preferences.{% endblock %}
+{% block settings_content %}
+    {{ profile_initial|json_script:"settings-profile-initial" }}
+    <form class="space-y-6" x-data="settingsProfile()" @submit.prevent="saveProfile()" novalidate>
         <!-- Personal information -->
         <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="profile-heading">
             <div class="border-b border-slate-200 px-5 py-4">
@@ -38,18 +18,18 @@
                 <div>
                     <label for="first_name" class="block text-sm font-medium text-slate-700">First name</label>
                     <input x-model="member.user.first_name" type="text" name="first_name" id="first_name"
-                           autocomplete="first_name"
+                           autocomplete="given-name" :aria-invalid="Boolean(memberErrors.user?.first_name)" aria-describedby="first_name-error"
                            class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                     <p x-cloak x-show="memberErrors.user.first_name" class="mt-1.5 text-xs font-medium text-red-600"
-                       x-text="memberErrors.user.first_name"></p>
+                       id="first_name-error" x-text="memberErrors.user.first_name"></p>
                 </div>
                 <div>
                     <label for="last_name" class="block text-sm font-medium text-slate-700">Last name</label>
                     <input x-model="member.user.last_name" type="text" name="last_name" id="last_name"
-                           autocomplete="last_name"
+                           autocomplete="family-name" :aria-invalid="Boolean(memberErrors.user?.last_name)" aria-describedby="last_name-error"
                            class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                     <p x-cloak x-show="memberErrors.user.last_name" class="mt-1.5 text-xs font-medium text-red-600"
-                       x-text="memberErrors.user.last_name"></p>
+                       id="last_name-error" x-text="memberErrors.user.last_name"></p>
                 </div>
                 <div>
                     <label for="email" class="block text-sm font-medium text-slate-700">Email address</label>
@@ -58,61 +38,17 @@
                            class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-500 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                 </div>
                 <div>
-                    <label id="timezone-label" for="timezone" class="block text-sm font-medium text-slate-700">Timezone</label>
-                    <div class="relative mt-1.5">
-                        <button @click="toggleTimezoneDropdown()"
-                                type="button"
-                                id="timezone"
-                                class="relative w-full cursor-default rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left text-sm text-slate-900 shadow-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                aria-haspopup="listbox" :aria-expanded="openTimezone" aria-labelledby="timezone-label">
-                            <span class="block truncate"
-                                  x-text="member.timezone||'--Choose Timezone--'"></span>
-                            <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
-                                <svg class="h-5 w-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 15L12 18.75 15.75 15m-7.5-6L12 5.25 15.75 9"/>
-                                </svg>
-                            </span>
-                        </button>
-                        <template x-if="openTimezone">
-                            <ul
-                                    x-show="openTimezone"
-                                    @click.self="toggleTimezoneDropdown()"
-                                    x-transition:enter=""
-                                    x-transition:enter-start=""
-                                    x-transition:enter-end=""
-                                    x-transition:leave="transition ease-in duration-100"
-                                    x-transition:leave-start="opacity-100"
-                                    x-transition:leave-end="opacity-0"
-                                    class="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-slate-200 bg-white py-1 text-sm shadow-lg focus:outline-none"
-                                    tabindex="-1" role="listbox"
-                                    aria-labelledby="timezone-label">
-                                {% for timezone in timezones %}
-                                    <li
-                                            @click="member.timezone = '{{ timezone }}';toggleTimezoneDropdown()"
-                                            @mouseenter="timezoneActiveIndex = '{{ forloop.counter }}'"
-                                            @mouseleave="timezoneActiveIndex = null"
-                                            :class="{ 'bg-indigo-600 text-white': timezoneActiveIndex === '{{ forloop.counter }}', 'text-slate-700': !(timezoneActiveIndex === '{{ forloop.counter }}') }"
-                                            class="relative cursor-default select-none py-2 pl-8 pr-4"
-                                            role="option">
-                                        <span class="block truncate"
-                                              :class="{ 'font-semibold': member.timezone === '{{ timezone }}', 'font-normal': !(member.timezone === '{{ timezone }}') }">
-                                            {{ timezone }}
-                                        </span>
-                                        <span
-                                                x-show="member.timezone === '{{ timezone }}'"
-                                                :class="{ 'text-indigo-600': (member.timezone === '{{ timezone }}') && (timezoneActiveIndex !== '{{ forloop.counter }}'), 'text-white': (!(member.timezone === '{{ timezone }}') || (timezoneActiveIndex === '{{ forloop.counter }}')) }"
-                                                class="absolute inset-y-0 left-0 flex items-center pl-1.5 text-indigo-600">
-                                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                                                <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
-                                            </svg>
-                                        </span>
-                                    </li>
-                                {% endfor %}
-                            </ul>
-                        </template>
-                    </div>
+                    <label for="timezone" class="block text-sm font-medium text-slate-700">Timezone</label>
+                    <select x-model="member.timezone" name="timezone" id="timezone"
+                            :aria-invalid="Boolean(memberErrors.timezone)" aria-describedby="timezone-help timezone-error"
+                            class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                        {% for timezone in timezones %}
+                            <option value="{{ timezone }}">{{ timezone }}</option>
+                        {% endfor %}
+                    </select>
+                    <p id="timezone-help" class="mt-1.5 text-xs text-slate-500">Used to display schedules, activity, and evidence timestamps.</p>
                     <p x-cloak x-show="memberErrors.timezone" class="mt-1.5 text-xs font-medium text-red-600"
-                       x-text="memberErrors.timezone"></p>
+                       id="timezone-error" x-text="memberErrors.timezone"></p>
                 </div>
             </div>
         </section>
@@ -121,42 +57,59 @@
         <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="notifications-heading">
             <div class="border-b border-slate-200 px-5 py-4">
                 <h2 id="notifications-heading" class="text-sm font-semibold text-slate-900">Notifications</h2>
-                <p class="mt-0.5 text-xs text-slate-500">Your notification settings across all accounts.</p>
+                <p class="mt-0.5 text-xs text-slate-500">Recipient preferences for {{ account.get_name }}. Workspace and source event gates still determine whether an event is sent.</p>
             </div>
             <div class="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2">
                 <div class="flex items-center">
+                    {% if settings_can_manage_workspace %}
+                        <button type="button" disabled class="relative inline-flex h-6 w-11 flex-none cursor-not-allowed rounded-full border-2 border-transparent bg-indigo-600 opacity-75" role="switch" aria-checked="true" aria-labelledby="notify-success-label">
+                            <span aria-hidden="true" class="pointer-events-none inline-block h-5 w-5 translate-x-5 rounded-full bg-white shadow ring-0"></span>
+                        </button>
+                    {% else %}
                     <button type="button"
                             @click="toggleNotification('success')"
-                            :class="member.notify_on_success ? 'bg-indigo-600' : 'bg-slate-200'"
+                            :class="preferences.notify_on_success ? 'bg-indigo-600' : 'bg-slate-200'"
                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                            role="switch" :aria-checked="member.notify_on_success" aria-labelledby="notify-success-label">
-                        <span :class="member.notify_on_success ? 'translate-x-5' : 'translate-x-0'"
+                            role="switch" :aria-checked="preferences.notify_on_success" aria-labelledby="notify-success-label">
+                        <span :class="preferences.notify_on_success ? 'translate-x-5' : 'translate-x-0'"
                               aria-hidden="true"
                               class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                     </button>
-                    <span class="ml-3 text-sm font-medium text-slate-700" id="notify-success-label">Notify on success</span>
+                    {% endif %}
+                    <span class="ml-3 text-sm font-medium text-slate-700" id="notify-success-label">Success events{% if settings_can_manage_workspace %} <span class="block text-xs font-normal text-slate-500">Required for the workspace owner when success events are enabled.</span>{% endif %}</span>
                 </div>
                 <div class="flex items-center">
+                    {% if settings_can_manage_workspace %}
+                        <button type="button" disabled class="relative inline-flex h-6 w-11 flex-none cursor-not-allowed rounded-full border-2 border-transparent bg-indigo-600 opacity-75" role="switch" aria-checked="true" aria-labelledby="notify-fail-label">
+                            <span aria-hidden="true" class="pointer-events-none inline-block h-5 w-5 translate-x-5 rounded-full bg-white shadow ring-0"></span>
+                        </button>
+                    {% else %}
                     <button type="button"
                             @click="toggleNotification('fail')"
-                            :class="member.notify_on_fail ? 'bg-indigo-600' : 'bg-slate-200'"
+                            :class="preferences.notify_on_fail ? 'bg-indigo-600' : 'bg-slate-200'"
                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                            role="switch" :aria-checked="member.notify_on_fail" aria-labelledby="notify-fail-label">
-                        <span :class="member.notify_on_fail ? 'translate-x-5' : 'translate-x-0'"
+                            role="switch" :aria-checked="preferences.notify_on_fail" aria-labelledby="notify-fail-label">
+                        <span :class="preferences.notify_on_fail ? 'translate-x-5' : 'translate-x-0'"
                               aria-hidden="true"
                               class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                     </button>
-                    <span class="ml-3 text-sm font-medium text-slate-700" id="notify-fail-label">Notify on failure</span>
+                    {% endif %}
+                    <span class="ml-3 text-sm font-medium text-slate-700" id="notify-fail-label">Failure events{% if settings_can_manage_workspace %} <span class="block text-xs font-normal text-slate-500">Required for the workspace owner when failure events are enabled.</span>{% endif %}</span>
                 </div>
             </div>
-            <div class="flex justify-end border-t border-slate-200 px-5 py-3">
-                <button type="button" @click="saveProfile()"
+            <div class="flex flex-wrap items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                <span class="mr-auto text-xs font-medium text-emerald-700" role="status" aria-live="polite" x-text="savedMessage"></span>
+                <button type="button" @click="discardChanges()" :disabled="!isDirty() || saving"
+                        class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-50">
+                    Discard
+                </button>
+                <button type="submit" :disabled="!isDirty() || saving"
                         class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                    Save Profile Changes
+                    <span x-text="saving ? 'Saving…' : 'Save changes'"></span>
                 </button>
             </div>
         </section>
-    </div>
+    </form>
     <script>
         document.addEventListener('alpine:init', () => {
             Alpine.data('settingsProfile', () => ({
@@ -164,79 +117,108 @@
                     user: {},
                     timezone: null,
                 },
-                member: {
-                    id: {{ request.user.member.id }},
-                    user: {
-                        id:{{ request.user.id }},
-                        first_name: "{{ request.user.first_name }}",
-                        last_name: "{{ request.user.last_name }}",
-                        email: "{{ request.user.email }}"
-                    },
-                    timezone: "{{ request.user.member.timezone }}",
-                    notify_on_success: {% if request.user.member.notify_on_success %}true{% else %}false{% endif %},
-                    notify_on_fail: {% if request.user.member.notify_on_fail %}true{% else %}false{% endif %}
-                },
-                openTimezone: false,
-                timezoneActiveIndex: null,
+                member: JSON.parse(document.getElementById('settings-profile-initial').textContent),
+                preferences: {},
+                original: '',
+                saving: false,
+                savedMessage: '',
                 init() {
+                    this.preferences = this.member.memberships[0] || {
+                        notify_on_success: true,
+                        notify_on_fail: true,
+                    };
+                    this.original = this.snapshot();
+                },
+                snapshot() {
+                    return JSON.stringify({
+                        user: this.member.user,
+                        timezone: this.member.timezone,
+                        preferences: this.preferences,
+                    });
+                },
+                isDirty() {
+                    return this.snapshot() !== this.original;
+                },
+                discardChanges() {
+                    const original = JSON.parse(this.original);
+                    this.member.user = original.user;
+                    this.member.timezone = original.timezone;
+                    this.preferences = original.preferences;
+                    this.memberErrors = {user: {}, timezone: null};
+                    this.savedMessage = '';
                 },
                 async saveProfile() {
-                    Alpine.store('showLoading').toggle("Saving account details.");
-
-                    let url = "/api/v1/members/" + this.member.id + "/";
-
-                    let data = this.member
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'PATCH',
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-
-                            throw new Error(json.detail);
+                    if (!this.isDirty() || this.saving) return;
+                    this.saving = true;
+                    this.savedMessage = '';
+                    this.memberErrors = {user: {}, timezone: null};
+                    try {
+                        const response = await fetch("/api/v1/members/" + this.member.id + "/", {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'PATCH',
+                            body: JSON.stringify({
+                                user: this.member.user,
+                                timezone: this.member.timezone,
+                                memberships: [this.preferences],
+                            })
+                        });
+                        let json = {};
+                        try {
+                            json = await response.json();
+                        } catch (error) {
+                            json = {};
                         }
-                    }).then((json) => {
+                        if (!response.ok) {
+                            if (response.status >= 500) {
+                                const unknown = new Error('Save outcome not confirmed—reload before retrying.');
+                                unknown.outcomeUnknown = true;
+                                throw unknown;
+                            }
+                            this.memberErrors = {
+                                user: json.user || {},
+                                timezone: json.timezone || null,
+                                detail: json.detail || null,
+                            };
+                            const firstError = json.detail
+                                || json.timezone
+                                || json.user?.first_name
+                                || json.user?.last_name
+                                || 'Changes could not be saved.';
+                            throw new Error(Array.isArray(firstError) ? firstError[0] : firstError);
+                        }
+                        this.original = this.snapshot();
+                        this.savedMessage = 'Saved just now';
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
-                            heading: 'Success!',
-                            details: json.detail
+                            heading: 'Profile saved',
+                            details: 'Identity details and current-workspace preferences were saved.'
                         });
-                    }).catch((error) => {
+                    } catch (error) {
+                        const outcomeUnknown = error.outcomeUnknown || error instanceof TypeError;
                         Alpine.store('notifications').items.push({
                             show: true,
                             error: true,
-                            heading: 'Error!',
-                            details: error.message
+                            heading: outcomeUnknown ? 'Save outcome not confirmed' : 'Profile not saved',
+                            details: outcomeUnknown
+                                ? 'The server response was lost or incomplete. Reload this page before deciding whether to retry.'
+                                : error.message
                         });
-                    });
+                    } finally {
+                        this.saving = false;
+                    }
                 },
                 toggleNotification(notificationType) {
                     if (notificationType === "success") {
-                        this.member.notify_on_success = !this.member.notify_on_success;
+                        this.preferences.notify_on_success = !this.preferences.notify_on_success;
                     } else if (notificationType === "fail") {
-                        this.member.notify_on_fail = !this.member.notify_on_fail;
+                        this.preferences.notify_on_fail = !this.preferences.notify_on_fail;
                     }
-                },
-
-                toggleTimezoneDropdown() {
-                    this.openTimezone = !this.openTimezone;
-                    this.timezoneActiveIndex = null;
-                },
+                    this.savedMessage = '';
+                }
             }));
         });
     </script>

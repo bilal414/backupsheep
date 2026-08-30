@@ -96,7 +96,7 @@
                                             <span class="text-xs font-semibold text-incident-700">Deletion requested</span>
                                         {% endif %}
                                     {% else %}
-                                        {% if source_protection_available and can_create_sources %}
+                                        {% if source_protection_available and can_create_sources and connection.source_registration_allowed %}
                                             <details class="relative">
                                                 <summary class="inline-flex min-h-10 cursor-pointer list-none items-center gap-2 rounded-md bg-evidence-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
                                                     Add source
@@ -1351,10 +1351,11 @@
                         Cancel
                     </button>
                     <button @click="saveConnection()" type="button"
-                            :disabled="loading || discoveryLoading"
+                            :disabled="loading || discoveryLoading || connectionMutationOutcomeUnknown"
                             :aria-busy="loading"
                             class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-60">
-                        <span x-show="!loading" x-text="connectionSubmitLabel()"></span>
+                        <span x-show="!loading && !connectionMutationOutcomeUnknown" x-text="connectionSubmitLabel()"></span>
+                        <span x-show="!loading && connectionMutationOutcomeUnknown">Reload before retrying</span>
                         <span x-show="loading">Saving and validating…</span>
                     </button>
                 </div>
@@ -1457,6 +1458,7 @@
             discoveryLoading: false,
             validatingConnectionId: null,
             connectionFailure: null,
+            connectionMutationOutcomeUnknown: false,
             hostKeyReview: null,
             hostKeyApprovalLoading: false,
             hostKeyRevocationLoading: false,
@@ -1695,6 +1697,21 @@
                 };
                 return {code, stage: 'browser', ...(failures[code] || failures.CONNECTION_VALIDATION_FAILED)};
             },
+            unknownConnectionMutationError(payload = {}) {
+                const failure = this.defaultConnectionFailure('REQUEST_OUTCOME_UNKNOWN');
+                const error = new Error(failure.detail);
+                error.connectionFailure = failure;
+                error.payload = payload && typeof payload === 'object' && !Array.isArray(payload)
+                    ? payload
+                    : {};
+                return error;
+            },
+            requireConnectionMutationReceipt(payload) {
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !payload.id) {
+                    throw this.unknownConnectionMutationError();
+                }
+                return payload;
+            },
             extractConnectionFailure(payload, responseStatus = null) {
                 const authPayload = payload?.['auth_' + this.integrationCode];
                 const candidate = payload?.connection_error || authPayload?.connection_error;
@@ -1837,17 +1854,17 @@
                         throw error;
                     }
                     await new Promise((resolve) => window.setTimeout(resolve, 750));
-                    state = await this.requestJSON(operationUrl, {
+                    const nextState = await this.requestJSON(operationUrl, {
                         headers: {'Accept': 'application/json'},
                         method: 'GET',
                         cache: 'no-store',
                     }, 20000);
+                    if (!nextState || typeof nextState !== 'object' || Array.isArray(nextState)) {
+                        throw this.unknownConnectionMutationError();
+                    }
+                    state = nextState;
                 }
-                const failure = this.defaultConnectionFailure('REQUEST_OUTCOME_UNKNOWN');
-                const error = new Error(failure.detail);
-                error.connectionFailure = failure;
-                error.payload = state;
-                throw error;
+                throw this.unknownConnectionMutationError(state);
             },
             sshHostKeyTarget() {
                 if (this.integrationCode === 'website') {
@@ -2084,7 +2101,7 @@
 
             },
             async saveConnection() {
-                if (this.loading || this.discoveryLoading) return;
+                if (this.loading || this.discoveryLoading || this.connectionMutationOutcomeUnknown) return;
                 this.loading = true;
                 this.connectionFailure = null;
                 this.hostKeyReview = null;
@@ -2165,6 +2182,7 @@
                         method: method,
                         body: JSON.stringify(data)
                     });
+                    json = this.requireConnectionMutationReceipt(json);
                     if (json["id"]) {
                         // A direct validation failure is reported as a successful,
                         // explicit PENDING save. Retain the identifier so retrying
@@ -2204,6 +2222,9 @@
                     this.closeConnectionModal();
                     location.reload();
                 } catch (error) {
+                    if (error?.connectionFailure?.code === 'REQUEST_OUTCOME_UNKNOWN') {
+                        this.connectionMutationOutcomeUnknown = true;
+                    }
                     this.applyConnectionErrors(error?.payload || {});
                     this.notifyConnectionFailure(
                         error,

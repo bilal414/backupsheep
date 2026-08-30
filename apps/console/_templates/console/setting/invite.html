@@ -1,89 +1,63 @@
-{% extends "console/_master.html" %}
-{% block title %}Settings - Invites{% endblock %}
-{% block meta_title %}Settings - Invites{% endblock %}
-{% block meta_description %}Settings - Invites{% endblock %}
-{% block meta_keywords %}Settings - Invites{% endblock %}
-{% block page_class %}page_settings dashboard-page{% endblock %}
-{% block content %}
+{% extends "console/setting/_base.html" %}
+{% block title %}Settings - Invitations{% endblock %}
+{% block meta_title %}Settings - Invitations{% endblock %}
+{% block meta_description %}Manage workspace invitations and review invitations sent to you.{% endblock %}
+{% block meta_keywords %}Settings - Invitations{% endblock %}
+{% block settings_page_title %}Invitations{% endblock %}
+{% block settings_page_description %}Manage invitations for {{ account.get_name }} and review workspace invitations addressed to your identity.{% endblock %}
+
+{% block settings_content %}
     <div class="space-y-6" x-data="settingsInvite()">
-        <!-- Page header -->
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Invites</h2>
-                <p class="mt-1 text-sm text-slate-500">Invite new users to your account and manage pending invitations.</p>
-            </div>
-        </div>
-
-        <!-- Settings navigation -->
-        <div class="border-b border-slate-200">
-            <nav class="-mb-px flex gap-6 overflow-x-auto" aria-label="Settings">
-                <a href="{% url 'console:settings:profile' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Profile</a>
-                <a href="{% url 'console:settings:account' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Account</a>
-                <a href="{% url 'console:settings:multifactor' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Multi-Factor Auth</a>
-                <a href="{% url 'console:settings:password' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Password</a>
-                <a href="{% url 'console:settings:group' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Groups</a>
-                <a href="{% url 'console:settings:user' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Users</a>
-                <a href="{% url 'console:settings:invite' %}" aria-current="page" class="whitespace-nowrap border-b-2 border-indigo-600 px-1 pb-3 text-sm font-medium text-indigo-600 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Invites</a>
-                <a href="{% url 'console:settings:notification' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Notifications</a>
-            </nav>
-        </div>
-
-        {% if account.invites.all.count > 0 %}
-            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="invitations-heading">
+        {% if settings_can_manage_workspace %}
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="outbound-invitations-heading">
                 <div class="border-b border-slate-200 px-5 py-4">
-                    <h2 id="invitations-heading" class="text-sm font-semibold text-slate-900">Invitations</h2>
-                    <p class="mt-0.5 text-xs text-slate-500">You have the option to extend invitations to other users for accessing your account.</p>
+                    <h2 id="outbound-invitations-heading" class="text-sm font-semibold text-slate-900">Workspace invitations</h2>
+                    <p class="mt-0.5 text-xs leading-5 text-slate-500">Invitation status reflects BackupSheep's acceptance record. A created or resent invitation does not independently prove that the recipient's email provider delivered it.</p>
                 </div>
-                <div class="space-y-5 p-5">
-                    <div class="flex items-start gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800" role="alert">
-                        <svg class="mt-0.5 h-5 w-5 flex-none text-sky-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/>
-                        </svg>
-                        <p class="min-w-0 flex-1 font-medium leading-6">Once the user accepts the invite, you can manage their settings on the <a href="{% url 'console:settings:user' %}" class="underline decoration-sky-400 underline-offset-2 transition hover:text-sky-900">users page</a>.</p>
-                    </div>
-                    <div class="overflow-x-auto rounded-xl border border-slate-200">
+                {% if outbound_invites %}
+                    <div class="overflow-x-auto">
                         <table class="min-w-full divide-y divide-slate-200 text-sm">
                             <thead>
                                 <tr class="bg-slate-50">
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Name</th>
+                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Recipient</th>
                                     <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Email</th>
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Groups</th>
+                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Access groups</th>
                                     <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-100">
-                                {% for invite in account.invites.all %}
-                                    <tr class="transition hover:bg-slate-50">
-                                        <td class="px-4 py-3 font-medium text-slate-900">{{ invite.full_name }}</td>
-                                        <td class="px-4 py-3">
-                                            <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset {% if invite.status == 1 %}bg-emerald-50 text-emerald-700 ring-emerald-600/20{% elif invite.status == 4 %}bg-amber-50 text-amber-700 ring-amber-600/20{% else %}bg-slate-100 text-slate-600 ring-slate-500/10{% endif %}">
-                                                <span class="h-1.5 w-1.5 rounded-full {% if invite.status == 1 %}bg-emerald-500{% elif invite.status == 4 %}bg-amber-500{% else %}bg-slate-400{% endif %}"></span>
-                                                {{ invite.get_status_display }}
-                                            </span>
+                                {% for invite_row in outbound_invites %}
+                                    <tr>
+                                        <td data-label="Recipient" class="px-4 py-3">
+                                            <span class="block font-medium text-slate-900">{{ invite_row.full_name }}</span>
+                                            <span class="mt-0.5 block text-xs text-slate-500">{{ invite_row.email }}</span>
                                         </td>
-                                        <td class="px-4 py-3 text-slate-600">{{ invite.email }}</td>
-                                        <td class="px-4 py-3">
+                                        <td data-label="Status" class="px-4 py-3 text-slate-700">
+                                            <span class="font-medium">{{ invite_row.get_status_display }}</span>
+                                            {% if invite_row.status == 4 and invite_row.expires_at %}
+                                                <span class="mt-0.5 block text-xs text-slate-500">Acceptance window ends {{ invite_row.expires_at|date:"M j, Y, P" }}</span>
+                                            {% endif %}
+                                        </td>
+                                        <td data-label="Access groups" class="px-4 py-3 text-slate-700">
                                             <ul class="space-y-1">
-                                                {% for group in invite.groups.all %}
-                                                    <li>
-                                                        <button type="button" @click="getGroup('{{ group.id }}', true)" class="text-sm font-medium text-indigo-600 transition hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">{{ group.name }}</button>
-                                                        <span class="text-xs text-slate-500">({{ group.get_type_display }})</span>
-                                                    </li>
+                                                {% for group_row in invite_row.groups.all %}
+                                                    <li>{{ group_row.name }} <span class="text-xs text-slate-500">({{ group_row.get_type_display }})</span></li>
+                                                {% empty %}
+                                                    <li class="text-slate-500">No groups selected</li>
                                                 {% endfor %}
                                             </ul>
                                         </td>
-                                        <td class="px-4 py-3 text-right">
+                                        <td data-label="Actions" class="px-4 py-3 text-right">
                                             <div class="flex flex-wrap items-center justify-end gap-2">
-                                                {% if invite.status != 1 %}
-                                                    <button type="button" @click="getInvite('{{ invite.id }}')" class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Modify</button>
+                                                {% if invite_row.status != 1 %}
+                                                    <button type="button" @click="loadInvite('{{ invite_row.id }}')" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Edit</button>
                                                 {% endif %}
-                                                {% if invite.status == 4 %}
-                                                    <button type="button" @click="resendInvite('{{ invite.id }}')" class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Resend</button>
-                                                    <button type="button" @click="cancelInvite('{{ invite.id }}')" class="inline-flex items-center justify-center rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Cancel</button>
+                                                {% if invite_row.status == 4 %}
+                                                    <button type="button" @click="resendInvite('{{ invite_row.id }}')" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Resend email</button>
+                                                    <button type="button" @click="openConfirm('cancel', '{{ invite_row.id }}', '{{ invite_row.email|escapejs }}', $el)" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-50">Cancel</button>
                                                 {% endif %}
-                                                {% if invite.status != 1 %}
-                                                    <button type="button" @click="deleteInvite('{{ invite.id }}')" class="inline-flex items-center justify-center rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Delete</button>
+                                                {% if invite_row.status != 1 %}
+                                                    <button type="button" @click="openConfirm('delete', '{{ invite_row.id }}', '{{ invite_row.email|escapejs }}', $el)" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-50">Delete</button>
                                                 {% endif %}
                                             </div>
                                         </td>
@@ -92,173 +66,164 @@
                             </tbody>
                         </table>
                     </div>
-                </div>
+                {% else %}
+                    <div class="px-5 py-8 text-sm text-slate-600">
+                        <p class="font-medium text-slate-900">No invitations have been created for this workspace.</p>
+                        <p class="mt-1">Use the form below to grant a new member an initial set of access groups.</p>
+                    </div>
+                {% endif %}
             </section>
         {% endif %}
 
-        {% if invites_received.count > 0 %}
-            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="invites-received-heading">
+        {% if invites_received %}
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="received-invitations-heading">
                 <div class="border-b border-slate-200 px-5 py-4">
-                    <h2 id="invites-received-heading" class="text-sm font-semibold text-slate-900">Invites Received</h2>
-                    <p class="mt-0.5 text-xs text-slate-500">You can accept invites sent by other accounts here.</p>
+                    <h2 id="received-invitations-heading" class="text-sm font-semibold text-slate-900">Invitations sent to you</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">Accepting adds your identity to the named workspace with the listed access groups.</p>
                 </div>
-                <div class="p-5">
-                    <div class="overflow-x-auto rounded-xl border border-slate-200">
-                        <table class="min-w-full divide-y divide-slate-200 text-sm">
-                            <thead>
-                                <tr class="bg-slate-50">
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Account</th>
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Invited By</th>
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Groups</th>
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
-                                    <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-slate-100">
-                                {% for invite in invites_received %}
-                                    <tr class="transition hover:bg-slate-50">
-                                        <td class="px-4 py-3 font-medium text-slate-900">{{ invite.account.name|default:"n/a" }}</td>
-                                        <td class="px-4 py-3 text-slate-600">{{ invite.added_by.full_name }}</td>
-                                        <td class="px-4 py-3 text-slate-600">
-                                            {% for group in invite.groups.all %}
-                                                {{ group.name }} <span class="text-xs text-slate-500">({{ group.get_type_display }})</span>
-                                            {% endfor %}
-                                        </td>
-                                        <td class="px-4 py-3">
-                                            <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset {% if invite.status == 1 %}bg-emerald-50 text-emerald-700 ring-emerald-600/20{% elif invite.status == 4 %}bg-amber-50 text-amber-700 ring-amber-600/20{% else %}bg-slate-100 text-slate-600 ring-slate-500/10{% endif %}">
-                                                <span class="h-1.5 w-1.5 rounded-full {% if invite.status == 1 %}bg-emerald-500{% elif invite.status == 4 %}bg-amber-500{% else %}bg-slate-400{% endif %}"></span>
-                                                {{ invite.get_status_display }}
-                                            </span>
-                                        </td>
-                                        <td class="px-4 py-3 text-right">
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-sm">
+                        <thead>
+                            <tr class="bg-slate-50">
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Workspace</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Invited by</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Access groups</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
+                                <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            {% for received in invites_received %}
+                                <tr>
+                                    <td data-label="Workspace" class="px-4 py-3 font-medium text-slate-900">{{ received.account.get_name }}</td>
+                                    <td data-label="Invited by" class="px-4 py-3 text-slate-700">{{ received.added_by.full_name }}</td>
+                                    <td data-label="Access groups" class="px-4 py-3 text-slate-700">
+                                        {% for received_group in received.groups.all %}
+                                            <span class="block">{{ received_group.name }} <span class="text-xs text-slate-500">({{ received_group.get_type_display }})</span></span>
+                                        {% empty %}
+                                            <span class="text-slate-500">No groups selected</span>
+                                        {% endfor %}
+                                    </td>
+                                    <td data-label="Status" class="px-4 py-3 text-slate-700">{{ received.get_status_display }}</td>
+                                    <td data-label="Actions" class="px-4 py-3 text-right">
+                                        {% if received.status == 4 %}
                                             <div class="flex flex-wrap items-center justify-end gap-2">
-                                                {% if invite.status == 4 %}
-                                                    <button type="button" @click="acceptInvite('{{ invite.id }}')" class="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Accept</button>
-                                                    <button type="button" @click="rejectInvite('{{ invite.id }}')" class="inline-flex items-center justify-center rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Reject</button>
-                                                {% endif %}
+                                                <button type="button" @click="acceptInvite('{{ received.id }}')" :disabled="busy" class="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Accept invitation</button>
+                                                <button type="button" @click="openReject('{{ received.id }}', '{{ received.account.get_name|escapejs }}', $el)" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-50">Reject</button>
                                             </div>
-                                        </td>
-                                    </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
+                                        {% else %}
+                                            <span class="text-xs text-slate-500">No action available</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        {% elif not settings_can_manage_workspace %}
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="received-empty-heading">
+                <div class="px-5 py-8">
+                    <h2 id="received-empty-heading" class="text-sm font-semibold text-slate-900">No invitations sent to you</h2>
+                    <p class="mt-1 text-sm text-slate-600">There are no pending or historical workspace invitations associated with your email address.</p>
                 </div>
             </section>
         {% endif %}
 
-        <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="invite-form-heading">
-            <div class="border-b border-slate-200 px-5 py-4">
-                <h2 id="invite-form-heading" class="text-sm font-semibold text-slate-900">
-                    <span x-cloak x-show="invite.id">Modify</span>
-                    <span x-show="!invite.id">Create</span>
-                    Invitation
-                </h2>
-                <p class="mt-0.5 text-xs text-slate-500">You have the ability to invite new users to the account and modify their group affiliations.</p>
-            </div>
-            <div class="space-y-5 p-5">
-                <div class="flex items-start gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800" role="alert">
-                    <svg class="mt-0.5 h-5 w-5 flex-none text-sky-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/>
-                    </svg>
-                    <p class="min-w-0 flex-1 font-medium leading-6">Once the user accepts the invite, you can manage their settings on the <a href="{% url 'console:settings:user' %}" class="underline decoration-sky-400 underline-offset-2 transition hover:text-sky-900">users page</a>.</p>
+        {% if settings_can_manage_workspace %}
+            <section id="invitation-editor" class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="invite-form-heading">
+                <div class="border-b border-slate-200 px-5 py-4">
+                    <h2 id="invite-form-heading" class="text-sm font-semibold text-slate-900" x-text="invite.id ? 'Edit invitation' : 'Create invitation'"></h2>
+                    <p class="mt-0.5 text-xs leading-5 text-slate-500">Groups become the recipient's initial workspace access after acceptance. Recipient preferences apply only when the workspace event gates are enabled.</p>
                 </div>
-                <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                    <div>
-                        <label for="first_name" class="block text-sm font-medium text-slate-700">First Name</label>
-                        <input x-model="invite.first_name" type="text" name="first_name" id="first_name" autocomplete="first_name"
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="inviteErrors.first_name" class="mt-1.5 text-xs font-medium text-red-600" id="first_name-error" x-text="inviteErrors.first_name"></p>
+                <div class="space-y-5 p-5">
+                    <div x-cloak x-show="formError" x-ref="formError" tabindex="-1" class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
+                        <p class="font-semibold">The invitation could not be saved.</p>
+                        <p class="mt-1" x-text="formError"></p>
                     </div>
-                    <div>
-                        <label for="last_name" class="block text-sm font-medium text-slate-700">Last Name</label>
-                        <input x-model="invite.last_name" type="text" name="last_name" id="last_name" autocomplete="last_name"
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="inviteErrors.last_name" class="mt-1.5 text-xs font-medium text-red-600" id="last_name-error" x-text="inviteErrors.last_name"></p>
+                    <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                        <div>
+                            <label for="invite-first-name" class="block text-sm font-medium text-slate-700">First name</label>
+                            <input x-model="invite.first_name" type="text" id="invite-first-name" autocomplete="given-name" :aria-invalid="Boolean(errors.first_name)" aria-describedby="invite-first-name-error" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p x-cloak x-show="errors.first_name" id="invite-first-name-error" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(errors.first_name)"></p>
+                        </div>
+                        <div>
+                            <label for="invite-last-name" class="block text-sm font-medium text-slate-700">Last name</label>
+                            <input x-model="invite.last_name" type="text" id="invite-last-name" autocomplete="family-name" :aria-invalid="Boolean(errors.last_name)" aria-describedby="invite-last-name-error" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p x-cloak x-show="errors.last_name" id="invite-last-name-error" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(errors.last_name)"></p>
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label for="invite-email" class="block text-sm font-medium text-slate-700">Email address</label>
+                            <input x-model="invite.email" type="email" id="invite-email" autocomplete="email" :aria-invalid="Boolean(errors.email)" aria-describedby="invite-email-error" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p x-cloak x-show="errors.email" id="invite-email-error" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(errors.email)"></p>
+                        </div>
                     </div>
-                    <div>
-                        <label for="email" class="block text-sm font-medium text-slate-700">Email</label>
-                        <input x-model="invite.email" type="email" name="email" id="email" autocomplete="email"
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="inviteErrors.email" class="mt-1.5 text-xs font-medium text-red-600" id="email-error" x-text="inviteErrors.email"></p>
-                    </div>
-                    <div class="sm:col-span-2">
-                        <span id="groups-label" class="block text-sm font-medium text-slate-700">Groups</span>
-                        <fieldset class="mt-1.5 max-h-56 overflow-y-auto rounded-lg border border-slate-200" aria-labelledby="groups-label">
-                            <div class="divide-y divide-slate-100">
-                                {% for enrollment in enrollments %}
-                                    <div class="flex items-center justify-between gap-3 px-4 py-3">
-                                        <div class="flex min-w-0 items-start gap-3">
-                                            <input id="user-group-{{ enrollment.id }}" aria-describedby="user-group-{{ enrollment.id }}" name="user-group-{{ enrollment.id }}" type="checkbox" value="{{ enrollment.id }}" x-model="invite.groups"
-                                                   class="mt-0.5 h-4 w-4 flex-none rounded border-slate-300 text-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                                            <label for="user-group-{{ enrollment.id }}" class="text-sm text-slate-700">
-                                                <span class="font-medium text-slate-900">{{ enrollment.name }}</span>
-                                                <span class="text-xs text-slate-500">({{ enrollment.get_type_display }})</span>
-                                                {% if enrollment.default %}
-                                                    <span class="ml-1 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">Default</span>
-                                                {% endif %}
-                                            </label>
-                                        </div>
-                                        <button type="button" @click="getGroup('{{ enrollment.id }}', true)" class="inline-flex flex-none items-center justify-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Details</button>
-                                    </div>
-                                {% endfor %}
-                            </div>
-                        </fieldset>
-                        <p x-cloak x-show="inviteErrors.groups" class="mt-1.5 text-xs font-medium text-red-600" id="groups-error" x-text="inviteErrors.groups"></p>
-                    </div>
-                </div>
-            </div>
-            <div class="rounded-b-xl border-t border-slate-200 bg-slate-50 px-5 py-4 text-right">
-                <button type="button" @click="saveInvite(invite.id)" class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                    <span x-cloak x-show="invite.id">Modify Invite</span>
-                    <span x-show="!invite.id">Create Invite</span>
-                </button>
-            </div>
-        </section>
 
-        <!-- Group details modal -->
-        <div x-cloak x-show="openGroup" @keydown.escape.window="closeGroupModal()" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
-            <div x-show="openGroup"
-                 x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
-                 x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0"
-                 class="fixed inset-0 bg-slate-900/50" @click="closeGroupModal()" aria-hidden="true"></div>
-            <div class="flex min-h-full items-center justify-center p-4">
-                <div x-show="openGroup"
-                     x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100"
-                     x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100 scale-100" x-transition:leave-end="opacity-0 scale-95"
-                     class="relative w-full max-w-lg rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
-                    <div x-show="loading" class="flex flex-col items-center justify-center py-8 text-center">
-                        <svg class="h-8 w-8 animate-spin text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <h3 class="mt-4 text-base font-semibold text-slate-900">Loading group details...</h3>
-                        <p class="mt-1 text-sm text-slate-500">Fetching group permissions and notes.</p>
+                    <fieldset class="rounded-lg border border-slate-200">
+                        <legend class="ml-3 px-1 text-sm font-medium text-slate-700">Initial access groups</legend>
+                        <div class="max-h-64 divide-y divide-slate-100 overflow-y-auto">
+                            {% for enrollment in enrollments %}
+                                <label for="invite-group-{{ enrollment.id }}" class="flex cursor-pointer items-start gap-3 px-4 py-3">
+                                    <input id="invite-group-{{ enrollment.id }}" type="checkbox" value="{{ enrollment.id }}" x-model="invite.groups" class="mt-0.5 h-4 w-4 flex-none rounded border-slate-300 text-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                                    <span class="text-sm text-slate-700">
+                                        <span class="font-medium text-slate-900">{{ enrollment.name }}</span>
+                                        <span class="text-xs text-slate-500">({{ enrollment.get_type_display }})</span>
+                                        {% if enrollment.default %}<span class="ml-1 text-xs font-medium text-slate-500">Default</span>{% endif %}
+                                    </span>
+                                </label>
+                            {% empty %}
+                                <p class="px-4 py-3 text-sm text-slate-500">No workspace groups are available.</p>
+                            {% endfor %}
+                        </div>
+                    </fieldset>
+                    <p x-cloak x-show="errors.groups" class="text-xs font-medium text-red-600" x-text="firstError(errors.groups)"></p>
+
+                    <fieldset class="rounded-lg border border-slate-200 p-4">
+                        <legend class="px-1 text-sm font-medium text-slate-700">Initial recipient preferences</legend>
+                        <div class="mt-1 grid gap-3 sm:grid-cols-2">
+                            <label class="flex items-center gap-3 text-sm text-slate-700"><input type="checkbox" x-model="invite.notify_on_success" class="h-4 w-4 rounded border-slate-300 text-indigo-600">Receive success events</label>
+                            <label class="flex items-center gap-3 text-sm text-slate-700"><input type="checkbox" x-model="invite.notify_on_fail" class="h-4 w-4 rounded border-slate-300 text-indigo-600">Receive failure events</label>
+                        </div>
+                    </fieldset>
+                </div>
+                <div class="flex flex-wrap items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                    <span class="mr-auto text-xs text-slate-500" role="status" aria-live="polite" x-text="operationStatus"></span>
+                    <button x-cloak x-show="invite.id" type="button" @click="resetForm()" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Cancel edit</button>
+                    <button type="button" @click="saveInvite()" :disabled="busy" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60"><span x-text="busy ? 'Saving…' : (invite.id ? 'Save invitation' : 'Create invitation')"></span></button>
+                </div>
+            </section>
+
+            <div x-cloak x-show="confirmDialog.open" @keydown.escape.window="closeConfirm()" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="invite-confirm-title" aria-describedby="invite-confirm-description">
+                <div class="flex min-h-full items-center justify-center p-4">
+                    <button type="button" class="fixed inset-0 cursor-default bg-slate-900/40" aria-label="Close invitation confirmation" @click="closeConfirm()"></button>
+                    <div x-ref="confirmPanel" @keydown.tab="trapConfirmFocus($event)" class="relative w-full max-w-md rounded-xl border border-slate-200 bg-white">
+                        <div class="px-5 py-4">
+                            <h2 id="invite-confirm-title" class="text-base font-semibold text-slate-900" x-text="confirmDialog.action === 'cancel' ? 'Cancel invitation?' : 'Delete invitation record?'"></h2>
+                            <p id="invite-confirm-description" class="mt-2 text-sm leading-6 text-slate-600">
+                                <span x-show="confirmDialog.action === 'cancel'">The acceptance link for <span class="font-medium" x-text="confirmDialog.email"></span> will stop working. The invitation record remains available for audit context.</span>
+                                <span x-show="confirmDialog.action === 'delete'">The invitation record for <span class="font-medium" x-text="confirmDialog.email"></span> will be deleted and its acceptance link will stop working. This cannot be undone from Settings.</span>
+                            </p>
+                        </div>
+                        <div class="flex items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                            <button type="button" x-ref="confirmCancel" @click="closeConfirm()" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Back</button>
+                            <button type="button" @click="runConfirmedAction()" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-60"><span x-text="busy ? 'Working…' : (confirmDialog.action === 'cancel' ? 'Cancel invitation' : 'Delete record')"></span></button>
+                        </div>
                     </div>
-                    <div x-show="!loading">
-                        <h3 id="group-modal-title" class="text-base font-semibold text-slate-900" x-text="groupView.name"></h3>
-                        <p class="mt-1 text-sm text-slate-500">The group permissions, notes and other details.</p>
-                        <div class="mt-5">
-                            <p class="text-sm font-medium text-slate-700">Permissions</p>
-                            <div class="mt-1.5 max-h-64 overflow-y-auto rounded-lg border border-slate-200">
-                                <ul role="list" class="divide-y divide-slate-100">
-                                    <template x-for="permission in groupView.permission_details">
-                                        <li class="px-4 py-3">
-                                            <p class="text-sm font-medium text-slate-900" x-text="permission.codename_alt"></p>
-                                            <p class="mt-0.5 text-sm text-slate-500" x-text="permission.name"></p>
-                                        </li>
-                                    </template>
-                                </ul>
-                            </div>
-                        </div>
-                        <div class="mt-5">
-                            <label for="notes" class="block text-sm font-medium text-slate-700">Notes</label>
-                            <textarea readonly x-model="groupView.notes" id="notes" name="notes" rows="3"
-                                      class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
-                        </div>
-                        <div class="mt-6 flex items-center justify-end gap-2">
-                            <button type="button" @click="closeGroupModal()" class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Close</button>
-                        </div>
+                </div>
+            </div>
+        {% endif %}
+
+        <div x-cloak x-show="rejectDialog.open" @keydown.escape.window="closeReject()" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="reject-invite-title" aria-describedby="reject-invite-description">
+            <div class="flex min-h-full items-center justify-center p-4">
+                <button type="button" class="fixed inset-0 cursor-default bg-slate-900/40" aria-label="Close reject invitation dialog" @click="closeReject()"></button>
+                <div x-ref="rejectPanel" @keydown.tab="trapRejectFocus($event)" class="relative w-full max-w-md rounded-xl border border-slate-200 bg-white">
+                    <div class="px-5 py-4">
+                        <h2 id="reject-invite-title" class="text-base font-semibold text-slate-900">Reject workspace invitation?</h2>
+                        <p id="reject-invite-description" class="mt-2 text-sm leading-6 text-slate-600">You will not receive access to <span class="font-medium" x-text="rejectDialog.workspace"></span>, and this acceptance link will stop working. The workspace owner can create a new invitation later.</p>
+                    </div>
+                    <div class="flex items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                        <button type="button" x-ref="rejectCancel" @click="closeReject()" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Keep invitation</button>
+                        <button type="button" @click="confirmReject()" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-60"><span x-text="busy ? 'Rejecting…' : 'Reject invitation'"></span></button>
                     </div>
                 </div>
             </div>
@@ -269,368 +234,226 @@
 {% block extra_scripts %}
     <script>
         document.addEventListener('alpine:init', () => {
-            Alpine.magic('clipboard', () => subject => {
-                Alpine.store('notifications').items.push({
-                    show: true,
-                    success: true,
-                    heading: 'Copied!',
-                    details: subject
-                });
-                navigator.clipboard.writeText(subject)
-            });
             Alpine.data('settingsInvite', () => ({
-                inviteErrors: {},
-                invite: {
-                    groups: []
+                invite: {first_name: '', last_name: '', email: '', groups: [], notify_on_success: true, notify_on_fail: true},
+                errors: {},
+                formError: '',
+                operationStatus: '',
+                busy: false,
+                confirmDialog: {open: false, action: '', id: null, email: '', returnFocus: null},
+                rejectDialog: {open: false, id: null, workspace: '', returnFocus: null},
+                firstError(value) {
+                    if (Array.isArray(value)) return value[0] || '';
+                    if (value && typeof value === 'object') return Object.values(value).flat()[0] || '';
+                    return value || '';
                 },
-                loading: null,
-                openGroup: null,
-                groupView: {},
-                openType: false,
-                typeActiveIndex: null,
-                init() {
+                notify(heading, details, success = false) {
+                    Alpine.store('notifications').items.push({show: true, [success ? 'success' : 'error']: true, heading, details});
                 },
-                async saveInvite(invite_id) {
-                    Alpine.store('showLoading').toggle("Saving invite details.");
-
-                    let url = "/api/v1/invites/";
-                    let method = "POST";
-
-                    if (invite_id) {
-                        url = "/api/v1/invites/" + this.invite.id + "/";
-                        method = "PATCH";
+                resetForm() {
+                    this.invite = {first_name: '', last_name: '', email: '', groups: [], notify_on_success: true, notify_on_fail: true};
+                    this.errors = {};
+                    this.formError = '';
+                    this.operationStatus = '';
+                },
+                async request(url, method, data, mutation = true) {
+                    let response;
+                    try {
+                        response = await fetch(url, {
+                            headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+                            method,
+                            body: data === undefined ? undefined : JSON.stringify(data),
+                        });
+                    } catch (error) {
+                        const result = new Error('The server response was not received.');
+                        result.outcomeUnknown = mutation;
+                        throw result;
                     }
-
-                    let data = this.invite
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.inviteErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
+                    let json = {};
+                    try { json = await response.json(); } catch (error) { json = {}; }
+                    if (!response.ok) {
+                        if (mutation && response.status >= 500) {
+                            const result = new Error('The server response was incomplete.');
+                            result.outcomeUnknown = true;
+                            throw result;
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
+                        this.errors = json;
+                        throw new Error(this.firstError(json.detail || json.non_field_errors || Object.values(json)[0]) || 'The request was rejected.');
+                    }
+                    return json;
+                },
+                showMutationError(error, definiteHeading) {
+                    if (error.outcomeUnknown) {
+                        this.notify('Change outcome not confirmed', 'The change may have completed. Reload this page before retrying.');
+                    } else {
+                        this.formError = error.message;
+                        this.notify(definiteHeading, error.message);
+                        this.$nextTick(() => this.$refs.formError?.focus());
+                    }
+                },
+                async loadInvite(id) {
+                    if (this.busy) return;
+                    this.busy = true;
+                    this.operationStatus = 'Loading invitation…';
+                    try {
+                        const json = await this.request('/api/v1/invites/' + id + '/', 'GET', undefined, false);
+                        this.invite = {
+                            ...json,
+                            groups: (json.groups || []).map(String),
+                            notify_on_success: json.notify_on_success !== false,
+                            notify_on_fail: json.notify_on_fail !== false,
+                        };
+                        this.errors = {};
+                        this.formError = '';
+                        this.operationStatus = '';
+                        this.$nextTick(() => document.getElementById('invitation-editor')?.scrollIntoView({behavior: 'smooth', block: 'start'}));
+                    } catch (error) {
+                        this.operationStatus = '';
+                        this.notify('Invitation unavailable', error.message);
+                    } finally {
+                        this.busy = false;
+                    }
+                },
+                async saveInvite() {
+                    if (this.busy) return;
+                    this.busy = true;
+                    this.errors = {};
+                    this.formError = '';
+                    this.operationStatus = 'Saving…';
+                    const editing = Boolean(this.invite.id);
+                    const url = editing ? '/api/v1/invites/' + this.invite.id + '/' : '/api/v1/invites/';
+                    try {
+                        await this.request(url, editing ? 'PATCH' : 'POST', this.invite);
+                        if (editing) {
+                            this.notify('Invitation updated', 'Recipient details and initial access were saved.', true);
+                        } else {
+                            this.notify('Invitation created', 'The record and acceptance link were created. Email delivery is not independently confirmed.', true);
+                        }
                         window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                    } catch (error) {
+                        this.operationStatus = '';
+                        this.showMutationError(error, editing ? 'Invitation not updated' : 'Invitation not created');
+                    } finally {
+                        this.busy = false;
+                    }
                 },
-                async acceptInvite(invite_id) {
-                    Alpine.store('showLoading').toggle("Accepting invite.");
-
-                    let url = "/api/v1/invites/" + invite_id + "/accept/";
-                    let method = "POST";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.inviteErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
+                async resendInvite(id) {
+                    if (this.busy) return;
+                    this.busy = true;
+                    try {
+                        await this.request('/api/v1/invites/' + id + '/resend/', 'POST', {});
+                        this.notify('Resend requested', 'A new acceptance window was recorded. Email delivery is not independently confirmed.', true);
                         window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                    } catch (error) {
+                        this.showMutationError(error, 'Invitation not resent');
+                    } finally {
+                        this.busy = false;
+                    }
                 },
-                async deleteInvite(invite_id) {
-                    Alpine.store('showLoading').toggle("Deleting invite details.");
-
-                    let url = "/api/v1/invites/" + invite_id + "/";
-                    let method = "DELETE";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.status === 204) {
-                            return {"detail": "Invite deleted."};
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
+                async acceptInvite(id) {
+                    if (this.busy) return;
+                    this.busy = true;
+                    try {
+                        const json = await this.request('/api/v1/invites/' + id + '/accept/', 'POST', {});
+                        if (!json || typeof json !== 'object' || Array.isArray(json)
+                            || typeof json.detail !== 'string' || !json.detail.trim()) {
+                            const unknown = new Error('The acceptance receipt was incomplete.');
+                            unknown.outcomeUnknown = true;
+                            throw unknown;
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
+                        this.notify('Invitation accepted', json.detail || 'Workspace access was added.', true);
                         window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                    } catch (error) {
+                        this.showMutationError(error, 'Invitation not accepted');
+                    } finally {
+                        this.busy = false;
+                    }
                 },
-                async resendInvite(invite_id) {
-                    Alpine.store('showLoading').toggle("Resending invite.");
-
-                    let url = "/api/v1/invites/" + invite_id + "/resend/";
-                    let method = "POST";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
+                openReject(id, workspace, trigger) {
+                    this.rejectDialog = {open: true, id, workspace, returnFocus: trigger};
+                    this.$nextTick(() => this.$refs.rejectCancel?.focus());
+                },
+                closeReject() {
+                    if (!this.rejectDialog.open || this.busy) return;
+                    const trigger = this.rejectDialog.returnFocus;
+                    this.rejectDialog.open = false;
+                    this.$nextTick(() => trigger?.focus());
+                },
+                trapRejectFocus(event) {
+                    const focusable = Array.from(this.$refs.rejectPanel?.querySelectorAll('button:not([disabled]), [href], input:not([disabled])') || []);
+                    if (!focusable.length) return;
+                    const first = focusable[0];
+                    const last = focusable[focusable.length - 1];
+                    if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                },
+                async confirmReject() {
+                    if (this.busy || !this.rejectDialog.id) return;
+                    this.busy = true;
+                    try {
+                        await this.request('/api/v1/invites/' + this.rejectDialog.id + '/reject/', 'POST', {});
+                        this.notify('Invitation rejected', 'The acceptance link no longer works and no workspace access was added.', true);
                         window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                async cancelInvite(invite_id) {
-                    Alpine.store('showLoading').toggle("Cancelling invite.");
-
-                    let url = "/api/v1/invites/" + invite_id + "/cancel/";
-                    let method = "POST";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
+                    } catch (error) {
+                        this.rejectDialog.open = false;
+                        if (error.outcomeUnknown) {
+                            this.notify('Rejection outcome not confirmed', 'The invitation may have been rejected. Reload this page before retrying.');
                         } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
+                            this.notify('Invitation not rejected', error.message);
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
+                        this.$nextTick(() => this.rejectDialog.returnFocus?.focus());
+                    } finally {
+                        this.busy = false;
+                    }
+                },
+                openConfirm(action, id, email, trigger) {
+                    this.confirmDialog = {open: true, action, id, email, returnFocus: trigger};
+                    this.$nextTick(() => this.$refs.confirmCancel?.focus());
+                },
+                closeConfirm() {
+                    if (!this.confirmDialog.open || this.busy) return;
+                    const trigger = this.confirmDialog.returnFocus;
+                    this.confirmDialog.open = false;
+                    this.$nextTick(() => trigger?.focus());
+                },
+                trapConfirmFocus(event) {
+                    const focusable = Array.from(this.$refs.confirmPanel?.querySelectorAll('button:not([disabled]), [href], input:not([disabled])') || []);
+                    if (!focusable.length) return;
+                    const first = focusable[0];
+                    const last = focusable[focusable.length - 1];
+                    if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                },
+                async runConfirmedAction() {
+                    if (this.busy || !this.confirmDialog.id) return;
+                    this.busy = true;
+                    const action = this.confirmDialog.action;
+                    const id = this.confirmDialog.id;
+                    try {
+                        if (action === 'cancel') {
+                            await this.request('/api/v1/invites/' + id + '/cancel/', 'POST', {});
+                            this.notify('Invitation cancelled', 'The acceptance link no longer works.', true);
+                        } else {
+                            await this.request('/api/v1/invites/' + id + '/', 'DELETE');
+                            this.notify('Invitation deleted', 'The invitation record was deleted.', true);
+                        }
                         window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                async getInvite(invite_id) {
-                    Alpine.store('showLoading').toggle("Fetching invite details.");
-
-                    let url = "/api/v1/invites/" + invite_id + "/";
-                    let method = "GET";
-
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.inviteErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                        this.invite = json;
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                async getGroup(group_id, openGroup) {
-                    Alpine.store('showLoading').toggle("Fetching group details.");
-
-                    let url = "/api/v1/groups/" + group_id + "/";
-                    let method = "GET";
-
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.groupErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-
-                        if (openGroup) {
-                            this.groupView = json;
-                            this.openGroupModal();
-                        } else {
-                            this.group = json;
-                            this.permissions = json.permissions;
-                            this.group.type = this.group.type.toString();
-                            const element = document.getElementById("modify-add-group");
-                            element.scrollIntoView();
-                        }
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                openGroupModal() {
-                    this.loading = false;
-                    this.openGroup = true;
-                },
-                closeGroupModal() {
-                    this.openGroup = false;
-                },
-                toggleTypeDropdown() {
-                    this.openType = !this.openType;
-                    this.typeActiveIndex = null;
-                },
-                toggleNotification(notificationType) {
-                    if (notificationType === "success") {
-                        this.invite.notify_on_success = !this.invite.notify_on_success;
-                    } else if (notificationType === "fail") {
-                        this.invite.notify_on_fail = !this.invite.notify_on_fail;
+                    } catch (error) {
+                        this.confirmDialog.open = false;
+                        this.showMutationError(error, action === 'cancel' ? 'Invitation not cancelled' : 'Invitation not deleted');
+                        this.$nextTick(() => this.confirmDialog.returnFocus?.focus());
+                    } finally {
+                        this.busy = false;
                     }
                 },
             }));

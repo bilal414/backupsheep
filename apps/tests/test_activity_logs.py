@@ -3,15 +3,22 @@ the auth signals, and a representative sample of the API call sites that now emi
 activity rows. External side effects (celery dispatch) are mocked; login endpoints
 need the onboarding gate marked configured (same helper pattern as test_auth).
 """
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta, timezone as datetime_timezone
+from urllib.parse import parse_qs
 from unittest import mock
 
+from django.contrib.auth.models import Group
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.test import override_settings
 from django.utils import timezone
+from django.utils.text import slugify
 
-from apps.console.account.models import CoreAccount
+from apps.console.account.models import CoreAccount, CoreAccountGroup
 from apps.console.backup.models import CoreWebsiteBackup, CoreWebsiteBackupStoragePoints
 from apps.console.log.models import CoreLog
+from apps.console.member.models import CoreMemberAccount
 from apps.console.setting.models import CoreSiteSettings
 from apps.console.storage.models import CoreStorage, CoreStorageLocal, CoreStorageType
 from apps.console.utils.models import UtilBackup
@@ -53,6 +60,117 @@ class CoreLogRecordTests(BaseTestCase):
         self.assertIsNone(CoreLog.record(None, CoreLog.Type.GENERIC, {"message": "x"}))
         self.assertIsNone(CoreLog.record(CoreAccount(), CoreLog.Type.GENERIC, {"message": "x"}))
         self.assertEqual(CoreLog.objects.count(), before)
+
+
+class ActivityPresentationTests(BaseTestCase):
+    def test_success_is_only_claimed_from_explicit_or_narrow_evidence(self):
+        prose_only = CoreLog.record(
+            self.account,
+            CoreLog.Type.BACKUP,
+            {
+                "message": "Backup successful and ready.",
+                "actor_email": self.user.email,
+            },
+        )
+        explicit = CoreLog.record(
+            self.account,
+            CoreLog.Type.BACKUP,
+            {"message": "Provider callback received.", "outcome": "SUCCESS"},
+        )
+        login = CoreLog.record(
+            self.account,
+            CoreLog.Type.AUTH,
+            {"message": "Signed in.", "action": "LOGIN"},
+        )
+
+        self.assertEqual(prose_only.build_presentation().outcome_label, "Recorded")
+        self.assertEqual(explicit.build_presentation().outcome_label, "Succeeded")
+        self.assertEqual(login.build_presentation().outcome_label, "Succeeded")
+
+    def test_reconciliation_is_progress_and_placeholder_error_is_omitted(self):
+        row = CoreLog.record(
+            self.account,
+            CoreLog.Type.BACKUP,
+            {
+                "message": "Backup is still being reconciled by Oracle Cloud.",
+                "error": "N/A",
+            },
+        )
+
+        presentation = row.build_presentation()
+
+        self.assertEqual(presentation.outcome_label, "In progress")
+        self.assertEqual(presentation.error, "")
+
+    def test_display_text_scrubs_credentials_and_credential_urls(self):
+        row = CoreLog.record(
+            self.account,
+            CoreLog.Type.GENERIC,
+            {
+                "message": (
+                    "Worker returned Bearer bearer-secret-123 "
+                    "password=plain-secret "
+                    "postgres://db-user:db-pass@db.internal:5432/customer"
+                ),
+                "error": "api_key=private-key-456",
+            },
+        )
+
+        presentation = row.build_presentation()
+        displayed = f"{presentation.message} {presentation.error}"
+
+        self.assertIn("Bearer [Filtered]", displayed)
+        self.assertIn("password=[Filtered]", displayed)
+        self.assertIn("api_key=[Filtered]", displayed)
+        self.assertIn("postgres://db.internal:5432/[Filtered]", displayed)
+        for secret in (
+            "bearer-secret-123",
+            "plain-secret",
+            "private-key-456",
+            "db-user",
+            "db-pass",
+        ):
+            self.assertNotIn(secret, displayed)
+
+    def test_display_text_has_strict_output_and_processing_bounds(self):
+        row = CoreLog.record(
+            self.account,
+            CoreLog.Type.GENERIC,
+            {
+                "message": "m" * 100_000,
+                "error": "e" * 100_000,
+                "request_id": "r" * 10_000,
+            },
+        )
+
+        presentation = row.build_presentation()
+
+        self.assertEqual(len(presentation.message), 1200)
+        self.assertEqual(len(presentation.error), 1200)
+        self.assertEqual(len(presentation.request_id), 160)
+
+    def test_bulk_presenter_does_not_issue_per_row_queries(self):
+        node = factories.make_website_node(self.account, self.member)
+        rows = [
+            CoreLog.record(
+                self.account,
+                CoreLog.Type.NODE,
+                {"node_id": node.id, "message": f"row {index}"},
+            )
+            for index in range(10)
+        ]
+        node_connection = node.connection
+
+        with CaptureQueriesContext(connection) as queries:
+            CoreLog.attach_presentations(
+                rows,
+                nodes_by_id={node.id: node},
+                connections_by_id={node.connection_id: node_connection},
+            )
+            rendered = [row.presentation.subject_label for row in rows]
+
+        self.assertEqual(len(queries), 0)
+        self.assertEqual(rendered, [node.name] * 10)
 
 
 class CoreLogPruneTests(BaseTestCase):
@@ -125,6 +243,133 @@ class ConsoleLogViewFilterTests(BaseTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].data["error"], "disk nearly full")
 
+    def test_search_actor_and_outcome_filters_compose(self):
+        target = CoreLog.record(
+            self.account,
+            CoreLog.Type.RESTORE,
+            {
+                "message": "Restore request alpha was rejected.",
+                "actor_email": "operator@example.com",
+                "outcome": "FAILED",
+            },
+        )
+        CoreLog.record(
+            self.account,
+            CoreLog.Type.RESTORE,
+            {
+                "message": "Restore request alpha accepted.",
+                "actor_email": "someone@example.com",
+                "outcome": "accepted",
+            },
+        )
+
+        response = self.client.get(
+            "/console/logs/",
+            {"q": "alpha", "actor": "operator@", "outcome": "failed"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row.id for row in self._rows(response)], [target.id])
+
+    def test_outcome_filter_matches_case_insensitive_presenter_aliases(self):
+        explicit = [
+            CoreLog.record(
+                self.account,
+                CoreLog.Type.BACKUP,
+                {"message": stored, "outcome": stored},
+            )
+            for stored in ("SUCCESS", "Succeeded", "oK")
+        ]
+        prose_only = CoreLog.record(
+            self.account,
+            CoreLog.Type.BACKUP,
+            {"message": "Backup successful.", "actor_email": self.user.email},
+        )
+
+        response = self.client.get("/console/logs/", {"outcome": "succeeded"})
+        returned_ids = {row.id for row in self._rows(response)}
+
+        self.assertTrue({row.id for row in explicit}.issubset(returned_ids))
+        self.assertNotIn(prose_only.id, returned_ids)
+        self.assertTrue(
+            all(
+                row.build_presentation().outcome_label == "Succeeded"
+                for row in explicit
+            )
+        )
+
+    def test_date_filter_uses_member_timezone_and_inclusive_calendar_day(self):
+        self.member.timezone = "America/Chicago"
+        self.member.save(update_fields=["timezone", "modified"])
+        timestamps = (
+            datetime(2026, 8, 30, 4, 59, tzinfo=datetime_timezone.utc),
+            datetime(2026, 8, 30, 5, 0, tzinfo=datetime_timezone.utc),
+            datetime(2026, 8, 31, 4, 59, tzinfo=datetime_timezone.utc),
+            datetime(2026, 8, 31, 5, 0, tzinfo=datetime_timezone.utc),
+        )
+        rows = []
+        for index, created in enumerate(timestamps):
+            row = CoreLog.record(
+                self.account,
+                CoreLog.Type.GENERIC,
+                {"message": f"boundary-{index}"},
+            )
+            CoreLog.objects.filter(pk=row.pk).update(created=created)
+            rows.append(row)
+
+        response = self.client.get(
+            "/console/logs/",
+            {"date_from": "2026-08-30", "date_to": "2026-08-30"},
+        )
+        returned_ids = {row.id for row in self._rows(response)}
+
+        self.assertNotIn(rows[0].id, returned_ids)
+        self.assertIn(rows[1].id, returned_ids)
+        self.assertIn(rows[2].id, returned_ids)
+        self.assertNotIn(rows[3].id, returned_ids)
+
+    def test_page_size_is_a_view_preference_not_an_active_filter(self):
+        response = self.client.get("/console/logs/", {"p_size": "25"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["filters_active"])
+        self.assertEqual(response.context["filter_count"], 0)
+
+    def test_pagination_uses_only_validated_state_and_preserves_scope(self):
+        for index in range(30):
+            CoreLog.record(
+                self.account,
+                CoreLog.Type.BACKUP,
+                {
+                    "message": f"pagination needle {index}",
+                    "backup_id": 77,
+                },
+            )
+
+        response = self.client.get(
+            "/console/logs/",
+            {
+                "backup": "77",
+                "q": "pagination needle",
+                "p_size": "25",
+                "unexpected": "do-not-reflect",
+            },
+        )
+        query = parse_qs(response.context["pagination_query"])
+        clear_query = parse_qs(response.context["clear_filters_query"])
+
+        self.assertEqual(response.context["logs_count"], 30)
+        self.assertEqual(
+            query,
+            {
+                "backup": ["77"],
+                "q": ["pagination needle"],
+                "p_size": ["25"],
+            },
+        )
+        self.assertEqual(clear_query, {"backup": ["77"], "p_size": ["25"]})
+        self.assertNotContains(response, "do-not-reflect")
+
     def test_invalid_type_param_is_ignored(self):
         r = self.client.get("/console/logs/", {"type": "abc"})
         self.assertEqual(r.status_code, 200)
@@ -145,6 +390,28 @@ class ConsoleLogViewFilterTests(BaseTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "987654")
 
+    def test_template_has_one_h1_scope_truth_and_no_raw_json(self):
+        row = CoreLog.record(
+            self.account,
+            CoreLog.Type.GENERIC,
+            {
+                "message": "Trace included Bearer never-render-this-token",
+                "unreviewed_internal_field": "never-render-raw-json",
+            },
+        )
+
+        response = self.client.get("/console/logs/", {"q": "Trace included"})
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(row.id, [item.id for item in self._rows(response)])
+        self.assertEqual(content.count("<h1"), 1)
+        self.assertContains(response, "not an immutable audit archive")
+        self.assertContains(response, "Bearer [Filtered]")
+        self.assertNotContains(response, "never-render-this-token")
+        self.assertNotContains(response, "never-render-raw-json")
+        self.assertContains(response, "<caption", html=False)
+
     def test_malformed_pagination_and_numeric_filters_are_ignored(self):
         response = self.client.get(
             "/console/logs/",
@@ -158,6 +425,147 @@ class ConsoleLogViewFilterTests(BaseTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+
+
+class RestrictedConsoleLogScopeTests(BaseTestCase):
+    def setUp(self):
+        super().setUp()
+        auth_group = Group.objects.create(
+            name=slugify(f"activity-scope-{self.account.id}")
+        )
+        self.group = CoreAccountGroup.objects.create(
+            account=self.account,
+            group=auth_group,
+            name="activity scope",
+            type=CoreAccountGroup.Type.Client,
+            default=False,
+        )
+        _account, self.restricted_member, self.restricted_user = factories.make_account(
+            email=f"activity-restricted-{self.account.id}@example.com"
+        )
+        self.restricted_member.memberships.filter(current=True).update(current=False)
+        CoreMemberAccount.objects.create(
+            member=self.restricted_member,
+            account=self.account,
+            status=CoreMemberAccount.Status.ACTIVE,
+            current=True,
+            primary=False,
+        )
+        self.restricted_user.groups.add(auth_group)
+        self.allowed_node = factories.make_website_node(self.account, self.member)
+        self.hidden_node = factories.make_website_node(self.account, self.member)
+        self.group.nodes.add(self.allowed_node)
+
+    def test_self_actor_does_not_restore_revoked_resource_visibility(self):
+        allowed = CoreLog.record(
+            self.account,
+            CoreLog.Type.NODE,
+            {
+                "message": "allowed source event",
+                "node_id": self.allowed_node.id,
+            },
+        )
+        allowed_legacy_string_id = CoreLog.record(
+            self.account,
+            CoreLog.Type.NODE,
+            {
+                "message": "allowed legacy source event",
+                "node_id": str(self.allowed_node.id),
+            },
+        )
+        hidden = CoreLog.record(
+            self.account,
+            CoreLog.Type.NODE,
+            {
+                "message": "hidden source event",
+                "node_id": self.hidden_node.id,
+                "actor_email": self.restricted_user.email,
+            },
+        )
+        own_identity = CoreLog.record(
+            self.account,
+            CoreLog.Type.MEMBER,
+            {
+                "message": "own profile event",
+                "actor_email": self.restricted_user.email,
+            },
+        )
+        self.client.force_login(self.restricted_user)
+
+        response = self.client.get("/console/logs/")
+        returned_ids = {row.id for row in response.context["page"].object_list}
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(allowed.id, returned_ids)
+        self.assertIn(allowed_legacy_string_id.id, returned_ids)
+        self.assertIn(own_identity.id, returned_ids)
+        self.assertNotIn(hidden.id, returned_ids)
+        self.assertNotContains(response, "hidden source event")
+        self.assertEqual(response.context["scope_mode"], "assigned")
+
+    def test_api_uses_same_revoked_source_and_identity_scope(self):
+        allowed = CoreLog.record(
+            self.account,
+            CoreLog.Type.NODE,
+            {
+                "message": "api allowed source event",
+                "node_id": self.allowed_node.id,
+            },
+        )
+        allowed_legacy_string_id = CoreLog.record(
+            self.account,
+            CoreLog.Type.NODE,
+            {
+                "message": "api allowed legacy source event",
+                "node_id": str(self.allowed_node.id),
+            },
+        )
+        hidden = CoreLog.record(
+            self.account,
+            CoreLog.Type.NODE,
+            {
+                "message": "api hidden source event",
+                "node_id": self.hidden_node.id,
+                "actor_email": self.restricted_user.email,
+            },
+        )
+        own_identity = CoreLog.record(
+            self.account,
+            CoreLog.Type.AUTH,
+            {
+                "message": "api own identity event",
+                "actor_email": self.restricted_user.email,
+            },
+        )
+        own_resource_auth = CoreLog.record(
+            self.account,
+            CoreLog.Type.AUTH,
+            {
+                "message": "api hidden resource auth event",
+                "actor_email": self.restricted_user.email,
+                "node_id": self.hidden_node.id,
+            },
+        )
+        another_identity = CoreLog.record(
+            self.account,
+            CoreLog.Type.MEMBER,
+            {
+                "message": "another member identity event",
+                "actor_email": self.user.email,
+            },
+        )
+        self.client.force_login(self.restricted_user)
+
+        response = self.client.get("/api/v1/logs/")
+        returned_ids = {row["id"] for row in response.json()}
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(allowed.id, returned_ids)
+        self.assertIn(allowed_legacy_string_id.id, returned_ids)
+        self.assertIn(own_identity.id, returned_ids)
+        self.assertNotIn(hidden.id, returned_ids)
+        self.assertNotIn(own_resource_auth.id, returned_ids)
+        self.assertNotIn(another_identity.id, returned_ids)
 
 
 class ApiLogViewTests(BaseTestCase):
@@ -201,6 +609,95 @@ class ApiLogViewTests(BaseTestCase):
         self.assertEqual([row["id"] for row in r.json()], [self.older.id])
         r = self.client.get("/api/v1/logs/", {"integration": 999})
         self.assertEqual(r.json(), [])
+
+    def test_null_and_non_mapping_legacy_data_fail_closed(self):
+        null_row = CoreLog.objects.create(
+            account=self.account,
+            type=CoreLog.Type.GENERIC,
+            data=None,
+        )
+        list_row = CoreLog.objects.create(
+            account=self.account,
+            type=CoreLog.Type.GENERIC,
+            data=[{"message": "not an event mapping"}],
+        )
+        scalar_row = CoreLog.objects.create(
+            account=self.account,
+            type=CoreLog.Type.GENERIC,
+            data="legacy scalar",
+        )
+
+        response = self.client.get("/api/v1/logs/")
+        by_id = {row["id"]: row for row in response.json()}
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(by_id[null_row.id]["data"], {})
+        self.assertEqual(by_id[list_row.id]["data"], {})
+        self.assertEqual(by_id[scalar_row.id]["data"], {})
+
+    def test_api_recursively_redacts_secrets_but_preserves_safe_structure(self):
+        row = CoreLog.record(
+            self.account,
+            CoreLog.Type.GENERIC,
+            {
+                "node_id": 42,
+                "correlation_id": "corr-safe-123",
+                "notes": 999,
+                "message": (
+                    "Worker returned Bearer api-bearer-secret "
+                    "password=message-password"
+                ),
+                "api_key": "top-level-key",
+                "callback_url": (
+                    "https://url-user:url-password@provider.invalid/"
+                    "signed/path?token=query-secret"
+                ),
+                "nested": {
+                    "safe_id": 17,
+                    "label": "safe label",
+                    "password": "nested-password",
+                },
+                "items": [
+                    {
+                        "request_id": "req-safe-456",
+                        "token": "nested-token",
+                    }
+                ],
+            },
+        )
+
+        response = self.client.get("/api/v1/logs/")
+        api_row = next(item for item in response.json() if item["id"] == row.id)
+        data = api_row["data"]
+        serialized = json.dumps(data, sort_keys=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["node_id"], 42)
+        self.assertEqual(data["correlation_id"], "corr-safe-123")
+        self.assertEqual(data["notes"], 999)
+        self.assertEqual(data["nested"]["safe_id"], 17)
+        self.assertEqual(data["nested"]["label"], "safe label")
+        self.assertEqual(data["items"][0]["request_id"], "req-safe-456")
+        self.assertEqual(data["api_key"], "[Filtered]")
+        self.assertEqual(data["nested"]["password"], "[Filtered]")
+        self.assertEqual(data["items"][0]["token"], "[Filtered]")
+        self.assertEqual(
+            data["callback_url"],
+            "https://provider.invalid/[Filtered]",
+        )
+        self.assertIn("Bearer [Filtered]", data["message"])
+        self.assertIn("password=[Filtered]", data["message"])
+        for secret in (
+            "api-bearer-secret",
+            "message-password",
+            "top-level-key",
+            "url-user",
+            "url-password",
+            "query-secret",
+            "nested-password",
+            "nested-token",
+        ):
+            self.assertNotIn(secret, serialized)
 
 
 class ViewActionLogTests(BaseTestCase):
@@ -247,6 +744,10 @@ class ViewActionLogTests(BaseTestCase):
         self.assertEqual(log.data["actor_email"], self.user.email)
         self.assertEqual(log.data["schedule_id"], schedule.id)
 
+    @override_settings(
+        BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+        BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+    )
     def test_backup_download_emits_backup_log(self):
         node = factories.make_website_node(self.account, self.member)
         storage = CoreStorage.objects.create(

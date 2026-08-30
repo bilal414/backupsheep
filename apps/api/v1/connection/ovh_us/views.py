@@ -1,4 +1,5 @@
 from django.db.models import Q
+from apps.api.v1.utils.api_helpers import provider_connections_for_action
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
 from rest_framework import viewsets
@@ -9,7 +10,11 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.connection.models import CoreConnection, CoreConnectionLocation
-from apps.api.v1.utils.api_permissions import MemberGroupPermissions, member_has_perm
+from apps.api.v1.utils.api_permissions import (
+    MemberGroupPermissions,
+    SOURCE_DISCOVERY_PERMISSIONS,
+    member_has_perm,
+)
 from apps.api.v1.utils.api_authentication import ConsoleSessionAuthentication
 from apps.console.node.models import CoreOVHCA, CoreOVHUS, CoreNode
 from .filters import CoreOVHUSFilter
@@ -31,7 +36,7 @@ class CoreOVHUSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         "*": "integration_changes",
         "oauth_url": "integration_changes",
         "validate": "integration_changes",
-        "objects": "integration_changes",
+        "objects": SOURCE_DISCOVERY_PERMISSIONS,
     }
     read_serializer_class = CoreOVHUSConnectionReadSerializer
     write_serializer_class = CoreOVHUSConnectionWriteSerializer
@@ -57,11 +62,9 @@ class CoreOVHUSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         }
 
     def get_queryset(self):
-        member = self.request.user.member
-        query = Q(account=member.get_current_account(), integration__code="ovh_us")
-        # query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        queryset = CoreConnection.objects.filter(query)
-        return queryset
+        return provider_connections_for_action(self.request, getattr(self, "action", None)).filter(
+            integration__code="ovh_us"
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

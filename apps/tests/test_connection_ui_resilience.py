@@ -364,7 +364,10 @@ class ConnectionSetupTemplateResilienceTests(SimpleTestCase):
         self.assertIn('operationStatus === "expired"', polling_source)
 
     def test_submit_and_validate_controls_are_disabled_and_restored(self):
-        self.assertIn(":disabled=\"loading || discoveryLoading\"", self.source)
+        self.assertIn(
+            ':disabled="loading || discoveryLoading || connectionMutationOutcomeUnknown"',
+            self.source,
+        )
         self.assertIn(
             ":disabled=\"validatingConnectionId === '{{ connection.id }}'\"",
             self.source,

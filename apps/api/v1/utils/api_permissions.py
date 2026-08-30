@@ -1,6 +1,12 @@
 from rest_framework import permissions
 
 
+SOURCE_DISCOVERY_PERMISSIONS = (
+    "integration_changes",
+    "node_changes",
+)
+
+
 def active_current_membership(member):
     """Return or safely select the member's active current membership.
 
@@ -115,9 +121,11 @@ class MemberGroupPermissions(permissions.BasePermission):
     """Fail-closed write gate backed by tenant-scoped custom permissions.
 
     ``action_permissions`` maps a DRF action to a CoreAccountGroup permission
-    codename; ``"*"`` is the fallback for an unsafe action without an explicit
-    entry. Safe actions without a mapping remain available to scoped querysets.
-    Unmapped unsafe actions are owner-only.
+    codename or a non-empty tuple/list/frozenset of codenames. Collections are
+    conjunctive: every listed permission is required. ``"*"`` is the fallback
+    for an unsafe action without an explicit entry. Safe actions without a
+    mapping remain available to scoped querysets. Unmapped unsafe actions are
+    owner-only.
     """
 
     action_permissions = {}
@@ -132,11 +140,56 @@ class MemberGroupPermissions(permissions.BasePermission):
         return getattr(view, "action_permissions", self.action_permissions)
 
     def _permission_codename(self, request, view):
+        # A direct source create consumes an existing integration connection
+        # and can enter provider credential/client code.  Nested node write
+        # serializers explicitly advertise the same conjunctive permission
+        # boundary as provider inventory discovery.  Resolve that declaration
+        # before the legacy per-view ``node_changes`` fallback so authorization
+        # fails before request data or credentials are processed.
+        if getattr(view, "action", None) == "create":
+            try:
+                serializer_class = view.get_serializer_class()
+            except (AttributeError, AssertionError, TypeError):
+                serializer_class = None
+            requirement = getattr(
+                serializer_class,
+                "source_creation_permissions",
+                None,
+            )
+            if requirement is None and serializer_class is not None:
+                node_field = getattr(
+                    serializer_class,
+                    "_declared_fields",
+                    {},
+                ).get("node")
+                requirement = getattr(
+                    node_field,
+                    "source_creation_permissions",
+                    None,
+                )
+            if requirement is not None:
+                return requirement
+
         action_permissions = self._permissions_for_view(view)
         codename = action_permissions.get(getattr(view, "action", None))
         if codename is None and request.method not in permissions.SAFE_METHODS:
             codename = action_permissions.get("*")
         return codename
+
+    @staticmethod
+    def _permission_codenames(requirement):
+        """Normalize one/all permission requirements, rejecting invalid specs."""
+
+        if isinstance(requirement, str):
+            return (requirement,) if requirement else None
+        if isinstance(requirement, (tuple, list, frozenset)):
+            codenames = tuple(requirement)
+            if codenames and all(
+                isinstance(codename, str) and codename
+                for codename in codenames
+            ):
+                return codenames
+        return None
 
     @staticmethod
     def _resolve_object_path(obj, path):
@@ -186,7 +239,10 @@ class MemberGroupPermissions(permissions.BasePermission):
             if request.method in permissions.SAFE_METHODS:
                 return True
             return current_account_is_primary(request)
-        return member_has_perm(request, codename)
+        codenames = self._permission_codenames(codename)
+        if codenames is None:
+            return False
+        return all(member_has_perm(request, item) for item in codenames)
 
     def has_object_permission(self, request, view, obj):
         try:
@@ -209,16 +265,25 @@ class MemberGroupPermissions(permissions.BasePermission):
                 from apps.api.v1.utils.api_helpers import visible_nodes
 
                 return visible_nodes(member).filter(pk=scope_pk).exists()
+            codenames = self._permission_codenames(codename)
+            if codenames is None:
+                return False
             # A permission granted by one account group must not authorize a
             # node assigned through another visibility-only group.
-            return member_has_perm_for_node(request, codename, scope)
+            return all(
+                member_has_perm_for_node(request, item, scope)
+                for item in codenames
+            )
 
         membership = active_current_membership(member)
         if membership is None or membership.account_id != scope_pk:
             return False
         if codename is None:
             return True
-        return member_has_perm(request, codename)
+        codenames = self._permission_codenames(codename)
+        if codenames is None:
+            return False
+        return all(member_has_perm(request, item) for item in codenames)
 
 
 class WebhookPermissions(permissions.BasePermission):

@@ -1,6 +1,7 @@
 import uuid
 
 from django.db.models import Q
+from apps.api.v1.utils.api_helpers import provider_connections_for_action
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -84,9 +85,8 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         }
 
     def get_queryset(self):
-        member = self.request.user.member
-        return CoreConnection.objects.filter(
-            account=member.get_current_account(), integration__code="database"
+        return provider_connections_for_action(self.request, getattr(self, "action", None)).filter(
+            integration__code="database"
         )
 
     def create(self, request, *args, **kwargs):

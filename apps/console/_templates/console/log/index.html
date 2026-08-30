@@ -1,188 +1,328 @@
 {% extends "console/_master.html" %}
+{% load tz %}
 {% block title %}{{ heading }}{% endblock %}
 {% block meta_title %}{{ heading }}{% endblock %}
-{% block meta_description %}{{ heading }}{% endblock %}
-{% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page{% endblock %}
+{% block meta_description %}Operational activity for the current BackupSheep access scope.{% endblock %}
+{% block meta_keywords %}BackupSheep activity{% endblock %}
+{% block page_class %}page_console console-page activity-page{% endblock %}
+{% block extra_styles %}<link type="text/css" href="{{ STATIC_URL }}console/css/activity.css" rel="stylesheet">{% endblock %}
 
 {% block content %}
-    <div class="space-y-6">
-        <!-- Page header -->
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Activity</h2>
-                <p class="mt-1 text-sm text-slate-500">A searchable record of backup, schedule, integration, and account events across your current access scope.</p>
+<div class="activity-shell">
+    <div class="activity-context" aria-label="Activity scope summary">
+        <p>
+            <span class="activity-context-dot" aria-hidden="true"></span>
+            {{ account.get_name|default:"Current workspace" }}
+            <span aria-hidden="true">/</span>
+            {% if scope_mode == "full" %}Full workspace{% else %}Assigned access{% endif %}
+        </p>
+        <p class="activity-context-time">
+            As of {% timezone timezone_name %}{{ generated_at|date:"M j, Y · H:i T" }}{% endtimezone %}
+        </p>
+    </div>
+
+    <header class="activity-hero">
+        <div>
+            <p class="activity-eyebrow">Operational event register</p>
+            <h1>Activity</h1>
+            <p class="activity-lede">Trace who or what acted, what was affected, and what BackupSheep recorded in your current access scope.</p>
+        </div>
+        <div class="activity-result-count" aria-live="polite">
+            <strong>{{ logs_count }}</strong>
+            <span>matching event{{ logs_count|pluralize }}</span>
+        </div>
+    </header>
+
+    <section class="activity-scope-strip" aria-labelledby="activity-scope-heading">
+        <h2 id="activity-scope-heading" class="sr-only">Scope and retention</h2>
+        <dl>
+            <div>
+                <dt>Access scope</dt>
+                <dd>{% if scope_mode == "full" %}Full workspace{% else %}Assigned sources{% endif %}</dd>
             </div>
-            <span class="inline-flex flex-none items-center gap-1.5 self-start rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10 sm:self-auto">{{ logs_count }} events in view</span>
+            <div>
+                <dt>Sources visible</dt>
+                <dd>{{ visible_source_count }}</dd>
+            </div>
+            <div>
+                <dt>Times shown in</dt>
+                <dd>{{ timezone_name }}</dd>
+            </div>
+            <div>
+                <dt>Retention</dt>
+                <dd>{{ retention_days }} days</dd>
+            </div>
+        </dl>
+        <p class="activity-truth-note">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/>
+            </svg>
+            This is retained operational history, not an immutable audit archive. “Accepted” means a request was recorded; it does not prove the operation completed.
+        </p>
+    </section>
+
+    {% if scope_chips %}
+    <div class="activity-scope-chips" aria-label="Drill-down scope">
+        <span class="activity-scope-label">Drill-down scope</span>
+        {% for chip in scope_chips %}
+            <span class="activity-scope-chip"><strong>{{ chip.label }}</strong>{{ chip.value }}</span>
+        {% endfor %}
+        <a href="{% url 'console:log:index' %}">View all activity</a>
+    </div>
+    {% endif %}
+
+    {% if filter_errors %}
+    <div class="activity-filter-errors" role="alert" aria-labelledby="activity-filter-error-heading">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+        </svg>
+        <div>
+            <h2 id="activity-filter-error-heading">Some filters could not be applied</h2>
+            <ul>{% for item in filter_errors %}<li>{{ item }}</li>{% endfor %}</ul>
+        </div>
+    </div>
+    {% endif %}
+
+    <section class="activity-filter-panel" aria-labelledby="activity-filter-heading">
+        <div class="activity-panel-heading">
+            <div>
+                <h2 id="activity-filter-heading">Find events</h2>
+                <p>Search safe event text and narrow the retained record without changing your access scope.</p>
+            </div>
+            {% if filters_active %}
+            <div class="activity-filter-state">
+                <span>{{ filter_count }} filter{{ filter_count|pluralize }} active</span>
+                <a href="{% url 'console:log:index' %}{% if clear_filters_query %}?{{ clear_filters_query }}{% endif %}#activity-results">Clear filters</a>
+            </div>
+            {% endif %}
         </div>
 
-        <!-- Server-side filter bar: type dropdown + substring search on message/error.
-             node/backup/integration drill-down params ride along as hidden inputs. -->
-        <form method="get" action="{% url 'console:log:index' %}" class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <form method="get" action="{% url 'console:log:index' %}#activity-results" role="search" class="activity-filter-form">
             {% if node %}<input type="hidden" name="node" value="{{ node }}">{% endif %}
             {% if backup %}<input type="hidden" name="backup" value="{{ backup }}">{% endif %}
             {% if integration %}<input type="hidden" name="integration" value="{{ integration }}">{% endif %}
-            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <div>
-                    <label for="filter-type" class="block text-sm font-medium text-slate-700">Type</label>
-                    <select name="type" id="filter-type"
-                            class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <option value="">All</option>
-                        {% for value, label in log_types %}
-                            <option value="{{ value }}" {% if type == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
-                        {% endfor %}
-                    </select>
+            {% if filters.message %}<input type="hidden" name="message" value="{{ filters.message }}">{% endif %}
+            {% if filters.error %}<input type="hidden" name="error" value="{{ filters.error }}">{% endif %}
+
+            <fieldset>
+                <legend class="sr-only">Activity search and filters</legend>
+                <div class="activity-search-row">
+                    <div class="activity-field activity-field-search">
+                        <label for="activity-search">Search events</label>
+                        <div class="activity-search-control">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
+                            </svg>
+                            <input id="activity-search" name="q" type="search" maxlength="200" value="{{ filters.q }}" placeholder="Message, source, actor, request, or correlation ID">
+                        </div>
+                    </div>
+                    <button type="submit" class="activity-primary-button">Apply filters</button>
                 </div>
-                <div>
-                    <label for="filter-message" class="block text-sm font-medium text-slate-700">Message</label>
-                    <input type="text" name="message" id="filter-message" value="{{ message|default:'' }}"
-                           class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                           placeholder="Search message text">
-                </div>
-                <div>
-                    <label for="filter-error" class="block text-sm font-medium text-slate-700">Error</label>
-                    <input type="text" name="error" id="filter-error" value="{{ error|default:'' }}"
-                           class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                           placeholder="Search error text">
-                </div>
-                <div class="flex items-end gap-2">
-                    <button type="submit"
-                            class="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3c2.755 0 5.455.232 8.083.678.533.09.917.556.917 1.096v1.044a2.25 2.25 0 01-.659 1.591l-5.432 5.432a2.25 2.25 0 00-.659 1.591v2.927a2.25 2.25 0 01-1.244 2.013L9.75 21v-6.568a2.25 2.25 0 00-.659-1.591L3.659 7.409A2.25 2.25 0 013 5.818V4.774c0-.54.384-1.006.917-1.096A48.32 48.32 0 0112 3z"/>
-                        </svg>
-                        Filter
-                    </button>
-                    <a href="{% url 'console:log:index' %}"
-                       class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Reset</a>
-                </div>
-            </div>
+
+                <details class="activity-more-filters" {% if filters_active %}open{% endif %}>
+                    <summary>
+                        More filters
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 9l-7.5 7.5L4.5 9"/></svg>
+                    </summary>
+                    <div class="activity-filter-grid">
+                        <div class="activity-field">
+                            <label for="activity-type">Category</label>
+                            <select id="activity-type" name="type">
+                                <option value="">All categories</option>
+                                {% for value, label in log_types %}<option value="{{ value }}" {% if filters.type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                            </select>
+                        </div>
+                        <div class="activity-field">
+                            <label for="activity-outcome">Outcome</label>
+                            <select id="activity-outcome" name="outcome">
+                                <option value="">Any outcome</option>
+                                {% for value, label in outcome_choices %}<option value="{{ value }}" {% if filters.outcome == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                            </select>
+                        </div>
+                        <div class="activity-field">
+                            <label for="activity-actor">Actor</label>
+                            <input id="activity-actor" name="actor" type="search" maxlength="320" value="{{ filters.actor }}" placeholder="Email address">
+                        </div>
+                        <div class="activity-field">
+                            <label for="activity-date-from">From date</label>
+                            <input id="activity-date-from" name="date_from" type="date" value="{{ filters.date_from }}">
+                        </div>
+                        <div class="activity-field">
+                            <label for="activity-date-to">To date</label>
+                            <input id="activity-date-to" name="date_to" type="date" value="{{ filters.date_to }}">
+                        </div>
+                        <div class="activity-field">
+                            <label for="activity-page-size">Rows per page</label>
+                            <select id="activity-page-size" name="p_size">
+                                {% for size in page_sizes %}<option value="{{ size }}" {% if page_size == size %}selected{% endif %}>{{ size }}</option>{% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    {% if filters.message or filters.error %}
+                    <p class="activity-legacy-filter-note">A legacy message or error constraint from this link is also active. Use “Clear filters” to remove it.</p>
+                    {% endif %}
+                </details>
+            </fieldset>
         </form>
+    </section>
 
-        {% if logs_count > 0 %}
-            <div x-data="logsPage">
-                <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-                    <table id="section-logs" class="min-w-full divide-y divide-slate-200 text-sm">
-                        <thead>
-                            <tr class="bg-slate-50">
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Date</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Node/Integration</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Backup</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Message/Error</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Type/Actor</th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-slate-100">
-                            {% for log in page.object_list %}
-                                <tr class="transition hover:bg-slate-50">
-                                    <td class="whitespace-nowrap px-4 py-3 text-slate-500">{{ log.created }}</td>
-                                    <td class="px-4 py-3">
-                                        {% if log.node %}
-                                            <a href="{% url 'console:node:detail' log.node.id %}" class="font-medium text-slate-900 transition hover:text-indigo-600">{{ log.node.name|default:'n/a' }}</a>
-                                        {% else %}
-                                            <span class="font-medium text-slate-900">{{ log.node.node_name|default:'n/a' }}</span>
-                                        {% endif %}
-                                        {% if log.node.connection %}
-                                            <p class="mt-0.5 text-xs">
-                                                <a class="font-medium text-indigo-600 transition hover:text-indigo-700"
-                                                   href="{% url 'console:setup:integration_open' integration_code=log.node.connection.integration.code %}?i_name={{ log.node.connection.name }}">{{ log.integration.name|default:'n/a' }}</a>
-                                            </p>
-                                        {% else %}
-                                            <p class="mt-0.5 text-xs text-slate-500">{{ log.integration_name|default:'n/a' }}</p>
-                                        {% endif %}
-                                    </td>
-                                    <td class="px-4 py-3">
-                                        <span class="font-mono text-xs text-slate-700">
-                                            {% if log.console_backup %}
-                                                {{ log.console_backup.uuid|default:'n/a' }}
-                                            {% elif log.backup_name %}
-                                                {{ log.backup_name|default:'n/a' }}
-                                            {% elif log.data.backup_id %}
-                                                {{ log.data.backup_id }}
-                                            {% else %}
-                                                n/a
-                                            {% endif %}
-                                        </span>
-                                    </td>
-                                    <td class="px-4 py-3">
-                                        {% if log.data.error.strip != "" %}
-                                            <p class="text-sm font-medium text-red-600">{{ log.data.error.strip|default:'n/a' }}</p>
-                                        {% endif %}
-                                        {% if log.data.message %}
-                                            {% if log.data.message.strip != "" %}
-                                                <p class="mt-0.5 text-sm text-slate-600">{{ log.data.message.strip }}</p>
-                                            {% endif %}
-                                        {% endif %}
-                                    </td>
-                                    <td class="whitespace-nowrap px-4 py-3">
-                                        <span class="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20">{{ log.get_type_display }}</span>
-                                        {% if log.data.actor_email %}
-                                            <p class="mt-1 text-xs text-slate-500">{{ log.data.actor_email }}</p>
-                                        {% endif %}
-                                    </td>
-                                </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+    <section id="activity-results" class="activity-results" aria-labelledby="activity-results-heading" tabindex="-1">
+        <div class="activity-results-heading">
+            <div>
+                <h2 id="activity-results-heading">Events</h2>
+                <p aria-live="polite">
+                    {% if logs_count %}
+                        Showing {{ page.start_index }}–{{ page.end_index }} of {{ logs_count }} matching event{{ logs_count|pluralize }}.
+                    {% elif filters_active %}
+                        No retained events match the current filters.
+                    {% else %}
+                        No retained events are visible in this scope.
+                    {% endif %}
+                </p>
+            </div>
+            <p class="activity-order-note">Newest recorded first</p>
+        </div>
+
+        {% if logs_count %}
+        <div class="activity-table-wrap">
+            <table class="activity-table">
+                <caption class="sr-only">BackupSheep activity events in the current access scope</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Recorded</th>
+                        <th scope="col">Outcome</th>
+                        <th scope="col">Event</th>
+                        <th scope="col">Subject</th>
+                        <th scope="col">Actor / source</th>
+                        <th scope="col"><span class="sr-only">Event details</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in page.object_list %}
+                    <tr>
+                        <td class="activity-time-cell">
+                            <time datetime="{% timezone timezone_name %}{{ log.created|date:'c' }}{% endtimezone %}">
+                                <span>{% timezone timezone_name %}{{ log.created|date:"M j, Y" }}{% endtimezone %}</span>
+                                <small>{% timezone timezone_name %}{{ log.created|date:"H:i:s T" }}{% endtimezone %}</small>
+                            </time>
+                        </td>
+                        <td><span class="activity-outcome activity-outcome-{{ log.presentation.outcome_slug }}">{{ log.presentation.outcome_label }}</span></td>
+                        <td class="activity-event-cell">
+                            <span class="activity-category">{{ log.presentation.category_label }}</span>
+                            <p>{{ log.presentation.message }}</p>
+                            {% if log.presentation.error %}<span class="activity-error-marker">Error recorded</span>{% endif %}
+                        </td>
+                        <td class="activity-subject-cell">
+                            {% if log.presentation.node_id %}<a href="{% url 'console:node:detail' log.presentation.node_id %}">{{ log.presentation.subject_label }}</a>{% else %}<strong>{{ log.presentation.subject_label }}</strong>{% endif %}
+                            {% if log.presentation.subject_meta %}<small>{{ log.presentation.subject_meta }}</small>{% endif %}
+                        </td>
+                        <td class="activity-actor-cell">
+                            <strong>{{ log.presentation.actor_label }}</strong>
+                            <small>{{ log.presentation.source_label }}</small>
+                        </td>
+                        <td class="activity-details-cell">
+                            <details class="activity-event-details">
+                                <summary>Details<span class="sr-only"> for {{ log.presentation.event_ref }}</span></summary>
+                                <div class="activity-detail-panel">
+                                    <dl>
+                                        <div><dt>Event ID</dt><dd><code>{{ log.presentation.event_ref }}</code></dd></div>
+                                        <div><dt>Recorded</dt><dd><time datetime="{% timezone timezone_name %}{{ log.created|date:'c' }}{% endtimezone %}">{% timezone timezone_name %}{{ log.created|date:"M j, Y · H:i:s T" }}{% endtimezone %}</time></dd></div>
+                                        <div><dt>Category</dt><dd>{{ log.presentation.category_label }}</dd></div>
+                                        <div><dt>Outcome</dt><dd>{{ log.presentation.outcome_label }}</dd></div>
+                                        {% if log.presentation.action %}<div><dt>Action</dt><dd>{{ log.presentation.action }}</dd></div>{% endif %}
+                                        <div><dt>Actor</dt><dd>{{ log.presentation.actor_label }} <small>({{ log.presentation.actor_kind }})</small></dd></div>
+                                        <div><dt>Subject</dt><dd>{{ log.presentation.subject_label }}{% if log.presentation.subject_meta %}<small>{{ log.presentation.subject_meta }}</small>{% endif %}</dd></div>
+                                        {% if log.presentation.correlation_id %}<div><dt>Correlation ID</dt><dd><code>{{ log.presentation.correlation_id }}</code></dd></div>{% endif %}
+                                        {% if log.presentation.request_id %}<div><dt>Request ID</dt><dd><code>{{ log.presentation.request_id }}</code></dd></div>{% endif %}
+                                        <div class="activity-detail-wide"><dt>Message</dt><dd>{{ log.presentation.message }}</dd></div>
+                                        {% if log.presentation.error %}<div class="activity-detail-wide activity-detail-error"><dt>Error</dt><dd>{{ log.presentation.error }}</dd></div>{% endif %}
+                                    </dl>
+                                </div>
+                            </details>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <ol class="activity-card-list" aria-label="Activity events">
+            {% for log in page.object_list %}
+            <li class="activity-card">
+                <div class="activity-card-topline">
+                    <time datetime="{% timezone timezone_name %}{{ log.created|date:'c' }}{% endtimezone %}">{% timezone timezone_name %}{{ log.created|date:"M j · H:i T" }}{% endtimezone %}</time>
+                    <span class="activity-outcome activity-outcome-{{ log.presentation.outcome_slug }}">{{ log.presentation.outcome_label }}</span>
                 </div>
+                <span class="activity-category">{{ log.presentation.category_label }}</span>
+                <p class="activity-card-message">{{ log.presentation.message }}</p>
+                <dl class="activity-card-facts">
+                    <div><dt>Subject</dt><dd>{% if log.presentation.node_id %}<a href="{% url 'console:node:detail' log.presentation.node_id %}">{{ log.presentation.subject_label }}</a>{% else %}{{ log.presentation.subject_label }}{% endif %}</dd></div>
+                    <div><dt>Actor / source</dt><dd>{{ log.presentation.actor_label }}<small>{{ log.presentation.source_label }}</small></dd></div>
+                </dl>
+                <details class="activity-event-details activity-card-details">
+                    <summary>View event details<span class="sr-only"> for {{ log.presentation.event_ref }}</span></summary>
+                    <div class="activity-detail-panel">
+                        <dl>
+                            <div><dt>Event ID</dt><dd><code>{{ log.presentation.event_ref }}</code></dd></div>
+                            <div><dt>Recorded</dt><dd>{% timezone timezone_name %}{{ log.created|date:"M j, Y · H:i:s T" }}{% endtimezone %}</dd></div>
+                            <div><dt>Category</dt><dd>{{ log.presentation.category_label }}</dd></div>
+                            <div><dt>Outcome</dt><dd>{{ log.presentation.outcome_label }}</dd></div>
+                            {% if log.presentation.action %}<div><dt>Action</dt><dd>{{ log.presentation.action }}</dd></div>{% endif %}
+                            <div><dt>Actor</dt><dd>{{ log.presentation.actor_label }} <small>({{ log.presentation.actor_kind }})</small></dd></div>
+                            {% if log.presentation.subject_meta %}<div><dt>Subject reference</dt><dd>{{ log.presentation.subject_meta }}</dd></div>{% endif %}
+                            {% if log.presentation.correlation_id %}<div><dt>Correlation ID</dt><dd><code>{{ log.presentation.correlation_id }}</code></dd></div>{% endif %}
+                            {% if log.presentation.request_id %}<div><dt>Request ID</dt><dd><code>{{ log.presentation.request_id }}</code></dd></div>{% endif %}
+                            {% if log.presentation.error %}<div class="activity-detail-error"><dt>Error</dt><dd>{{ log.presentation.error }}</dd></div>{% endif %}
+                        </dl>
+                    </div>
+                </details>
+            </li>
+            {% endfor %}
+        </ol>
 
-                <nav class="mt-4 flex items-center justify-between border-t border-slate-200 pt-4" aria-label="Pagination">
-                    <div class="flex flex-1">
-                        {% if page.has_previous %}
-                            <a href="{% url 'console:log:index' %}?p_no={{ page.previous_page_number }}&p_size={{ page.paginator.per_page }}{% if node %}&node={{ node }}{% endif %}{% if integration %}&integration={{ integration }}{% endif %}{% if type %}&type={{ type }}{% endif %}{% if message %}&message={{ message|urlencode }}{% endif %}{% if error %}&error={{ error|urlencode }}{% endif %}#section-logs"
-                               class="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                <svg class="h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
-                                </svg>
-                                Previous
-                            </a>
-                        {% endif %}
-                    </div>
-                    <div class="hidden items-center gap-1 md:flex">
-                        {% for page_no in elided_page_range %}
-                            {% if page_no == "…" %}
-                                <span class="inline-flex h-9 w-9 items-center justify-center text-sm font-medium text-slate-400">{{ page_no }}</span>
-                            {% else %}
-                                <a href="{% url 'console:log:index' %}?p_no={{ page_no }}&p_size={{ page.paginator.per_page }}{% if node %}&node={{ node }}{% endif %}{% if integration %}&integration={{ integration }}{% endif %}{% if type %}&type={{ type }}{% endif %}{% if message %}&message={{ message|urlencode }}{% endif %}{% if error %}&error={{ error|urlencode }}{% endif %}#section-logs"
-                                   {% if page.number == page_no %}aria-current="page"{% endif %}
-                                   class="inline-flex h-9 w-9 items-center justify-center rounded-lg text-sm font-medium transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 {% if page.number == page_no %}bg-indigo-600 text-white shadow-sm{% else %}text-slate-600 hover:bg-slate-100{% endif %}">
-                                    {{ page_no }}
-                                </a>
-                            {% endif %}
-                        {% endfor %}
-                    </div>
-                    <div class="flex flex-1 justify-end">
-                        {% if page.has_next %}
-                            <a href="{% url 'console:log:index' %}?p_no={{ page.next_page_number }}&p_size={{ page.paginator.per_page }}{% if node %}&node={{ node }}{% endif %}{% if backup %}&backup={{ backup }}{% endif %}{% if integration %}&integration={{ integration }}{% endif %}{% if type %}&type={{ type }}{% endif %}{% if message %}&message={{ message|urlencode }}{% endif %}{% if error %}&error={{ error|urlencode }}{% endif %}#section-logs"
-                               class="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                Next
-                                <svg class="h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
-                                </svg>
-                            </a>
-                        {% endif %}
-                    </div>
-                </nav>
+        <nav class="activity-pagination" aria-label="Activity pagination">
+            <div>
+                {% if page.has_previous %}
+                <a rel="prev" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}p_no={{ page.previous_page_number }}#activity-results">Previous</a>
+                {% else %}
+                <span aria-disabled="true">Previous</span>
+                {% endif %}
             </div>
-            <script>
-                document.addEventListener('alpine:init', () => {
-                    Alpine.data('logsPage', () => ({
-                        log: {},
-                    }));
-                });
-            </script>
+            <div class="activity-page-numbers" aria-label="Page numbers">
+                {% for page_no in elided_page_range %}
+                    {% if page_no == "…" %}
+                        <span aria-hidden="true">{{ page_no }}</span>
+                    {% elif page.number == page_no %}
+                        <span aria-current="page" aria-label="Page {{ page_no }}, current page">{{ page_no }}</span>
+                    {% else %}
+                        <a aria-label="Go to page {{ page_no }}" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}p_no={{ page_no }}#activity-results">{{ page_no }}</a>
+                    {% endif %}
+                {% endfor %}
+            </div>
+            <p>Page {{ page.number }} of {{ page.paginator.num_pages }}</p>
+            <div class="activity-pagination-next">
+                {% if page.has_next %}
+                <a rel="next" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}p_no={{ page.next_page_number }}#activity-results">Next</a>
+                {% else %}
+                <span aria-disabled="true">Next</span>
+                {% endif %}
+            </div>
+        </nav>
         {% else %}
-            <div class="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-6 py-12 text-center">
-                <span class="grid h-11 w-11 place-items-center rounded-full bg-slate-100 text-slate-400">
-                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859m-19.5.338V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H6.911a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661z"/>
-                    </svg>
-                </span>
-                <p class="mt-3 text-sm font-medium text-slate-900">No logs found</p>
-                <p class="mt-1 max-w-sm text-sm text-slate-500">Empty logs are usually a good sign.</p>
-                <button type="button" onclick="history.back()"
-                        class="mt-4 inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Go Back</button>
-            </div>
+        <div class="activity-empty-state">
+            <span class="activity-empty-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z"/></svg>
+            </span>
+            {% if filters_active %}
+                <h3>No events match these filters</h3>
+                <p>Adjust the date range or remove a filter. Your access scope will stay unchanged.</p>
+                <a class="activity-secondary-button" href="{% url 'console:log:index' %}{% if clear_filters_query %}?{{ clear_filters_query }}{% endif %}#activity-results">Clear filters</a>
+            {% else %}
+                <h3>No retained activity in this scope</h3>
+                <p>Events appear here as BackupSheep records backup, restore, source, schedule, connection, access, and account activity. Records older than {{ retention_days }} days are pruned.</p>
+            {% endif %}
+        </div>
         {% endif %}
-    </div>
+    </section>
+</div>
 {% endblock %}

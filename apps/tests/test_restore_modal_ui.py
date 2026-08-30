@@ -271,6 +271,38 @@ class LogicalRestoreModalUiTests(SimpleTestCase):
         )[0]
         self.assertIn("storagePoint.direct_download_permitted !== true", download)
 
+    def test_download_navigation_revalidates_server_targets_in_the_browser(self):
+        validator = self.detail.split(
+            "validatedBrowserDownloadTarget(value)", 1
+        )[1].split("applyNodeSummary(summary)", 1)[0]
+        for marker in (
+            "value.trim() !== value",
+            "value.startsWith('/')",
+            "localDownloadPath.test(value)",
+            "parsed = new URL(value)",
+            "parsed.protocol !== 'https:'",
+            "parsed.username || parsed.password",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, validator)
+
+        download = self.detail.split(
+            "async downloadBackup(storagePoint, type)", 1
+        )[1].split("async downloadTransferLog", 1)[0]
+        validation = "const url = this.validatedBrowserDownloadTarget(data.url);"
+        self.assertIn(validation, download)
+        self.assertLess(download.index(validation), download.index("navigator.clipboard.writeText(url)"))
+        self.assertLess(download.index(validation), download.index("window.location.assign(url)"))
+        self.assertNotIn("const url = data.url;", download)
+
+        directory_tree = self.detail.split(
+            "async downloadDirTree(backup_id)", 1
+        )[1].split("async downloadBackup(storagePoint, type)", 1)[0]
+        self.assertIn(
+            "window.location.assign(this.validatedBrowserDownloadTarget(json.url));",
+            directory_tree,
+        )
+
     def test_native_restore_async_work_is_bounded_and_context_isolated(self):
         native_get = self.detail.split("async getNativeCloudRestores(", 1)[1].split(
             "async startNativeCloudRestore(exactRetry = false)", 1

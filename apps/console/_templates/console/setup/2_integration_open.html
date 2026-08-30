@@ -28,11 +28,11 @@
                         <p class="mt-2 max-w-3xl text-sm leading-6 text-ink-650">{% if storage %}Manage the account boundary and destinations available to backup policies.{% elif integration %}Manage provider accounts, execution lanes, and the sources attached to each connection.{% endif %}</p>
                     </div>
                 </div>
-                <nav class="flex-none" aria-label="Connection setup progress">
-                    <ol class="grid grid-cols-3 overflow-hidden rounded-md border border-rule-200 bg-wool-50 text-xs font-semibold">
-                        <li class="flex min-h-12 items-center gap-2 border-r border-rule-200 px-3 text-verified-700"><svg class="h-5 w-5 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75l2.25 2.25L15 9.75m6-3.75a12.96 12.96 0 01-9-3.75A12.96 12.96 0 013 6c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622z"/></svg><span>Provider</span></li>
-                        <li class="flex min-h-12 items-center gap-2 border-r border-rule-200 bg-evidence-50 px-3 text-evidence-700" aria-current="step"><span class="grid h-5 w-5 flex-none place-items-center rounded-full bg-evidence-600 text-[11px] text-white">2</span><span>Account</span></li>
-                        <li class="flex min-h-12 items-center gap-2 px-3 text-ink-500"><span class="grid h-5 w-5 flex-none place-items-center rounded-full border border-rule-200 bg-paper text-[11px]">3</span><span>Source</span></li>
+                <nav class="min-w-0 w-full lg:w-auto" aria-label="Connection setup progress">
+                    <ol class="grid grid-cols-1 overflow-hidden rounded-md border border-rule-200 bg-wool-50 text-xs font-semibold sm:grid-cols-3">
+                        <li class="flex min-h-11 min-w-0 items-center gap-2 border-b border-rule-200 px-3 text-verified-700 sm:min-h-12 sm:border-b-0 sm:border-r"><svg class="h-5 w-5 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75l2.25 2.25L15 9.75m6-3.75a12.96 12.96 0 01-9-3.75A12.96 12.96 0 013 6c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622z"/></svg><span class="min-w-0">Provider</span></li>
+                        <li class="flex min-h-11 min-w-0 items-center gap-2 border-b border-rule-200 bg-evidence-50 px-3 text-evidence-700 sm:min-h-12 sm:border-b-0 sm:border-r" aria-current="step"><span class="grid h-5 w-5 flex-none place-items-center rounded-full bg-evidence-600 text-[11px] text-white">2</span><span class="min-w-0">Account</span></li>
+                        <li class="flex min-h-11 min-w-0 items-center gap-2 px-3 text-ink-500 sm:min-h-12"><span class="grid h-5 w-5 flex-none place-items-center rounded-full border border-rule-200 bg-paper text-[11px]">3</span><span class="min-w-0">Source</span></li>
                     </ol>
                 </nav>
             </div>

@@ -46,6 +46,7 @@ from apps.console.storage.models import (
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
+from backupsheep.download_urls import UnsafeBrowserDownloadTarget
 
 
 def make_local_storage(account, member, *, path=None, no_delete=None):
@@ -650,6 +651,26 @@ class LocalStorageDeleteTests(BaseTestCase):
             point.generate_download_url(),
             f"/api/v1/storage/local/file/website/{point.id}/",
         )
+        self.assertEqual(
+            point.generate_browser_download_target(),
+            f"/api/v1/storage/local/file/website/{point.id}/",
+        )
+
+    def test_browser_download_target_rejects_unsafe_provider_output(self):
+        storage = make_local_storage(self.account, self.member)
+        point = make_website_backup_point(
+            self.member,
+            storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="/backups/x.zip",
+        )
+        with mock.patch.object(
+            point,
+            "generate_download_url",
+            return_value="javascript:alert(document.domain)",
+        ):
+            with self.assertRaises(UnsafeBrowserDownloadTarget):
+                point.generate_browser_download_target()
 
 
 class LocalStorageDownloadViewTests(BaseTestCase):

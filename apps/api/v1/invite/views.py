@@ -167,3 +167,43 @@ class CoreInviteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 {"detail": "Unable to accept invite. Please contact support."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        """Let the addressed recipient explicitly decline a pending invite.
+
+        This is identity-bound by the authenticated email, just like acceptance;
+        it never relies on the requester's current workspace or exposes outbound
+        invitation metadata.
+        """
+        invite = CoreInvite.objects.filter(
+            id=pk,
+            email__iexact=request.user.email,
+        ).first()
+
+        if invite and invite.expire_if_needed():
+            return Response(
+                {"detail": "This invite has expired and no longer needs a response."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not invite or invite.status != CoreInvite.Status.PENDING:
+            return Response(
+                {"detail": "This invitation is not available to reject."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        invite.status = CoreInvite.Status.CANCELLED
+        invite.save(update_fields=["status", "modified"])
+        _record_member_log(
+            invite.account,
+            {
+                "message": f"Invite rejected by {request.user.email}.",
+                "actor_email": request.user.email,
+                "invite_id": invite.id,
+                "invitee_email": invite.email,
+            },
+        )
+        return Response(
+            {"detail": f"Invitation to {invite.account.get_name()} rejected."},
+            status=status.HTTP_200_OK,
+        )

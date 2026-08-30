@@ -3,28 +3,29 @@
 {% block meta_title %}{{ heading }}{% endblock %}
 {% block meta_description %}{{ heading }}{% endblock %}
 {% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page source-config-page{% endblock %}
+{% block extra_styles %}<link type="text/css" href="{{ STATIC_URL }}console/css/source_discovery.css" rel="stylesheet">{% endblock %}
+{% block page_class %}page_console console-page source-config-page source-discovery-page{% endblock %}
 {% block heading %}false{% endblock %}
 {% block content %}
-    <div class="space-y-6">
+    <div class="source-discovery-shell space-y-6">
         <!-- Source workspace header -->
         <header>
             <a href="{% if show_link_url %}{{ show_link_url }}{% else %}{% url 'console:setup:integration_select' %}{% endif %}" class="inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-ink-650 transition hover:text-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-evidence-600">
                 <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
                 </svg>
-                {% if node %}Back to source{% else %}Back to {{ integration.name }}{% endif %}
+                {% if node %}Back to source{% else %}Back to {{ integration.name }} accounts{% endif %}
             </a>
             <div class="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div class="min-w-0">
                     {% if node %}
                         <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Source configuration</p>
                         <h1 class="mt-1 break-words text-2xl font-semibold tracking-tight text-ink-950 sm:text-3xl">{{ node.name }}</h1>
-                        <p class="mt-2 text-sm leading-6 text-ink-650">{{ integration.name }} &middot; {{ connection.name }} &mdash; review what is protected and how source data is transferred.</p>
+                        <p class="mt-2 text-sm leading-6 text-ink-650">{{ integration.name }} &middot; {{ connection.name }} &mdash; review source identity and configuration. Backup and recovery evidence is recorded separately.</p>
                     {% else %}
-                        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Connect a source</p>
-                        <h1 class="mt-1 text-2xl font-semibold tracking-tight text-ink-950 sm:text-3xl">Set up {{ integration.name }}</h1>
-                        <p class="mt-2 text-sm leading-6 text-ink-650">{{ connection.name }} &mdash; choose what to protect and how source data is transferred.</p>
+                        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-600">Source registration</p>
+                        <h1 class="mt-1 text-2xl font-semibold tracking-tight text-ink-950 sm:text-3xl">Add {{ integration.name }} resources</h1>
+                        <p class="mt-2 max-w-3xl text-sm leading-6 text-ink-650">Choose provider resources from <strong class="font-semibold text-ink-800">{{ connection.name }}</strong> to register as BackupSheep sources. Registration alone does not create a backup, schedule, or recovery evidence.</p>
                     {% endif %}
                 </div>
                 {% if node %}
@@ -56,7 +57,7 @@
                             </li>
                             <li class="flex items-center gap-1.5 text-indigo-600" aria-current="step">
                                 <span class="grid h-5 w-5 place-items-center rounded-full bg-indigo-600 text-xs font-semibold text-white">3</span>
-                                Set up source
+                                Register resources
                             </li>
                         </ol>
                     </nav>

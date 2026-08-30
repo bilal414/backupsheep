@@ -13,7 +13,7 @@ class CoreInviteViewPermissions(permissions.BasePermission):
         # Invite management (including reads of pending invite metadata) is an
         # owner-only surface. The recipient-facing accept action remains
         # available and independently binds the invite to request.user.email.
-        if getattr(view, "action", None) == "accept":
+        if getattr(view, "action", None) in {"accept", "reject"}:
             return True
         membership = active_current_membership(member)
         return membership is not None and membership.primary

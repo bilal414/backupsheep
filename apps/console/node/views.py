@@ -589,6 +589,9 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
         can_run_backups = member_has_perm_for_node(
             self.request, "backup_create", node
         )
+        can_restore_backups = member_has_perm_for_node(
+            self.request, "backup_restore", node
+        )
         can_download_backups = member_has_perm_for_node(
             self.request, "backup_download", node
         )
@@ -602,7 +605,7 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
         # Destination names are operational metadata. Only expose them to
         # members who can use them in a backup or protection policy.
         storage_list = CoreStorage.objects.none()
-        if can_run_backups or can_manage_schedules:
+        if can_run_backups or can_restore_backups or can_manage_schedules:
             storage_list = CoreStorage.objects.filter(
                 account=member.get_current_account(),
                 status=CoreStorage.Status.ACTIVE,
@@ -620,6 +623,7 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
         context[
             "heading"
         ] = f"{node.get_type_display()} | {node.get_integration_alt_name()} | {node.name}"
+        context["content_owns_h1"] = True
         context["active_url"] = "nodes"
         context["page"] = page
         context["elided_page_range"] = page.paginator.get_elided_page_range(
@@ -647,6 +651,7 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
         context["can_manage_source"] = can_manage_source
         context["can_manage_schedules"] = can_manage_schedules
         context["can_run_backups"] = can_run_backups
+        context["can_restore_backups"] = can_restore_backups
         context["can_download_backups"] = can_download_backups
         context["can_delete_backups"] = can_delete_backups
         context["can_validate_storage"] = can_validate_storage

@@ -115,7 +115,7 @@ class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                             },
                             status=status.HTTP_409_CONFLICT,
                         )
-                    download_url = storage_point.generate_download_url()
+                    download_url = storage_point.generate_browser_download_target()
                     _log_activity(
                         request,
                         CoreLog.Type.BACKUP,

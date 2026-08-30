@@ -8,7 +8,7 @@ class CoreLightsailBucketReplicationViewPermissions(MemberGroupPermissions):
         "partial_update": "node_changes",
         "destroy": "node_changes",
         "run": "backup_create",
-        "restore": "backup_create",
+        "restore": "backup_restore",
         "validate": "backup_create",
     }
 

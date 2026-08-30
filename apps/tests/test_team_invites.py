@@ -8,7 +8,9 @@ import itertools
 from datetime import timedelta
 from unittest import mock
 
-from django.contrib.auth.models import Group, User
+from django.contrib.auth.models import Group, Permission, User
+from django.db import connection
+from django.db.models.query import QuerySet
 from django.test import Client
 from django.utils import timezone
 from django.utils.text import slugify
@@ -408,6 +410,57 @@ class GroupApiTests(BaseTestCase):
             CoreLog.objects.filter(account=self.account, type=CoreLog.Type.MEMBER).exists()
         )
 
+    def test_restore_permission_roundtrips_and_foreign_permissions_are_rejected(self):
+        created = self.client.post(
+            "/api/v1/groups/",
+            {
+                "name": "recovery-operators",
+                "type": CoreAccountGroup.Type.Team,
+                "permissions": ["backup_restore", "backup_restore"],
+                "nodes": [],
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.content)
+        account_group = CoreAccountGroup.objects.get(id=created.json()["id"])
+        self.assertEqual(
+            set(account_group.group.permissions.values_list("codename", flat=True)),
+            {"backup_restore"},
+        )
+
+        detail = self.client.get(f"/api/v1/groups/{account_group.id}/")
+        self.assertEqual(detail.status_code, 200, detail.content)
+        self.assertEqual(detail.json()["permissions"], {"backup_restore": True})
+
+        rejected = self.client.post(
+            "/api/v1/groups/",
+            {
+                "name": "foreign-permission",
+                "type": CoreAccountGroup.Type.Team,
+                "permissions": ["change_user"],
+                "nodes": [],
+            },
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.content)
+        self.assertFalse(
+            CoreAccountGroup.objects.filter(
+                account=self.account,
+                name="foreign-permission",
+            ).exists()
+        )
+
+        account_group.group.permissions.add(
+            Permission.objects.get(
+                content_type__app_label="auth",
+                codename="change_user",
+            )
+        )
+        filtered = self.client.get(f"/api/v1/groups/{account_group.id}/")
+        self.assertEqual(filtered.status_code, 200, filtered.content)
+        self.assertEqual(filtered.json()["permissions"], {"backup_restore": True})
+        self.assertNotIn("change_user", str(filtered.json()))
+
     def test_group_nodes_assignment_roundtrips(self):
         node = factories.make_website_node(self.account, self.member)
         r = self.client.post(
@@ -438,6 +491,7 @@ class GroupApiTests(BaseTestCase):
     def test_group_nodes_must_belong_to_account(self):
         other_account, other_member, _ = factories.make_account()
         foreign_node = factories.make_website_node(other_account, other_member)
+        auth_group_ids_before = set(Group.objects.values_list("id", flat=True))
         r = self.client.post(
             "/api/v1/groups/",
             {
@@ -449,6 +503,175 @@ class GroupApiTests(BaseTestCase):
             format="json",
         )
         self.assertEqual(r.status_code, 400, r.content)
+        self.assertEqual(
+            set(Group.objects.values_list("id", flat=True)),
+            auth_group_ids_before,
+            "invalid source scope must not leave an orphan auth Group",
+        )
+        self.assertFalse(
+            CoreAccountGroup.objects.filter(account=self.account, name="bad-nodes").exists()
+        )
+
+    def test_invalid_node_update_does_not_rename_backing_auth_group(self):
+        account_group = _make_group(self.account, "stable-operators")
+        old_auth_name = account_group.group.name
+        other_account, other_member, _ = factories.make_account()
+        foreign_node = factories.make_website_node(other_account, other_member)
+
+        response = self.client.patch(
+            f"/api/v1/groups/{account_group.id}/",
+            {
+                "name": "renamed-before-validation",
+                "type": CoreAccountGroup.Type.Client,
+                "nodes": [foreign_node.id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        account_group.refresh_from_db()
+        account_group.group.refresh_from_db()
+        self.assertEqual(account_group.name, "stable-operators")
+        self.assertEqual(account_group.group.name, old_auth_name)
+
+    def test_group_delete_records_redacted_impact_only_after_success(self):
+        account_group = _make_group(self.account, "retired-recovery-operators")
+        node = factories.make_website_node(self.account, self.member)
+        account_group.nodes.add(node)
+        account_group.group.permissions.add(
+            Permission.objects.get(
+                content_type__app_label=CoreAccountGroup._meta.app_label,
+                content_type__model=CoreAccountGroup._meta.model_name,
+                codename="backup_restore",
+            )
+        )
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            response = self.client.delete(f"/api/v1/groups/{account_group.id}/")
+
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertEqual(len(callbacks), 1)
+        self.assertFalse(CoreAccountGroup.objects.filter(pk=account_group.pk).exists())
+        self.assertFalse(Group.objects.filter(pk=account_group.group_id).exists())
+        self.assertTrue(node.__class__.objects.filter(pk=node.pk).exists())
+        audit = CoreLog.objects.filter(
+            account=self.account,
+            type=CoreLog.Type.MEMBER,
+            data__action="group_delete",
+        ).latest("id")
+        self.assertEqual(audit.data["outcome"], "succeeded")
+        self.assertEqual(audit.data["actor_email"], self.user.email)
+        self.assertEqual(audit.data["group_id"], account_group.id)
+        self.assertEqual(audit.data["group_name"], "retired-recovery-operators")
+        self.assertEqual(audit.data["member_count"], 0)
+        self.assertEqual(audit.data["source_count"], 1)
+        self.assertEqual(audit.data["source_scope"], "selected_sources")
+        self.assertNotIn("permissions", audit.data)
+        self.assertIn("were not deleted", audit.data["message"])
+
+    def test_group_delete_locks_auth_group_and_enrollment_before_impact_check(self):
+        from apps.api.v1.group import views as group_views
+
+        account_group = _make_group(self.account, "locked-delete")
+        baseline_atomic_depth = len(connection.atomic_blocks)
+        events = []
+        original_select_for_update = QuerySet.select_for_update
+        original_impact = group_views._locked_group_delete_impact
+
+        def observe_select_for_update(queryset, *args, **kwargs):
+            if queryset.model in (Group, CoreAccountGroup):
+                events.append(
+                    ("lock", queryset.model, len(connection.atomic_blocks))
+                )
+            return original_select_for_update(queryset, *args, **kwargs)
+
+        def observe_impact(locked_account_group, locked_auth_group):
+            events.append(("impact", None, len(connection.atomic_blocks)))
+            return original_impact(locked_account_group, locked_auth_group)
+
+        with (
+            mock.patch.object(
+                QuerySet,
+                "select_for_update",
+                new=observe_select_for_update,
+            ),
+            mock.patch.object(
+                group_views,
+                "_locked_group_delete_impact",
+                side_effect=observe_impact,
+            ),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.delete(f"/api/v1/groups/{account_group.id}/")
+
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertEqual(
+            [event[1] for event in events if event[0] == "lock"],
+            [Group, CoreAccountGroup],
+        )
+        self.assertEqual([event[0] for event in events], ["lock", "lock", "impact"])
+        self.assertTrue(
+            all(event[2] > baseline_atomic_depth for event in events),
+            events,
+        )
+
+    def test_group_delete_rejection_and_database_failure_do_not_create_false_audit(self):
+        assigned_group = _make_group(self.account, "assigned-operators")
+        assigned_group.group.user_set.add(self.user)
+        audit_count = CoreLog.objects.filter(
+            account=self.account,
+            type=CoreLog.Type.MEMBER,
+            data__action="group_delete",
+        ).count()
+
+        with (
+            mock.patch(
+                "apps.api.v1.group.views._record_member_log"
+            ) as record_member_log,
+            self.captureOnCommitCallbacks(execute=True) as rejected_callbacks,
+        ):
+            rejected = self.client.delete(f"/api/v1/groups/{assigned_group.id}/")
+
+        self.assertEqual(rejected.status_code, 400, rejected.content)
+        self.assertEqual(rejected_callbacks, [])
+        record_member_log.assert_not_called()
+        self.assertTrue(CoreAccountGroup.objects.filter(pk=assigned_group.pk).exists())
+        self.assertEqual(
+            CoreLog.objects.filter(
+                account=self.account,
+                type=CoreLog.Type.MEMBER,
+                data__action="group_delete",
+            ).count(),
+            audit_count,
+        )
+
+        empty_group = _make_group(self.account, "database-failure")
+        with (
+            mock.patch.object(
+                Group,
+                "delete",
+                autospec=True,
+                side_effect=RuntimeError("simulated database failure"),
+            ),
+            mock.patch(
+                "apps.api.v1.group.views._record_member_log"
+            ) as record_member_log,
+            self.captureOnCommitCallbacks(execute=True) as failed_callbacks,
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.delete(f"/api/v1/groups/{empty_group.id}/")
+
+        self.assertEqual(failed_callbacks, [])
+        record_member_log.assert_not_called()
+        self.assertTrue(CoreAccountGroup.objects.filter(pk=empty_group.pk).exists())
+        self.assertEqual(
+            CoreLog.objects.filter(
+                account=self.account,
+                type=CoreLog.Type.MEMBER,
+                data__action="group_delete",
+            ).count(),
+            audit_count,
+        )
 
 
 class NodeScopeTests(BaseTestCase):

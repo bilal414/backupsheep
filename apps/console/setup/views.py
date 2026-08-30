@@ -5,6 +5,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied
 from django.db.models import Count, Q
+from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views.generic import TemplateView, DetailView
@@ -12,7 +13,7 @@ from django.core.paginator import Paginator
 from apps.console.connection.models import CoreConnection, CoreIntegration
 from apps.console.storage.models import CoreStorage, CoreStorageType
 from requests_oauthlib import OAuth2Session
-from apps.api.v1.utils.api_helpers import visible_nodes
+from apps.api.v1.utils.api_helpers import visible_connections, visible_nodes
 from apps.api.v1.utils.api_permissions import (
     member_has_perm,
     member_has_perm_for_node,
@@ -28,6 +29,45 @@ from backupsheep.source_recovery_policy import (
 
 
 CONNECTION_PAGE_SIZES = (10, 25, 50)
+
+OAUTH_RECONNECT_INTEGRATIONS = frozenset(
+    {"digitalocean", "ovh_ca", "ovh_eu", "ovh_us"}
+)
+
+SOURCE_RESOURCE_LABELS = {
+    "cloud": ("server", "servers"),
+    "volume": ("volume", "volumes"),
+    "s3": ("S3 bucket", "S3 buckets"),
+    "dynamodb": ("DynamoDB table", "DynamoDB tables"),
+    "vultr_database": ("managed database", "managed databases"),
+}
+
+SOURCE_OBJECT_CODES_BY_INTEGRATION = {
+    "aws": frozenset({"cloud", "volume", "s3", "dynamodb"}),
+    "aws_rds": frozenset({"cloud"}),
+    "basecamp": frozenset({"objects"}),
+    "database": frozenset({"objects"}),
+    "digitalocean": frozenset({"cloud", "volume"}),
+    "google_cloud": frozenset({"cloud", "volume"}),
+    "hetzner": frozenset({"cloud"}),
+    "lightsail": frozenset({"cloud", "volume"}),
+    "oracle": frozenset({"cloud", "volume"}),
+    "ovh_ca": frozenset({"cloud", "volume"}),
+    "ovh_eu": frozenset({"cloud", "volume"}),
+    "ovh_us": frozenset({"cloud", "volume"}),
+    "upcloud": frozenset({"cloud", "volume"}),
+    "vultr": frozenset({"cloud", "volume", "vultr_database"}),
+    "website": frozenset({"objects"}),
+    "wordpress": frozenset({"objects"}),
+}
+
+
+def _require_supported_source_object_code(integration_code, object_code):
+    """Reject routes that cannot render or register the requested resource."""
+
+    supported_codes = SOURCE_OBJECT_CODES_BY_INTEGRATION.get(integration_code)
+    if supported_codes is None or object_code not in supported_codes:
+        raise Http404("This provider resource type is not supported.")
 
 
 def _bounded_page_size(raw_value):
@@ -219,9 +259,22 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
                 total_nodes_count=attachment_count
             )
             page = Paginator(connections, p_size).get_page(p_no)
+            source_registration_connection_ids = set()
+            if context["can_create_sources"]:
+                source_registration_connection_ids = set(
+                    visible_connections(member)
+                    .filter(
+                        integration=integration,
+                        status=CoreConnection.Status.ACTIVE,
+                    )
+                    .values_list("id", flat=True)
+                )
             for connection in page.object_list:
                 connection.provider_identity = self._provider_identity(connection)
                 connection.operator_name = self._operator_name(connection)
+                connection.source_registration_allowed = (
+                    connection.id in source_registration_connection_ids
+                )
             context["page"] = page
             context["elided_page_range"] = page.paginator.get_elided_page_range(
                 page.number
@@ -480,8 +533,14 @@ class IntegrationCreateNodeView(LoginRequiredMixin, TemplateView):
 
         context = self.get_context_data(**kwargs)
         context["active_url"] = "setup"
+        context["content_owns_h1"] = True
+        context["shell_heading"] = "Add provider resources"
         integration_code = self.kwargs.get("integration_code")
         connection_id = self.kwargs.get("connection_id")
+        object_code = self.kwargs.get("object_code")
+
+        integration = get_object_or_404(CoreIntegration, code=integration_code)
+        _require_supported_source_object_code(integration.code, object_code)
 
         if not source_backup_creation_available(integration_code):
             messages.error(request, SOURCE_RECOVERY_UNAVAILABLE_MESSAGE)
@@ -492,20 +551,24 @@ class IntegrationCreateNodeView(LoginRequiredMixin, TemplateView):
 
         member = self.request.user.member
 
-        integration = get_object_or_404(CoreIntegration, code=integration_code)
-
         query = Q(
-            account=member.get_current_account(),
             integration=integration,
             status=CoreConnection.Status.ACTIVE,
             id=connection_id,
         )
-        connection = get_object_or_404(CoreConnection, query)
+        connection = get_object_or_404(visible_connections(member), query)
 
         context["heading"] = f"Setup Node - {integration.name} - {connection.name}"
 
         context["integration"] = integration
         context["connection"] = connection
+        (
+            context["resource_label"],
+            context["resource_label_plural"],
+        ) = SOURCE_RESOURCE_LABELS.get(object_code, ("resource", "resources"))
+        context["oauth_reconnect_available"] = (
+            integration.code in OAUTH_RECONNECT_INTEGRATIONS
+        )
         context["can_browse_source"] = True
         context["show_link_icon"] = True
         context["show_link_url"] = reverse(
@@ -521,13 +584,17 @@ class IntegrationModifyNodeView(LoginRequiredMixin, TemplateView):
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
         context["active_url"] = "nodes"
+        context["content_owns_h1"] = True
+        context["shell_heading"] = "Source configuration"
         integration_code = self.kwargs.get("integration_code")
         connection_id = self.kwargs.get("connection_id")
         node_id = self.kwargs.get("node_id")
+        object_code = self.kwargs.get("object_code")
 
         member = self.request.user.member
 
         integration = get_object_or_404(CoreIntegration, code=integration_code)
+        _require_supported_source_object_code(integration.code, object_code)
 
         query = Q(
             account=member.get_current_account(),
@@ -552,6 +619,13 @@ class IntegrationModifyNodeView(LoginRequiredMixin, TemplateView):
         context["integration"] = integration
         context["connection"] = connection
         context["node"] = node
+        (
+            context["resource_label"],
+            context["resource_label_plural"],
+        ) = SOURCE_RESOURCE_LABELS.get(object_code, ("resource", "resources"))
+        context["oauth_reconnect_available"] = (
+            integration.code in OAUTH_RECONNECT_INTEGRATIONS
+        )
         context["can_browse_source"] = member_has_perm(
             request, "integration_changes"
         )

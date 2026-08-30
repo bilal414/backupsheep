@@ -101,6 +101,18 @@ def _scrub_text(value: str) -> str:
     )
 
 
+def scrub_sensitive_text(value: object) -> str:
+    """Return display-safe text using BackupSheep's shared secret boundary.
+
+    Operational history can contain legacy exception strings written before
+    structured public errors existed.  Keeping this wrapper public lets console
+    presenters reuse the same conservative URL, authorization, and credential
+    redaction rules as telemetry without depending on a private helper.
+    """
+
+    return _scrub_text(str(value))
+
+
 def _scrub_value(value, *, path=()):
     if isinstance(value, Mapping):
         scrubbed = {}
@@ -129,6 +141,18 @@ def _scrub_value(value, *, path=()):
         # of shipping a request body or decrypted key material.
         return FILTERED
     return value
+
+
+def scrub_sensitive_value(value):
+    """Recursively redact credentials while preserving nonsecret structure.
+
+    This is the shared boundary for customer-visible structured legacy data as
+    well as telemetry. Mappings and sequences retain their shape; sensitive
+    keys, credential-bearing URLs, authorization strings, and key-value secrets
+    are replaced using the same fail-closed rules as Sentry events.
+    """
+
+    return _scrub_value(value)
 
 
 def _safe_trace_context(contexts):

@@ -1,47 +1,27 @@
-{% extends "console/_master.html" %}
+{% extends "console/setting/_base.html" %}
 {% block title %}Settings - Account{% endblock %}
 {% block meta_title %}Settings - Account{% endblock %}
 {% block meta_description %}Settings - Account{% endblock %}
 {% block meta_keywords %}Settings - Account{% endblock %}
-{% block page_class %}page_settings{% endblock %}
-{% block content %}
+{% block settings_page_title %}Workspace general{% endblock %}
+{% block settings_page_description %}Review the current workspace identity and its top-level notification event gates.{% endblock %}
+{% block settings_content %}
     <div class="space-y-6" x-data="settingsAccount()">
-        <!-- Page header -->
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Account</h2>
-                <p class="mt-1 text-sm text-slate-500">Manage account specific information.</p>
-            </div>
-        </div>
-
-        <!-- Settings navigation -->
-        <div class="border-b border-slate-200">
-            <nav class="-mb-px flex gap-6 overflow-x-auto whitespace-nowrap" aria-label="Settings">
-                <a href="{% url 'console:settings:profile' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Profile</a>
-                <a href="{% url 'console:settings:account' %}" aria-current="page" class="flex-none border-b-2 border-indigo-600 px-1 pb-3 text-sm font-medium text-indigo-600 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Account</a>
-                <a href="{% url 'console:settings:multifactor' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Multi-Factor Auth</a>
-                <a href="{% url 'console:settings:password' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Password</a>
-                <a href="{% url 'console:settings:group' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Groups</a>
-                <a href="{% url 'console:settings:user' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Users</a>
-                <a href="{% url 'console:settings:invite' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Invites</a>
-                <a href="{% url 'console:settings:notification' %}" class="flex-none border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Notifications</a>
-            </nav>
-        </div>
-
         <!-- Account details -->
         <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="account-heading">
             <div class="border-b border-slate-200 px-5 py-4">
                 <h2 id="account-heading" class="text-sm font-semibold text-slate-900">Account details</h2>
-                <p class="mt-0.5 text-xs text-slate-500">Manage account specific information.</p>
+                <p class="mt-0.5 text-xs text-slate-500">The display name used throughout activity, ownership, and audit surfaces.</p>
             </div>
             <div class="grid grid-cols-1 gap-5 p-5 sm:grid-cols-2">
                 <div>
                     <label for="name" class="block text-sm font-medium text-slate-700">Name</label>
                     <input x-model="account.name" type="text" name="name" id="name"
-                           autocomplete="name"
+                           autocomplete="organization" {% if not settings_can_manage_workspace %}readonly aria-readonly="true"{% endif %}
+                           :aria-invalid="Boolean(accountErrors.name)" aria-describedby="name-error"
                            class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                     <p x-cloak x-show="accountErrors.name" class="mt-1.5 text-xs font-medium text-red-600"
-                       x-text="accountErrors.name"></p>
+                       id="name-error" x-text="accountErrors.name"></p>
                 </div>
             </div>
         </section>
@@ -49,13 +29,13 @@
         <!-- Notifications -->
         <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="notifications-heading">
             <div class="border-b border-slate-200 px-5 py-4">
-                <h2 id="notifications-heading" class="text-sm font-semibold text-slate-900">Notifications</h2>
-                <p class="mt-0.5 text-xs text-slate-500">Account level notification.</p>
+                <h2 id="notifications-heading" class="text-sm font-semibold text-slate-900">Workspace event gates</h2>
+                <p class="mt-0.5 text-xs text-slate-500">A disabled event is not sent to any recipient or connected Slack/Telegram channel. Source-level gates and member preferences apply after this gate.</p>
             </div>
             <div class="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2">
                 <div class="flex items-center">
                     <button type="button"
-                            @click="toggleNotification('success')"
+                            @click="toggleNotification('success')" {% if not settings_can_manage_workspace %}disabled{% endif %}
                             :class="account.notify_on_success ? 'bg-indigo-600' : 'bg-slate-200'"
                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
                             role="switch" :aria-checked="account.notify_on_success" aria-labelledby="notify-success-label">
@@ -63,11 +43,11 @@
                               aria-hidden="true"
                               class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                     </button>
-                    <span class="ml-3 text-sm font-medium text-slate-700" id="notify-success-label">Notify on success</span>
+                    <span class="ml-3 text-sm font-medium text-slate-700" id="notify-success-label">Allow success events</span>
                 </div>
                 <div class="flex items-center">
                     <button type="button"
-                            @click="toggleNotification('fail')"
+                            @click="toggleNotification('fail')" {% if not settings_can_manage_workspace %}disabled{% endif %}
                             :class="account.notify_on_fail ? 'bg-indigo-600' : 'bg-slate-200'"
                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
                             role="switch" :aria-checked="account.notify_on_fail" aria-labelledby="notify-fail-label">
@@ -75,177 +55,250 @@
                               aria-hidden="true"
                               class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                     </button>
-                    <span class="ml-3 text-sm font-medium text-slate-700" id="notify-fail-label">Notify on failure</span>
+                    <span class="ml-3 text-sm font-medium text-slate-700" id="notify-fail-label">Allow failure events</span>
                 </div>
             </div>
-            <div class="flex justify-end border-t border-slate-200 px-5 py-3">
-                <button type="button" @click="saveAccount()"
-                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                    Save Account Changes
-                </button>
-            </div>
+            {% if settings_can_manage_workspace %}
+                <div class="flex flex-wrap items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                    <span class="mr-auto text-xs font-medium text-emerald-700" role="status" aria-live="polite" x-text="savedMessage"></span>
+                    <button type="button" @click="discardChanges()" :disabled="!isDirty() || saving" class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Discard</button>
+                    <button type="button" @click="saveAccount()" :disabled="!isDirty() || saving"
+                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+                        <span x-text="saving ? 'Saving…' : 'Save changes'"></span>
+                    </button>
+                </div>
+            {% endif %}
         </section>
 
-        {% if request.user.member.memberships.count > 1 and request.user.member.is_primary_account %}
+        {% if other_memberships %}
             <!-- Account access -->
             <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="access-heading">
                 <div class="border-b border-slate-200 px-5 py-4">
-                    <h2 id="access-heading" class="text-sm font-semibold text-slate-900">Account Access</h2>
-                    <p class="mt-0.5 text-xs text-slate-500">You have access to following accounts.</p>
+                    <h2 id="access-heading" class="text-sm font-semibold text-slate-900">Your other workspaces</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">Leaving removes your access immediately. It does not delete the workspace or its backup data.</p>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-slate-200 text-sm">
                         <thead>
                             <tr class="bg-slate-50">
                                 <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Account</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Groups</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Role</th>
                                 <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
                                 <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-100">
-                            {% for membership in request.user.member.memberships.all %}
-                                {% if membership.account != account %}
+                            {% for row in other_memberships %}
+                                {% with membership=row.membership %}
                                     <tr class="transition hover:bg-slate-50">
-                                        <td class="whitespace-nowrap px-4 py-3">
+                                        <td data-label="Workspace" class="whitespace-nowrap px-4 py-3">
                                             <span class="font-medium text-slate-900">{{ membership.account.name|default:membership.account.get_primary_member.full_name }}</span>
                                         </td>
-                                        <td class="whitespace-nowrap px-4 py-3 text-slate-700">
-                                            {% for group in request.user.groups.all %}
-                                                {% if group.enrollment.get.account != account %}
-                                                    {{ group.enrollment.get.name }}
-                                                    <span class="text-xs text-slate-500">({{ group.enrollment.get.get_type_display }})</span>
-                                                {% endif %}
-                                            {% endfor %}
-                                        </td>
-                                        <td class="whitespace-nowrap px-4 py-3 text-slate-700">
+                                        <td data-label="Role" class="whitespace-nowrap px-4 py-3 text-slate-700">{% if membership.primary %}Owner{% else %}Member{% endif %}</td>
+                                        <td data-label="Status" class="whitespace-nowrap px-4 py-3 text-slate-700">
                                             {{ membership.get_status_display }}
                                         </td>
-                                        <td class="whitespace-nowrap px-4 py-3 text-right">
-                                            <button @click="leaveMembership('{{ membership.id }}')"
+                                        <td data-label="Action" class="whitespace-nowrap px-4 py-3 text-right">
+                                            {% if row.can_leave %}
+                                            <button @click="openLeaveDialog('{{ membership.id }}', '{{ membership.account.id }}', '{{ membership.account.get_name|escapejs }}', $el)"
                                                     type="button"
                                                     class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                                 Leave
                                             </button>
+                                            {% else %}
+                                                <span class="text-xs text-slate-500">{% if membership.primary %}Owner access cannot be left here{% else %}Inactive access is read-only{% endif %}</span>
+                                            {% endif %}
                                         </td>
                                     </tr>
-                                {% endif %}
+                                {% endwith %}
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
             </section>
         {% endif %}
+
+        <div x-cloak x-show="leaveDialog.open" @keydown.escape.window="closeLeaveDialog()" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="leave-workspace-title" aria-describedby="leave-workspace-description">
+            <div class="flex min-h-full items-center justify-center p-4">
+                <button type="button" class="fixed inset-0 cursor-default bg-slate-900/40" aria-label="Close leave workspace dialog" @click="closeLeaveDialog()"></button>
+                <div x-ref="leaveDialogPanel" @keydown.tab="trapLeaveDialogFocus($event)" class="relative w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl">
+                    <div class="px-5 py-4">
+                        <h2 id="leave-workspace-title" class="text-base font-semibold text-slate-900">Leave <span x-text="leaveDialog.accountName"></span>?</h2>
+                        <p id="leave-workspace-description" class="mt-2 text-sm leading-6 text-slate-600">Your access will be removed immediately. This does not delete the workspace, its backup data, or other members’ access.</p>
+                    </div>
+                    <div class="flex items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                        <button type="button" x-ref="leaveCancel" @click="closeLeaveDialog()" :disabled="leaveDialog.busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Cancel</button>
+                        <button type="button" @click="confirmLeaveMembership()" :disabled="leaveDialog.busy" class="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-60"><span x-text="leaveDialog.busy ? 'Leaving…' : 'Leave workspace'"></span></button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
     {{ account.name|json_script:"account-name-data" }}
     <script>
         document.addEventListener('alpine:init', () => {
             Alpine.data('settingsAccount', () => ({
-                accountErrors: {
-                    user: {},
-                    timezone: null,
-                },
+                accountErrors: {},
                 account: {
                     id: {{ account.id }},
                     name: JSON.parse(document.getElementById('account-name-data').textContent),
                     notify_on_success: {% if account.notify_on_success %}true{% else %}false{% endif %},
                     notify_on_fail: {% if account.notify_on_fail %}true{% else %}false{% endif %}
                 },
-                openTimezone: false,
-                timezoneActiveIndex: null,
+                original: '',
+                saving: false,
+                savedMessage: '',
+                leaveDialog: {
+                    open: false,
+                    busy: false,
+                    membershipId: null,
+                    accountId: null,
+                    accountName: '',
+                    returnFocus: null,
+                },
                 init() {
+                    this.original = JSON.stringify(this.account);
+                },
+                isDirty() {
+                    return JSON.stringify(this.account) !== this.original;
+                },
+                discardChanges() {
+                    this.account = JSON.parse(this.original);
+                    this.accountErrors = {};
+                    this.savedMessage = '';
                 },
                 async saveAccount() {
-                    Alpine.store('showLoading').toggle("Saving account details.");
-
-                    let url = "/api/v1/accounts/" + this.account.id + "/";
-
-                    let data = this.account;
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'PATCH',
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-
-                            throw new Error(json.detail);
+                    if (!this.isDirty() || this.saving) return;
+                    this.saving = true;
+                    this.savedMessage = '';
+                    this.accountErrors = {};
+                    try {
+                        const response = await fetch("/api/v1/accounts/" + this.account.id + "/", {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'PATCH',
+                            body: JSON.stringify(this.account)
+                        });
+                        let json = {};
+                        try {
+                            json = await response.json();
+                        } catch (error) {
+                            json = {};
                         }
-                    }).then((json) => {
+                        if (!response.ok) {
+                            if (response.status >= 500) {
+                                const unknown = new Error('Save outcome not confirmed—reload before retrying.');
+                                unknown.outcomeUnknown = true;
+                                throw unknown;
+                            }
+                            this.accountErrors = json;
+                            const firstError = json.detail || json.name || 'Workspace changes could not be saved.';
+                            throw new Error(Array.isArray(firstError) ? firstError[0] : firstError);
+                        }
+                        this.original = JSON.stringify(this.account);
+                        this.savedMessage = 'Saved just now';
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
-                            heading: 'Success!',
-                            details: json.detail
+                            heading: 'Workspace settings saved',
+                            details: 'The workspace name and event gates were persisted.'
                         });
-                    }).catch((error) => {
+                    } catch (error) {
+                        const outcomeUnknown = error.outcomeUnknown || error instanceof TypeError;
                         Alpine.store('notifications').items.push({
                             show: true,
                             error: true,
-                            heading: 'Error!',
-                            details: error.message
+                            heading: outcomeUnknown ? 'Save outcome not confirmed' : 'Workspace not saved',
+                            details: outcomeUnknown
+                                ? 'The server response was lost or incomplete. Reload this page before deciding whether to retry.'
+                                : error.message
                         });
-                    });
+                    } finally {
+                        this.saving = false;
+                    }
                 },
-                async leaveMembership(membership_id) {
-                    Alpine.store('showLoading').toggle("Leaving account...");
-
-                    let url = "/api/v1/accounts/{{ account.id }}/leave_membership/";
-                    let method = "POST";
-
-                    let data = {"membership_id": membership_id}
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.userErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
+                openLeaveDialog(membershipId, accountId, accountName, trigger) {
+                    this.leaveDialog = {
+                        open: true,
+                        busy: false,
+                        membershipId,
+                        accountId,
+                        accountName,
+                        returnFocus: trigger,
+                    };
+                    this.$nextTick(() => this.$refs.leaveCancel?.focus());
+                },
+                closeLeaveDialog() {
+                    if (!this.leaveDialog.open || this.leaveDialog.busy) return;
+                    const trigger = this.leaveDialog.returnFocus;
+                    this.leaveDialog.open = false;
+                    this.$nextTick(() => trigger?.focus());
+                },
+                trapLeaveDialogFocus(event) {
+                    const focusable = Array.from(this.$refs.leaveDialogPanel?.querySelectorAll('button:not([disabled]), [href], input:not([disabled])') || []);
+                    if (!focusable.length) return;
+                    const first = focusable[0];
+                    const last = focusable[focusable.length - 1];
+                    if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                },
+                async confirmLeaveMembership() {
+                    if (this.leaveDialog.busy) return;
+                    this.leaveDialog.busy = true;
+                    const membership_id = this.leaveDialog.membershipId;
+                    const account_id = this.leaveDialog.accountId;
+                    const account_name = this.leaveDialog.accountName;
+                    try {
+                        const response = await fetch("/api/v1/accounts/" + account_id + "/leave_membership/", {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'POST',
+                            body: JSON.stringify({membership_id: membership_id})
+                        });
+                        let json = {};
+                        try {
+                            json = await response.json();
+                        } catch (error) {
+                            json = {};
                         }
-                    }).then((json) => {
+                        if (!response.ok) {
+                            if (response.status >= 500) {
+                                const unknown = new Error('Leave outcome not confirmed—reload before retrying.');
+                                unknown.outcomeUnknown = true;
+                                throw unknown;
+                            }
+                            throw new Error(json.detail || 'Workspace access could not be removed.');
+                        }
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
-                            heading: 'Success!',
-                            details: json.detail
+                            heading: 'Workspace left',
+                            details: json.detail || `Your access to ${account_name} was removed.`
                         });
+                        this.leaveDialog.open = false;
                         window.location.reload();
-                    }).catch((error) => {
+                    } catch (error) {
+                        const outcomeUnknown = error.outcomeUnknown || error instanceof TypeError;
                         Alpine.store('notifications').items.push({
                             show: true,
                             error: true,
-                            heading: 'Error!',
-                            details: error.message
+                            heading: outcomeUnknown ? 'Leave outcome not confirmed' : 'Workspace not left',
+                            details: outcomeUnknown
+                                ? 'The server response was lost or incomplete. Reload before deciding whether to retry.'
+                                : error.message
                         });
-                    });
+                    } finally {
+                        this.leaveDialog.busy = false;
+                    }
                 },
                 toggleNotification(notificationType) {
                     if (notificationType === "success") {
@@ -253,12 +306,8 @@
                     } else if (notificationType === "fail") {
                         this.account.notify_on_fail = !this.account.notify_on_fail;
                     }
-                },
-
-                toggleTimezoneDropdown() {
-                    this.openTimezone = !this.openTimezone;
-                    this.timezoneActiveIndex = null;
-                },
+                    this.savedMessage = '';
+                }
             }));
         });
     </script>

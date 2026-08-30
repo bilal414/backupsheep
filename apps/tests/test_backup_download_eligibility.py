@@ -187,6 +187,54 @@ class BackupDownloadEligibilityTests(BaseTestCase):
                 )
                 generate.assert_called_once_with()
 
+    def test_exact_local_stream_target_is_allowed_for_each_backup_family(self):
+        for family in ("website", "database", "wordpress", "basecamp"):
+            with self.subTest(family=family):
+                view_class, backup, point = self._case(family)
+                expected = (
+                    f"/api/v1/storage/local/file/{family}/{point.pk}/"
+                )
+                with mock.patch.object(
+                    type(point),
+                    "generate_download_url",
+                    return_value=expected,
+                ) as generate:
+                    response = self._download(view_class, backup, point)
+
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(response.data["url"], expected)
+                generate.assert_called_once_with()
+
+    def test_unsafe_provider_targets_are_rejected_by_each_download_api(self):
+        unsafe_targets = (
+            "javascript:alert(document.domain)",
+            "data:text/html,<script>alert(1)</script>",
+            "http://download.invalid/archive.zip",
+            "//download.invalid/archive.zip",
+            "/api/v1/storage/local/file/website/1/?redirect=javascript:alert(1)",
+            "https://download.invalid\\@attacker.invalid/archive.zip",
+            "https://user:password@download.invalid/archive.zip",
+            "https://download.invalid:99999/archive.zip",
+        )
+
+        for family in ("website", "database", "wordpress", "basecamp"):
+            for unsafe_target in unsafe_targets:
+                with self.subTest(family=family, target=unsafe_target):
+                    view_class, backup, point = self._case(family)
+                    with mock.patch.object(
+                        type(point),
+                        "generate_download_url",
+                        return_value=unsafe_target,
+                    ) as generate:
+                        response = self._download(view_class, backup, point)
+
+                    self.assertEqual(
+                        response.status_code,
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
+                    self.assertNotIn(unsafe_target, str(response.data))
+                    generate.assert_called_once_with()
+
     def test_incomplete_backup_or_copy_never_reaches_download_provider(self):
         for family in ("website", "database", "wordpress", "basecamp"):
             point_model = {

@@ -224,7 +224,7 @@
                                                 </button>
                                             {% endif %}
                                             {% endif %}
-                                            {% if can_run_backups %}
+                                            {% if can_restore_backups %}
                                             {% if object.type == 3 or object.type == 4 and not is_vultr_managed_database %}
                                                 <button x-show="loaded ? Boolean(view && view.category === 'complete') : {% if backup.status == 3 %}true{% else %}false{% endif %}"
                                                         x-cloak
@@ -597,6 +597,7 @@
         </div>
 
         {% include "console/node/_recovery_dialogs.html" %}
+        {% if can_restore_backups %}
         <!-- Native cloud restore modal -->
         <div x-cloak x-show="openNativeCloudRestore" class="fixed inset-0 z-50 overflow-y-auto"
              aria-labelledby="native-restore-modal-title" role="dialog" aria-modal="true"
@@ -904,6 +905,7 @@
                 </div>
             </div>
         </div>
+        {% endif %}
 
         <!-- Transfer backup modal -->
         <div x-cloak x-show="openBackupTransfer" class="fixed inset-0 z-50 overflow-y-auto"
@@ -2017,6 +2019,38 @@
                             upstreamSignal.removeEventListener('abort', abortFromUpstream);
                         }
                     }
+                },
+                validatedBrowserDownloadTarget(value) {
+                    if (
+                        typeof value !== 'string' || !value || value.length > 32768 ||
+                        value.trim() !== value || /\s|[\u0000-\u001f\u007f\\]/.test(value)
+                    ) {
+                        throw new Error('The secure download link was rejected. Please prepare it again.');
+                    }
+
+                    const localDownloadPath = /^\/api\/v1\/storage\/local\/file\/(?:website|database|wordpress|basecamp)\/[1-9][0-9]*\/$/;
+                    if (value.startsWith('/')) {
+                        if (!localDownloadPath.test(value)) {
+                            throw new Error('The secure download link was rejected. Please prepare it again.');
+                        }
+                        return value;
+                    }
+
+                    let parsed;
+                    try {
+                        parsed = new URL(value);
+                    } catch (_error) {
+                        throw new Error('The secure download link was rejected. Please prepare it again.');
+                    }
+                    const port = parsed.port ? Number(parsed.port) : null;
+                    if (
+                        parsed.protocol !== 'https:' || !parsed.hostname ||
+                        parsed.username || parsed.password ||
+                        (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535))
+                    ) {
+                        throw new Error('The secure download link was rejected. Please prepare it again.');
+                    }
+                    return value;
                 },
                 applyNodeSummary(summary) {
                     if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return;
@@ -4403,7 +4437,7 @@
                             heading: 'Success!',
                             details: json.detail
                         });
-                        window.location.href = json.url;
+                        window.location.assign(this.validatedBrowserDownloadTarget(json.url));
                     }).catch((error) => {
                         Alpine.store('notifications').items.push({
                             show: true,
@@ -4468,10 +4502,7 @@
                                 details: detail
                             });
                         } else {
-                            const url = data.url;
-                            if (typeof url !== 'string' || !url) {
-                                throw new Error('A secure download link was not returned.');
-                            }
+                            const url = this.validatedBrowserDownloadTarget(data.url);
                             if (type === "copy") {
                                 if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
                                     throw new Error('Clipboard access is unavailable in this browser.');
@@ -5023,6 +5054,31 @@
                         this.loading = false;
                     });
                 },
+                validationOutcomeUnknownError() {
+                    const error = new Error('The validation may have completed, but the response was not confirmed. Reload this page before retrying validation.');
+                    error.outcomeUnknown = true;
+                    return error;
+                },
+                assertValidationReceipt(payload, requireDetail = true) {
+                    const isRecord = payload && typeof payload === 'object' && !Array.isArray(payload);
+                    const hasDetail = !requireDetail
+                        || (typeof payload?.detail === 'string' && payload.detail.trim());
+                    if (!isRecord || !hasDetail) {
+                        throw this.validationOutcomeUnknownError();
+                    }
+                    return payload;
+                },
+                notifyValidationError(error) {
+                    const outcomeUnknown = Boolean(error?.outcomeUnknown);
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: outcomeUnknown ? 'Validation outcome not confirmed' : 'Validation failed',
+                        details: outcomeUnknown
+                            ? 'The validation may have completed. Reload this page before retrying so the provider is not queried twice unnecessarily.'
+                            : error.message,
+                    });
+                },
                 async validateConnection() {
                     Alpine.store('showLoading').toggle("Checking {{ object.connection.integration.name|lower }} status with {{ object.connection.integration.name }}.", "Integration Validation");
                     const url = "/api/v1/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/validate?" + new URLSearchParams({
@@ -5033,12 +5089,15 @@
                         const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
                         try {
                             const response = await fetch(target, {...options, signal: controller.signal});
-                            let payload = {};
+                            let payload = null;
                             try { payload = await response.json(); } catch (ignored) {}
                             if (!response.ok) {
-                                throw new Error(payload.detail || 'Integration validation failed.');
+                                const safePayload = payload && typeof payload === 'object' && !Array.isArray(payload)
+                                    ? payload
+                                    : {};
+                                throw new Error(safePayload.detail || 'Integration validation failed.');
                             }
-                            return payload;
+                            return this.assertValidationReceipt(payload, false);
                         } catch (error) {
                             if (error.name === 'AbortError') {
                                 throw new Error('The validation request timed out. Retry the operation.');
@@ -5057,6 +5116,7 @@
                             method: 'POST',
                             body: '{}',
                         });
+                        const managedOperationAccepted = Boolean(json.operation_id);
                         if (json.operation_id) {
                             const statusUrl = "/api/v1/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/managed-ssh-operations/"
                                 + encodeURIComponent(json.operation_id) + "/";
@@ -5082,19 +5142,20 @@
                                 throw new Error('Integration validation timed out. Retry the operation.');
                             }
                         }
+                        this.assertValidationReceipt(json, !managedOperationAccepted);
+                        const validationDetail = typeof json.detail === 'string' && json.detail.trim()
+                            ? json.detail
+                            : (typeof json.result?.detail === 'string' && json.result.detail.trim()
+                                ? json.result.detail
+                                : 'Provider credentials and account access were validated. No backup or recovery was tested.');
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
                             heading: 'Success!',
-                            details: json.detail || 'Validation passed. Integration is good for backups.'
+                            details: validationDetail
                         });
                     } catch (error) {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
+                        this.notifyValidationError(error);
                     } finally {
                         Alpine.store('showLoading').toggle();
                     }
@@ -5102,92 +5163,75 @@
                 async validateNode() {
                     Alpine.store('showLoading').toggle("Checking {{ object.get_type_display|lower }} status with {{ object.connection.integration.name }}.", "Node Validation");
 
-                    let url = "/api/v1/nodes/" + {{object.id}} +"/validate" + "/?" + new URLSearchParams({
+                    const url = "/api/v1/nodes/" + {{object.id}} +"/validate" + "/?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'POST',
-                        body: '{}',
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            this.loading = false;
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            this.connectionErrors = json;
-                            throw new Error(json.detail);
+                    try {
+                        const response = await fetch(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'POST',
+                            body: '{}',
+                        });
+                        let json = null;
+                        try { json = await response.json(); } catch (ignored) {}
+                        if (!response.ok) {
+                            const safePayload = json && typeof json === 'object' && !Array.isArray(json)
+                                ? json
+                                : {};
+                            this.connectionErrors = safePayload;
+                            throw new Error(safePayload.detail || 'Node validation was rejected.');
                         }
-                    }).then((json) => {
+                        this.assertValidationReceipt(json);
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
-                            heading: 'Validation Passed!',
+                            heading: 'Source access confirmed',
                             details: json.detail
                         });
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Validation Failed!',
-                            details: error.message
-                        });
-                    });
+                    } catch (error) {
+                        this.notifyValidationError(error);
+                    } finally {
+                        Alpine.store('showLoading').toggle();
+                    }
                 },
                 async validateStorage(storage_id, storage_code) {
                     Alpine.store('showLoading').toggle();
 
-                    let method = "POST";
-                    let url = "/api/v1/storage/" + storage_code + "/" + storage_id + "/validate" + "/?" + new URLSearchParams({
+                    const url = "/api/v1/storage/" + storage_code + "/" + storage_id + "/validate" + "/?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                        body: '{}',
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
+                    try {
+                        const response = await fetch(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'POST',
+                            body: '{}',
+                        });
+                        let json = null;
+                        try { json = await response.json(); } catch (ignored) {}
+                        if (!response.ok) {
+                            const safePayload = json && typeof json === 'object' && !Array.isArray(json)
+                                ? json
+                                : {};
+                            throw new Error(safePayload.detail || 'Destination validation was rejected.');
                         }
-                    }).then((json) => {
+                        this.assertValidationReceipt(json);
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
-                            heading: 'Success!',
+                            heading: 'Destination access confirmed',
                             details: json.detail
                         });
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                    } catch (error) {
+                        this.notifyValidationError(error);
+                    } finally {
+                        Alpine.store('showLoading').toggle();
+                    }
                 },
 
             }));

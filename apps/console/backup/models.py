@@ -45,6 +45,7 @@ from apps.api.v1.utils.boto import (
 from ..utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps._tasks.helper.tasks import delete_from_disk
 from backupsheep.celery import app
+from backupsheep.download_urls import validated_browser_download_target
 from botocore.config import Config
 from ..vultr import (
     is_terminal_snapshot_failure,
@@ -5358,6 +5359,11 @@ class BaseBackupStoragePoints(TimeStampedModel):
             and type(enterprise) is bool
             and not enterprise
         )
+
+    def generate_browser_download_target(self):
+        """Generate and validate the value exposed to the browser console."""
+
+        return validated_browser_download_target(self.generate_download_url())
 
     def generate_download_url(self, *, for_restore=False):
         if not for_restore and not self.direct_download_permitted():

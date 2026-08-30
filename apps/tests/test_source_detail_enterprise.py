@@ -1,6 +1,7 @@
 from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest import mock
 
 from django.contrib.auth.models import Group, Permission
 from django.template.loader import get_template
@@ -182,6 +183,7 @@ class SourceDetailEnterpriseTests(BaseTestCase):
         self.assertTrue(response.context["can_manage_source"])
         self.assertTrue(response.context["can_manage_schedules"])
         self.assertTrue(response.context["can_run_backups"])
+        self.assertTrue(response.context["can_restore_backups"])
         self.assertTrue(response.context["can_validate_storage"])
         self.assertContains(response, "Recovery ledger")
         self.assertContains(response, "No isolated recovery evidence")
@@ -189,8 +191,45 @@ class SourceDetailEnterpriseTests(BaseTestCase):
             response,
             "A completed backup is not presented as proof of a successful recovery.",
         )
+        self.assertContains(
+            response,
+            "Provider credentials and account access were validated. No backup or recovery was tested.",
+        )
+        self.assertNotContains(
+            response,
+            "Validation passed. Integration is good for backups.",
+        )
         self.assertContains(response, "Latest operation needs review")
+        self.assertTrue(response.context["content_owns_h1"])
+        self.assertEqual(
+            response.content.decode(response.charset or "utf-8").lower().count("<h1"),
+            1,
+        )
         self.assertEqual(_duplicate_rendered_ids(response), [])
+
+    def test_source_validation_reports_reachability_without_recovery_claims(self):
+        with mock.patch.object(CoreNode, "validate", return_value=True):
+            reachable = self.client.post(
+                f"/api/v1/nodes/{self.node.id}/validate/",
+                content_type="application/json",
+            )
+
+        self.assertEqual(reachable.status_code, 200, reachable.content)
+        self.assertEqual(
+            reachable.json()["detail"],
+            "The provider source is currently reachable and active. No backup or recovery was tested.",
+        )
+        self.assertNotIn("good for backups", reachable.content.decode().lower())
+
+        with mock.patch.object(CoreNode, "validate", return_value=False):
+            unavailable = self.client.post(
+                f"/api/v1/nodes/{self.node.id}/validate/",
+                content_type="application/json",
+            )
+
+        self.assertEqual(unavailable.status_code, 400, unavailable.content)
+        self.assertIn("could not be confirmed", unavailable.json()["detail"])
+        self.assertNotIn("backups will fail", unavailable.content.decode().lower())
 
     @override_settings(
         BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=True,
@@ -304,6 +343,7 @@ class RestrictedSourceDetailEnterpriseTests(BaseTestCase):
         self.assertFalse(response.context["can_manage_source"])
         self.assertFalse(response.context["can_manage_schedules"])
         self.assertFalse(response.context["can_run_backups"])
+        self.assertFalse(response.context["can_restore_backups"])
         self.assertFalse(response.context["can_download_backups"])
         self.assertFalse(response.context["can_delete_backups"])
         self.assertFalse(response.context["can_validate_storage"])
@@ -312,6 +352,39 @@ class RestrictedSourceDetailEnterpriseTests(BaseTestCase):
         self.assertNotContains(response, ">Run backup<")
         self.assertNotContains(response, ">Configure source<")
         self.assertNotContains(response, ">Create protection policy<")
+
+    def test_restore_is_a_distinct_node_scoped_capability(self):
+        CoreWebsiteBackup.objects.create(
+            website=self.visible.website,
+            name="scoped recovery point",
+            status=UtilBackup.Status.COMPLETE,
+            type=UtilBackup.Type.ON_DEMAND,
+        )
+
+        self.group.group.permissions.add(
+            Permission.objects.get(codename="backup_create")
+        )
+        backup_only = self.client.get(f"/console/nodes/{self.visible.id}/")
+
+        self.assertEqual(backup_only.status_code, 200)
+        self.assertTrue(backup_only.context["can_run_backups"])
+        self.assertFalse(backup_only.context["can_restore_backups"])
+        self.assertNotContains(backup_only, '@click="openBackupRestoreModal')
+
+        self.group.group.permissions.remove(
+            Permission.objects.get(codename="backup_create")
+        )
+        self.group.group.permissions.add(
+            Permission.objects.get(codename="backup_restore")
+        )
+        restore_only = self.client.get(f"/console/nodes/{self.visible.id}/")
+
+        self.assertEqual(restore_only.status_code, 200)
+        self.assertFalse(restore_only.context["can_run_backups"])
+        self.assertTrue(restore_only.context["can_restore_backups"])
+        self.assertContains(restore_only, '@click="openBackupRestoreModal')
+        self.assertNotContains(restore_only, '@click="openBackupModal()"')
+        self.assertEqual(len(restore_only.context["storage_list"]), 1)
 
     def test_modify_route_intersects_visibility_and_node_permission(self):
         denied = self.client.get(self._modify_url(self.visible))

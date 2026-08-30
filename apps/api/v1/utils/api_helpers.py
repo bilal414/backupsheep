@@ -683,6 +683,58 @@ def visible_connections(member):
     return connections.filter(nodes__in=visible_nodes(member)).distinct()
 
 
+def scoped_connections(request):
+    """Connections safe to expose through authenticated API reads.
+
+    Managing integrations is account-wide and grants the complete active
+    workspace connection set. Other members see only connections anchored to
+    one of their visible sources. This keeps empty or hidden credential-bearing
+    provider records out of otherwise safe list and retrieve actions.
+    """
+    from apps.api.v1.utils.api_permissions import (
+        active_current_membership,
+        member_has_perm,
+    )
+    from apps.console.connection.models import CoreConnection
+
+    try:
+        member = request.user.member
+    except AttributeError:
+        return CoreConnection.objects.none()
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreConnection.objects.none()
+
+    connections = CoreConnection.objects.filter(account=membership.account)
+    if member_has_perm(request, "integration_changes"):
+        return connections
+    return connections.filter(nodes__in=visible_nodes(member)).distinct()
+
+
+def provider_connections_for_action(request, action):
+    """Apply the stricter source-scope boundary to provider discovery.
+
+    Account integration managers may inspect empty connections in the account
+    register, but inventory discovery is a source-registration prerequisite.
+    It therefore uses the same visible-connection contract as node creation so
+    the UI, direct API, and write serializer cannot disagree.
+    """
+    if action != "objects":
+        return scoped_connections(request)
+
+    from apps.api.v1.utils.api_permissions import active_current_membership
+    from apps.console.connection.models import CoreConnection
+
+    try:
+        member = request.user.member
+    except AttributeError:
+        return CoreConnection.objects.none()
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreConnection.objects.none()
+    return visible_connections(member).filter(account=membership.account)
+
+
 class GenerateGroup:
     requires_context = True
 

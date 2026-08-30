@@ -1,0 +1,17 @@
+<div class="settings-nav-group">
+    <p>Personal</p>
+    <a href="{% url 'console:settings:profile' %}" {% if active_url == "profile" %}aria-current="page"{% endif %}>Profile</a>
+</div>
+<div class="settings-nav-group">
+    <p>Security</p>
+    <a href="{% url 'console:settings:multifactor' %}" {% if active_url == "multifactor" %}aria-current="page"{% endif %}>Authenticator</a>
+    <a href="{% url 'console:settings:password' %}" {% if active_url == "password" %}aria-current="page"{% endif %}>Password</a>
+</div>
+<div class="settings-nav-group">
+    <p>Workspace</p>
+    <a href="{% url 'console:settings:account' %}" {% if active_url == "account" %}aria-current="page"{% endif %}>General</a>
+    <a href="{% url 'console:settings:user' %}" {% if active_url == "user" %}aria-current="page"{% endif %}>Members</a>
+    <a href="{% url 'console:settings:group' %}" {% if active_url == "group" %}aria-current="page"{% endif %}>Access groups</a>
+    <a href="{% url 'console:settings:invite' %}" {% if active_url == "invite" %}aria-current="page"{% endif %}>Invitations</a>
+    <a href="{% url 'console:settings:notification' %}" {% if active_url == "notifications" %}aria-current="page"{% endif %}>Notification channels</a>
+</div>
