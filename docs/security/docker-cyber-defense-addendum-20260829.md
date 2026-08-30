@@ -265,7 +265,8 @@ production helpers are not copied into the application runtime image.
 | Release-chain contract series | 98 passed | five-image descriptor, manifest, provenance, SBOM/scanner identity, quarantine publication, and exact action pins |
 | Deployment and CI topology series | 55 passed | Compose isolation, release topology, egress and migration harness contracts |
 | PostgreSQL ACL hardening regressions | 61 passed locally | global and schema-local defaults, effective routine/type ACLs, exact historical-source contracts, hidden empty-record refusal contract, and topology attack shape; live PostgreSQL execution remains a Linux release gate |
-| PostgreSQL migration stdin/restore regressions | 51 passed locally; independent review found no P0/P1/P2 | literal SQL-byte preservation, positional arguments, fail-closed finalization, Docker stdin attachment, source/target migration contracts, and topology integration; live Alpine/Docker execution remains a Linux release gate |
+| PostgreSQL migration stdin/restore regressions | 56 passed locally; independent review found no P0/P1/P2 | literal SQL-byte preservation, positional arguments, bounded fail-closed crash evidence, Docker Desktop bind attestation, Docker stdin attachment, source/target migration contracts, and topology integration |
+| Native Docker PostgreSQL 18.6 migration E2E | Pass on arm64 Docker Desktop | generation-2 migration and sealed reconciliation, generation-3 adversarial refusals, three intentional SIGKILL boundaries, resume, receipts, type/data/ownership/ACL proof, stable executable-diff fingerprint, and complete owned-resource cleanup; Linux execution remains the release gate |
 | Static runtime-provider audit | Pass | no AWS KMS provider export, factory branch, client construction, or dynamic provider import |
 | Rendered Compose mount review | Pass | only matching source workers receive matching keyrings; storage receives neither |
 | Signed-upgrade refusal contract | Pass | former stage/upgrade forms made no Docker call, mutation lock, or installation byte/metadata change |
@@ -284,9 +285,10 @@ This addendum is not release approval. At the implementation snapshot:
 
 - signed cross-version in-place upgrade is intentionally unsupported; an enterprise
   patching strategy based on separately verified fresh-project restore remains required;
-- the final full PostgreSQL-backed application suite and Linux/Docker runtime tests had
-  not yet run against one frozen final commit; local macOS evidence cannot substitute
-  for the Linux anonymous-file and exact built-image gates;
+- the native arm64 Docker PostgreSQL migration E2E passed against a frozen executable
+  diff, but the final full PostgreSQL-backed application suite and Linux/Docker runtime
+  tests had not yet run against one committed release candidate; local Docker Desktop
+  evidence cannot substitute for the Linux anonymous-file and exact built-image gates;
 - the current branch had not been pushed to the pull request, approved, or merged into
   `develop`;
 - fresh exact-image multi-architecture build, SBOM, provenance, CodeQL, locked Trivy

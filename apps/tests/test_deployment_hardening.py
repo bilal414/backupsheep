@@ -229,21 +229,27 @@ class DeploymentHardeningContractTests(TestCase):
             self.assertIn(exact_header, migration)
         self.assertNotIn("pg_dumpall", migration)
 
-        marker_read = migration.index(
-            'marker_status="$(sed -n \'1p\' <<< "$evidence")"'
+        evidence_classification = migration.index(
+            'classified_evidence="$(classify_existing_target_evidence'
+        )
+        state_read = migration.index(
+            'evidence_state="$(sed -n \'1p\' <<< "$classified_evidence")"'
         )
         complete_branch = migration.index(
-            "if [[ \"$marker_status\" == 'status=complete' ]]"
+            'if [[ "$evidence_state" == complete ]]'
         )
         pending_reset = migration.index(
             '"$docker_bin" volume rm "$target_volume"'
         )
-        self.assertLess(marker_read, complete_branch)
+        self.assertLess(evidence_classification, state_read)
+        self.assertLess(state_read, complete_branch)
         self.assertLess(complete_branch, pending_reset)
         self.assertIn(
-            '[[ -z "$marker_status" || "$marker_status" == \'status=pending\' ]]',
+            '[[ "$evidence_state" == absent || "$evidence_state" == pending-empty ]]',
             migration,
         )
+        self.assertIn('if [[ "$evidence_state" == pending-receipt ]]', migration)
+        self.assertNotIn('marker_status="', migration)
 
         self.assertIn("migration-bootstrap.XXXXXXXX", migration)
         self.assertIn("migration-restore.XXXXXXXX", migration)
@@ -341,6 +347,10 @@ if arguments and (
     raise SystemExit(97)
 
 if arguments and arguments[0] == "ps":
+    raise SystemExit(0)
+
+if arguments[:2] == ["info", "--format"]:
+    print("Docker Desktop|linux")
     raise SystemExit(0)
 
 if arguments[:2] == ["volume", "inspect"]:

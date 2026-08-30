@@ -44,6 +44,15 @@ else
 fi
 
 [[ -x "$docker_bin" ]] || die "Docker executable is invalid"
+host_kernel="$(uname -s 2>/dev/null)" \
+    || die "could not identify the host kernel for Docker bind attestation"
+docker_daemon_identity=""
+if [[ "$host_kernel" == Darwin ]]; then
+    docker_daemon_identity="$(
+        "$docker_bin" info --format '{{.OperatingSystem}}|{{.OSType}}'
+    )" || die "could not identify the Docker daemon for bind attestation"
+fi
+readonly host_kernel docker_daemon_identity
 [[ "$project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die "project name is invalid"
 [[ "$installation_id" =~ ^[0-9a-f]{64}$ && "$storage_witness" =~ ^[0-9a-f]{64}$ ]] || die "identity or witness is invalid"
 [[ "$source_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "source image ID is invalid"
@@ -106,9 +115,99 @@ docker_resource_label() {
     printf '%s' "$label_value"
 }
 
+sort_nonempty_docker_mount_records() {
+    # Docker appends its own newline after a template whose range already uses
+    # println.  Remove only those empty format records before deterministic sort.
+    sed '/^$/d' | LC_ALL=C sort
+}
+
+normalize_docker_bind_source() {
+    local reported_source="$1" normalized_source=""
+
+    [[ "$reported_source" == /* && "$reported_source" != *[[:cntrl:]]* \
+        && "$reported_source" != *'|'* ]] || return 1
+    normalized_source="$reported_source"
+    case "$normalized_source" in
+        /host_mnt/*)
+            [[ "$host_kernel" == Darwin \
+                && "$docker_daemon_identity" == 'Docker Desktop|linux' ]] \
+                || return 1
+            normalized_source="${normalized_source#/host_mnt}"
+            ;;
+    esac
+    [[ "$normalized_source" == /* \
+        && "$normalized_source" != /host_mnt \
+        && "$normalized_source" != /host_mnt/* \
+        && "$normalized_source" != *'//'* \
+        && "$normalized_source" != */../* \
+        && "$normalized_source" != */./* \
+        && "$normalized_source" != */.. \
+        && "$normalized_source" != */. ]] || return 1
+    printf '%s' "$normalized_source"
+}
+
+docker_bind_source_matches() {
+    local normalized_source=""
+    normalized_source="$(normalize_docker_bind_source "$1")" || return 1
+    [[ "$normalized_source" == "$2" ]]
+}
+
+is_exact_ephemeral_secret_bind_source() {
+    local normalized_source="" prefix="" suffix=""
+    normalized_source="$(normalize_docker_bind_source "$1")" || return 1
+    case "$2" in
+        bootstrap|restore) ;;
+        *) return 1 ;;
+    esac
+    prefix="${secret_file}.migration-${2}."
+    [[ "$normalized_source" == "$prefix"* ]] || return 1
+    suffix="${normalized_source#"$prefix"}"
+    [[ "$suffix" =~ ^[A-Za-z0-9]{8}$ ]]
+}
+
+classify_existing_target_evidence() {
+    local framed_evidence="$1" expected_pending_marker="$2"
+    local expected_complete_marker="$3" line_count="" marker="" receipt=""
+    local normalized_evidence="" state=""
+    local absent_shape=$'--storage-marker-absent-v2--\n--receipt-absent-v2--\n--evidence-end-v2--'
+    local pending_without_receipt=""
+
+    if [[ "$framed_evidence" == "$absent_shape" ]]; then
+        printf '%s' absent
+        return 0
+    fi
+    pending_without_receipt=$'--storage-marker-present-v2--\n'"${expected_pending_marker}"$'\n--receipt-absent-v2--\n--evidence-end-v2--'
+    if [[ "$framed_evidence" == "$pending_without_receipt" ]]; then
+        printf '%s' pending-empty
+        return 0
+    fi
+
+    line_count="$(printf '%s\n' "$framed_evidence" | wc -l | tr -d ' ')" \
+        || return 1
+    [[ "$line_count" == 17 \
+        && "$(sed -n '1p' <<< "$framed_evidence")" == \
+            '--storage-marker-present-v2--' \
+        && "$(sed -n '7p' <<< "$framed_evidence")" == \
+            '--receipt-present-v2--' \
+        && "$(sed -n '17p' <<< "$framed_evidence")" == \
+            '--evidence-end-v2--' ]] || return 1
+    marker="$(sed -n '2,6p' <<< "$framed_evidence")"
+    receipt="$(sed -n '8,16p' <<< "$framed_evidence")"
+    if [[ "$marker" == "$expected_pending_marker" ]]; then
+        state=pending-receipt
+    elif [[ "$marker" == "$expected_complete_marker" ]]; then
+        state=complete
+    else
+        return 1
+    fi
+    normalized_evidence="${marker}"$'\n--receipt--\n'"${receipt}"
+    printf '%s\n%s' "$state" "$normalized_evidence"
+}
+
 remove_owned_container() {
     local name="$1" id="" runtime_record="" mount_records=""
     local expected_mount_records="" secret_mount_record="" secret_mount_source=""
+    local secret_mount_prefix='bind||/run/secrets/db_bootstrap_password|false|'
     local container_image_id=""
     id="$($docker_bin ps --all --no-trunc --quiet --filter "name=^/${name}$")" || die "could not inventory migration container ${name}"
     [[ -n "$id" ]] || return 0
@@ -122,7 +221,8 @@ remove_owned_container() {
         "$id")" || die "could not attest migration container ${name}"
     mount_records="$($docker_bin inspect --format \
         '{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Destination}}|{{.RW}}|{{.Source}}{{println}}{{end}}' \
-        "$id" | LC_ALL=C sort)" || die "could not attest migration container mounts for ${name}"
+        "$id" | sort_nonempty_docker_mount_records)" \
+        || die "could not attest migration container mounts for ${name}"
     case "$name" in
         "$source_container")
             [[ "$runtime_record" == "${source_image_id}|999:999|none|true|[\"ALL\"]|[\"no-new-privileges:true\"]|/usr/local/bin/docker-entrypoint.sh" ]] \
@@ -149,11 +249,12 @@ remove_owned_container() {
             [[ -n "$secret_mount_record" && "$secret_mount_record" != *$'\n'* \
                 && "$(printf '%s\n' "$mount_records" | grep -c .)" == 3 ]] \
                 || die "interrupted migration target credential mount drifted"
-            secret_mount_source="${secret_mount_record##*|}"
-            case "$secret_mount_source" in
-                "${secret_file}.migration-bootstrap."*) ;;
-                *) die "interrupted migration target credential path drifted" ;;
-            esac
+            [[ "$secret_mount_record" == "$secret_mount_prefix"* ]] \
+                || die "interrupted migration target credential record drifted"
+            secret_mount_source="${secret_mount_record#"$secret_mount_prefix"}"
+            is_exact_ephemeral_secret_bind_source \
+                "$secret_mount_source" bootstrap \
+                || die "interrupted migration target credential path drifted"
             ;;
         *) die "internal migration cleanup name is invalid" ;;
     esac
@@ -176,24 +277,28 @@ validate_interrupted_helper_mounts() {
             "volume|${target_volume}|/var/lib/postgresql|true"|\
             "volume|${target_volume}|/evidence|false") target_scope=true ;;
             "bind||/run/secrets/source_password|false")
-                [[ "$source" == "$secret_file" ]] || return 1
+                docker_bind_source_matches "$source" "$secret_file" || return 1
                 source_secret=true
                 ;;
             "bind||/run/secrets/target_password|false"|\
             "bind||/run/secrets/db_bootstrap_password|false")
-                case "$source" in "${secret_file}.migration-bootstrap."*) ;; *) return 1 ;; esac
+                is_exact_ephemeral_secret_bind_source "$source" bootstrap \
+                    || return 1
                 bootstrap_secret=true
                 ;;
             "bind||/run/secrets/restore_password|false")
-                case "$source" in "${secret_file}.migration-restore."*) ;; *) return 1 ;; esac
+                is_exact_ephemeral_secret_bind_source "$source" restore \
+                    || return 1
                 restore_secret=true
                 ;;
             "bind||/run/secrets/ephemeral_password|false")
-                case "$source" in
-                    "${secret_file}.migration-bootstrap."*) bootstrap_secret=true ;;
-                    "${secret_file}.migration-restore."*) restore_secret=true ;;
-                    *) return 1 ;;
-                esac
+                if is_exact_ephemeral_secret_bind_source "$source" bootstrap; then
+                    bootstrap_secret=true
+                elif is_exact_ephemeral_secret_bind_source "$source" restore; then
+                    restore_secret=true
+                else
+                    return 1
+                fi
                 ;;
             *) return 1 ;;
         esac
@@ -245,7 +350,8 @@ remove_owned_interrupted_helpers() {
             || die "interrupted migration helper image drifted"
         mounts="$($docker_bin inspect --format \
             '{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Destination}}|{{.RW}}|{{.Source}}{{println}}{{end}}' \
-            "$id" | LC_ALL=C sort)" || die "could not attest interrupted migration helper mounts"
+            "$id" | sort_nonempty_docker_mount_records)" \
+            || die "could not attest interrupted migration helper mounts"
         validate_interrupted_helper_mounts "$mounts" \
             || die "interrupted migration helper mount boundary drifted"
         "$docker_bin" stop --time 30 "$id" >/dev/null 2>&1 || true
@@ -281,7 +387,8 @@ host_file_links() {
 
 remove_unattached_ephemeral_secret_residue() {
     local secret_owner="" candidate="" suffix="" value="" byte_count="" mode=""
-    local container_ids="" container_id="" mount_sources=""
+    local container_ids="" container_id="" mount_sources="" mount_source=""
+    local normalized_mount_source=""
     local -a residue_paths=()
 
     secret_owner="$(host_file_uid "$secret_file")" \
@@ -338,8 +445,15 @@ remove_unattached_ephemeral_secret_residue() {
                     && die "could not inspect a Docker bind attachment before credential cleanup"
                 continue
             fi
-            ! grep -Fxq -- "$candidate" <<< "$mount_sources" \
-                || die "ephemeral credential residue remains attached to a Docker container"
+            while IFS= read -r mount_source; do
+                [[ -n "$mount_source" ]] || continue
+                normalized_mount_source="$(
+                    normalize_docker_bind_source "$mount_source"
+                )" || die "Docker bind attachment source is unsafe for credential cleanup"
+                if [[ "$normalized_mount_source" == "$candidate" ]]; then
+                    die "ephemeral credential residue remains attached to a Docker container"
+                fi
+            done <<< "$mount_sources"
         done <<< "$container_ids"
         rm -- "$candidate" \
             || die "could not remove an unattached exact ephemeral credential residue"
@@ -399,18 +513,61 @@ if "$docker_bin" volume inspect "$target_volume" >/dev/null 2>&1; then
         && "$(docker_resource_label volume "$target_volume" com.backupsheep.postgres-migration)" == "$purpose" ]] \
         || die "existing target volume is not the exact witnessed migration target"
     [[ -z "$($docker_bin ps --all --no-trunc --quiet --filter "volume=${target_volume}")" ]] || die "migration target is attached"
-    evidence="$($docker_bin run --rm --network none --read-only --cap-drop ALL \
+    expected_pending_marker="$(printf '%s\n' 'status=pending' \
+        "generation=${generation}" "installation=${installation_id}" \
+        "intent=${storage_intent}" "witness=${storage_witness}")"
+    expected_complete_marker="$(printf '%s\n' 'status=complete' \
+        "generation=${generation}" "installation=${installation_id}" \
+        "intent=${storage_intent}" "witness=${storage_witness}")"
+    framed_evidence="$($docker_bin run --rm --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges:true --user 70:70 --entrypoint /bin/sh \
         --label "com.backupsheep.project=${project}" \
         --label "com.backupsheep.installation-id=${installation_id}" \
         --label "com.backupsheep.postgres-migration=${purpose}" \
         -v "${target_volume}:/evidence:ro" "$target_image_id" -ceu '
-            cat /evidence/.backupsheep-storage-witness-v1 2>/dev/null || true
-            printf "%s\n" "--receipt--"
-            cat /evidence/.backupsheep-logical-migration-receipt-v2 2>/dev/null || true
+            bounded_evidence_file() {
+                evidence_path="$1"
+                expected_lines="$2"
+                maximum_bytes="$3"
+                evidence_bytes="$(stat -c "%s" "$evidence_path" 2>/dev/null \
+                    || stat -f "%z" "$evidence_path" 2>/dev/null)" || return 1
+                case "$evidence_bytes" in ""|*[!0-9]*) return 1 ;; esac
+                [ "${#evidence_bytes}" -le 4 ] \
+                    && [ "$evidence_bytes" -le "$maximum_bytes" ] || return 1
+                [ "$(wc -l < "$evidence_path" | tr -d " ")" = "$expected_lines" ] \
+                    || return 1
+                [ "$(LC_ALL=C tr -d "\012\040-\176" < "$evidence_path" \
+                    | wc -c | tr -d " ")" = 0 ] || return 1
+            }
+            marker=/evidence/.backupsheep-storage-witness-v1
+            receipt=/evidence/.backupsheep-logical-migration-receipt-v2
+            [ -d /evidence ] && [ ! -L /evidence ] \
+                && [ -r /evidence ] && [ -x /evidence ] || exit 64
+            if [ -e "$marker" ] || [ -L "$marker" ]; then
+                [ -f "$marker" ] && [ ! -L "$marker" ] \
+                    && bounded_evidence_file "$marker" 5 512 || exit 65
+                printf "%s\n" "--storage-marker-present-v2--"
+                cat "$marker"
+            else
+                printf "%s\n" "--storage-marker-absent-v2--"
+            fi
+            if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+                [ -f "$receipt" ] && [ ! -L "$receipt" ] \
+                    && bounded_evidence_file "$receipt" 9 1024 || exit 66
+                printf "%s\n" "--receipt-present-v2--"
+                cat "$receipt"
+            else
+                printf "%s\n" "--receipt-absent-v2--"
+            fi
+            printf "%s\n" "--evidence-end-v2--"
         ')" || die "could not inspect an existing witnessed migration target"
-    marker_status="$(sed -n '1p' <<< "$evidence")"
-    if [[ "$marker_status" == 'status=complete' ]]; then
+    classified_evidence="$(classify_existing_target_evidence \
+        "$framed_evidence" "$expected_pending_marker" \
+        "$expected_complete_marker")" \
+        || die "existing migration target evidence framing is invalid"
+    evidence_state="$(sed -n '1p' <<< "$classified_evidence")"
+    evidence="$(sed '1d' <<< "$classified_evidence")"
+    if [[ "$evidence_state" == complete ]]; then
         recorded_target_image_id="$(backupsheep_validate_completed_postgres_migration_evidence \
             "$evidence" "$generation" "$installation_id" "$storage_intent" \
             "$storage_witness" "$source_image_id" "$target_image_id")" \
@@ -424,8 +581,19 @@ if "$docker_bin" volume inspect "$target_volume" >/dev/null 2>&1; then
         printf '%s\n' "PostgreSQL migration reconciled from its completed receipt: source=${source_image_id} target=${recorded_target_image_id}"
         exit 0
     fi
-    [[ -z "$marker_status" || "$marker_status" == 'status=pending' ]] \
-        || die "existing migration target has an unrecognized marker state"
+    if [[ "$evidence_state" == pending-receipt ]]; then
+        completed_evidence=$'status=complete\n'"$(sed '1d' <<< "$evidence")"
+        backupsheep_validate_completed_postgres_migration_evidence \
+            "$completed_evidence" "$generation" "$installation_id" \
+            "$storage_intent" "$storage_witness" "$source_image_id" \
+            "$target_image_id" >/dev/null \
+            || die "pending migration target receipt is malformed, stale, or belongs to another source"
+    else
+        [[ "$evidence_state" == absent || "$evidence_state" == pending-empty ]] \
+            || die "existing migration target has an unrecognized evidence state"
+        [[ -z "$evidence" ]] \
+            || die "existing migration target state contains unexpected evidence"
+    fi
     [[ "$reconcile_only" == false ]] \
         || die "sealed database identity state requires an already-complete migration receipt; target reset is refused"
     "$docker_bin" volume rm "$target_volume" >/dev/null || die "could not remove exact interrupted migration target"
@@ -793,7 +961,7 @@ restore_role_record="$(
     shift
     source_password="$(cat /run/secrets/source_password)"
     restore_password="$(cat /run/secrets/restore_password)"
-    PGPASSWORD="$source_password" psql --no-psqlrc --no-password -h /target \
+    PGPASSWORD="$source_password" psql --quiet --no-psqlrc --no-password -h /target \
       -U "$1" -d "$2" -v ON_ERROR_STOP=1 -At \
       --set="restore_role=$3" --set="restore_password=$restore_password" \
       --set="installation=$4" --set="database_name=$2" <<'SQL'

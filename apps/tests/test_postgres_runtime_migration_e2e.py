@@ -127,6 +127,7 @@ class PostgresRuntimeMigrationE2EContractTests(TestCase):
             "INSERT INTO public.migration_fixture",
             "CREATE FUNCTION public.fixture_label",
             "queued,complete",
+            "d|true|text",
             "label:text,amount:integer",
             "pg_catalog.has_database_privilege",
             "pg_catalog.has_schema_privilege",
@@ -140,6 +141,7 @@ class PostgresRuntimeMigrationE2EContractTests(TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.runner)
+        self.assertNotIn("d|t|text", self.runner)
 
     def test_internal_catalog_char_values_are_cast_before_serialization(self):
         self.assertIn("type.typtype::text ||", self.runner)

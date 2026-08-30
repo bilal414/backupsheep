@@ -596,7 +596,7 @@ verify_target() {
     local witness="$scenario_witness" intent="$scenario_intent"
     local target_volume="$scenario_target_volume" secret="$scenario_secret"
     local container="${project}-verify-target" socket="${project}_verify_socket"
-    local ready=false evidence expected_roles owners acl_vector effective
+    local ready=false evidence domain_definition expected_roles owners acl_vector effective
     create_owned_volume "$socket" "$project" "$installation_id" verify_socket
     run_docker run --detach --name "$container" \
         --label "com.backupsheep.postgres-runtime-e2e=${TEST_OWNERSHIP_VALUE}" \
@@ -637,8 +637,9 @@ verify_target() {
         || fail 'migrated row data differs from the witnessed source'
     [[ "$(target_query "$container" "SELECT string_agg(enumlabel, ',' ORDER BY enumsortorder) FROM pg_catalog.pg_enum WHERE enumtypid='public.fixture_state'::pg_catalog.regtype")" == 'queued,complete' ]] \
         || fail 'the public enum definition or order did not survive migration'
-    [[ "$(target_query "$container" "SELECT type.typtype::text || '|' || type.typnotnull || '|' || type.typbasetype::pg_catalog.regtype::text FROM pg_catalog.pg_type type WHERE type.oid='public.fixture_code'::pg_catalog.regtype")" == 'd|t|text' ]] \
-        || fail 'the public domain definition did not survive migration'
+    domain_definition="$(target_query "$container" "SELECT type.typtype::text || '|' || type.typnotnull || '|' || type.typbasetype::pg_catalog.regtype::text FROM pg_catalog.pg_type type WHERE type.oid='public.fixture_code'::pg_catalog.regtype")"
+    [[ "$domain_definition" == 'd|true|text' ]] \
+        || fail "the public domain definition did not survive migration: ${domain_definition}"
     [[ "$(target_query "$container" "SELECT string_agg(attribute.attname || ':' || attribute.atttypid::pg_catalog.regtype::text, ',' ORDER BY attribute.attnum) FROM pg_catalog.pg_attribute attribute WHERE attribute.attrelid='public.fixture_pair'::pg_catalog.regclass AND attribute.attnum > 0 AND NOT attribute.attisdropped")" == 'label:text,amount:integer' ]] \
         || fail 'the public composite definition did not survive migration'
 

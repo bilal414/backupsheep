@@ -599,7 +599,13 @@ class PostgresSourceIdentityContractTests(TestCase):
                 "#!/bin/sh\n"
                 ": \"${CAPTURE_ARGS:?}\" \"${CAPTURE_STDIN:?}\"\n"
                 "printf '%s\\0' \"$@\" > \"$CAPTURE_ARGS\"\n"
-                "/bin/cat > \"$CAPTURE_STDIN\"\n",
+                "/bin/cat > \"$CAPTURE_STDIN\"\n"
+                "quiet=false\n"
+                "for argument do\n"
+                "  [ \"$argument\" = --quiet ] && quiet=true\n"
+                "done\n"
+                "[ \"$quiet\" = true ] || printf 'COMMAND STATUS\\n'\n"
+                "printf '%s' \"${PSQL_EXPECTED_STDOUT:-}\"\n",
                 encoding="utf-8",
             )
             fake_psql.chmod(0o755)
@@ -612,10 +618,18 @@ class PostgresSourceIdentityContractTests(TestCase):
                     capture_args = Path(temp_dir) / f"{delimiter}.args"
                     capture_stdin = Path(temp_dir) / f"{delimiter}.sql"
                     environment = os.environ.copy()
+                    expected_stdout = ""
+                    if delimiter == "PREPARE_RESTORE_SCRIPT":
+                        expected_stdout = (
+                            "restore_role|false|false|false|false|true|false|false|1|"
+                            "true|true|true|"
+                            f"backupsheep:postgres-restore-v1:{INSTALLATION_ID}\n0\n"
+                        )
                     environment.update(
                         PATH=f"{fake_bin}:{environment['PATH']}",
                         CAPTURE_ARGS=str(capture_args),
                         CAPTURE_STDIN=str(capture_stdin),
+                        PSQL_EXPECTED_STDOUT=expected_stdout,
                     )
                     result = subprocess.run(
                         ["/bin/sh", "-seu", "--", sentinel, *arguments],
@@ -635,6 +649,9 @@ class PostgresSourceIdentityContractTests(TestCase):
                         psql_arguments[psql_arguments.index(b"-d") + 1],
                         b"backupsheep",
                     )
+                    if delimiter == "PREPARE_RESTORE_SCRIPT":
+                        self.assertIn(b"--quiet", psql_arguments)
+                        self.assertEqual(result.stdout, expected_stdout)
                     captured_sql = capture_stdin.read_text(encoding="utf-8")
                     self.assertIn(sql_fragment, captured_sql)
                     self.assertIn(parameter_fragment, captured_sql)
@@ -752,8 +769,18 @@ is_exact_interrupted_postgres_source container-id \
             migrator.index("legacy source volume is absent"),
         )
 
-    def run_secret_residue_cleanup(self, secret_file, *, attached=False):
-        functions = self.migration_function_chunk("host_file_uid() {", "cleanup() {")
+    def run_secret_residue_cleanup(
+        self,
+        secret_file,
+        *,
+        attached=False,
+        attached_path=None,
+        host_kernel="Linux",
+        docker_daemon_identity="Docker Engine|linux",
+    ):
+        functions = self.migration_function_chunk(
+            "normalize_docker_bind_source() {", "cleanup() {"
+        )
         residue_paths = list(
             secret_file.parent.glob(secret_file.name + ".migration-*")
         )
@@ -762,6 +789,8 @@ set -Eeuo pipefail
 die() { printf '%s\n' "$*" >&2; exit 64; }
 docker_bin=mock_docker
 secret_file="$1"
+host_kernel="$HOST_KERNEL"
+docker_daemon_identity="$DOCKER_DAEMON_IDENTITY"
 mock_docker() {
     if [[ "$1" == ps ]]; then
         [[ "$ATTACHED" == true ]] && printf '%s\n' attached-container
@@ -779,7 +808,13 @@ remove_unattached_ephemeral_secret_residue
         env = os.environ.copy()
         env.update(
             ATTACHED=str(attached).lower(),
-            ATTACHED_PATH=str(residue_paths[0]) if attached and residue_paths else "",
+            ATTACHED_PATH=(
+                str(attached_path)
+                if attached_path is not None
+                else str(residue_paths[0]) if attached and residue_paths else ""
+            ),
+            HOST_KERNEL=host_kernel,
+            DOCKER_DAEMON_IDENTITY=docker_daemon_identity,
         )
         return subprocess.run(
             [
@@ -858,12 +893,487 @@ remove_unattached_ephemeral_secret_residue
                 self.assertNotEqual(result.returncode, 0)
                 self.assertTrue(residue.exists() or residue.is_symlink())
 
-    def test_anonymous_helper_mount_contract_prevents_source_target_secret_crossover(self):
+        with tempfile.TemporaryDirectory(
+            prefix="postgres-secret-residue-desktop-"
+        ) as temp_dir:
+            secret = Path(temp_dir) / "db_bootstrap_password"
+            secret.write_text("installed-secret\n", encoding="ascii")
+            residue = Path(f"{secret}.migration-restore.A1b2C3d4")
+            residue.write_text(("a" * 64) + "\n", encoding="ascii")
+            residue.chmod(0o444)
+            result = self.run_secret_residue_cleanup(
+                secret,
+                attached=True,
+                attached_path="/host_mnt" + str(residue),
+                host_kernel="Darwin",
+                docker_daemon_identity="Docker Desktop|linux",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(residue.exists())
+
+            ambiguous_paths = (
+                "/host_mnt" + str(residue.parent) + "/../" + residue.parent.name + "/" + residue.name,
+                "/host_mnt/host_mnt" + str(residue),
+                "/host_mnt" + str(residue) + "|foreign",
+            )
+            for attached_path in ambiguous_paths:
+                with self.subTest(attached_path=attached_path):
+                    result = self.run_secret_residue_cleanup(
+                        secret,
+                        attached=True,
+                        attached_path=attached_path,
+                        host_kernel="Darwin",
+                        docker_daemon_identity="Docker Desktop|linux",
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(residue.exists())
+
+            unsupported = self.run_secret_residue_cleanup(
+                secret,
+                attached=True,
+                attached_path="/host_mnt" + str(residue),
+                host_kernel="Darwin",
+                docker_daemon_identity="Other Desktop|linux",
+            )
+            self.assertNotEqual(unsupported.returncode, 0)
+            self.assertTrue(residue.exists())
+
+    def test_docker_desktop_bind_source_normalization_is_narrow(self):
         functions = self.migration_function_chunk(
-            "validate_interrupted_helper_mounts() {", "remove_owned_socket_volume() {"
+            "normalize_docker_bind_source() {", "remove_owned_container() {"
         )
         command = r'''
 set -Eeuo pipefail
+host_kernel="$HOST_KERNEL"
+docker_daemon_identity="$DOCKER_DAEMON_IDENTITY"
+secret_file=/private/tmp/safe/db_bootstrap_password
+case "$MODE" in
+    exact) docker_bind_source_matches "$REPORTED" "$EXPECTED" ;;
+    ephemeral) is_exact_ephemeral_secret_bind_source "$REPORTED" "$KIND" ;;
+    *) exit 98 ;;
+esac
+'''
+
+        def run(
+            reported,
+            *,
+            expected="/private/tmp/safe/db_bootstrap_password",
+            host_kernel="Darwin",
+            daemon="Docker Desktop|linux",
+            mode="exact",
+            kind="bootstrap",
+        ):
+            return subprocess.run(
+                ["/bin/bash", "-c", functions + "\n" + command],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "HOST_KERNEL": host_kernel,
+                    "DOCKER_DAEMON_IDENTITY": daemon,
+                    "MODE": mode,
+                    "REPORTED": reported,
+                    "EXPECTED": expected,
+                    "KIND": kind,
+                },
+            )
+
+        accepted = (
+            run("/host_mnt/private/tmp/safe/db_bootstrap_password"),
+            run(
+                "/private/tmp/safe/db_bootstrap_password",
+                host_kernel="Linux",
+                daemon="",
+            ),
+            run(
+                "/host_mnt/private/tmp/safe/db_bootstrap_password."
+                "migration-bootstrap.A1b2C3d4",
+                mode="ephemeral",
+            ),
+        )
+        for result in accepted:
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        refused = (
+            run(
+                "/host_mnt/private/tmp/safe/db_bootstrap_password",
+                host_kernel="Linux",
+                daemon="Docker Desktop|linux",
+            ),
+            run(
+                "/host_mnt/private/tmp/safe/db_bootstrap_password",
+                daemon="Other Desktop|linux",
+            ),
+            run("/host_mnt/private/tmp/../safe/db_bootstrap_password"),
+            run("/host_mnt/host_mnt/private/tmp/safe/db_bootstrap_password"),
+            run(
+                "/host_mnt/private/tmp/safe/db_bootstrap_password."
+                "migration-bootstrap.SHORT",
+                mode="ephemeral",
+            ),
+            run(
+                "/host_mnt/private/tmp/safe/db_bootstrap_password."
+                "migration-bootstrap.A1b2C3d4extra",
+                mode="ephemeral",
+            ),
+            run(
+                "/host_mnt/private/tmp/safe/db_bootstrap_password."
+                "migration-restore.A1b2C3d4",
+                mode="ephemeral",
+                kind="bootstrap",
+            ),
+        )
+        for result in refused:
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_docker_mount_record_sort_removes_only_format_blank_lines(self):
+        function = self.migration_function_chunk(
+            "sort_nonempty_docker_mount_records() {",
+            "normalize_docker_bind_source() {",
+        )
+        records = (
+            "\n"
+            "volume|z|/z|true|/engine/z\n"
+            " \n"
+            "volume|a|/a|false|/engine/a\n"
+            "\n"
+        )
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                function + "\nsort_nonempty_docker_mount_records",
+            ],
+            input=records,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            " \n"
+            "volume|a|/a|false|/engine/a\n"
+            "volume|z|/z|true|/engine/z\n",
+        )
+        source = MIGRATOR.read_text(encoding="utf-8")
+        self.assertEqual(source.count("| sort_nonempty_docker_mount_records"), 2)
+
+    def test_target_cleanup_parses_the_entire_bind_source_before_removal(self):
+        functions = self.migration_function_chunk(
+            "sort_nonempty_docker_mount_records() {",
+            "validate_interrupted_helper_mounts() {",
+        )
+        image_id = "sha256:" + ("4" * 64)
+        command = r'''
+set -Eeuo pipefail
+die() { printf '%s\n' "$*" >&2; exit 64; }
+docker_bin=mock_docker
+project=backupsheep
+installation_id="$(printf '%064d' 0)"
+purpose="postgres-runtime-$(printf '%064d' 1)"
+source_container=backupsheep-postgres-migration-source
+target_container=backupsheep-postgres-migration-target
+target_socket=backupsheep_postgres_migration_target_socket
+target_volume=backupsheep_postgres_data_v1
+secret_file=/private/tmp/safe/db_bootstrap_password
+host_kernel=Darwin
+docker_daemon_identity='Docker Desktop|linux'
+docker_resource_label() {
+    case "$1|$3" in
+        container\|com.backupsheep.installation-id) printf '%s' "$installation_id" ;;
+        container\|com.backupsheep.postgres-migration) printf '%s' "$purpose" ;;
+        container\|com.backupsheep.project) printf '%s' "$project" ;;
+        image\|com.backupsheep.postgres.runtime-generation)
+            printf '%s' 18.6-alpine3.24-icu-v1 ;;
+        *) return 93 ;;
+    esac
+}
+mock_docker() {
+    if [[ "$1" == ps ]]; then printf '%s\n' container-id; return 0; fi
+    if [[ "$1" == inspect && "$2" == --format ]]; then
+        case "$3" in
+            '{{.Image}}|'*)
+                printf '%s\n' "$IMAGE_ID|70:70|none|true|[\"ALL\"]|[\"no-new-privileges:true\"]|/usr/local/bin/docker-entrypoint.sh"
+                ;;
+            '{{range .Mounts}}'*) printf '%s\n\n' "$MOUNT_RECORDS" ;;
+            *) return 94 ;;
+        esac
+        return 0
+    fi
+    if [[ "$1" == stop || "$1" == rm ]]; then
+        printf '%s\n' "$1" >> "$MUTATION_LOG"
+        return 0
+    fi
+    return 95
+}
+remove_owned_container "$target_container"
+'''
+
+        def run(source):
+            records = (
+                "volume|backupsheep_postgres_migration_target_socket|"
+                "/var/run/postgresql|true|/engine/socket\n"
+                "volume|backupsheep_postgres_data_v1|/var/lib/postgresql|"
+                "true|/engine/data\n"
+                "bind||/run/secrets/db_bootstrap_password|false|" + source
+            )
+            with tempfile.TemporaryDirectory(
+                prefix="postgres-target-cleanup-"
+            ) as temp_dir:
+                mutation_log = Path(temp_dir) / "mutations"
+                result = subprocess.run(
+                    ["/bin/bash", "-c", functions + "\n" + command],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "IMAGE_ID": image_id,
+                        "MOUNT_RECORDS": records,
+                        "MUTATION_LOG": str(mutation_log),
+                    },
+                )
+                mutations = (
+                    mutation_log.read_text(encoding="utf-8")
+                    if mutation_log.exists()
+                    else ""
+                )
+                return result, mutations
+
+        valid, mutations = run(
+            "/host_mnt/private/tmp/safe/db_bootstrap_password."
+            "migration-bootstrap.A1b2C3d4"
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertEqual(mutations, "stop\nrm\n")
+
+        hostile_sources = (
+            "/foreign|/host_mnt/private/tmp/safe/db_bootstrap_password."
+            "migration-bootstrap.A1b2C3d4",
+            "/host_mnt/private/tmp/../tmp/safe/db_bootstrap_password."
+            "migration-bootstrap.A1b2C3d4",
+            "/host_mnt/host_mnt/private/tmp/safe/db_bootstrap_password."
+            "migration-bootstrap.A1b2C3d4",
+            "/host_mnt/private/tmp/safe/db_bootstrap_password."
+            "migration-bootstrap.A1b2C3d4extra",
+        )
+        for source in hostile_sources:
+            with self.subTest(source=source):
+                refused, mutations = run(source)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertEqual(mutations, "")
+
+    def test_existing_target_evidence_distinguishes_absence_from_corruption(self):
+        function = self.migration_function_chunk(
+            "classify_existing_target_evidence() {", "remove_owned_container() {"
+        )
+        pending_marker = (
+            "status=pending\n"
+            "generation=18-alpine-icu-v1\n"
+            f"installation={INSTALLATION_ID}\n"
+            f"intent={GENERATION2_INTENT}\n"
+            + "witness=" + ("e" * 64)
+        )
+        complete_marker = pending_marker.replace("status=pending", "status=complete")
+        receipt = "\n".join(
+            (
+                "status=complete",
+                "receipt_version=2",
+                "restore_strategy=fixed-target-v3-roles-unprivileged-custom-v1",
+                "source_contract=generation2-three-role-v1",
+                f"source_image={SOURCE_IMAGE_ID}",
+                f"target_image={TARGET_IMAGE_ID}",
+                "roles_sha256=" + ("1" * 64),
+                "schema_sha256=" + ("2" * 64),
+                "data_sha256=" + ("3" * 64),
+            )
+        )
+
+        def run(evidence):
+            return subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    function
+                    + '\nclassify_existing_target_evidence "$EVIDENCE" '
+                    '"$PENDING_MARKER" "$COMPLETE_MARKER"',
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "EVIDENCE": evidence,
+                    "PENDING_MARKER": pending_marker,
+                    "COMPLETE_MARKER": complete_marker,
+                },
+            )
+
+        absent = run(
+            "--storage-marker-absent-v2--\n"
+            "--receipt-absent-v2--\n"
+            "--evidence-end-v2--"
+        )
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        self.assertEqual(absent.stdout, "absent")
+
+        pending = run(
+            "--storage-marker-present-v2--\n"
+            + pending_marker
+            + "\n--receipt-absent-v2--\n--evidence-end-v2--"
+        )
+        self.assertEqual(pending.returncode, 0, pending.stderr)
+        self.assertEqual(pending.stdout, "pending-empty")
+
+        pending_receipt = run(
+            "--storage-marker-present-v2--\n"
+            + pending_marker
+            + "\n--receipt-present-v2--\n"
+            + receipt
+            + "\n--evidence-end-v2--"
+        )
+        self.assertEqual(pending_receipt.returncode, 0, pending_receipt.stderr)
+        self.assertEqual(
+            pending_receipt.stdout,
+            "pending-receipt\n" + pending_marker + "\n--receipt--\n" + receipt,
+        )
+
+        complete = run(
+            "--storage-marker-present-v2--\n"
+            + complete_marker
+            + "\n--receipt-present-v2--\n"
+            + receipt
+            + "\n--evidence-end-v2--"
+        )
+        self.assertEqual(complete.returncode, 0, complete.stderr)
+        self.assertEqual(
+            complete.stdout,
+            "complete\n" + complete_marker + "\n--receipt--\n" + receipt,
+        )
+
+        malformed = (
+            "--receipt--",
+            "--storage-marker-absent-v2--\n--receipt-absent-v2--",
+            "--storage-marker-absent-v2--\n--receipt-present-v2--\n"
+            + receipt
+            + "\n--evidence-end-v2--",
+            "--storage-marker-present-v2--\n\n"
+            + complete_marker
+            + "\n--receipt-present-v2--\n"
+            + receipt
+            + "\n--evidence-end-v2--",
+            "--storage-marker-present-v2--\n"
+            + pending_marker.replace(f"installation={INSTALLATION_ID}", "installation=wrong")
+            + "\n--receipt-absent-v2--\n--evidence-end-v2--",
+            "--storage-marker-present-v2--\n"
+            + pending_marker
+            + "\n--receipt-present-v2--\n"
+            + "\n".join(receipt.splitlines()[:-1])
+            + "--evidence-end-v2--",
+            "--storage-marker-present-v2--\n"
+            + pending_marker
+            + "\n--receipt-present-v2--\n"
+            + receipt
+            + "\n\n--evidence-end-v2--",
+            "--storage-marker-unknown-v2--\n--receipt-absent-v2--\n"
+            "--evidence-end-v2--",
+        )
+        for evidence in malformed:
+            with self.subTest(evidence=evidence):
+                self.assertNotEqual(run(evidence).returncode, 0)
+
+        source = MIGRATOR.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "cat /evidence/.backupsheep-storage-witness-v1 2>/dev/null || true",
+            source,
+        )
+        self.assertNotIn(
+            "cat /evidence/.backupsheep-logical-migration-receipt-v2 "
+            "2>/dev/null || true",
+            source,
+        )
+        self.assertIn('bounded_evidence_file "$marker" 5 512', source)
+        self.assertIn('bounded_evidence_file "$receipt" 9 1024', source)
+        self.assertIn('stat -c "%s" "$evidence_path"', source)
+        self.assertNotIn('evidence_bytes="$(wc -c < "$evidence_path"', source)
+        self.assertIn('tr -d "\\012\\040-\\176"', source)
+
+    def test_existing_target_evidence_files_are_bounded_before_capture(self):
+        function = self.migration_function_chunk(
+            "bounded_evidence_file() {",
+            "marker=/evidence/.backupsheep-storage-witness-v1",
+        )
+
+        def validate(path, lines, maximum):
+            return subprocess.run(
+                [
+                    "/bin/sh",
+                    "-ceu",
+                    function
+                    + '\nbounded_evidence_file "$1" "$2" "$3"',
+                    "bounded-evidence-test",
+                    str(path),
+                    str(lines),
+                    str(maximum),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        with tempfile.TemporaryDirectory(
+            prefix="postgres-bounded-evidence-"
+        ) as temp_dir:
+            root = Path(temp_dir)
+            valid = root / "valid"
+            valid.write_bytes(b"one\ntwo\nthree\nfour\nfive\n")
+            self.assertEqual(validate(valid, 5, 512).returncode, 0)
+
+            oversized_marker = root / "oversized-marker"
+            oversized_marker.write_bytes((b"a" * 508) + (b"\n" * 5))
+            self.assertNotEqual(validate(oversized_marker, 5, 512).returncode, 0)
+
+            oversized_receipt = root / "oversized-receipt"
+            oversized_receipt.write_bytes((b"a" * 1016) + (b"\n" * 9))
+            self.assertNotEqual(
+                validate(oversized_receipt, 9, 1024).returncode,
+                0,
+            )
+
+            sparse = root / "sparse-marker"
+            with sparse.open("wb") as sparse_file:
+                sparse_file.seek((1024 * 1024 * 1024) - 1)
+                sparse_file.write(b"\n")
+            self.assertNotEqual(validate(sparse, 5, 512).returncode, 0)
+
+            missing_final_newline = root / "missing-final-newline"
+            missing_final_newline.write_bytes(b"one\ntwo\nthree\nfour\nfive")
+            self.assertNotEqual(
+                validate(missing_final_newline, 5, 512).returncode,
+                0,
+            )
+
+            extra_final_newline = root / "extra-final-newline"
+            extra_final_newline.write_bytes(b"one\ntwo\nthree\nfour\nfive\n\n")
+            self.assertNotEqual(
+                validate(extra_final_newline, 5, 512).returncode,
+                0,
+            )
+
+            binary = root / "binary"
+            binary.write_bytes(b"one\ntwo\x00\nthree\nfour\nfive\n")
+            self.assertNotEqual(validate(binary, 5, 512).returncode, 0)
+
+    def test_anonymous_helper_mount_contract_prevents_source_target_secret_crossover(self):
+        functions = self.migration_function_chunk(
+            "normalize_docker_bind_source() {", "remove_owned_socket_volume() {"
+        )
+        command = r'''
+set -Eeuo pipefail
+host_kernel="$HOST_KERNEL"
+docker_daemon_identity="$DOCKER_DAEMON_IDENTITY"
 source_socket=backupsheep_postgres_migration_source_socket
 target_socket=backupsheep_postgres_migration_target_socket
 target_volume=backupsheep_postgres_data_v1
@@ -893,7 +1403,12 @@ validate_interrupted_helper_mounts "$MOUNTS"
                 check=False,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "MOUNTS": records},
+                env={
+                    **os.environ,
+                    "MOUNTS": records,
+                    "HOST_KERNEL": "Linux",
+                    "DOCKER_DAEMON_IDENTITY": "",
+                },
             )
             self.assertEqual(result.returncode, 0, result.stderr)
         for records in refused_records:
@@ -902,9 +1417,47 @@ validate_interrupted_helper_mounts "$MOUNTS"
                 check=False,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "MOUNTS": records},
+                env={
+                    **os.environ,
+                    "MOUNTS": records,
+                    "HOST_KERNEL": "Linux",
+                    "DOCKER_DAEMON_IDENTITY": "",
+                },
             )
             self.assertNotEqual(result.returncode, 0)
+
+        desktop_records = (
+            "volume|backupsheep_postgres_migration_target_socket|/target|false|"
+            "/var/lib/docker/volumes/socket\n"
+            "bind||/run/secrets/restore_password|false|/host_mnt/safe/"
+            "db_bootstrap_password.migration-restore.A1b2C3d4"
+        )
+        desktop = subprocess.run(
+            ["/bin/bash", "-c", functions + "\n" + command],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "MOUNTS": desktop_records,
+                "HOST_KERNEL": "Darwin",
+                "DOCKER_DAEMON_IDENTITY": "Docker Desktop|linux",
+            },
+        )
+        self.assertEqual(desktop.returncode, 0, desktop.stderr)
+        linux = subprocess.run(
+            ["/bin/bash", "-c", functions + "\n" + command],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "MOUNTS": desktop_records,
+                "HOST_KERNEL": "Linux",
+                "DOCKER_DAEMON_IDENTITY": "Docker Desktop|linux",
+            },
+        )
+        self.assertNotEqual(linux.returncode, 0)
 
 
 class PostgresInstallerStateMachineTests(TestCase):
