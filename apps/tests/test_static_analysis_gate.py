@@ -111,7 +111,16 @@ class StaticAnalysisGateTests(TestCase):
         )
         self.assertEqual(policy["bandit_version"], "1.9.4")
         self.assertEqual(policy["minimum_severity"], "MEDIUM")
-        self.assertEqual(len(policy["reviewed_findings"]), 60)
+        self.assertEqual(len(policy["reviewed_findings"]), 61)
         self.assertTrue(
             all(item["review"] in policy["reviews"] for item in policy["reviewed_findings"])
+        )
+        self.assertIn(
+            {
+                "fingerprint": "ceecc80ede2dee5f13b65e3e406887d3010fddb39382c9d58bacf0c5255efac7",
+                "path": "scripts/collect_release_transition.py",
+                "review": "release-transition-container-tmpfs",
+                "test_id": "B108",
+            },
+            policy["reviewed_findings"],
         )

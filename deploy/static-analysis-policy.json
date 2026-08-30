@@ -306,6 +306,12 @@
       "test_id": "B310"
     },
     {
+      "fingerprint": "ceecc80ede2dee5f13b65e3e406887d3010fddb39382c9d58bacf0c5255efac7",
+      "path": "scripts/collect_release_transition.py",
+      "review": "release-transition-container-tmpfs",
+      "test_id": "B108"
+    },
+    {
       "fingerprint": "0ebc4e156bb45109384b225dcf8b8bf48ab357fc00cad063dea0e2bed3f50f3d",
       "path": "scripts/upcloud_live_ui_e2e.py",
       "review": "validated-harness-remote-commands",
@@ -377,6 +383,7 @@
     "non-sql-log-message": "The flagged strings are structured execution log messages and are never submitted to a database engine.",
     "owned-harness-temporary-paths": "Remote temporary names contain a strictly validated run identifier and exist only on an owned disposable test instance.",
     "provider-address-http-probe": "The scheme is a fixed http literal and the address comes from the authenticated EC2 instance record for a disposable reachability probe.",
+    "release-transition-container-tmpfs": "The /tmp literal is a Docker container mount target, not a host path. It creates a private 16 MiB noexec, nosuid, nodev tmpfs for the unprivileged, read-only, networkless migration-inventory container.",
     "validated-aws-fixture-sql": "The disposable AWS fixture accepts strict lowercase SQL identifiers, escapes literals, and shell-quotes complete psql statements.",
     "validated-harness-remote-commands": "The remote command primitive is used only with constants or strict validation plus shlex quoting in the safety-gated disposable harness.",
     "validated-lane-policy-sql": "Lane-policy SQL combines module-owned statements with strict identifier/literal validators and no request-controlled SQL fragments.",
