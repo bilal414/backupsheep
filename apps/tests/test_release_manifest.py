@@ -1454,8 +1454,29 @@ class ReleaseWorkflowContractTests(TestCase):
         verifier_scan_position = build_job.index(
             "Freshly scan the separately bootstrapped consumer verifier"
         )
+        bind_position = build_job.index(
+            "Bind private scanner state to runner scratch space"
+        )
+        build_job_environment = build_job.split("  build_scan:", 1)[1].split(
+            "    steps:", 1
+        )[0]
         self.assertLess(prepare_position, image_scan_position)
         self.assertLess(image_scan_position, verifier_scan_position)
+        self.assertLess(bind_position, prepare_position)
+        self.assertNotIn("${{ runner.temp }}", build_job_environment)
+        self.assertIn(
+            '"$RUNNER_TEMP/backupsheep-release-trivy-cache" >>"$GITHUB_ENV"',
+            build_job,
+        )
+        self.assertIn(
+            '"$RUNNER_TEMP/backupsheep-release-trivy-db-evidence.json" '
+            '>>"$GITHUB_ENV"',
+            build_job,
+        )
+        self.assertIn(
+            '"$RUNNER_TEMP/backupsheep-release-trivy-home" >>"$GITHUB_ENV"',
+            build_job,
+        )
         self.assertEqual(build_job.count("--skip-db-update"), 2)
         self.assertEqual(build_job.count("--skip-java-db-update"), 2)
         self.assertEqual(build_job.count("--skip-check-update"), 2)

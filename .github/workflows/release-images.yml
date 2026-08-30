@@ -50,9 +50,6 @@ jobs:
       ARTIFACT_DIR: release-candidate/release-artifacts
       LAYOUT_DIR: release-candidate/release-layouts
       TOOL_DIR: /tmp/backupsheep-release-tools
-      TRIVY_CACHE_DIR: ${{ runner.temp }}/backupsheep-release-trivy-cache
-      TRIVY_DB_EVIDENCE: ${{ runner.temp }}/backupsheep-release-trivy-db-evidence.json
-      TRIVY_HOME: ${{ runner.temp }}/backupsheep-release-trivy-home
       DOCKER_BUILD_RECORD_UPLOAD: "false"
       DOCKER_BUILD_SUMMARY: "false"
     steps:
@@ -95,6 +92,18 @@ jobs:
           "$TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
           "$TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
           "$TOOL_DIR/oras" version | grep -Eq '1\.3\.3'
+
+      - name: Bind private scanner state to runner scratch space
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf 'TRIVY_CACHE_DIR=%s\n' \
+            "$RUNNER_TEMP/backupsheep-release-trivy-cache" >>"$GITHUB_ENV"
+          printf 'TRIVY_DB_EVIDENCE=%s\n' \
+            "$RUNNER_TEMP/backupsheep-release-trivy-db-evidence.json" >>"$GITHUB_ENV"
+          printf 'TRIVY_HOME=%s\n' \
+            "$RUNNER_TEMP/backupsheep-release-trivy-home" >>"$GITHUB_ENV"
 
       - name: Prepare the exact reviewed Trivy vulnerability database
         shell: bash
