@@ -152,20 +152,22 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertIn("USER 70:70", postgres_dockerfile)
         database = self.service_block("db")
         self.assertIn("--locale-provider=icu --icu-locale=und", database)
-        self.assertIn("postgres_data_v1:/var/lib/postgresql", database)
+        self.assertIn("source: postgres_data_v1", database)
+        self.assertIn("target: /var/lib/postgresql", database)
+        self.assertIn("nocopy: false", database)
         self.assertNotIn("pgdata:/var/lib/postgresql", database)
 
     def test_bundled_rabbitmq_derivatives_patch_exact_upstream_runtimes(self):
         expected = {
             "Dockerfile.rabbitmq": (
                 "rabbitmq:4.3.5-alpine@sha256:"
-                "d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7",
-                'runtime-generation="4.3.5-alpine3.23-openssl-v1"',
+                "290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240",
+                'runtime-generation="4.3.5-alpine3.23-openssl3.5.8-v2"',
             ),
             "Dockerfile.rabbitmq-upgrade": (
                 "rabbitmq:4.2.9-alpine@sha256:"
-                "f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095",
-                'runtime-generation="4.2.9-alpine3.23-openssl-v1"',
+                "b2e69a138ea46106d0336bf8741187cac59031b778517d9ed2c9740f139dfa5a",
+                'runtime-generation="4.2.9-alpine3.23-openssl3.5.8-v2"',
             ),
         }
         for path, (base, generation) in expected.items():
@@ -175,8 +177,49 @@ class DeploymentHardeningContractTests(TestCase):
                 self.assertIn(generation, dockerfile)
                 self.assertIn("'libcrypto3=3.5.8-r0'", dockerfile)
                 self.assertIn("'libssl3=3.5.8-r0'", dockerfile)
+                self.assertIn('openssl-runtime-version="3.5.8"', dockerfile)
+                self.assertIn("crypto:info_lib()", dockerfile)
+                self.assertIn("/proc/self/maps", dockerfile)
+                self.assertIn('enabled-plugins="none"', dockerfile)
+                self.assertIn(
+                    "rabbitmq-plugins disable --offline rabbitmq_prometheus",
+                    dockerfile,
+                )
                 self.assertIn("USER 100:101", dockerfile)
                 self.assertNotIn("apk upgrade", dockerfile)
+
+        legacy = (ROOT / "Dockerfile.rabbitmq-legacy-source").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            "FROM rabbitmq:3.13.7@sha256:"
+            "87178a0ee3e2f52980ba356d38646ed1056705ff2d5ff281f8965456eaa0c1e3",
+            "FROM rabbitmq:4.3.5@sha256:"
+            "f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f469995a728c298b AS openssl-runtime",
+            "FROM erlang:26.2.5.21@sha256:"
+            "f9007e3e435761bd7f88aafa4bfab20fd4107baa88e3ff45e935ef2aa3e892d5 AS erlang-runtime",
+            'runtime-generation="3.13.7-otp26.2.5.21-openssl3.5.8-v3"',
+            'erlang-runtime-version="26.2.5.21"',
+            'openssl-runtime-version="3.5.8"',
+            "COPY --from=openssl-runtime /opt/openssl/ /opt/openssl-3.5.8/",
+            "COPY --from=erlang-runtime /usr/local/lib/erlang/ /opt/erlang-26.2.5.21/",
+            "ENV LD_LIBRARY_PATH=/opt/openssl/lib",
+            "/opt/erlang/releases/26/OTP_VERSION",
+            "crypto:info_lib()",
+            "/proc/self/maps",
+            "rm -f /usr/sbin/gosu",
+            "! command -v gosu",
+            "'gpgv=2.4.4-2ubuntu17.4'",
+            "'libssl3t64=3.0.13-0ubuntu3.15'",
+            "'openssl=3.0.13-0ubuntu3.15'",
+            "--only-upgrade",
+            'enabled-plugins="none"',
+            "rabbitmq-plugins disable --offline rabbitmq_prometheus",
+            "USER 999:999",
+        ):
+            self.assertIn(expected, legacy)
+        self.assertNotIn("apt-get upgrade", legacy)
+        self.assertNotIn("dist-upgrade", legacy)
 
     def test_release_verifier_rebuilds_exact_cosign_source_with_fixed_graph(self):
         dockerfile = (ROOT / "Dockerfile.release-verifier").read_text(
@@ -508,10 +551,11 @@ raise SystemExit(99)
         ):
             with self.subTest(required=required):
                 self.assertIn(required, gate)
+
         self.assertNotIn("--network-alias database", gate)
         self.assertNotIn("--env DB_HOST=database", gate)
 
-        self.assertEqual(gate.count("docker build --pull --no-cache"), 7)
+        self.assertEqual(gate.count("docker build --pull --no-cache"), 8)
         self.assertNotIn("continue-on-error", gate)
         self.assertNotIn("--privileged", gate)
         self.assertNotIn("docker.sock", gate)
@@ -520,6 +564,88 @@ raise SystemExit(99)
         self.assertNotIn('echo "$database_password"', gate)
         self.assertNotIn("set -x", gate)
 
+    def test_supply_chain_ci_exercises_the_real_rabbitmq_transition_entrypoint(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "supply-chain-security.yml"
+        ).read_text(encoding="utf-8")
+        harness = (
+            ROOT / "deploy" / "ci" / "run-rabbitmq-entrypoint-transition-e2e.sh"
+        ).read_text(encoding="utf-8")
+        harness_call = "deploy/ci/run-rabbitmq-entrypoint-transition-e2e.sh"
+
+        self.assertEqual(workflow.count(harness_call), 1)
+        for version_probe in (
+            '--entrypoint rabbitmqctl "$TEST_RABBITMQ_IMAGE" version',
+            '--entrypoint rabbitmqctl "$TEST_RABBITMQ_UPGRADE_IMAGE" version',
+        ):
+            with self.subTest(version_probe=version_probe):
+                self.assertLess(
+                    workflow.index(version_probe),
+                    workflow.index(harness_call),
+                )
+        self.assertLess(
+            workflow.index(harness_call),
+            workflow.index('"$TEST_RELEASE_VERIFIER_IMAGE" version'),
+        )
+        self.assertIn("timeout --signal=TERM --kill-after=10s 5m", workflow)
+
+        for required in (
+            "deploy/rabbitmq/entrypoint.sh",
+            "deploy/rabbitmq/volume-init.sh",
+            "--network none",
+            "--read-only",
+            "--user 100:101",
+            "--cap-drop ALL",
+            "--security-opt no-new-privileges:true",
+            "--pids-limit 64",
+            "--memory 256m",
+            "--memory-swap 256m",
+            "--tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777",
+            "--tmpfs /run/backupsheep-rabbitmq:rw,noexec,nosuid,nodev,size=1m",
+            "target=/usr/local/bin/docker-entrypoint.sh,readonly",
+            "docker volume create \\",
+            "docker volume rm",
+            "com.backupsheep.ci-cleanup-token",
+            "od -An -N32 -tx1 /dev/urandom",
+            "steady-unattested",
+            "malformed-target",
+            "transition42-empty",
+            "transition42-legacy",
+            "transition43-empty",
+            "transition43-legacy",
+            "steady43-no-witness",
+            "steady43-final",
+            "assert_final_witness_v2",
+            '"version=2"',
+            '"node_host=rabbitmq"',
+            "legacy-exact",
+            "legacy-v1-wrong-host",
+            "init-legacy",
+            "finalize-legacy",
+            "finalize-final-only",
+            "finalize-transition",
+            "RabbitMQ fresh initialization refuses a nonempty data volume without a witness.",
+            "RabbitMQ transition finalization refuses an empty data volume.",
+            "resume-absent",
+            "resume-pending",
+            "resume-malformed",
+            "resume-final",
+            "resume-both",
+            "backupsheep-rabbitmq-volume-init resume",
+            "chmod 0700 /var/lib/rabbitmq",
+            "RabbitMQ pending volume identity witness is missing.",
+            "RabbitMQ pending volume identity witness is invalid.",
+            "RabbitMQ volume identity has both final and pending records.",
+            "BACKUPSHEEP_RABBITMQ_DATA_GENERATION=4.3",
+            "BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET=$target",
+            "__BACKUPSHEEP_RABBITMQ_VENDOR_ENTRYPOINT_REACHED__",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, harness)
+
+        self.assertNotIn("--privileged", harness)
+        self.assertNotIn("--user 0", harness)
+
     def test_postgres_healthcheck_authenticates_with_the_file_secret(self):
         database = self.service_block("db")
         self.assertIn("cat /run/secrets/db_bootstrap_password", database)
@@ -527,12 +653,68 @@ raise SystemExit(99)
         self.assertIn("--command='SELECT 1'", database)
         self.assertNotIn('test: ["CMD-SHELL", "pg_isready', database)
 
+    def test_postgres_runtime_boundaries_reject_unsafe_database_names(self):
+        self.assertEqual(
+            self.compose.count("${DB_NAME:?DB_NAME is required}"),
+            2,
+        )
+        boundaries = (
+            ROOT / "deploy" / "postgres" / "entrypoint.sh",
+            ROOT / "deploy" / "postgres" / "storage-witness.sh",
+        )
+        for boundary in boundaries:
+            for database_name in (
+                "",
+                "postgres",
+                "template0",
+                "template1",
+                "Tenant",
+                "tenant-name",
+                "ténant",
+                "1tenant",
+                "a" * 64,
+            ):
+                with self.subTest(boundary=boundary.name, database_name=database_name):
+                    environment = os.environ.copy()
+                    environment["POSTGRES_DB"] = database_name
+                    result = subprocess.run(
+                        [str(boundary)],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 64, result.stderr)
+                    self.assertIn(
+                        "POSTGRES_DB must be a non-system lowercase PostgreSQL "
+                        "database identifier",
+                        result.stderr,
+                    )
+
+            environment = os.environ.copy()
+            environment["POSTGRES_DB"] = "backupsheep"
+            accepted = subprocess.run(
+                [str(boundary)],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(accepted.returncode, 64, accepted.stderr)
+            self.assertNotIn("POSTGRES_DB must be", accepted.stderr)
+
     def test_compose_uses_supported_pinned_broker_without_guest_defaults(self):
+        stateful_runtime = self.compose.split(
+            "x-stateful-runtime: &stateful-runtime\n", 1
+        )[1].split("\nx-egress-network:", 1)[0]
+        self.assertIn("pull_policy: never", stateful_runtime)
         self.assertIn(
-            "rabbitmq:4.3.5-alpine@sha256:"
-            "d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7",
+            "BACKUPSHEEP_RABBITMQ_IMAGE:-backupsheep-rabbitmq:local",
             self.compose,
         )
+        self.assertIn("dockerfile: Dockerfile.rabbitmq", self.service_block("rabbitmq"))
         self.assertNotIn("RABBITMQ_DEFAULT_PASS:", self.compose)
         self.assertIn(
             "/run/secrets/rabbitmq_bootstrap_password",
@@ -555,7 +737,7 @@ raise SystemExit(99)
         self.assertIn("rabbit_password_hashing_sha256", provisioner)
         self.assertNotIn("rabbitmq_password:/run/secrets/rabbitmq_password", self.compose)
         self.assertIn(
-            '["CMD", "rabbitmq-diagnostics", "-q", "ping"]',
+            '["CMD-SHELL", "rabbitmq-diagnostics -q -n \\"$${RABBITMQ_NODENAME}\\" ping"]',
             self.service_block("rabbitmq"),
         )
         self.assertIn("start_period: 30s", self.compose)
@@ -565,11 +747,38 @@ raise SystemExit(99)
         overlay = (
             ROOT / "deploy" / "rabbitmq" / "upgrade-4.2.9.compose.yml"
         ).read_text(encoding="utf-8")
+        transition_43 = (
+            ROOT / "deploy" / "rabbitmq" / "transition-4.3.compose.yml"
+        ).read_text(encoding="utf-8")
+        volume_init = (
+            ROOT / "deploy" / "rabbitmq" / "volume-init.sh"
+        ).read_text(encoding="utf-8")
+        wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
         guide = (ROOT / "docs" / "guides" / "rabbitmq-upgrade.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("rabbitmq:4.2.9-alpine@sha256:", overlay)
+        self.assertIn(
+            "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE:-backupsheep-rabbitmq-upgrade:local",
+            overlay,
+        )
+        self.assertIn("dockerfile: Dockerfile.rabbitmq-upgrade", overlay)
+        for transition in (overlay, transition_43):
+            self.assertIn("backupsheep-rabbitmq-entrypoint", transition)
+            self.assertIn('"transition"', transition)
+            self.assertIn("secrets: !reset []", transition)
+            self.assertIn("networks: !reset []", transition)
+            self.assertIn("network_mode: none", transition)
+            self.assertIn('restart: "no"', transition)
+            self.assertIn("90-legacy-source.conf", transition)
+        self.assertIn("finalize-transition", wrapper)
+        self.assertIn("finalize-transition", volume_init)
+        self.assertIn(
+            "fresh initialization refuses a nonempty data volume without a witness",
+            volume_init,
+        )
+        self.assertNotIn("finalize-transition", self.service_block("rabbitmq-volume-init"))
         self.assertIn("must not be started directly", guide)
+        self.assertIn("raw `docker compose`", guide)
         self.assertIn("3.13.x to 4.2.x", guide)
 
     def test_compose_bounds_logs_and_isolates_backend(self):
@@ -884,6 +1093,7 @@ raise SystemExit(99)
             "BACKUPSHEEP_IMAGE_MODE",
             "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE",
             "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE",
+            "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE",
             "BACKUPSHEEP_RELEASE_APP_IMAGE",
             "BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256",
             "BACKUPSHEEP_RELEASE_EGRESS_IMAGE",

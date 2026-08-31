@@ -45,9 +45,10 @@ Profile-less starts are core-only; commands that authorize provider workers and 
 Deployment commands use the shipped `./backupsheep-compose` wrapper, not raw Compose. It
 pins the project directory, `.env` and base model; rejects ambient profile/Bake/orphan and
 alternate-settings controls; validates the rendered model; and refuses to auto-load a
-`docker-compose.override.yml`. If an installation has an override, inspect its ownership,
-permissions, mounts, privileges, networks and complete rendered diff first, then add its
-exact path before the Compose command, for example:
+`docker-compose.override.yml`. The stock wrapper accepts an override only when the complete
+rendered model differs solely by the canonical `backup_storage` local bind-volume driver
+options. Inspect its ownership, permissions, bounded absolute device path and complete
+rendered diff first, then add its exact path before the Compose command, for example:
 
 ```bash
 ./backupsheep-compose \

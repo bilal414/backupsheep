@@ -103,6 +103,12 @@
       "sha256": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
       "archive_member": null
     },
+    "grype": {
+      "version": "0.116.1",
+      "url": "https://github.com/anchore/grype/releases/download/v0.116.1/grype_0.116.1_linux_amd64.tar.gz",
+      "sha256": "0122df7b655981abe547ad3d2190d65551dac6a2bfc80b4dc2a989b5d0587458",
+      "archive_member": "grype"
+    },
     "oras": {
       "version": "1.3.3",
       "url": "https://github.com/oras-project/oras/releases/download/v1.3.3/oras_1.3.3_linux_amd64.tar.gz",
@@ -125,9 +131,15 @@
   "vulnerability_policy": {
     "scanner": "trivy",
     "scanner_version": "0.74.0",
+    "secondary_scanner": "grype",
+    "secondary_scanner_version": "0.116.1",
     "database": {
       "lock_path": "deploy/trivy-db-lock.json",
-      "lock_sha256": "sha256:c888bbe68b8cdb22162b62e61a40543f638a1e2f84a07f0288e66c8a8ee50b3e"
+      "lock_sha256": "sha256:097deeec887a7deeda154ed12211062caaab9cc2d4898f7f12ebce689f6accae"
+    },
+    "secondary_database": {
+      "lock_path": "deploy/grype-db-lock.json",
+      "lock_sha256": "sha256:769a77cb012d1a23db23af7dd68ebf7ad4411441e2a058a08e4f8831baa94a55"
     },
     "fail_severities": [
       "HIGH",

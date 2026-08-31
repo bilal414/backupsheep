@@ -36,6 +36,60 @@ those boundaries trustworthy
 > evidence, not a zero-vulnerability or released-multi-architecture claim; Canonical
 > still has relevant 26.04 issues in `Needs evaluation`, as detailed below.
 
+> **Repository-only transition follow-up, 2026-08-30:** The current candidate adds an
+> exact-base, networkless RabbitMQ 3.13.7 source-adoption derivative before the
+> source-controlled 4.2.9/4.3.5 transition entrypoints. In-place adoption accepts only
+> the historical single-node stock identity (`guest [administrator]` and `/`) after every
+> queue is drained, retains either the fixed `rabbitmq` node host or one unique reviewed
+> 12-lowercase-hex Docker hostname, and refuses ambiguous/multiple node trees. All project
+> containers and networks must be removed before source adoption. A separate isolated
+> helper converts only the exact `999:999` broker tree to `100:101` before 4.2.9.
+> Signed-release mode is fresh-only and refuses this local-build migration path.
+>
+> The candidate also adds exact target and canonical-model attestation, a durably flushed
+> protected P313/A313, P42/source-clean/target-ready/A42,
+> P43/target-ready/A43 host transition ledger plus secondary
+> pending/final volume witness, canonical recreation, and `.env`-last commit with narrowly
+> bounded crash recovery. The protected ledger is published before Docker mutation and
+> advanced only after exact target postflight; the broker-writable volume witness alone
+> never authorizes recovery. It also makes the stock
+> Docker database name an explicit
+> non-system lowercase identifier at every installer/runtime boundary while preserving
+> provider-valid names for external `DATABASE_URL` and non-stock discrete deployments.
+> These are repository control claims only; exact PR/merge checks and a fresh demo
+> deployment inspection remain separate pending evidence.
+> Normal startup can create a missing RabbitMQ witness only on an empty volume. The broker
+> uid can invoke the mounted nonempty-volume finalizer and write that secondary witness;
+> only the supported wrapper path gives it meaning, and only after matching protected 4.3
+> host attestation. Raw invocation of either transition overlay is unsupported.
+> All three compatibility brokers run with `network_mode: none`, no Compose networks,
+> no secrets, no dependencies, no restart, and zero enabled RabbitMQ plugins. The final
+> canonical 4.3.5 broker alone regains its private product networks and bootstrap secret
+> after exact attestation. RabbitMQ 4.2.9 remains in the affected range for
+> [multiple upstream advisories](https://www.rabbitmq.com/security), including
+> [GHSA-cfqc-c682-93mm](https://github.com/rabbitmq/rabbitmq-server/security/advisories/GHSA-cfqc-c682-93mm),
+> fixed in 4.2.10. RabbitMQ lists that patched 4.2 build as Enterprise Support; as of
+> 2026-08-30 the public GitHub binary/signature links and official Docker
+> `rabbitmq:4.2.10-alpine` tag were unavailable, while the public 4.2 tag still resolved
+> to 4.2.9. The supported hop makes the remote plugin path unreachable by disabling
+> all plugins and removing networking and secrets, and retains 4.2.9 only long enough to
+> attest flags/Khepri before 4.3.5. This is compensating containment, not a claim that the
+> upstream advisory is absent; the derivative and attestations must move to the first
+> available supported patched 4.2 image.
+> The 2026-08-30 candidate also closes the distinct bundled-OpenSSL gap. RabbitMQ's
+> Erlang crypto NIF loads `/opt/openssl`, not Alpine's distro library, so merely upgrading
+> `libcrypto3`/`libssl3` did not remediate the broker runtime. The reviewed 2026-08-27
+> official 4.3.5 and 4.2.9 rebuilds are now pinned by exact multi-architecture index digest;
+> each contains `/opt/openssl` 3.5.8, while the derivative also pins the distro packages to
+> 3.5.8-r0. The historical 3.13.7 migration image imports `/opt/openssl` 3.5.8 only from
+> the exact Ubuntu 24.04 4.3.5 rebuild while retaining RabbitMQ 3.13.7 for on-disk
+> compatibility. Build, wrapper, installer and CI checks execute Erlang's
+> `crypto:info_lib()` and inspect the running VM's `/proc/self/maps`; image labels or
+> package inventory alone are not accepted as proof of the loaded library.
+> Docker-daemon and protected
+> installation-file control remain trusted host-administrator capabilities outside the
+> application/container threat boundary.
+
 ## 2026-08-25 predecessor local candidate evidence (`0e76142`)
 
 This section is a non-demo predecessor evidence cut for implementation commit
@@ -284,8 +338,26 @@ authenticated backup cryptography.
   witness before the server starts. This evidence is not a claim that the demo has
   already been redeployed.
 - RabbitMQ data-generation fencing prevents a 4.3 image from guessing at a legacy
-  3.13/4.2 volume. The installer/wrapper require exact state witnesses and the
-  documented Khepri transition path.
+  3.13/4.2 volume. The local-build-only path first builds and attests a commit-tagged
+  3.13.7 security derivative from the exact historical base digest, without running
+  that vulnerable upstream image against product data. After complete project
+  container/network quiescence it proves the old single-node
+  `guest`/`/` model and drained queues, retains its fixed or reviewed 12-hex node host,
+  runs an isolated bounded `999:999` to `100:101` ownership conversion, then attests the
+  exact 4.2.9 and 4.3.5/Khepri targets. Every compatibility broker is networkless,
+  secretless, dependency-free, non-restarting and plugin-free; only the attested
+  canonical 4.3.5 service rejoins the private product networks. Signed releases remain
+  fresh-only.
+- The host transition ledger accepts only P313/A313,
+  P42/`source-clean`/`target-ready`/A42, and P43/`target-ready`/A43 source/target
+  combinations, bound to installation, project, node identity, source evidence, target
+  image ID/reference and configuration hash. `source-clean` authorizes only 3.13 source
+  detachment and the idempotent UID conversion; each `target-ready` checkpoint authorizes
+  only its exact cross-version target after clean source-layout proof. Exact retry can
+  preserve an already healthy target; absent, exited or unhealthy targets are recreated
+  only when their matching `target-ready` or attested record authorizes it. The final 4.3
+  generation is committed to `.env` only after the secondary volume witness and canonical
+  model both revalidate.
 - Current database identity generation 3 separates bootstrap, schema-owning migrator,
   app, preflight, Beat and five worker logins. Exact grants, column restrictions and
   row-level policies replace the earlier shared runtime DML identity; `db-seal` and
@@ -439,12 +511,25 @@ blockers can be closed operationally.
 - `install.sh` refuses root and `sudo`, accepts only a full 40-character commit, uses
   an isolated HTTPS Git process, verifies the object database, and requires its own
   bytes to match the selected commit.
-- It explicitly builds the commit-tagged `db`, `app`, and `app-egress-guard` images.
-  Stock services use `pull_policy: never`, so a missing local image fails rather than
-  silently substituting registry content.
+- It explicitly builds the commit-tagged `db`, `app`, `app-egress-guard`, and hardened
+  `rabbitmq` derivative from the base Compose model only. The 3.13/4.2 compatibility
+  derivatives remain on-demand, wrapper-attested migration images. The wrapper fixes
+  build inputs and supplies `--pull --no-cache`; startup supplies `--no-build` where
+  Compose supports it and `--pull never` for every create/up/run path. Because Compose
+  `run` has no `--no-build` switch, the wrapper first requires that one-off's exact local
+  image reference and immutable ID to exist; a missing tag is refused instead of being
+  implicitly rebuilt from ordinary cache.
+  Every local service must retain `pull_policy: never`, so a missing local image fails
+  rather than silently substituting registry content.
 - It does not upgrade a checkout in place and does not provision the host.
 - Install paths, parents, checkout files, `.env`, secrets, overrides, and resource
   ownership are validated before mutation.
+- An approved Compose override may change only the canonical `backup_storage` volume to
+  the exact local `type=none,o=bind,device=<bounded absolute path>` contract. Base and
+  combined renders must have identical complete service graphs, top-level objects and
+  every other volume. Docker's realized volume option map must then exactly equal that
+  reviewed device. Service, dependency, entrypoint, privilege, host-mount, port, image,
+  build, network and pull-policy mutations are rejected before a container is created.
 - A stable random installation ID labels containers, networks, volumes, and an empty
   sentinel volume. Exact-name inventory prevents Compose from adopting a foreign or
   unlabeled resource that label-only discovery would miss.
@@ -462,8 +547,10 @@ blockers can be closed operationally.
   mount, group or provisioning path.
 - Secret migration is atomic and fail-closed. Existing secret values are preserved,
   moved to files, and blanked from `.env` without being printed.
-- RabbitMQ generation transitions, legacy-project adoption, runtime overrides,
-  deletion, and additional Compose files require narrow, value-bearing gates.
+- RabbitMQ generation transitions, legacy-project/node-host adoption, runtime overrides,
+  deletion, and additional Compose files require narrow, value-bearing gates. A stopped
+  legacy broker requires local-build `--legacy-rabbitmq-node-host HOST --skip-start`;
+  signed-release mode rejects legacy adoption and transition flags before Docker mutation.
 - The wrapper rejects privilege, entrypoint, environment, volume, port, build,
   orphan-removal, image-removal, and volume-deletion escape routes unless the exact
   reviewed maintenance operation is explicitly authorized.
@@ -783,10 +870,11 @@ Critical findings. The immediately prior Alpine 3.22.2 candidate reported 17 Hig
 current claim. This candidate scan is useful remediation evidence, not a substitute for
 scanning and signing the exact release image.
 
-Grype alone reported `CVE-2026-14456` in RabbitMQ's bundled `/opt/openssl`; Trivy did not.
-The issue affects OpenSSL QUIC server listener allocation. BackupSheep does not expose or
-use OpenSSL QUIC in RabbitMQ, which materially reduces reachability, but this is not a
-waiver. Track the vendor image and rebuild when a reviewed fix is available.
+At this historical evidence cut, Grype alone reported `CVE-2026-14456` in RabbitMQ's
+bundled `/opt/openssl`; Trivy did not. QUIC was not exposed, which reduced reachability
+but did not waive the finding. The 2026-08-30 candidate supersedes that runtime with
+OpenSSL 3.5.8 and proves the library loaded by Erlang, while retaining the scanner-
+coverage disagreement as a reason to use both runtime attestation and multiple scanners.
 
 Exact amd64 evidence hashes:
 
@@ -994,9 +1082,10 @@ be read as current-candidate deployment evidence.
    can fill Docker storage, and named-volume confidentiality depends on the host.
    Require capacity/inode alarms, retention controls, filesystem/project quotas where
    supported, encrypted storage, and documented emergency recovery.
-5. **Unsigned local image distribution.** Inputs are pinned and builds are evidenced,
-   but release consumers do not yet verify a signed image, SBOM, provenance statement,
-   or transparency-log record tied to a protected release commit.
+5. **Local-build mode remains unsigned.** Inputs are pinned and builds are evidenced,
+   while the signed-release consumer verifies the image signature, SBOM, provenance,
+   transparency-log record and protected-commit manifest before use. Publication and
+   independent acceptance evidence for an exact signed release remain pending.
 6. **Provider and restore behavior remains held.** Core health does not prove provider
    mutation, duplicate avoidance, crash reconciliation, destination integrity, or
    restoration. Keep operations off until durable work and provider ownership are
@@ -1025,8 +1114,10 @@ be read as current-candidate deployment evidence.
    are an accepted single-host exception, not suitable across an untrusted boundary.
 2. RabbitMQ and the new egress guards' capability boundaries must be demonstrated after
    the exact demo/production rollout with their matching volume/network witnesses.
-3. Grype/Trivy disagree on the RabbitMQ OpenSSL QUIC issue. QUIC is not exposed, but the
-   pinned vendor image must be rescanned and updated when a reviewed fix lands.
+3. Grype/Trivy disagreed on the RabbitMQ bundled-OpenSSL QUIC issue. The 2026-08-30
+   candidate pins the reviewed OpenSSL 3.5.8 vendor rebuild and attests the library loaded
+   by Erlang. Exact release images still require both fresh scans and runtime attestation;
+   either control alone has already demonstrated a coverage gap.
 4. At-least-once outbox delivery can duplicate a notification after an unknown publish
    outcome; consumers need durable idempotency.
 5. The image contains SSH and several database client families required for supported
@@ -1051,8 +1142,13 @@ be read as current-candidate deployment evidence.
    scans; publish signed multi-architecture images, SBOMs and provenance tied to the
    protected commit.
 3. Exercise the exact-ref installer on a fresh user-owned host and the fail-closed v3
-   migration on a recoverable existing-volume copy. Inspect every resulting mount,
-   identity, capability, healthcheck, restart policy and egress namespace.
+   migration on a recoverable existing-volume copy. Include the exact drained stock
+   RabbitMQ 3.13.7 source, isolated UID conversion, 4.2.9 feature/Khepri gate, 4.3.5
+   canonical commit, and crash retry from every P313/A313,
+   P42/`source-clean`/`target-ready`/A42, and P43/`target-ready`/A43 boundary. Include
+   absent and genuine narrowly admitted stale-PID same-version recovery at each applicable
+   source/target checkpoint. Inspect every resulting mount, identity, capability,
+   healthcheck, restart policy and egress namespace.
 4. Prove allowed same-lane plus denied cross-lane unwraps, BSE1 context/tamper/swap
    rejection, key-wrap rotation and key-loss recovery. Keep every old key until database
    evidence shows no active envelope uses it and recovery is rehearsed.
@@ -1157,8 +1253,9 @@ state, or installation-identity witness. Follow
   validation.
 - The rollback bundle was validated for integrity/decryption/listing. A full destructive
   rollback rehearsal was not performed on the live demo after the final deployment.
-- Current demo server inspection and rollout were blocked by SSH public-key rejection;
-  the current candidate therefore has no live-demo containment or migration proof.
+- The earlier demo rollout attempt was blocked by SSH public-key rejection. Access has
+  since been restored, but the current candidate still has no live-demo containment or
+  RabbitMQ migration proof until its exact merged revision is deployed and inspected.
 - Host reverse-proxy, daemon, firewall, MAC, patching, encryption, and rootless posture
   are explicitly outside this Docker-owned boundary.
 

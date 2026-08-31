@@ -362,7 +362,7 @@ attest_local_image_platform() {
 
 git_client() {
     /usr/bin/env -i LC_ALL=C LANG=C HOME=/ PATH=/usr/local/bin:/usr/bin:/bin \
-        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0 \
         GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GIT_ALLOW_PROTOCOL=https \
         "$GIT_BIN" -c core.hooksPath=/dev/null -c init.templateDir=/dev/null \
         -c http.sslVerify=true -c core.fsmonitor=false -c core.untrackedCache=false \
@@ -395,7 +395,7 @@ validate_source_checkout() {
     git_client -C "$INSTALL_DIR" fsck --strict --no-dangling >/dev/null || die "release checkout object verification failed"
     git_client -C "$INSTALL_DIR" diff --no-ext-diff --no-textconv --quiet -- || die "release checkout has modified tracked files"
     git_client -C "$INSTALL_DIR" diff --cached --no-ext-diff --no-textconv --quiet -- || die "release checkout has staged changes"
-    for relative in deploy/release/consume-signed-release.sh deploy/release/sigstore-trusted-root.json deploy/release-policy.json deploy/release/signed-release.compose.yml deploy/runtime/compose-json.awk scripts/release_transition.py; do
+    for relative in deploy/release/consume-signed-release.sh deploy/release/sigstore-trusted-root.json deploy/release-policy.json deploy/release/signed-release.compose.yml deploy/runtime/compose-json.awk deploy/rabbitmq/upgrade-4.2.9.compose.yml deploy/rabbitmq/transition-4.3.compose.yml deploy/rabbitmq/90-legacy-source.conf deploy/rabbitmq/entrypoint.sh deploy/rabbitmq/volume-init.sh deploy/rabbitmq/uid-transition.sh scripts/release_transition.py; do
         validate_checkout_control_file "$relative"
     done
 }
@@ -1162,6 +1162,31 @@ cleanup_residues() {
     done < <(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -type d \( -name '.release-evidence.download.*' -o -name '.release-evidence.verify.*' \) -print0)
 }
 
+cleanup_command_output_residues() {
+    local residue="" base="" size="" count=0
+    for residue in "${INSTALL_DIR}"/.release-command-output.*; do
+        [[ -e "$residue" || -L "$residue" ]] || continue
+        base="$(basename -- "$residue")"
+        [[ "$base" =~ ^\.release-command-output\.[1-9][0-9]*\.[0-9]{1,5}\.[1-8]$ ]] \
+            || die "protected output capture residue has a noncanonical name"
+        count=$((count + 1)); (( count <= 8 )) \
+            || die "too many protected output capture residues exist"
+        [[ -f "$residue" && ! -L "$residue" \
+            && "$(file_uid "$residue")" == "$EUID" \
+            && "$(file_mode "$residue")" == "600" \
+            && "$(file_links "$residue")" == "1" ]] \
+            || die "protected output capture residue has an unsafe identity"
+        size="$(file_size "$residue")"
+        [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) \
+            || die "protected output capture residue is too large"
+        rm -f -- "$residue" \
+            || die "could not remove protected output capture residue"
+    done
+    if (( count > 0 )); then
+        durable_sync
+    fi
+}
+
 image_repo_digest_present() { docker_client image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null | grep -Fxq -- "$2"; }
 
 attest_cosign_image() {
@@ -1553,6 +1578,7 @@ main() {
     for docker_variable in DOCKER_API_VERSION DOCKER_CERT_PATH DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY SSL_CERT_DIR SSL_CERT_FILE; do [[ -n "${!docker_variable-}" ]] && DOCKER_ENV+=("${docker_variable}=${!docker_variable}"); done
     acquire_or_inherit_mutation_lock
     assert_mutation_lock_ownership
+    cleanup_command_output_residues
     attest_docker_daemon_platform
     INSTALLATION_PATH_DIGEST="$(sha256_text "$INSTALL_DIR")"
     WORKFLOW_IDENTITY="https://github.com/${SOURCE_REPOSITORY}/${RELEASE_WORKFLOW}@refs/tags/${RELEASE_TAG}"

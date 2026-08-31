@@ -8,8 +8,8 @@ the `signed-release` environment and set
 ## Trust and promotion model
 
 The release is an ordered, fail-closed chain:
-`release_regression` -> `build_scan` -> `sign_promote` -> `publish_evidence`.
-Each job must succeed before the next one can run, and the four jobs have separate
+`release_regression` -> `build_scan` -> `protected_rescan` -> `sign_promote` ->
+`publish_evidence`. Each job must succeed before the next one can run, and the five jobs have separate
 permission boundaries:
 
 1. `release_regression` calls the repository's reusable
@@ -19,21 +19,38 @@ permission boundaries:
    It has no package, OIDC, or release-publication permission and publishes no
    candidate image. A failure prevents `build_scan` from starting.
 2. `build_scan` also has only `contents: read`. It builds and scans private local
-   OCI layouts, records their digest-bound evidence, and uploads the candidate
-   workflow artifact. It has neither package-write nor OIDC permission and cannot
-   publish to a registry.
-3. `sign_promote` is protected by the `signed-release` environment. It installs
-   hash-verified Cosign and ORAS binaries, revalidates all downloaded evidence,
-   and is the only job with package-write and OIDC permission. After approval it
-   pushes the exact verified layouts only to the explicit `*-quarantine`
-   repositories, signs those digests, and verifies them online. Only then does it
+   OCI layouts and uploads an explicitly untrusted preview artifact for diagnostics.
+   That artifact is not downloaded, parsed, or reused by either protected job. The
+   preview has neither package-write nor OIDC permission and cannot publish to a
+   registry.
+3. `protected_rescan` is protected by the `signed-release` environment. It has
+   package-write permission for quarantine but no OIDC permission. After approval it
+   independently rebuilds all five multi-platform OCI layouts from the exact remote
+   commit with the pinned QEMU, BuildKit, and build action. It does not download the
+   preview artifact. From those protected layouts it freshly extracts the raw indexes
+   and BuildKit provenance, regenerates the migration transition, Syft/SPDX/CycloneDX
+   SBOMs, Trivy and Grype reports for all ten release-image platform children, all
+   verifier evidence, the release manifest, and the descriptor. It prepares fresh
+   copies of both exact locked vulnerability databases, exports only the exact
+   manifest-derived inventory into new private files, and pushes only the protected
+   layouts to the explicit `*-quarantine` repositories. No producer-authored layout,
+   SBOM, provenance, transition record, scan, manifest, or descriptor crosses this
+   boundary.
+4. `sign_promote` has package-write and OIDC permission but receives only that
+   protected exact-inventory artifact. It does not install or execute scanners and
+   never downloads or opens a producer OCI layout. Before registry credentials it
+   revalidates the exact inventory, policy, manifest, descriptor, scanner outputs, and
+   database receipts. It then re-fetches and byte-compares all five quarantine indexes,
+   ten release platform manifests, ten attestation manifests, and two verifier child
+   manifests before requesting an OIDC signature. Only after signing and online
+   verification does it
    copy the exact OCI index digest to an official SemVer tag. It signs the official
    digest separately and reruns the complete online verifier. Before promotion it
    also creates a canonical sixteen-line V2 consumer descriptor binding the tag,
    source commit, release-manifest SHA-256, all five official digest references,
    and the independently distributed verifier contract. It signs that descriptor
    as a blob with the same OIDC identity and verifies the bundle exactly.
-4. `publish_evidence` can write GitHub release contents but cannot write packages
+5. `publish_evidence` can write GitHub release contents but cannot write packages
    or request an OIDC token. It verifies the signed archive before publishing it.
 
 No candidate is built or published unless the read-only regression gate passes.
@@ -57,7 +74,7 @@ unverifiable image blocks completion and release-evidence publication.
 ## Immutable inputs and real provenance
 
 Every GitHub Action is pinned to a full commit. BuildKit and QEMU container images
-are digest pinned. Cosign, ORAS, Syft, and Trivy are downloaded directly from exact
+are digest pinned. Cosign, ORAS, Syft, Trivy, and Grype are downloaded directly from exact
 release asset URLs and installed only after their checked-in SHA-256 values match.
 No release installer script from another repository is executed.
 
@@ -91,11 +108,11 @@ the source verifier's immutable index, platform/config, runtime-contract and tru
 identity. Ranges, wildcards, mutable references, equal/higher source epochs, duplicates and
 unknown keys are rejected.
 
-The build job materializes the release application's exact amd64 child from the same
-content-addressed BuildKit cache as the retained multi-platform OCI layout. Before running
-it, the collector requires the local image configuration ID to equal the config digest in
-that exact OCI child and checks the release source/revision/version labels. It then executes
-the immutable image ID—not its mutable local tag—with no network, a read-only root,
+The protected rebuild job materializes the release application's exact amd64 child from
+the same protected remote-commit build inputs as the retained multi-platform OCI layout.
+Before running it, the collector requires the local image configuration ID to equal the
+config digest in that exact OCI child and checks the release source/revision/version labels.
+It then executes the immutable image ID—not its mutable local tag—with no network, a read-only root,
 dropped capabilities, `no-new-privileges`, bounded memory/CPU/PIDs and a private hardened
 tmpfs. The model-free inventory command loads Django's complete migration graph without a
 database, refuses replacement or non-transactional migrations, and emits canonical sorted
@@ -113,10 +130,10 @@ application image contains no staged-upgrade controller or source/target journal
 
 ## Scanner and SBOM policy
 
-Trivy and Syft run in a cleared environment with explicit trusted empty config
-files. Trivy also receives an explicit empty ignore file. Repository-local
-`.syft.yaml`, `trivy.yaml`, `.trivyignore`, environment overrides, and a hidden
-`--ignore-unfixed` flag cannot silently weaken the gate.
+Trivy, Grype, and Syft run in cleared environments with explicit trusted empty config
+files. Trivy also receives an explicit empty ignore file. Repository-local scanner
+configuration, ignore files, update settings, and hidden fixed-only flags cannot silently
+weaken the gate. Release Grype scans are VEX-free and reject every ignored finding.
 
 The recurring source and exact-image gates do not let Trivy resolve or update its
 mutable default vulnerability database. `deploy/trivy-db-lock.json` records one reviewed
@@ -130,6 +147,20 @@ against that isolated cache with database, Java-database, and check updates disa
 and with offline scanning enabled. The cache is rehashed after every image scan, and
 each retained source/image summary binds the lock, manifest, layer, database, and
 preparation evidence hashes.
+
+Grype uses a separate reviewed database and therefore supplies independent coverage.
+`deploy/grype-db-lock.json` binds one exact official v6 archive URL, archive size/hash,
+database schema/build/expiry, extracted database size/hash, and import metadata.
+`scripts/prepare_grype_db.py` refuses redirects, verifies the pinned Grype 0.116.1
+binary, imports the exact archive into a private cache, checks the only permitted cache
+members, and compares Grype's own database status with the lock. Scans disable database
+and application updates, reverify the cache after every image, and fail when the reviewed
+database expires. Both database locks and preparation records are hash-bound into the
+signed release manifest. Each individual Trivy and Grype report record also embeds the
+exact lock, preparation-record, extracted-database, schema, and generation-time receipt.
+The verifier checks Grype's own `descriptor.db` status and checks every report receipt
+against the protected database evidence, so a producer-authored report is never
+sufficient for signing.
 
 The upstream database artifact is digest-locked; this control does not claim that
 upstream signs it. A lock refresh is therefore a deliberate reviewed change, never an
@@ -147,9 +178,9 @@ automatic acceptance of whatever `:2` points to:
    fresh lock is merged, the scan is intentionally red once its exact `NextUpdate` is
    reached.
 
-The lock checked in on 2026-08-29 uses manifest
-`sha256:b494387b91d0e201f9a8945709a02eb66558cba454efa265b4638e7edde45132`
-and expires at `2026-08-30T13:02:57.331758258Z`. It is evidence for that bounded
+The lock refreshed on 2026-08-30 uses manifest
+`sha256:b50899ac59bda25cea33ba1305154a041f916cc5aeb9e1e0b4efe56caebdbd52`
+and expires at `2026-08-31T19:01:43.110911954Z`. It is evidence for that bounded
 window, not a permanent vulnerability result.
 
 Every exact platform child must have:
@@ -159,21 +190,31 @@ Every exact platform child must have:
 - an SPDX document with at least one package;
 - a CycloneDX document with at least one component; and
 - a structurally complete Trivy report with target/class/type metadata and a
-  nonempty package inventory.
+  nonempty package inventory; and
+- a Grype report whose embedded child manifest, image configuration, compressed layers,
+  tool version, effective no-suppression policy, and digest reference all match the same
+  exact platform child.
 
-Any HIGH or CRITICAL vulnerability fails, including one without a vendor fix. The
-checked-in policy has no allowlist. Scanner evidence, signing, registry lookup, and
+Any HIGH or CRITICAL vulnerability reported by either scanner fails, including one
+without a vendor fix. The checked-in release policy has no allowlist or VEX exception.
+Scanner evidence, signing, registry lookup, and
 consumer verification always use digest references; tags are never verification
 boundaries.
 
 ## Evidence and independent verification
 
-Both candidate and final workflow artifacts use GitHub's 90-day maximum retention.
+The untrusted preview and final workflow artifacts use GitHub's 90-day maximum retention.
 After final registry verification, the workflow makes a deterministic archive of
-the manifest, raw OCI objects, BuildKit provenance, SBOMs, Trivy reports, policy
+the manifest, raw OCI objects, BuildKit provenance, SBOMs, Trivy and Grype reports, policy
 snapshot, and Sigstore bundles. It signs that archive and publishes the archive,
 checksum, signature bundle, release manifest, manifest bundle, and policy as assets
 on the immutable Git tag's GitHub release.
+
+The protected artifact handed to the OIDC job is stricter than the final archive:
+`scripts/protect_release_evidence.py` derives its complete file and directory inventory
+from the validated manifest, copies each permitted input into a fresh `0600` file, and
+rejects missing files, hard links, symbolic links, unknown files, and unknown directories.
+The signer repeats that exact-inventory validation before obtaining registry credentials.
 
 With an extracted evidence archive and the policy-pinned Cosign and ORAS versions:
 
@@ -258,6 +299,16 @@ change updating the reviewed bytes, source commit, and hash. Release publishers 
 cannot override it. The fresh-cache, network-disabled Cosign acceptance gate must pass before
 the rotated root can authorize a release.
 
+The first-party verifier has already completed its one-time bootstrap and the ordinary
+release workflow neither rebuilds nor republishes it. Any reviewed verifier rotation that
+reuses the bootstrap publisher must first pre-create and grant authenticated read/write
+access to both exact GHCR package repositories:
+`ghcr.io/bilal414/backupsheep-release-verifier-quarantine` and
+`ghcr.io/bilal414/backupsheep-release-verifier`. Before its first write, the publisher
+requires a successful, bounded JSON tag inventory from both repositories. A `404` string
+or any other failed registry response is not evidence that a repository or tag is absent;
+GHCR can mask unreadable packages as not found, so that condition fails closed.
+
 ## Administrator-owned controls and remaining rollout gates
 
 Repository code cannot enforce these external controls. Before opt-in:
@@ -265,8 +316,9 @@ Repository code cannot enforce these external controls. Before opt-in:
 - protect `main` and release tags against force-update and deletion;
 - require reviewers on `signed-release` and disable administrator bypass;
 - restrict Actions to reviewed full-commit-pinned actions;
-- create/authorize both quarantine GHCR packages and official packages for the
-  workflow token, while denying unnecessary human write access;
+- pre-create and authorize every policy-listed quarantine and official GHCR package for
+  authenticated inventory and workflow writes, while denying unnecessary human write
+  access; a failed lookup or `404` is never an empty tag inventory;
 - configure lifecycle retention for rejected quarantine candidates and orphaned
   commit/run-bound official `staged-*` tags, without deleting a digest or referrer
   reachable from an official SemVer release;

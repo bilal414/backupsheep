@@ -3,6 +3,7 @@ import hashlib
 import os
 import signal
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -17,17 +18,31 @@ INSTALLER = ROOT / "install.sh"
 COMPOSE_JSON_PARSER = ROOT / "deploy" / "runtime" / "compose-json.awk"
 INSTALLATION_ID = "0123456789abcdef" * 4
 OTHER_INSTALLATION_ID = "fedcba9876543210" * 4
-PINNED_RABBIT_IMAGE = "rabbitmq:4.3.5-management@sha256:" + ("a" * 64)
+SOURCE_COMMIT = "a" * 40
+PINNED_RABBIT_IMAGE = f"backupsheep-rabbitmq:{SOURCE_COMMIT}"
 PINNED_RABBIT_IMAGE_ID = "sha256:" + ("b" * 64)
-PINNED_RABBIT_42_IMAGE = "rabbitmq:4.2.9-management@sha256:" + ("c" * 64)
+PINNED_RABBIT_42_IMAGE = f"backupsheep-rabbitmq-upgrade:{SOURCE_COMMIT}"
 PINNED_RABBIT_42_IMAGE_ID = "sha256:" + ("d" * 64)
-EGRESS_IMAGE = "backupsheep-egress:test"
+PINNED_RABBIT_313_IMAGE = f"backupsheep-rabbitmq-legacy-source:{SOURCE_COMMIT}"
+PINNED_RABBIT_313_IMAGE_ID = "sha256:" + ("6" * 64)
+RABBITMQ_43_FEATURE_FLAGS = (
+    "name stability state\n"
+    "khepri_db required enabled\n"
+    "required_flag required enabled"
+)
+EGRESS_IMAGE = f"backupsheep-egress:{SOURCE_COMMIT}"
 EGRESS_IMAGE_ID = "sha256:" + ("e" * 64)
-APP_IMAGE = "backupsheep:test"
+APP_IMAGE = f"backupsheep:{SOURCE_COMMIT}"
 APP_IMAGE_ID = "sha256:" + ("1" * 64)
-POSTGRES_IMAGE = "backupsheep-postgres:test"
+POSTGRES_IMAGE = f"backupsheep-postgres:{SOURCE_COMMIT}"
 POSTGRES_IMAGE_ID = "sha256:" + ("2" * 64)
 CONFIG_HASH = "f" * 64
+RABBITMQ_42_CONFIG_HASH = "4" * 64
+RABBITMQ_43_TRANSITION_CONFIG_HASH = "3" * 64
+RABBITMQ_313_CONFIG_HASH = "5" * 64
+RABBITMQ_313_RECOVERY_CONFIG_HASH = "7" * 64
+RABBITMQ_42_RECOVERY_CONFIG_HASH = "8" * 64
+RABBITMQ_43_RECOVERY_CONFIG_HASH = "9" * 64
 APP_PAIR_UP = (
     "up",
     "--detach",
@@ -202,11 +217,19 @@ EVENT_PATH = ROOT / "docker-events.jsonl"
 NETWORKS = __NETWORKS__
 VOLUMES = __VOLUMES__
 SERVICES = __SERVICES__
+INSTALLATION_ID = "0123456789abcdef" * 4
 ENVIRONMENT_KEYS = (
-    "BACKUPSHEEP_BIND_ADDRESS", "BACKUPSHEEP_IMAGE", "BACKUPSHEEP_POSTGRES_IMAGE",
+    "BACKUPSHEEP_BIND_ADDRESS", "BACKUPSHEEP_IMAGE_MODE", "BACKUPSHEEP_IMAGE",
+    "BACKUPSHEEP_POSTGRES_IMAGE", "BACKUPSHEEP_EGRESS_IMAGE",
+    "BACKUPSHEEP_RABBITMQ_IMAGE", "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE",
+    "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE",
     "BACKUPSHEEP_COMPOSE_PROJECT_NAME", "BACKUPSHEEP_INSTALLATION_ID",
     "BACKUPSHEEP_POSTGRES_STORAGE_GENERATION",
     "BACKUPSHEEP_POSTGRES_STORAGE_INTENT", "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS",
+    "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY",
+    "BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_IMAGE",
+    "BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_USER",
+    "BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_TARGET",
     "COMPOSE_BAKE", "COMPOSE_ENV_FILES",
     "COMPOSE_EXPERIMENTAL", "COMPOSE_FILE", "COMPOSE_MENU", "COMPOSE_PATH_SEPARATOR",
     "COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME", "COMPOSE_REMOVE_ORPHANS",
@@ -214,17 +237,31 @@ ENVIRONMENT_KEYS = (
     "DOCKER_DEFAULT_PLATFORM", "DOCKER_CONTEXT", "DOCKER_HOST",
     "LC_ALL",
 )
-PINNED_RABBIT_IMAGE = "rabbitmq:4.3.5-management@sha256:" + ("a" * 64)
+SOURCE_COMMIT = "a" * 40
+PINNED_RABBIT_IMAGE = f"backupsheep-rabbitmq:{SOURCE_COMMIT}"
 PINNED_RABBIT_IMAGE_ID = "sha256:" + ("b" * 64)
-PINNED_RABBIT_42_IMAGE = "rabbitmq:4.2.9-management@sha256:" + ("c" * 64)
+PINNED_RABBIT_42_IMAGE = f"backupsheep-rabbitmq-upgrade:{SOURCE_COMMIT}"
 PINNED_RABBIT_42_IMAGE_ID = "sha256:" + ("d" * 64)
-EGRESS_IMAGE = "backupsheep-egress:test"
+PINNED_RABBIT_313_IMAGE = f"backupsheep-rabbitmq-legacy-source:{SOURCE_COMMIT}"
+PINNED_RABBIT_313_IMAGE_ID = "sha256:" + ("6" * 64)
+EGRESS_IMAGE = f"backupsheep-egress:{SOURCE_COMMIT}"
 EGRESS_IMAGE_ID = "sha256:" + ("e" * 64)
-APP_IMAGE = "backupsheep:test"
+APP_IMAGE = f"backupsheep:{SOURCE_COMMIT}"
 APP_IMAGE_ID = "sha256:" + ("1" * 64)
-POSTGRES_IMAGE = "backupsheep-postgres:test"
+POSTGRES_IMAGE = f"backupsheep-postgres:{SOURCE_COMMIT}"
 POSTGRES_IMAGE_ID = "sha256:" + ("2" * 64)
 CONFIG_HASH = "f" * 64
+RABBITMQ_42_CONFIG_HASH = "4" * 64
+RABBITMQ_43_TRANSITION_CONFIG_HASH = "3" * 64
+RABBITMQ_313_CONFIG_HASH = "5" * 64
+RABBITMQ_313_RECOVERY_CONFIG_HASH = "7" * 64
+RABBITMQ_42_RECOVERY_CONFIG_HASH = "8" * 64
+RABBITMQ_43_RECOVERY_CONFIG_HASH = "9" * 64
+RABBITMQ_43_FEATURE_FLAGS = (
+    "name stability state\n"
+    "khepri_db required enabled\n"
+    "required_flag required enabled"
+)
 
 def load_state():
     if not STATE_PATH.exists():
@@ -282,10 +319,17 @@ def compose_subcommand(arguments):
         return argument
     return ""
 
-def canonical_yaml(project):
+def canonical_yaml(project, arguments):
     lines = [f"name: {project}", "services:"]
     for service in SERVICES:
-        lines.extend((f"  {service}:", "    image: backupsheep:test"))
+        pull_policy = state.get("service_pull_policies", {}).get(service, "never")
+        lines.extend(
+            (
+                f"  {service}:",
+                f"    image: {service_image(service)}",
+                f"    pull_policy: {pull_policy}",
+            )
+        )
     lines.append("networks:")
     for network in NETWORKS:
         lines.extend((f"  {network}:", f"    name: {project}_{network}"))
@@ -310,7 +354,65 @@ def image_id(reference):
         EGRESS_IMAGE: EGRESS_IMAGE_ID,
         PINNED_RABBIT_IMAGE: PINNED_RABBIT_IMAGE_ID,
         PINNED_RABBIT_42_IMAGE: PINNED_RABBIT_42_IMAGE_ID,
+        PINNED_RABBIT_313_IMAGE: PINNED_RABBIT_313_IMAGE_ID,
     }.get(reference, "")
+
+def image_metadata(reference):
+    rabbitmq_metadata = {
+        PINNED_RABBIT_IMAGE: {
+            "config_user": "100:101",
+            "labels": {
+                "com.backupsheep.rabbitmq.runtime-generation":
+                    "4.3.5-alpine3.23-openssl3.5.8-v2",
+                "com.backupsheep.rabbitmq.base-index-digest":
+                    "sha256:290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240",
+                "com.backupsheep.rabbitmq.openssl-donor-index-digest": "",
+                "com.backupsheep.rabbitmq.erlang-donor-index-digest": "",
+                "com.backupsheep.rabbitmq.erlang-runtime-version": "",
+                "com.backupsheep.rabbitmq.openssl-runtime-version": "3.5.8",
+                "com.backupsheep.rabbitmq.openssl-package-version": "3.5.8-r0",
+                "com.backupsheep.rabbitmq.gpgv-package-version": "",
+                "com.backupsheep.rabbitmq.enabled-plugins": "none",
+            },
+        },
+        PINNED_RABBIT_42_IMAGE: {
+            "config_user": "100:101",
+            "labels": {
+                "com.backupsheep.rabbitmq.runtime-generation":
+                    "4.2.9-alpine3.23-openssl3.5.8-v2",
+                "com.backupsheep.rabbitmq.base-index-digest":
+                    "sha256:b2e69a138ea46106d0336bf8741187cac59031b778517d9ed2c9740f139dfa5a",
+                "com.backupsheep.rabbitmq.openssl-donor-index-digest": "",
+                "com.backupsheep.rabbitmq.erlang-donor-index-digest": "",
+                "com.backupsheep.rabbitmq.erlang-runtime-version": "",
+                "com.backupsheep.rabbitmq.openssl-runtime-version": "3.5.8",
+                "com.backupsheep.rabbitmq.openssl-package-version": "3.5.8-r0",
+                "com.backupsheep.rabbitmq.gpgv-package-version": "",
+                "com.backupsheep.rabbitmq.enabled-plugins": "none",
+            },
+        },
+        PINNED_RABBIT_313_IMAGE: {
+            "config_user": "999:999",
+            "labels": {
+                "com.backupsheep.rabbitmq.runtime-generation":
+                    "3.13.7-otp26.2.5.21-openssl3.5.8-v3",
+                "com.backupsheep.rabbitmq.base-index-digest":
+                    "sha256:87178a0ee3e2f52980ba356d38646ed1056705ff2d5ff281f8965456eaa0c1e3",
+                "com.backupsheep.rabbitmq.openssl-donor-index-digest":
+                    "sha256:f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f469995a728c298b",
+                "com.backupsheep.rabbitmq.erlang-donor-index-digest":
+                    "sha256:f9007e3e435761bd7f88aafa4bfab20fd4107baa88e3ff45e935ef2aa3e892d5",
+                "com.backupsheep.rabbitmq.erlang-runtime-version": "26.2.5.21",
+                "com.backupsheep.rabbitmq.openssl-runtime-version": "3.5.8",
+                "com.backupsheep.rabbitmq.openssl-package-version":
+                    "3.0.13-0ubuntu3.15",
+                "com.backupsheep.rabbitmq.gpgv-package-version":
+                    "2.4.4-2ubuntu17.4",
+                "com.backupsheep.rabbitmq.enabled-plugins": "none",
+            },
+        },
+    }
+    return rabbitmq_metadata.get(reference, {})
 
 def compose_healthcheck(service):
     if service == "db":
@@ -320,7 +422,10 @@ def compose_healthcheck(service):
         }
     if service == "rabbitmq":
         return {
-            "test": ["CMD", "rabbitmq-diagnostics", "-q", "ping"],
+            "test": [
+                "CMD-SHELL",
+                'rabbitmq-diagnostics -q -n "${RABBITMQ_NODENAME}" ping',
+            ],
             "interval": "5s", "timeout": "5s", "retries": 10,
             "start_period": "30s",
         }
@@ -376,10 +481,28 @@ def service_stop_grace(service, arguments):
     return None, None
 
 def canonical_json(project, arguments):
+    transition_313 = any(
+        "source-3.13.7.compose.yml" in argument for argument in arguments
+    )
+    transition_42 = any(
+        "upgrade-4.2.9.compose.yml" in argument for argument in arguments
+    )
+    transition_43 = any(
+        "transition-4.3.compose.yml" in argument for argument in arguments
+    )
+    recovery = any(
+        "recovery.compose.yml" in argument for argument in arguments
+    )
     services = {}
+    rabbitmq_node_host = compose_env_value(
+        arguments, "BACKUPSHEEP_RABBITMQ_NODE_HOST", "rabbitmq"
+    )
     for service in SERVICES:
         model = {
             "image": service_image(service),
+            "pull_policy": state.get("service_pull_policies", {}).get(
+                service, "never"
+            ),
             "environment": {"BACKUPSHEEP_TEST_SERVICE": service},
             "logging": {
                 "driver": "json-file",
@@ -389,13 +512,101 @@ def canonical_json(project, arguments):
         healthcheck = compose_healthcheck(service)
         if healthcheck is not None:
             model["healthcheck"] = healthcheck
-        if service == "rabbitmq":
-            model["hostname"] = "rabbitmq"
+        if service == "rabbitmq-volume-init":
+            model["environment"]["BACKUPSHEEP_RABBITMQ_NODE_HOST"] = rabbitmq_node_host
+        elif service == "rabbitmq":
+            model["hostname"] = rabbitmq_node_host
+            model["environment"].update(
+                BACKUPSHEEP_RABBITMQ_NODE_HOST=rabbitmq_node_host,
+                RABBITMQ_NODENAME=f"rabbit@{rabbitmq_node_host}",
+            )
+            if transition_313 or transition_42 or transition_43:
+                target = "3.13" if transition_313 else "4.2" if transition_42 else "4.3"
+                model["image"] = (
+                    PINNED_RABBIT_313_IMAGE if transition_313
+                    else PINNED_RABBIT_42_IMAGE if transition_42
+                    else PINNED_RABBIT_IMAGE
+                )
+                if transition_313:
+                    model["environment"]["BACKUPSHEEP_RABBITMQ_DATA_GENERATION"] = "unattested"
+                model["environment"]["BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET"] = target
+                model["entrypoint"] = [
+                    "/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-entrypoint",
+                    "legacy-source" if transition_313 else "transition",
+                ]
+            if recovery:
+                recovery_version = os.environ.get(
+                    "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY", ""
+                )
+                if recovery_version:
+                    model["environment"][
+                        "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY"
+                    ] = recovery_version
+                model["restart"] = "no"
+        elif service == "rabbitmq-provision":
+            model["environment"].update(
+                BACKUPSHEEP_RABBITMQ_NODE_HOST=rabbitmq_node_host,
+                RABBITMQ_NODENAME=f"rabbit@{rabbitmq_node_host}",
+            )
         stop_grace, _ = service_stop_grace(service, arguments)
         if stop_grace is not None:
             model["stop_grace_period"] = stop_grace
         services[service] = model
-    return json.dumps({"name": project, "services": services}, separators=(",", ":"))
+    volumes = {
+        volume: {"name": f"{project}_{volume}"}
+        for volume in VOLUMES
+    }
+    if any(
+        Path(argument).name == "docker-compose.override.yml"
+        for argument in arguments
+    ):
+        extra_service = state.get("approved_override_extra_service")
+        if extra_service:
+            services[extra_service] = {
+                "image": "attacker/evil:latest",
+                "pull_policy": "never",
+                "privileged": True,
+            }
+        mutated_service = state.get("approved_override_mutated_service")
+        if mutated_service in services:
+            services[mutated_service]["command"] = ["/bin/sh", "-c", "attacker"]
+        backup_device = state.get("approved_override_backup_storage_device")
+        if backup_device:
+            volumes["backup_storage"].update(
+                driver="local",
+                driver_opts={"type": "none", "o": "bind", "device": backup_device},
+            )
+    return json.dumps(
+        {"name": project, "services": services, "volumes": volumes},
+        separators=(",", ":"),
+    )
+
+def rabbitmq_config_hash(arguments):
+    transition_313 = any(
+        "source-3.13.7.compose.yml" in argument for argument in arguments
+    )
+    transition_42 = any(
+        "upgrade-4.2.9.compose.yml" in argument for argument in arguments
+    )
+    transition_43 = any(
+        "transition-4.3.compose.yml" in argument for argument in arguments
+    )
+    recovery = any(
+        "recovery.compose.yml" in argument for argument in arguments
+    )
+    if recovery and transition_313:
+        return RABBITMQ_313_RECOVERY_CONFIG_HASH
+    if recovery and transition_42:
+        return RABBITMQ_42_RECOVERY_CONFIG_HASH
+    if recovery and transition_43:
+        return RABBITMQ_43_RECOVERY_CONFIG_HASH
+    if transition_313:
+        return RABBITMQ_313_CONFIG_HASH
+    if transition_42:
+        return RABBITMQ_42_CONFIG_HASH
+    if transition_43:
+        return RABBITMQ_43_TRANSITION_CONFIG_HASH
+    return CONFIG_HASH
 
 def docker_healthcheck(service):
     healthcheck = compose_healthcheck(service)
@@ -428,6 +639,16 @@ def matching_resources(resources, arguments):
             for resource_id, resource in resources.items()
             if volume_name in resource.get("volumes", ())
         ]
+    if resource_filter.startswith("name="):
+        name_pattern = resource_filter[len("name="):]
+        try:
+            return [
+                (resource_id, resource)
+                for resource_id, resource in resources.items()
+                if re.search(name_pattern, "/" + resource.get("name", ""))
+            ]
+        except re.error:
+            return []
     if not resource_filter.startswith("label="):
         return []
     expression = resource_filter[len("label="):]
@@ -449,6 +670,20 @@ def find_resource(resources, identifier):
     raise KeyError(identifier)
 
 def inspect_value(resource, template):
+    if template == '{{.Config.User}}|{{index .Config.Labels "com.backupsheep.rabbitmq.runtime-generation"}}|{{index .Config.Labels "com.backupsheep.rabbitmq.base-index-digest"}}|{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-donor-index-digest"}}|{{index .Config.Labels "com.backupsheep.rabbitmq.erlang-donor-index-digest"}}|{{index .Config.Labels "com.backupsheep.rabbitmq.erlang-runtime-version"}}|{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-runtime-version"}}|{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-package-version"}}|{{index .Config.Labels "com.backupsheep.rabbitmq.gpgv-package-version"}}|{{index .Config.Labels "com.backupsheep.rabbitmq.enabled-plugins"}}':
+        labels = resource.get("labels", {})
+        return "|".join((
+            resource.get("config_user", ""),
+            labels.get("com.backupsheep.rabbitmq.runtime-generation", ""),
+            labels.get("com.backupsheep.rabbitmq.base-index-digest", ""),
+            labels.get("com.backupsheep.rabbitmq.openssl-donor-index-digest", ""),
+            labels.get("com.backupsheep.rabbitmq.erlang-donor-index-digest", ""),
+            labels.get("com.backupsheep.rabbitmq.erlang-runtime-version", ""),
+            labels.get("com.backupsheep.rabbitmq.openssl-runtime-version", ""),
+            labels.get("com.backupsheep.rabbitmq.openssl-package-version", ""),
+            labels.get("com.backupsheep.rabbitmq.gpgv-package-version", ""),
+            labels.get("com.backupsheep.rabbitmq.enabled-plugins", ""),
+        ))
     label_match = re.search(r'index [^\"]*Labels[^\"]*\"([^\"]+)\"', template)
     if label_match:
         value = resource.get("labels", {}).get(label_match.group(1), "")
@@ -503,11 +738,24 @@ def inspect_value(resource, template):
         else:
             service = resource.get("labels", {}).get("com.docker.compose.service", "")
             default = ["PATH=/usr/bin", f"BACKUPSHEEP_TEST_SERVICE={service}"]
+            if service in {"rabbitmq-volume-init", "rabbitmq", "rabbitmq-provision"}:
+                default.append("BACKUPSHEEP_RABBITMQ_NODE_HOST=rabbitmq")
+            if service in {"rabbitmq", "rabbitmq-provision"}:
+                default.append("RABBITMQ_NODENAME=rabbit@rabbitmq")
         return json.dumps(resource.get("config_env", default), separators=(",", ":"))
     if template == "{{json .Config.Entrypoint}}":
         return json.dumps(resource.get("config_entrypoint"), separators=(",", ":"))
     if template == "{{json .Config.Cmd}}":
         return json.dumps(resource.get("config_cmd"), separators=(",", ":"))
+    if template == '{{.Config.User}}|{{json .Config.Entrypoint}}|{{json .Config.Cmd}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.AutoRemove}}':
+        return resource.get(
+            "transition_helper_contract",
+            '100:101|["/bin/sh"]|["-ceu","/usr/local/bin/backupsheep-rabbitmq-volume-init finalize-transition >/dev/null && /usr/local/bin/backupsheep-rabbitmq-volume-init verify >/dev/null"]|none|true|true',
+        )
+    if template == '{{.Config.User}}|{{json .Config.Entrypoint}}|{{json .Config.Cmd}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.AutoRemove}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.Privileged}}|{{.HostConfig.PidsLimit}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.NanoCpus}}':
+        return resource.get("clean_inspector_contract", "")
+    if template == '{{range .Config.Env}}{{println .}}{{end}}':
+        return "\n".join(resource.get("config_env", ()))
     if template == "{{.Path}}":
         configured = resource.get("config_entrypoint") or resource.get("config_cmd") or []
         return resource.get("path", configured[0] if configured else "")
@@ -771,6 +1019,8 @@ def inspect_value(resource, template):
         for target in targets:
             add("tmpfs", "", target, True)
         return "\n".join(lines)
+    if template == '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t\\n" .Type .Name .Source .Destination .RW}}{{end}}':
+        return resource.get("transition_helper_mounts", "")
     if template == '{{range .HostConfig.Binds}}{{println .}}{{end}}':
         runtime_mounts = inspect_value(
             resource,
@@ -792,11 +1042,20 @@ def inspect_value(resource, template):
             '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t|%s|%s\\n" .Type .Name .Source .Destination .RW .Propagation .Mode}}{{end}}',
         )
         records = []
+        service = resource.get("labels", {}).get("com.docker.compose.service", "")
         for line in runtime_mounts.splitlines():
             kind, name, _source, target, writable, _propagation, _mode = line.split("|")
             if kind == "volume":
+                no_copy = not (
+                    (service == "db" and target == "/var/lib/postgresql")
+                    or (
+                        service in {"rabbitmq-volume-init", "rabbitmq"}
+                        and target == "/var/lib/rabbitmq"
+                    )
+                )
                 records.append(
-                    f"volume|{name}|{target}|{'false' if writable == 'true' else 'true'}|true|true||0|false|false|false|false|false"
+                    f"volume|{name}|{target}|{'false' if writable == 'true' else 'true'}|"
+                    f"true|{str(no_copy).lower()}||0|false|false|false|false|false"
                 )
         return "\n".join(records)
     if template == '{{with index .HostConfig.PortBindings "8000/tcp"}}{{len .}}|{{range .}}{{.HostIp}}|{{.HostPort}}{{end}}{{else}}0||{{end}}':
@@ -895,11 +1154,22 @@ def inspect_value(resource, template):
         return resource.get(
             "runtime_policy", f"local|0|local|/var/lib/docker/volumes/{name}/_data"
         )
+    if template == "{{json .Options}}":
+        return json.dumps(resource.get("volume_options", {}), separators=(",", ":"))
+    if template == "{{.Driver}}|{{.Scope}}|{{.Mountpoint}}":
+        name = resource.get("name", "")
+        return resource.get(
+            "source_binding_policy",
+            f"local|local|/var/lib/docker/volumes/{name}/_data",
+        )
     return ""
 
 def handle_compose(arguments, state):
     command = compose_subcommand(arguments)
     project = option_value(arguments, "--project-name") or "backupsheep"
+    rabbitmq_node_host = compose_env_value(
+        arguments, "BACKUPSHEEP_RABBITMQ_NODE_HOST", "rabbitmq"
+    )
     command_index = arguments.index(command) if command in arguments else -1
     command_arguments = arguments[command_index + 1:] if command_index >= 0 else []
     if command == state.get("blocked_compose_command") and "--dry-run" not in arguments:
@@ -917,10 +1187,18 @@ def handle_compose(arguments, state):
         if "--hash" in command_arguments:
             hash_index = command_arguments.index("--hash")
             requested = command_arguments[hash_index + 1]
-            emit(f"{requested} {CONFIG_HASH}")
+            config_hash = (
+                rabbitmq_config_hash(arguments)
+                if requested == "rabbitmq"
+                else CONFIG_HASH
+            )
+            emit(f"{requested} {config_hash}")
             return
         if "--services" in command_arguments:
-            emit("\n".join(SERVICES))
+            services = list(SERVICES)
+            if any("upgrade-4.2.9.compose.yml" in argument for argument in arguments):
+                services.append("rabbitmq-uid-transition")
+            emit("\n".join(services))
             return
         if "--images" in command_arguments:
             images_index = command_arguments.index("--images")
@@ -933,7 +1211,9 @@ def handle_compose(arguments, state):
                     compose_file_count = sum(
                         1 for argument in arguments if argument == "-f"
                     )
-                    if any("upgrade-4.2.9.compose.yml" in argument for argument in arguments):
+                    if any("source-3.13.7.compose.yml" in argument for argument in arguments):
+                        emit(PINNED_RABBIT_313_IMAGE)
+                    elif any("upgrade-4.2.9.compose.yml" in argument for argument in arguments):
                         emit(PINNED_RABBIT_42_IMAGE)
                     elif compose_file_count == 1:
                         emit(PINNED_RABBIT_IMAGE)
@@ -947,41 +1227,215 @@ def handle_compose(arguments, state):
         if option_value(command_arguments, "--format") == "json" or "--format=json" in command_arguments:
             emit(canonical_json(project, arguments))
             return
-        emit(canonical_yaml(project))
+        emit(canonical_yaml(project, arguments))
+        return
+    if command == "run":
+        if "rabbitmq-clean-inspector" in command_arguments:
+            if not any(
+                "clean-inspector.compose.yml" in argument
+                for argument in arguments
+            ):
+                sys.exit(1)
+            sys.exit(state.get("rabbitmq_clean_inspector_exit_code", 0))
+        if "rabbitmq-volume-init" in command_arguments:
+            if any("backupsheep-rabbitmq-volume-init resume" in argument for argument in command_arguments):
+                sys.exit(state.get("rabbitmq_witness_resume_exit_code", 1))
+            return
+        if "rabbitmq-uid-transition" in command_arguments:
+            sys.exit(state.get("rabbitmq_uid_transition_exit_code", 0))
+    if command in {"stop", "rm"} and "rabbitmq" in command_arguments:
+        for resource_id, resource in list(state["containers"].items()):
+            if resource.get("labels", {}).get("com.docker.compose.service") != "rabbitmq":
+                continue
+            if command == "stop":
+                resource["state"] = "exited"
+                resource["health"] = ""
+            else:
+                del state["containers"][resource_id]
+        save_state(state)
         return
     if command == "up":
-        exit_code = state.get("compose_up_exit_code", 0)
+        selected_rabbit = "rabbitmq" in command_arguments
+        transition_313 = any(
+            "source-3.13.7.compose.yml" in argument for argument in arguments
+        )
+        transition_42 = any(
+            "upgrade-4.2.9.compose.yml" in argument for argument in arguments
+        )
+        transition_43 = any(
+            "transition-4.3.compose.yml" in argument for argument in arguments
+        )
+        recovery = any(
+            "recovery.compose.yml" in argument for argument in arguments
+        )
+        canonical_recreate = (
+            selected_rabbit
+            and "--force-recreate" in command_arguments
+            and not transition_313
+            and not transition_42
+            and not transition_43
+            and not recovery
+        )
+        if recovery:
+            exit_code = state.get("rabbitmq_recovery_compose_up_exit_code", 0)
+        elif canonical_recreate:
+            exit_code = state.get("canonical_compose_up_exit_code", 0)
+        else:
+            exit_code = state.get("compose_up_exit_code", 0)
         if exit_code:
             sys.exit(exit_code)
-        transition = state.pop("compose_up_transition_result", None)
-        if transition:
+        if recovery:
+            transition_key = "rabbitmq_recovery_compose_up_transition_result"
+        elif canonical_recreate:
+            transition_key = "canonical_compose_up_transition_result"
+        else:
+            transition_key = "compose_up_transition_result"
+        transition = state.pop(transition_key, None)
+        if selected_rabbit and (transition is not None or transition_313 or transition_42 or transition_43 or canonical_recreate):
+            transition = transition or {}
             rabbit = next(
-                resource
-                for resource in state["containers"].values()
-                if resource.get("labels", {}).get("com.docker.compose.service") == "rabbitmq"
+                (
+                    resource
+                    for resource in state["containers"].values()
+                    if resource.get("labels", {}).get("com.docker.compose.service") == "rabbitmq"
+                ),
+                None,
             )
+            if rabbit is None:
+                rabbit = {
+                    "name": f"{project}-rabbitmq-1",
+                    "labels": {
+                        "com.docker.compose.project": project,
+                        "com.docker.compose.project.working_dir": str(ROOT.resolve()),
+                        "com.docker.compose.service": "rabbitmq",
+                    },
+                }
+                state["containers"]["rabbit-container"] = rabbit
             compose_files = [
                 arguments[index + 1]
                 for index, argument in enumerate(arguments[:-1])
                 if argument == "-f"
             ]
             rabbit["labels"]["com.docker.compose.project.config_files"] = ",".join(compose_files)
-            rabbit["labels"]["com.backupsheep.installation-id"] = transition[
-                "installation_id"
-            ]
+            rabbit["labels"]["com.docker.compose.config-hash"] = transition.get(
+                "config_hash",
+                rabbitmq_config_hash(arguments),
+            )
+            rabbit["labels"]["com.backupsheep.installation-id"] = transition.get(
+                "installation_id",
+                INSTALLATION_ID,
+            )
             rabbit["state"] = transition.get("state", "running")
             rabbit["health"] = transition.get("health", "healthy")
             rabbit["config_image"] = transition.get(
-                "config_image", PINNED_RABBIT_IMAGE
+                "config_image",
+                PINNED_RABBIT_313_IMAGE if transition_313
+                else PINNED_RABBIT_42_IMAGE if transition_42
+                else PINNED_RABBIT_IMAGE,
             )
             rabbit["image_id"] = transition.get(
-                "image_id", PINNED_RABBIT_IMAGE_ID
+                "image_id",
+                PINNED_RABBIT_313_IMAGE_ID if transition_313
+                else PINNED_RABBIT_42_IMAGE_ID if transition_42
+                else PINNED_RABBIT_IMAGE_ID,
             )
+            rabbit["config_hostname"] = transition.get(
+                "config_hostname", rabbitmq_node_host
+            )
+            target = "3.13" if transition_313 else "4.2" if transition_42 else "4.3" if transition_43 else ""
+            recovery_version = os.environ.get(
+                "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY", ""
+            )
+            rabbit["config_env"] = transition.get(
+                "config_env",
+                ["PATH=/usr/bin", "BACKUPSHEEP_TEST_SERVICE=rabbitmq"]
+                + [
+                    f"BACKUPSHEEP_RABBITMQ_NODE_HOST={rabbitmq_node_host}",
+                    f"RABBITMQ_NODENAME=rabbit@{rabbitmq_node_host}",
+                ]
+                + (["BACKUPSHEEP_RABBITMQ_DATA_GENERATION=unattested"] if transition_313 else [])
+                + ([f"BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET={target}"] if target else []),
+            )
+            if recovery and recovery_version and not any(
+                record.startswith("BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=")
+                for record in rabbit["config_env"]
+            ):
+                rabbit["config_env"].append(
+                    f"BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY={recovery_version}"
+                )
+            rabbit["config_entrypoint"] = transition.get(
+                "config_entrypoint",
+                (
+                    [
+                        "/bin/sh",
+                        "/usr/local/bin/backupsheep-rabbitmq-entrypoint",
+                        "legacy-source" if transition_313 else "transition",
+                    ]
+                    if target else None
+                ),
+            )
+            rabbit.pop("path", None)
+            rabbit["volumes"] = [f"{project}_rabbitmq_data"]
+            if transition_313:
+                data_mountpoint = f"/var/lib/docker/volumes/{project}_rabbitmq_data/_data"
+                rabbit.update({
+                    "runtime_policy": "999:999|false|true||private|private|0|0|no|none",
+                    "attached_networks": "none",
+                    "restart_policy": "no",
+                    "tmpfs_policy": (
+                        "/run/backupsheep-rabbitmq|rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=999,gid=999\n"
+                        "/tmp|rw,noexec,nosuid,nodev,size=128m,mode=1777\n"
+                        "/var/log/rabbitmq|rw,noexec,nosuid,nodev,size=64m,mode=0750,uid=999,gid=999"
+                    ),
+                    "mounts": "\n".join((
+                        f"bind||{ROOT / 'deploy/rabbitmq/90-legacy-source.conf'}|/etc/rabbitmq/conf.d/90-backupsheep.conf|false|rprivate|ro",
+                        f"bind||{ROOT / 'deploy/rabbitmq/entrypoint.sh'}|/usr/local/bin/backupsheep-rabbitmq-entrypoint|false|rprivate|ro",
+                        f"bind||{ROOT / 'deploy/rabbitmq/volume-init.sh'}|/usr/local/bin/backupsheep-rabbitmq-volume-init|false|rprivate|ro",
+                        f"volume|{project}_rabbitmq_data|{data_mountpoint}|/var/lib/rabbitmq|true||",
+                        "tmpfs|||/tmp|true||",
+                        "tmpfs|||/var/log/rabbitmq|true||",
+                        "tmpfs|||/run/backupsheep-rabbitmq|true||",
+                    )),
+                    "host_mounts": (
+                        f"volume|{project}_rabbitmq_data|/var/lib/rabbitmq|false|"
+                        "true|true||0|false|false|false|false|false"
+                    ),
+                })
+            elif recovery:
+                for key in (
+                    "attached_networks", "tmpfs_policy", "mounts",
+                    "host_mounts", "host_binds",
+                ):
+                    rabbit.pop(key, None)
+                rabbit["runtime_policy"] = (
+                    "100:101|false|true||private|private|0|0|no|"
+                    f"{project}_app-broker"
+                )
+                rabbit["restart_policy"] = "no"
+            else:
+                for key in (
+                    "runtime_policy", "attached_networks", "restart_policy",
+                    "tmpfs_policy", "mounts", "host_mounts", "host_binds",
+                ):
+                    rabbit.pop(key, None)
             state["rabbitmq_server_version"] = transition.get(
-                "server_version", "4.3.5"
+                "server_version",
+                "3.13.7" if transition_313 else "4.2.9" if transition_42 else "4.3.5",
             )
+            state["rabbitmq_node"] = transition.get(
+                "rabbitmq_node", f"rabbit@{rabbitmq_node_host}"
+            )
+            default_feature_flags = (
+                "name stability state\n"
+                "khepri_db experimental disabled\n"
+                "stream_queue stable enabled"
+            ) if transition_313 else RABBITMQ_43_FEATURE_FLAGS
+            if recovery:
+                default_feature_flags = state.get(
+                    "rabbitmq_feature_flags", default_feature_flags
+                )
             state["rabbitmq_feature_flags"] = transition.get(
-                "feature_flags", "name stability state\nkhepri_db stable enabled"
+                "feature_flags", default_feature_flags
             )
             save_state(state)
 
@@ -1025,8 +1479,20 @@ def handle_collection(kind, arguments, state):
 def handle_raw_docker(arguments, state):
     if not arguments:
         return
+    if arguments[0:2] == ["context", "show"]:
+        emit(state.get("docker_context", os.environ.get("DOCKER_CONTEXT", "default")))
+        return
+    if arguments[0:2] == ["context", "inspect"]:
+        emit(state.get("docker_endpoint", "unix:///var/run/docker.sock"))
+        return
     if arguments[0] == "ps":
         matches = matching_resources(state["containers"], arguments)
+        if "--all" not in arguments and "-a" not in arguments:
+            matches = [
+                (resource_id, resource)
+                for resource_id, resource in matches
+                if resource.get("state") == "running"
+            ]
         emit("\n".join(resource_id for resource_id, _ in matches))
         return
     if arguments[0] == "network":
@@ -1035,6 +1501,15 @@ def handle_raw_docker(arguments, state):
     if arguments[0] == "volume":
         handle_collection("volumes", arguments, state)
         return
+    if arguments[0:2] == ["container", "rm"]:
+        identifier = arguments[-1]
+        for resource_id, resource in list(state["containers"].items()):
+            if resource_id == identifier or resource.get("name") == identifier:
+                del state["containers"][resource_id]
+                save_state(state)
+                emit(resource_id)
+                return
+        sys.exit(1)
     if arguments[0] == "inspect":
         template = option_value(arguments, "--format") or ""
         identifier = arguments[-1]
@@ -1046,11 +1521,14 @@ def handle_raw_docker(arguments, state):
     if arguments[0:2] == ["image", "inspect"]:
         template = option_value(arguments, "--format") or ""
         identifier = arguments[-1]
+        if identifier in state.get("missing_image_refs", []):
+            sys.exit(1)
         expected_id = image_id(identifier)
         if identifier.startswith("sha256:"):
             expected_id = identifier if identifier in {
                 APP_IMAGE_ID, POSTGRES_IMAGE_ID, EGRESS_IMAGE_ID,
                 PINNED_RABBIT_IMAGE_ID, PINNED_RABBIT_42_IMAGE_ID,
+                PINNED_RABBIT_313_IMAGE_ID,
             } else ""
         if not expected_id:
             sys.exit(1)
@@ -1061,6 +1539,19 @@ def handle_raw_docker(arguments, state):
         }
         effective_id = overrides.get(expected_id, expected_id)
         image = {"is_image": True, "id": effective_id}
+        reference = next(
+            (
+                candidate
+                for candidate in (
+                    APP_IMAGE, POSTGRES_IMAGE, EGRESS_IMAGE,
+                    PINNED_RABBIT_IMAGE, PINNED_RABBIT_42_IMAGE,
+                    PINNED_RABBIT_313_IMAGE,
+                )
+                if image_id(candidate) == expected_id
+            ),
+            identifier,
+        )
+        image.update(image_metadata(reference))
         if template == "{{.Id}}":
             emit(effective_id)
         else:
@@ -1069,15 +1560,43 @@ def handle_raw_docker(arguments, state):
     if arguments[0] == "exec":
         if "/usr/local/bin/backupsheep-egress-healthcheck" in arguments:
             sys.exit(state.get("guard_healthcheck_exit_code", 0))
+        elif "/usr/local/bin/backupsheep-rabbitmq-volume-init" in arguments:
+            action = arguments[-1]
+            sys.exit(state.get(f"rabbitmq_volume_{action}_exit_code", 0))
         elif "server_version" in arguments:
             emit(state.get("rabbitmq_server_version", "4.3.5"))
+        elif "enable_feature_flag" in arguments and arguments[-1] == "all":
+            exit_code = state.get("rabbitmq_enable_feature_flag_exit_code", 0)
+            if exit_code:
+                sys.exit(exit_code)
+            state["rabbitmq_feature_flags"] = RABBITMQ_43_FEATURE_FLAGS
+            save_state(state)
         elif "list_feature_flags" in arguments:
             emit(
                 state.get(
                     "rabbitmq_feature_flags",
-                    "name stability state\nkhepri_db stable enabled",
+                    RABBITMQ_43_FEATURE_FLAGS,
                 )
             )
+        elif "eval" in arguments and "node()." in arguments:
+            emit(state.get("rabbitmq_node", "rabbit@rabbitmq"))
+        elif "list_vhosts" in arguments:
+            emit(state.get("rabbitmq_vhosts", "/"))
+        elif "list_users" in arguments:
+            emit(state.get("rabbitmq_users", "guest\t[administrator]"))
+        elif "list_queues" in arguments:
+            emit(state.get("rabbitmq_queues", ""))
+    elif arguments[0] == "run":
+        if option_value(arguments, "--pull") != "never" or not any(
+            reference in arguments
+            for reference in (
+                PINNED_RABBIT_IMAGE,
+                PINNED_RABBIT_42_IMAGE,
+                PINNED_RABBIT_313_IMAGE,
+            )
+        ):
+            sys.exit(1)
+        sys.exit(state.get("raw_docker_run_exit_code", 0))
 
 arguments = sys.argv[1:]
 log_invocation(arguments)
@@ -1103,15 +1622,33 @@ class SecureComposeWrapperTests(TestCase):
         self.base_file = self.root / "docker-compose.yml"
         self.base_file.write_text(
             'name: "${BACKUPSHEEP_COMPOSE_PROJECT_NAME:?required}"\n'
-            "services:\n  app:\n    image: backupsheep:test\n",
+            f"services:\n  app:\n    image: {APP_IMAGE}\n",
             encoding="utf-8",
         )
         self.base_file.chmod(0o600)
+        for name in (
+            "Dockerfile.rabbitmq",
+            "Dockerfile.rabbitmq-upgrade",
+            "Dockerfile.rabbitmq-legacy-source",
+        ):
+            fixture = self.root / name
+            fixture.write_text("reviewed fixture\n", encoding="utf-8")
+            fixture.chmod(0o600)
         rabbit_dir = self.root / "deploy" / "rabbitmq"
         rabbit_dir.mkdir(parents=True, mode=0o700)
-        for name in ("volume-init.sh", "entrypoint.sh", "provision.sh", "90-backupsheep.conf"):
+        for name in (
+            "volume-init.sh", "entrypoint.sh", "provision.sh",
+            "90-backupsheep.conf", "90-legacy-source.conf", "uid-transition.sh",
+        ):
             fixture = rabbit_dir / name
             fixture.write_text("reviewed fixture\n", encoding="utf-8")
+            fixture.chmod(0o600)
+        for name in (
+            "transition-4.3.compose.yml", "source-3.13.7.compose.yml",
+            "recovery.compose.yml", "clean-inspector.compose.yml",
+        ):
+            fixture = rabbit_dir / name
+            fixture.write_text("services: {}\n", encoding="utf-8")
             fixture.chmod(0o600)
         runtime_dir = self.root / "deploy" / "runtime"
         runtime_dir.mkdir(mode=0o700)
@@ -1174,14 +1711,26 @@ class SecureComposeWrapperTests(TestCase):
         installation_value=f"'{INSTALLATION_ID}'",
         generation_value="'4.3'",
         egress_generation_value="'2'",
+        database_value="'backupsheep'",
         postgres_storage_generation="18-alpine-icu-v1-pending-fresh",
         postgres_storage_intent="new-empty-v1",
+        rabbitmq_node_host="rabbitmq",
+        image_mode="local-build",
         additional_lines=(),
     ):
         lines = [
             f"BACKUPSHEEP_COMPOSE_PROJECT_NAME='{project_name}'",
             "BACKUPSHEEP_BIND_ADDRESS='127.0.0.1'",
+            f"BACKUPSHEEP_IMAGE_MODE='{image_mode}'",
+            f"BACKUPSHEEP_IMAGE='{APP_IMAGE}'",
+            f"BACKUPSHEEP_POSTGRES_IMAGE='{POSTGRES_IMAGE}'",
+            f"BACKUPSHEEP_EGRESS_IMAGE='{EGRESS_IMAGE}'",
+            f"BACKUPSHEEP_RABBITMQ_IMAGE='{PINNED_RABBIT_IMAGE}'",
+            f"BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE='{PINNED_RABBIT_42_IMAGE}'",
+            f"BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE='{PINNED_RABBIT_313_IMAGE}'",
         ]
+        if database_value is not None:
+            lines.append(f"DB_NAME={database_value}")
         if installation_value is not None:
             lines.append(f"BACKUPSHEEP_INSTALLATION_ID={installation_value}")
         witness_installation = (installation_value or "").strip("'\"")
@@ -1211,6 +1760,8 @@ class SecureComposeWrapperTests(TestCase):
             )
         if generation_value is not None:
             lines.append(f"BACKUPSHEEP_RABBITMQ_DATA_GENERATION={generation_value}")
+        if rabbitmq_node_host is not None:
+            lines.append(f"BACKUPSHEEP_RABBITMQ_NODE_HOST='{rabbitmq_node_host}'")
         lines.extend(additional_lines)
         self.env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.env_file.chmod(0o600)
@@ -1308,13 +1859,38 @@ class SecureComposeWrapperTests(TestCase):
             check=check, capture_output=True, text=True,
         )
 
+    def rootful_docker_environment(self):
+        allowed = {Path("/var/run/docker.sock"), Path("/run/docker.sock")}
+        for socket_path in allowed:
+            try:
+                metadata = socket_path.lstat()
+                resolved = socket_path.parent.resolve(strict=True) / socket_path.name
+            except OSError:
+                continue
+            if (
+                stat.S_ISSOCK(metadata.st_mode)
+                and not stat.S_ISLNK(metadata.st_mode)
+                and metadata.st_uid == 0
+                and resolved in allowed
+            ):
+                return {
+                    "DOCKER_CONTEXT": "",
+                    "DOCKER_HOST": f"unix://{socket_path}",
+                }
+        self.skipTest("a real canonical root-owned Docker socket is unavailable")
+
     def wrapper_environment(self, extra_environment=None):
         environment = os.environ.copy()
         environment["PATH"] = f"{self.fake_bin}{os.pathsep}{environment['PATH']}"
         environment.update(
             BACKUPSHEEP_BIND_ADDRESS="0.0.0.0",
+            BACKUPSHEEP_IMAGE_MODE="signed-release",
             BACKUPSHEEP_IMAGE="attacker/image:latest",
             BACKUPSHEEP_POSTGRES_IMAGE="attacker/postgres:latest",
+            BACKUPSHEEP_EGRESS_IMAGE="attacker/egress:latest",
+            BACKUPSHEEP_RABBITMQ_IMAGE="attacker/rabbitmq:latest",
+            BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE="attacker/rabbitmq-upgrade:latest",
+            BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE="attacker/rabbitmq-legacy:latest",
             BACKUPSHEEP_COMPOSE_PROJECT_NAME="ambient-attacker",
             BACKUPSHEEP_INSTALLATION_ID=OTHER_INSTALLATION_ID,
             COMPOSE_BAKE="true",
@@ -1336,8 +1912,10 @@ class SecureComposeWrapperTests(TestCase):
             environment.update(extra_environment)
         return environment
 
-    def assert_refused(self, arguments, message):
-        result = self.run_wrapper(*arguments)
+    def assert_refused(self, arguments, message, *, extra_environment=None):
+        result = self.run_wrapper(
+            *arguments, extra_environment=extra_environment
+        )
         self.assertNotEqual(result.returncode, 0, arguments)
         self.assertIn(message, result.stderr, arguments)
         return result
@@ -1483,6 +2061,27 @@ class SecureComposeWrapperTests(TestCase):
         rabbit.chmod(0o600)
         return rabbit
 
+    def rabbit_source_overlay(self):
+        return self.root / "deploy" / "rabbitmq" / "source-3.13.7.compose.yml"
+
+    def prepare_legacy_rabbit_source(self, *, installation_id=INSTALLATION_ID):
+        self.write_env(generation_value="''")
+        self.set_state(
+            volumes={
+                "sentinel": self.sentinel(installation_id),
+                "rabbit-data": self.owned_volume(
+                    "rabbitmq_data", installation_id=installation_id
+                ),
+            }
+        )
+        result = self.run_wrapper(
+            "--prepare-rabbitmq-3.13-source",
+            "up", "--detach", "--no-deps", "rabbitmq",
+            check=True,
+        )
+        self.clear_events()
+        return result
+
     def rabbit_transition_state(
         self,
         *,
@@ -1495,13 +2094,44 @@ class SecureComposeWrapperTests(TestCase):
         container_image_ref=None,
         container_image_id=None,
         combined_rabbitmq_image=PINNED_RABBIT_IMAGE,
+        container_state="running",
+        container_health="healthy",
+        container_config_hash=None,
+        container_config_env=None,
+        container_config_entrypoint=None,
+        attest_exact_source=True,
     ):
+        transition_42 = "upgrade-4.2.9.compose.yml" in config_files
+        transition_43 = "transition-4.3.compose.yml" in config_files
+        if container_config_hash is None:
+            container_config_hash = (
+                RABBITMQ_42_CONFIG_HASH if transition_42
+                else RABBITMQ_43_TRANSITION_CONFIG_HASH if transition_43
+                else CONFIG_HASH
+            )
+        transition_target = "4.2" if transition_42 else "4.3" if transition_43 else ""
+        if container_config_env is None:
+            container_config_env = [
+                "PATH=/usr/bin",
+                "BACKUPSHEEP_TEST_SERVICE=rabbitmq",
+                "BACKUPSHEEP_RABBITMQ_NODE_HOST=rabbitmq",
+                "RABBITMQ_NODENAME=rabbit@rabbitmq",
+            ]
+            if transition_target:
+                container_config_env.append(
+                    f"BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET={transition_target}"
+                )
+        if container_config_entrypoint is None and transition_target:
+            container_config_entrypoint = [
+                "/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-entrypoint",
+                "transition",
+            ]
         rabbit_labels = {
             "com.docker.compose.project": "backupsheep",
             "com.docker.compose.project.working_dir": str(self.root.resolve()),
             "com.docker.compose.project.config_files": config_files,
             "com.docker.compose.service": "rabbitmq",
-            "com.docker.compose.config-hash": CONFIG_HASH,
+            "com.docker.compose.config-hash": container_config_hash,
         }
         if installation_id is not None:
             rabbit_labels["com.backupsheep.installation-id"] = installation_id
@@ -1513,36 +2143,30 @@ class SecureComposeWrapperTests(TestCase):
                     "stream_queue stable enabled"
                 )
             else:
-                feature_flags = "name stability state\nkhepri_db stable enabled"
+                feature_flags = RABBITMQ_43_FEATURE_FLAGS
         if container_image_ref is None:
             container_image_ref = (
-                PINNED_RABBIT_IMAGE
-                if server_version == "4.3.5"
-                else (
-                    PINNED_RABBIT_42_IMAGE
-                    if server_version == "4.2.9"
-                    else "rabbitmq:legacy-source"
-                )
+                PINNED_RABBIT_42_IMAGE if transition_42
+                else PINNED_RABBIT_IMAGE if transition_43 or not server_version.startswith("3.13.")
+                else "rabbitmq:legacy-source"
             )
         if container_image_id is None:
             container_image_id = (
-                PINNED_RABBIT_IMAGE_ID
-                if server_version == "4.3.5"
-                else (
-                    PINNED_RABBIT_42_IMAGE_ID
-                    if server_version == "4.2.9"
-                    else "sha256:" + ("f" * 64)
-                )
+                PINNED_RABBIT_42_IMAGE_ID if transition_42
+                else PINNED_RABBIT_IMAGE_ID if transition_43 or not server_version.startswith("3.13.")
+                else "sha256:" + ("f" * 64)
             )
         self.set_state(
             containers={
                 "rabbit-container": {
-                    "health": "healthy",
+                    "health": container_health,
                     "config_image": container_image_ref,
+                    "config_env": container_config_env,
+                    "config_entrypoint": container_config_entrypoint,
                     "image_id": container_image_id,
                     "labels": rabbit_labels,
                     "name": "backupsheep-rabbitmq-1",
-                    "state": "running",
+                    "state": container_state,
                 }
             },
             volumes={
@@ -1555,6 +2179,21 @@ class SecureComposeWrapperTests(TestCase):
             compose_up_exit_code=compose_up_exit_code,
             combined_rabbitmq_image=combined_rabbitmq_image,
         )
+        if transition_42 and attest_exact_source:
+            source_binding = hashlib.sha256(
+                (
+                    "BackupSheep/rabbitmq-source/v1|"
+                    f"{installation_id or ''}|backupsheep|{server_version}|"
+                    f"{config_files}|{container_config_hash}|"
+                    f"{container_image_ref}|{container_image_id}"
+                ).encode("ascii")
+            ).hexdigest()
+            self.write_rabbit_transition_ledger(
+                phase="attested",
+                source_class="4.2.9",
+                target="4.2",
+                source_binding=source_binding,
+            )
 
     def env_value(self, key):
         for line in self.env_file.read_text(encoding="utf-8").splitlines():
@@ -1562,13 +2201,71 @@ class SecureComposeWrapperTests(TestCase):
                 return line.split("=", 1)[1]
         return None
 
+    def write_rabbit_transition_ledger(
+        self,
+        *,
+        phase,
+        source_class,
+        target,
+        source_binding="9" * 64,
+        config_hash=None,
+        image_ref=None,
+        image_id=None,
+        final_newline=True,
+    ):
+        target_version = {
+            "3.13": "3.13.7", "4.2": "4.2.9", "4.3": "4.3.5"
+        }[target]
+        if config_hash is None:
+            config_hash = (
+                RABBITMQ_313_CONFIG_HASH if target == "3.13"
+                else RABBITMQ_42_CONFIG_HASH if target == "4.2"
+                else RABBITMQ_43_TRANSITION_CONFIG_HASH
+            )
+        if image_ref is None:
+            image_ref = (
+                PINNED_RABBIT_313_IMAGE if target == "3.13"
+                else PINNED_RABBIT_42_IMAGE if target == "4.2"
+                else PINNED_RABBIT_IMAGE
+            )
+        if image_id is None:
+            image_id = (
+                PINNED_RABBIT_313_IMAGE_ID if target == "3.13"
+                else PINNED_RABBIT_42_IMAGE_ID if target == "4.2"
+                else PINNED_RABBIT_IMAGE_ID
+            )
+        content = "\n".join(
+            (
+                "version=1",
+                f"installation_id={INSTALLATION_ID}",
+                "project_name=backupsheep",
+                f"phase={phase}",
+                f"source_class={source_class}",
+                f"source_binding={source_binding}",
+                f"target_version={target_version}",
+                f"target_config_hash={config_hash}",
+                f"target_image_ref={image_ref}",
+                f"target_image_id={image_id}",
+            )
+        )
+        if final_newline:
+            content += "\n"
+        path = self.root / ".backupsheep-rabbitmq-transition-state"
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+        return path
+
     def test_ambient_model_build_profile_and_identity_controls_are_removed(self):
         result = self.run_wrapper("config", "--services", check=True)
         self.assertEqual(result.stdout.splitlines(), list(CANONICAL_SERVICES))
         compose_events = self.compose_events()
-        self.assertEqual(len(compose_events), 2)
+        self.assertEqual(len(compose_events), 3)
         stripped = {
-            "BACKUPSHEEP_BIND_ADDRESS", "BACKUPSHEEP_IMAGE", "BACKUPSHEEP_POSTGRES_IMAGE",
+            "BACKUPSHEEP_BIND_ADDRESS", "BACKUPSHEEP_IMAGE_MODE",
+            "BACKUPSHEEP_IMAGE", "BACKUPSHEEP_POSTGRES_IMAGE",
+            "BACKUPSHEEP_EGRESS_IMAGE", "BACKUPSHEEP_RABBITMQ_IMAGE",
+            "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE",
+            "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE",
             "BACKUPSHEEP_COMPOSE_PROJECT_NAME", "BACKUPSHEEP_INSTALLATION_ID",
             "COMPOSE_ENV_FILES", "COMPOSE_FILE",
             "COMPOSE_PATH_SEPARATOR", "COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME",
@@ -1588,7 +2285,12 @@ class SecureComposeWrapperTests(TestCase):
             self.assertEqual(arguments[arguments.index("--project-name") + 1], "backupsheep")
             self.assertEqual(arguments[arguments.index("--env-file") + 1], str(self.env_file.resolve()))
             self.assertNotIn("foreign", arguments)
-            self.assertNotIn("operations", arguments)
+            if "operations" in arguments:
+                profile_index = arguments.index("--profile")
+                self.assertEqual(
+                    arguments[profile_index : profile_index + 3],
+                    ["--profile", "operations", "config"],
+                )
             self.assertNotIn("/tmp/attacker.yml", arguments)
 
     def test_overlays_require_explicit_approval_and_have_canonical_order(self):
@@ -1607,13 +2309,23 @@ class SecureComposeWrapperTests(TestCase):
             "config", "--quiet", check=True,
         )
         expected_files = [str(self.base_file.resolve()), str(override.resolve()), str(rabbit.resolve())]
+        saw_active_model = False
         for event in self.compose_events():
             arguments = event["argv"]
             actual_files = [
                 arguments[index + 1] for index, argument in enumerate(arguments)
                 if argument == "-f"
             ]
-            self.assertEqual(actual_files, expected_files)
+            self.assertIn(
+                actual_files,
+                (
+                    [str(self.base_file.resolve())],
+                    [str(self.base_file.resolve()), str(override.resolve())],
+                    expected_files,
+                ),
+            )
+            saw_active_model = saw_active_model or actual_files == expected_files
+        self.assertTrue(saw_active_model)
         duplicate = self.run_wrapper(
             "--approved-compose-file", str(override),
             "--approved-compose-file", str(override), "config",
@@ -1635,6 +2347,294 @@ class SecureComposeWrapperTests(TestCase):
         self.assert_refused(
             ("--approved-compose-file", str(override), "config"),
             "must not be writable by group",
+        )
+
+    def test_approved_override_cannot_change_services_or_pull_policy(self):
+        override = self.root / "docker-compose.override.yml"
+        override.write_text("services: {}\n", encoding="utf-8")
+        override.chmod(0o600)
+        approved = ("--approved-compose-file", str(override))
+
+        self.set_state(approved_override_extra_service="evil")
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "changed reviewed Compose key services",
+        )
+
+        self.set_state(approved_override_mutated_service="app")
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "changed reviewed Compose key services",
+        )
+
+        self.set_state(service_pull_policies={"app": "always"})
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "must retain pull_policy: never",
+        )
+
+    def test_approved_backup_storage_bind_is_exactly_attested(self):
+        local_docker = self.rootful_docker_environment()
+        device_path = self.root / "approved-backup-storage"
+        device_path.mkdir(mode=0o700)
+        device = str(device_path.resolve(strict=True))
+        override = self.root / "docker-compose.override.yml"
+        override.write_text(
+            "volumes:\n"
+            "  backup_storage:\n"
+            "    driver: local\n"
+            "    driver_opts:\n"
+            "      type: none\n"
+            "      o: bind\n"
+            f"      device: {device}\n",
+            encoding="utf-8",
+        )
+        override.chmod(0o600)
+        backup_storage = self.owned_volume("backup_storage")
+        backup_storage.update(
+            runtime_policy=(
+                "local|3|local|/var/lib/docker/volumes/"
+                "backupsheep_backup_storage/_data"
+            ),
+            volume_options={"type": "none", "o": "bind", "device": device},
+        )
+        self.set_state(
+            volumes={
+                "sentinel": self.sentinel(),
+                "backup-storage": backup_storage,
+            },
+            approved_override_backup_storage_device=device,
+        )
+        approved = ("--approved-compose-file", str(override))
+        self.run_wrapper(
+            *approved, "ps", "--all", check=True,
+            extra_environment=local_docker,
+        )
+
+        backup_storage["volume_options"]["device"] = "/mnt/other"
+        self.set_state(
+            volumes={
+                "sentinel": self.sentinel(),
+                "backup-storage": backup_storage,
+            },
+            approved_override_backup_storage_device=device,
+        )
+        self.assert_refused(
+            (*approved, "ps", "--all"),
+            "options differ from the exact reviewed bind target",
+            extra_environment=local_docker,
+        )
+
+        self.set_state(approved_override_backup_storage_device="/")
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "cannot be the host root",
+            extra_environment=local_docker,
+        )
+
+        self.set_state(approved_override_backup_storage_device=device)
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "requires the canonical local rootful Docker socket",
+            extra_environment={
+                "DOCKER_CONTEXT": "",
+                "DOCKER_HOST": "ssh://reviewed-daemon",
+            },
+        )
+
+        self.set_state(
+            approved_override_backup_storage_device=device,
+            docker_context="remote-review",
+            docker_endpoint="ssh://backup-host",
+        )
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "requires the canonical local rootful Docker socket",
+            extra_environment={
+                "DOCKER_CONTEXT": "remote-review",
+                "DOCKER_HOST": "",
+            },
+        )
+
+        self.set_state(
+            approved_override_backup_storage_device=device,
+            docker_context="forwarded-review",
+            docker_endpoint="unix:///tmp/remote-docker.sock",
+        )
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "requires the canonical local rootful Docker socket",
+            extra_environment={
+                "DOCKER_CONTEXT": "forwarded-review",
+                "DOCKER_HOST": "",
+            },
+        )
+
+    def test_approved_backup_storage_remote_endpoint_rejection_is_platform_independent(self):
+        # Keep this endpoint-focused fixture outside host-control roots even
+        # when the test runner's executable TMPDIR is intentionally under
+        # /run. Endpoint rejection occurs before local directory inspection.
+        device = "/tmp/backupsheep-remote-endpoint-fixture"
+        override = self.root / "docker-compose.override.yml"
+        override.write_text(
+            "volumes:\n"
+            "  backup_storage:\n"
+            "    driver: local\n"
+            "    driver_opts:\n"
+            "      type: none\n"
+            "      o: bind\n"
+            f"      device: {device}\n",
+            encoding="utf-8",
+        )
+        override.chmod(0o600)
+        approved = ("--approved-compose-file", str(override))
+        cases = (
+            (
+                {"DOCKER_CONTEXT": "", "DOCKER_HOST": "ssh://remote"},
+                {},
+            ),
+            (
+                {"DOCKER_CONTEXT": "forwarded", "DOCKER_HOST": ""},
+                {
+                    "docker_context": "forwarded",
+                    "docker_endpoint": "unix:///tmp/remote-docker.sock",
+                },
+            ),
+        )
+        for environment, state in cases:
+            with self.subTest(environment=environment):
+                self.set_state(
+                    approved_override_backup_storage_device=device,
+                    **state,
+                )
+                self.assert_refused(
+                    (*approved, "config", "--quiet"),
+                    "requires the canonical local rootful Docker socket",
+                    extra_environment=environment,
+                )
+
+    def test_approved_backup_storage_rejects_symlinks_and_inode_replacement(self):
+        local_docker = self.rootful_docker_environment()
+        real_device = self.root / "real-backup-storage"
+        real_device.mkdir(mode=0o700)
+        linked_device = self.root / "linked-backup-storage"
+        linked_device.symlink_to(real_device, target_is_directory=True)
+        override = self.root / "docker-compose.override.yml"
+        override.write_text(
+            "volumes:\n"
+            "  backup_storage:\n"
+            "    driver: local\n"
+            "    driver_opts:\n"
+            "      type: none\n"
+            "      o: bind\n"
+            f"      device: {linked_device}\n",
+            encoding="utf-8",
+        )
+        override.chmod(0o600)
+        approved = ("--approved-compose-file", str(override))
+        self.set_state(
+            approved_override_backup_storage_device=str(linked_device)
+        )
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "must already be a real directory",
+            extra_environment=local_docker,
+        )
+
+        linked_device.unlink()
+        real_parent = self.root / "real-storage-parent"
+        nested_device = real_parent / "nested"
+        nested_device.mkdir(parents=True, mode=0o700)
+        linked_parent = self.root / "linked-storage-parent"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        symlink_component_device = linked_parent / "nested"
+        self.set_state(
+            approved_override_backup_storage_device=str(symlink_component_device)
+        )
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "canonical and contain no symlink component",
+            extra_environment=local_docker,
+        )
+        linked_parent.unlink()
+
+        device = str(real_device.resolve(strict=True))
+        override.write_text(
+            "volumes:\n"
+            "  backup_storage:\n"
+            "    driver: local\n"
+            "    driver_opts:\n"
+            "      type: none\n"
+            "      o: bind\n"
+            f"      device: {device}\n",
+            encoding="utf-8",
+        )
+        override.chmod(0o600)
+        self.set_state(approved_override_backup_storage_device=device)
+        self.run_wrapper(
+            *approved, "build", "app", check=True,
+            extra_environment=local_docker,
+        )
+        ledger = self.root / ".backupsheep-backup-storage-identity"
+        self.assertTrue(ledger.is_file())
+        self.assertIn("version=2\n", ledger.read_text(encoding="utf-8"))
+        self.assertIn(f"device={device}\n", ledger.read_text(encoding="utf-8"))
+        self.assertRegex(
+            ledger.read_text(encoding="utf-8"),
+            r"ancestor_sha256=[0-9a-f]{64}\n?$",
+        )
+
+        replaced = self.root / "replaced-backup-storage"
+        real_device.rename(replaced)
+        real_device.mkdir(mode=0o700)
+        self.assert_refused(
+            (*approved, "config", "--quiet"),
+            "differs from its installation ledger",
+            extra_environment=local_docker,
+        )
+
+    def test_approved_backup_storage_rejects_attacker_writable_ancestor(self):
+        local_docker = self.rootful_docker_environment()
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-unsafe-storage-",
+            dir=self.root.parent,
+        ) as unsafe_parent_raw:
+            unsafe_parent = Path(unsafe_parent_raw)
+            unsafe_parent.chmod(0o777)
+            device_path = unsafe_parent / "backup-storage"
+            device_path.mkdir(mode=0o700)
+            device = str(device_path.resolve(strict=True))
+            override = self.root / "docker-compose.override.yml"
+            override.write_text(
+                "volumes:\n"
+                "  backup_storage:\n"
+                "    driver: local\n"
+                "    driver_opts:\n"
+                "      type: none\n"
+                "      o: bind\n"
+                f"      device: {device}\n",
+                encoding="utf-8",
+            )
+            override.chmod(0o600)
+            self.set_state(approved_override_backup_storage_device=device)
+            self.assert_refused(
+                ("--approved-compose-file", str(override), "config", "--quiet"),
+                "attacker-writable without a root-owned sticky boundary",
+                extra_environment=local_docker,
+            )
+
+    def test_backup_storage_target_allows_only_safe_install_or_service_ownership(self):
+        source = self.wrapper.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "10#$target_owner == 0 || 10#$target_owner == EUID",
+            source,
+        )
+        self.assertIn("10#$target_owner == 10004", source)
+        self.assertIn("(8#$target_mode & 8#022) == 0", source)
+        self.assertIn(
+            '"$(dirname -- "$reviewed_backup_storage_device")")"',
+            source,
         )
 
     def test_caller_cannot_replace_model_project_environment_or_orphan_policy(self):
@@ -1752,6 +2752,36 @@ class SecureComposeWrapperTests(TestCase):
             )
         )
         self.run_wrapper("config", "--quiet", check=True)
+
+    def test_database_name_uses_the_stock_non_system_identifier_contract(self):
+        for value in (
+            None,
+            "",
+            "postgres",
+            "template0",
+            "template1",
+            "Tenant",
+            "tenant-name",
+            "ténant",
+            "1tenant",
+            " tenant",
+            "tenant ",
+            "a" * 64,
+        ):
+            with self.subTest(value=value):
+                database_value = None if value is None else f"'{value}'"
+                self.write_env(database_value=database_value)
+                self.clear_events()
+                self.assert_refused(
+                    ("config", "--quiet"),
+                    "DB_NAME must be a non-system lowercase PostgreSQL database identifier",
+                )
+                self.assertEqual(self.events(), [])
+
+        for value in ("backupsheep", "_backupsheep", "tenant_1", "a" * 63):
+            with self.subTest(value=value):
+                self.write_env(database_value=f"'{value}'")
+                self.run_wrapper("config", "--quiet", check=True)
 
     def test_nul_bytes_in_env_are_rejected_before_parsing_or_docker(self):
         original = self.env_file.read_bytes()
@@ -2536,7 +3566,7 @@ class SecureComposeWrapperTests(TestCase):
             "ownership sentinel belongs to a different BackupSheep installation",
         )
 
-    def test_verified_sentinel_unblocks_blank_identity_legacy_rabbit_transition(self):
+    def test_blank_identity_legacy_rabbit_requires_exact_source_adoption(self):
         self.write_env(generation_value="''")
         overlay = self.rabbit_overlay()
         self.rabbit_transition_state(
@@ -2544,12 +3574,21 @@ class SecureComposeWrapperTests(TestCase):
             server_version="3.13.7",
             installation_id=None,
         )
-        self.run_wrapper(
-            "--approved-compose-file", str(overlay),
-            "--allow-rabbitmq-generation-transition=4.2",
-            "up", "--detach", "--no-deps", "rabbitmq",
-            check=True,
+        self.assert_refused(
+            (
+                "--approved-compose-file", str(overlay),
+                "--allow-rabbitmq-generation-transition=4.2",
+                "up", "--detach", "--no-deps", "rabbitmq",
+            ),
+            "outside the exact 3.13 adoption or 4.2 target history",
         )
+
+        self.prepare_legacy_rabbit_source()
+        ledger = (self.root / ".backupsheep-rabbitmq-transition-state").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("phase=attested\n", ledger)
+        self.assertIn("source_class=3.13.7\n", ledger)
 
     def test_legacy_rabbit_volume_blocks_broad_up_and_option_value_decoys(self):
         self.write_env(generation_value="''")
@@ -2652,34 +3691,231 @@ class SecureComposeWrapperTests(TestCase):
             "compatibility overlay may mutate only through",
         )
 
+    def test_signed_release_refuses_every_rabbitmq_generation_transition_before_docker(self):
+        self.write_env(
+            generation_value="''",
+            image_mode="signed-release",
+        )
+        for target in ("4.2", "4.3"):
+            with self.subTest(target=target):
+                self.clear_events()
+                refused = self.run_wrapper(
+                    f"--allow-rabbitmq-generation-transition={target}",
+                    "up", "--detach", "--no-deps", "rabbitmq",
+                )
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("signed-release mode is fresh-only", refused.stderr)
+                self.assertEqual(self.events(), [])
+        self.clear_events()
+        refused = self.run_wrapper(
+            "--prepare-rabbitmq-3.13-source",
+            "up", "--detach", "--no-deps", "rabbitmq",
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("signed-release mode is fresh-only", refused.stderr)
+        self.assertEqual(self.events(), [])
+
+    def test_preexisting_local_rabbit_image_without_ledger_is_sanitized_rebuilt(self):
+        self.write_env(generation_value="''")
+        self.set_state(
+            volumes={
+                "sentinel": self.sentinel(),
+                "rabbit-data": self.owned_volume("rabbitmq_data"),
+            }
+        )
+
+        self.run_wrapper(
+            "--prepare-rabbitmq-3.13-source",
+            "up", "--detach", "--no-deps", "rabbitmq",
+            check=True,
+        )
+
+        build_events = self.compose_events("build")
+        self.assertEqual(len(build_events), 1)
+        build_arguments = build_events[0]["argv"]
+        self.assertEqual(
+            build_arguments[-4:],
+            ["build", "--pull", "--no-cache", "rabbitmq"],
+        )
+        self.assertEqual(
+            [
+                build_arguments[index + 1]
+                for index, argument in enumerate(build_arguments)
+                if argument == "-f"
+            ],
+            [str(self.base_file.resolve()), str(self.rabbit_source_overlay().resolve())],
+        )
+        for key in (
+            "BACKUPSHEEP_IMAGE_MODE",
+            "BACKUPSHEEP_RABBITMQ_IMAGE",
+            "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE",
+            "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE",
+            "COMPOSE_FILE",
+            "COMPOSE_PROFILES",
+        ):
+            self.assertEqual(build_events[0]["env"][key], "<unset>", key)
+
     def test_valid_42_transition_uses_base_then_rabbit_model_history(self):
         rabbit = self.rabbit_overlay()
-        self.write_env(generation_value="''")
-        self.rabbit_transition_state(
-            config_files=str(self.base_file.resolve()),
-            server_version="3.13.7",
-        )
+        self.prepare_legacy_rabbit_source()
         self.run_wrapper(
             "--approved-compose-file", str(rabbit),
             "--allow-rabbitmq-generation-transition=4.2",
             "up", "--detach", "--no-deps", "rabbitmq",
             check=True,
         )
-        expected_files = [str(self.base_file.resolve()), str(rabbit.resolve())]
-        for event in self.compose_events():
-            arguments = event["argv"]
-            actual_files = [
-                arguments[index + 1]
-                for index, argument in enumerate(arguments)
+        build_events = self.compose_events("build")
+        self.assertEqual(len(build_events), 1)
+        self.assertEqual(
+            build_events[0]["argv"][-4:],
+            ["build", "--pull", "--no-cache", "rabbitmq"],
+        )
+        self.assertEqual(
+            [
+                build_events[0]["argv"][index + 1]
+                for index, argument in enumerate(build_events[0]["argv"])
                 if argument == "-f"
-            ]
-            self.assertEqual(actual_files, expected_files)
+            ],
+            [str(self.base_file.resolve()), str(rabbit.resolve())],
+        )
+        target_up = self.compose_events("up")
+        self.assertEqual(len(target_up), 1)
+        self.assertEqual(
+            [
+                target_up[0]["argv"][index + 1]
+                for index, argument in enumerate(target_up[0]["argv"])
+                if argument == "-f"
+            ],
+            [str(self.base_file.resolve()), str(rabbit.resolve())],
+        )
+        uid_runs = [
+            event for event in self.compose_events("run")
+            if "rabbitmq-uid-transition" in event["argv"]
+        ]
+        self.assertEqual(len(uid_runs), 1)
         diagnostic = [
             event for event in self.raw_events("exec")
             if "server_version" in event["argv"]
         ]
-        self.assertEqual(len(diagnostic), 1)
-        self.assertEqual(diagnostic[0]["argv"][1:3], ["--user", "rabbitmq"])
+        self.assertEqual(len(diagnostic), 2)
+        for event in diagnostic:
+            self.assertEqual(event["argv"][1:3], ["--user", "rabbitmq"])
+
+    def test_exact_healthy_42_target_skips_recreation_but_completes_postflight(self):
+        rabbit = self.rabbit_overlay()
+        target_history = f"{self.base_file.resolve()},{rabbit.resolve()}"
+        arguments = (
+            "--approved-compose-file", str(rabbit),
+            "--allow-rabbitmq-generation-transition=4.2",
+            "up", "--detach", "--no-deps", "rabbitmq",
+        )
+        for phase in ("target-ready", "attested"):
+            with self.subTest(phase=phase):
+                self.write_env(generation_value="''")
+                self.rabbit_transition_state(
+                    config_files=target_history,
+                    server_version="4.2.9",
+                )
+                if phase == "target-ready":
+                    self.write_rabbit_transition_ledger(
+                        phase="target-ready",
+                        source_class="3.13.7",
+                        target="4.2",
+                    )
+                self.clear_events()
+
+                self.run_wrapper(*arguments, check=True)
+
+                self.assertEqual(self.compose_events("build"), [])
+                self.assertEqual(self.compose_events("up"), [])
+                self.assertEqual(
+                    [
+                        event for event in self.compose_events("run")
+                        if "rabbitmq-uid-transition" in event["argv"]
+                    ],
+                    [],
+                )
+                diagnostics = [
+                    event for event in self.raw_events("exec")
+                    if "server_version" in event["argv"]
+                ]
+                self.assertEqual(len(diagnostics), 2)
+                ledger = (
+                    self.root / ".backupsheep-rabbitmq-transition-state"
+                ).read_text(encoding="utf-8")
+                self.assertIn("phase=attested\n", ledger)
+                self.assertIn("source_class=4.2.9\n", ledger)
+
+    def test_matching_transition_ledger_requires_the_exact_local_image_id(self):
+        rabbit = self.rabbit_overlay()
+        target_history = f"{self.base_file.resolve()},{rabbit.resolve()}"
+        self.write_env(generation_value="''")
+        self.rabbit_transition_state(
+            config_files=target_history,
+            server_version="4.2.9",
+        )
+        self.write_rabbit_transition_ledger(
+            phase="attested",
+            source_class="4.2.9",
+            target="4.2",
+            image_id="sha256:" + ("0" * 64),
+        )
+        self.clear_events()
+
+        self.assert_refused(
+            (
+                "--approved-compose-file", str(rabbit),
+                "--allow-rabbitmq-generation-transition=4.2",
+                "up", "--detach", "--no-deps", "rabbitmq",
+            ),
+            "protected RabbitMQ transition image ID changed",
+        )
+        self.assertEqual(self.compose_events("build"), [])
+        self.assertEqual(self.compose_events("up"), [])
+
+    def test_nonhealthy_or_absent_exact_42_target_is_force_recreated(self):
+        rabbit = self.rabbit_overlay()
+        target_history = f"{self.base_file.resolve()},{rabbit.resolve()}"
+        arguments = (
+            "--approved-compose-file", str(rabbit),
+            "--allow-rabbitmq-generation-transition=4.2",
+            "up", "--detach", "--no-deps", "rabbitmq",
+        )
+        scenarios = (
+            ("created", "created", ""),
+            ("exited", "exited", ""),
+            ("unhealthy", "running", "unhealthy"),
+            ("absent", None, None),
+        )
+        for scenario, container_state, container_health in scenarios:
+            with self.subTest(scenario=scenario):
+                self.write_env(generation_value="''")
+                if scenario == "absent":
+                    self.set_state(
+                        volumes={
+                            "sentinel": self.sentinel(),
+                            "rabbit-data": self.owned_volume("rabbitmq_data"),
+                        }
+                    )
+                    self.write_rabbit_transition_ledger(
+                        phase="attested",
+                        source_class="4.2.9",
+                        target="4.2",
+                    )
+                else:
+                    self.rabbit_transition_state(
+                        config_files=target_history,
+                        server_version="4.2.9",
+                        container_state=container_state,
+                        container_health=container_health,
+                    )
+                self.clear_events()
+
+                self.run_wrapper(*arguments, check=True)
+
+                up_events = self.compose_events("up")
+                self.assertEqual(len(up_events), 2)
+                self.assertIn("--force-recreate", up_events[-1]["argv"])
 
     def test_each_rabbit_hop_refuses_a_disabled_non_khepri_stable_flag(self):
         rabbit = self.rabbit_overlay()
@@ -2706,16 +3942,26 @@ class SecureComposeWrapperTests(TestCase):
         )
         for arguments, config_files, version, khepri_columns in cases:
             with self.subTest(version=version):
-                self.write_env(generation_value="''")
-                self.rabbit_transition_state(
-                    config_files=config_files,
-                    server_version=version,
-                    feature_flags=(
+                if version == "3.13.7":
+                    self.prepare_legacy_rabbit_source()
+                    state = self.state()
+                    state["rabbitmq_feature_flags"] = (
                         "name stability state\n"
                         f"khepri_db {khepri_columns}\n"
                         "stream_queue stable disabled"
-                    ),
-                )
+                    )
+                    self.state_path.write_text(json.dumps(state), encoding="utf-8")
+                else:
+                    self.write_env(generation_value="''")
+                    self.rabbit_transition_state(
+                        config_files=config_files,
+                        server_version=version,
+                        feature_flags=(
+                            "name stability state\n"
+                            f"khepri_db {khepri_columns}\n"
+                            "stream_queue stable disabled"
+                        ),
+                    )
                 self.clear_events()
                 self.assert_refused(
                     arguments, "stable/required flag is not enabled"
@@ -2724,16 +3970,14 @@ class SecureComposeWrapperTests(TestCase):
 
     def test_313_with_experimental_khepri_enabled_requires_blue_green(self):
         rabbit = self.rabbit_overlay()
-        self.write_env(generation_value="''")
-        self.rabbit_transition_state(
-            config_files=str(self.base_file.resolve()),
-            server_version="3.13.7",
-            feature_flags=(
-                "name stability state\n"
-                "khepri_db experimental enabled\n"
-                "stream_queue stable enabled"
-            ),
+        self.prepare_legacy_rabbit_source()
+        state = self.state()
+        state["rabbitmq_feature_flags"] = (
+            "name stability state\n"
+            "khepri_db experimental enabled\n"
+            "stream_queue stable enabled"
         )
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
         self.assert_refused(
             (
                 "--approved-compose-file", str(rabbit),
@@ -2762,7 +4006,7 @@ class SecureComposeWrapperTests(TestCase):
                 "server_version": "4.3.5",
                 "feature_flags": (
                     "name stability state\n"
-                    "khepri_db stable enabled\n"
+                    "khepri_db required enabled\n"
                     "new_in_43 stable disabled\n"
                     "required_flag required enabled"
                 ),
@@ -2773,21 +4017,134 @@ class SecureComposeWrapperTests(TestCase):
             "up", "--detach", "--no-deps", "rabbitmq",
             check=True,
         )
-        for event in self.compose_events("up"):
-            arguments = event["argv"]
-            actual_files = [
-                arguments[index + 1]
-                for index, argument in enumerate(arguments)
-                if argument == "-f"
-            ]
-            self.assertEqual(actual_files, [str(self.base_file.resolve())])
+        up_events = self.compose_events("up")
+        self.assertEqual(len(up_events), 2)
+        transition_files = [
+            up_events[0]["argv"][index + 1]
+            for index, argument in enumerate(up_events[0]["argv"])
+            if argument == "-f"
+        ]
+        self.assertEqual(
+            transition_files,
+            [
+                str(self.base_file.resolve()),
+                str((self.root / "deploy/rabbitmq/transition-4.3.compose.yml").resolve()),
+            ],
+        )
+        canonical_files = [
+            up_events[1]["argv"][index + 1]
+            for index, argument in enumerate(up_events[1]["argv"])
+            if argument == "-f"
+        ]
+        self.assertEqual(canonical_files, [str(self.base_file.resolve())])
+        self.assertIn("--force-recreate", up_events[1]["argv"])
         feature_query = [
             event for event in self.raw_events("exec")
             if "list_feature_flags" in event["argv"]
         ]
-        self.assertEqual(len(feature_query), 2)
+        self.assertEqual(len(feature_query), 3)
+        witness_commands = [
+            event["argv"][-1]
+            for event in self.raw_events("exec")
+            if "/usr/local/bin/backupsheep-rabbitmq-volume-init" in event["argv"]
+        ]
+        self.assertEqual(
+            witness_commands, ["finalize-transition", "verify", "verify"]
+        )
         self.assertEqual(
             self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "'4.3'"
+        )
+
+    def test_exact_healthy_prepared_43_target_skips_only_transition_recreation(self):
+        transition = self.root / "deploy/rabbitmq/transition-4.3.compose.yml"
+        transition_history = f"{self.base_file.resolve()},{transition.resolve()}"
+        self.write_env(generation_value="''")
+        self.rabbit_transition_state(
+            config_files=transition_history,
+            server_version="4.3.5",
+            feature_flags=RABBITMQ_43_FEATURE_FLAGS,
+        )
+        self.write_rabbit_transition_ledger(
+            phase="target-ready",
+            source_class="4.2.9",
+            target="4.3",
+        )
+        self.clear_events()
+
+        self.run_wrapper(
+            "--allow-rabbitmq-generation-transition=4.3",
+            "up", "--detach", "--no-deps", "rabbitmq",
+            check=True,
+        )
+
+        up_events = self.compose_events("up")
+        self.assertEqual(len(up_events), 1)
+        compose_files = [
+            up_events[0]["argv"][index + 1]
+            for index, argument in enumerate(up_events[0]["argv"])
+            if argument == "-f"
+        ]
+        self.assertEqual(compose_files, [str(self.base_file.resolve())])
+        self.assertIn("--force-recreate", up_events[0]["argv"])
+        self.assertEqual(
+            self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "'4.3'"
+        )
+        self.assertFalse(
+            (self.root / ".backupsheep-rabbitmq-transition-state").exists()
+        )
+
+    def test_attested_canonical_43_pre_env_crash_replays_full_transition(self):
+        transition = self.root / "deploy/rabbitmq/transition-4.3.compose.yml"
+        self.write_env(generation_value="''")
+        self.rabbit_transition_state(
+            config_files=str(self.base_file.resolve()),
+            server_version="4.3.5",
+            feature_flags=RABBITMQ_43_FEATURE_FLAGS,
+        )
+        self.write_rabbit_transition_ledger(
+            phase="attested",
+            source_class="4.3.5",
+            target="4.3",
+        )
+        self.clear_events()
+
+        self.run_wrapper(
+            "--allow-rabbitmq-generation-transition=4.3",
+            "up", "--detach", "--no-deps", "rabbitmq",
+            check=True,
+        )
+
+        up_events = self.compose_events("up")
+        self.assertEqual(len(up_events), 2)
+        transition_files = [
+            up_events[0]["argv"][index + 1]
+            for index, argument in enumerate(up_events[0]["argv"])
+            if argument == "-f"
+        ]
+        self.assertEqual(
+            transition_files,
+            [str(self.base_file.resolve()), str(transition.resolve())],
+        )
+        canonical_files = [
+            up_events[1]["argv"][index + 1]
+            for index, argument in enumerate(up_events[1]["argv"])
+            if argument == "-f"
+        ]
+        self.assertEqual(canonical_files, [str(self.base_file.resolve())])
+        witness_commands = [
+            event["argv"][-1]
+            for event in self.raw_events("exec")
+            if "/usr/local/bin/backupsheep-rabbitmq-volume-init" in event["argv"]
+        ]
+        self.assertEqual(
+            witness_commands,
+            ["verify", "finalize-transition", "verify", "verify"],
+        )
+        self.assertEqual(
+            self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "'4.3'"
+        )
+        self.assertFalse(
+            (self.root / ".backupsheep-rabbitmq-transition-state").exists()
         )
 
     def test_43_transition_failure_or_unverified_result_keeps_generation_blank(self):
@@ -2807,7 +4164,7 @@ class SecureComposeWrapperTests(TestCase):
                         "server_version": "4.2.9",
                     }
                 },
-                "post-transition broker is not the pinned RabbitMQ 4.3.5 target",
+                "not the pinned 4.3.5 target during the RabbitMQ 4.3 transition attestation",
             ),
             (
                 "wrong-post-identity",
@@ -2841,7 +4198,7 @@ class SecureComposeWrapperTests(TestCase):
                         "image_id": "sha256:" + ("d" * 64),
                     }
                 },
-                "not running the exact digest-pinned reviewed image",
+                "not bound to the exact reviewed local image reference and ID",
             ),
         )
         for scenario, transition_options, expected_message in scenarios:
@@ -2863,12 +4220,304 @@ class SecureComposeWrapperTests(TestCase):
                     self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "''"
                 )
 
+    def test_43_target_and_canonical_gates_require_a_required_feature_row(self):
+        rabbit = self.rabbit_overlay()
+        rabbit_history = f"{self.base_file.resolve()},{rabbit.resolve()}"
+        no_required_rows = "name stability state\nkhepri_db stable enabled"
+        for failure_phase in ("target", "canonical"):
+            with self.subTest(failure_phase=failure_phase):
+                self.write_env(generation_value="''")
+                self.rabbit_transition_state(
+                    config_files=rabbit_history,
+                    server_version="4.2.9",
+                    feature_flags=(
+                        "name stability state\n"
+                        "khepri_db required enabled\n"
+                        "stream_queue stable enabled"
+                    ),
+                    compose_up_transition_result=(
+                        {"feature_flags": no_required_rows}
+                        if failure_phase == "target"
+                        else None
+                    ),
+                )
+                if failure_phase == "canonical":
+                    state = self.state()
+                    state["canonical_compose_up_transition_result"] = {
+                        "feature_flags": no_required_rows
+                    }
+                    self.state_path.write_text(json.dumps(state), encoding="utf-8")
+                self.clear_events()
+                self.assert_refused(
+                    (
+                        "--allow-rabbitmq-generation-transition=4.3",
+                        "up", "--detach", "--no-deps", "rabbitmq",
+                    ),
+                    "stable/required flag is not enabled",
+                )
+                self.assertEqual(
+                    self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "''"
+                )
+
+    def test_43_volume_witness_alone_never_authorizes_transition_recovery(self):
+        self.write_env(generation_value="''")
+        self.rabbit_transition_state(
+            config_files=str(self.base_file.resolve()),
+            server_version="4.3.5",
+            feature_flags=RABBITMQ_43_FEATURE_FLAGS,
+        )
+        state = self.state()
+        state["containers"]["rabbit-container"]["state"] = "exited"
+        state["containers"]["rabbit-container"]["health"] = ""
+        # Even a broker-volume witness that the networkless helper can resume is
+        # not transition authority. Only protected host state may bridge a crash.
+        state["rabbitmq_witness_resume_exit_code"] = 0
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.assert_refused(
+            (
+                "--allow-rabbitmq-generation-transition=4.3",
+                "up", "--detach", "--no-deps", "rabbitmq",
+            ),
+            "exact interrupted RabbitMQ target lacks matching protected durable transition state",
+        )
+        self.assertEqual(self.compose_events("up"), [])
+        self.assertEqual(self.compose_events("run"), [])
+        self.assertEqual(
+            self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "''"
+        )
+
+    def test_prepared_43_host_state_recovers_a_stopped_source_and_commits(self):
+        self.write_env(generation_value="''")
+        rabbit = self.rabbit_overlay()
+        self.rabbit_transition_state(
+            config_files=f"{self.base_file.resolve()},{rabbit.resolve()}",
+            server_version="4.2.9",
+            feature_flags=RABBITMQ_43_FEATURE_FLAGS,
+            container_state="exited",
+            container_health="",
+        )
+        prior_ledger = dict(
+            line.split("=", 1)
+            for line in (
+                self.root / ".backupsheep-rabbitmq-transition-state"
+            ).read_text(encoding="utf-8").splitlines()
+        )
+        self.write_rabbit_transition_ledger(
+            phase="prepared",
+            source_class="4.2.9",
+            target="4.3",
+            source_binding=prior_ledger["source_binding"],
+        )
+        self.run_wrapper(
+            "--allow-rabbitmq-generation-transition=4.3",
+            "up", "--detach", "--no-deps", "rabbitmq",
+            check=True,
+        )
+        self.assertEqual(len(self.compose_events("up")), 3)
+        self.assertEqual(
+            self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "'4.3'"
+        )
+        self.assertFalse(
+            (self.root / ".backupsheep-rabbitmq-transition-state").exists()
+        )
+
+    def test_attested_43_host_state_repairs_witness_before_absent_target_recreate(self):
+        self.write_env(generation_value="''")
+        self.rabbit_overlay()
+        self.set_state(
+            volumes={
+                "sentinel": self.sentinel(),
+                "rabbit-data": self.owned_volume("rabbitmq_data"),
+            }
+        )
+        self.write_rabbit_transition_ledger(
+            phase="attested", source_class="4.3.5", target="4.3"
+        )
+        self.run_wrapper(
+            "--allow-rabbitmq-generation-transition=4.3",
+            "up", "--detach", "--no-deps", "rabbitmq",
+            check=True,
+        )
+        witness_repairs = [
+            event for event in self.compose_events("run")
+            if any("finalize-transition" in argument for argument in event["argv"])
+        ]
+        self.assertEqual(len(witness_repairs), 1)
+        self.assertEqual(len(self.compose_events("up")), 3)
+        self.assertEqual(
+            self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "'4.3'"
+        )
+
+    def test_attested_43_reconciles_only_the_exact_stranded_witness_oneoff(self):
+        self.write_env(generation_value="''")
+        self.rabbit_overlay()
+        helper_id = "7" * 64
+        helper_name = "backupsheep-rabbitmq-transition-witness"
+        self.set_state(
+            containers={
+                helper_id: {
+                    "id": helper_id,
+                    "name": helper_name,
+                    "state": "exited",
+                    "health": "",
+                    "config_image": PINNED_RABBIT_IMAGE,
+                    "image_id": PINNED_RABBIT_IMAGE_ID,
+                    "labels": {
+                        "com.docker.compose.project": "backupsheep",
+                        "com.docker.compose.project.working_dir": str(self.root.resolve()),
+                        "com.docker.compose.project.config_files": str(self.base_file.resolve()),
+                        "com.docker.compose.service": "rabbitmq-volume-init",
+                        "com.docker.compose.oneoff": "True",
+                        "com.backupsheep.installation-id": INSTALLATION_ID,
+                    },
+                    "transition_helper_mounts": (
+                        f"bind||{self.root.resolve()}/deploy/rabbitmq/volume-init.sh|"
+                        "/usr/local/bin/backupsheep-rabbitmq-volume-init|false\n"
+                        "volume|backupsheep_rabbitmq_data|"
+                        "/var/lib/docker/volumes/backupsheep_rabbitmq_data/_data|"
+                        "/var/lib/rabbitmq|true"
+                    ),
+                }
+            },
+            volumes={
+                "sentinel": self.sentinel(),
+                "rabbit-data": self.owned_volume("rabbitmq_data"),
+            },
+        )
+        self.write_rabbit_transition_ledger(
+            phase="attested", source_class="4.3.5", target="4.3"
+        )
+        self.run_wrapper(
+            "--allow-rabbitmq-generation-transition=4.3",
+            "up", "--detach", "--no-deps", "rabbitmq",
+            check=True,
+        )
+        removals = [
+            event for event in self.raw_events("container")
+            if event["argv"][1:3] == ["rm", "--force"]
+        ]
+        self.assertEqual(len(removals), 1)
+        self.assertEqual(removals[0]["argv"][-1], helper_id)
+
+        # A near-match is never deleted before normal ownership rejects it.
+        self.write_env(generation_value="''")
+        self.set_state(
+            containers={
+                helper_id: {
+                    "id": helper_id,
+                    "name": helper_name,
+                    "state": "exited",
+                    "config_image": PINNED_RABBIT_IMAGE,
+                    "image_id": PINNED_RABBIT_IMAGE_ID,
+                    "labels": {
+                        "com.docker.compose.project": "backupsheep",
+                        "com.docker.compose.project.working_dir": str(self.root.resolve()),
+                        "com.docker.compose.project.config_files": str(self.base_file.resolve()),
+                        "com.docker.compose.service": "rabbitmq-volume-init",
+                        "com.docker.compose.oneoff": "True",
+                        "com.backupsheep.installation-id": INSTALLATION_ID,
+                    },
+                    "transition_helper_contract": "drifted",
+                    "transition_helper_mounts": "",
+                }
+            },
+            volumes={
+                "sentinel": self.sentinel(),
+                "rabbit-data": self.owned_volume("rabbitmq_data"),
+            },
+        )
+        self.write_rabbit_transition_ledger(
+            phase="attested", source_class="4.3.5", target="4.3"
+        )
+        self.clear_events()
+        self.assert_refused(
+            (
+                "--allow-rabbitmq-generation-transition=4.3",
+                "up", "--detach", "--no-deps", "rabbitmq",
+            ),
+            "command or isolation policy drifted",
+        )
+        self.assertEqual(
+            [event for event in self.raw_events("container") if "rm" in event["argv"]],
+            [],
+        )
+
+    def test_attested_42_without_container_must_recover_42_before_43(self):
+        self.write_env(generation_value="''")
+        rabbit = self.rabbit_overlay()
+        self.set_state(
+            volumes={
+                "sentinel": self.sentinel(),
+                "rabbit-data": self.owned_volume("rabbitmq_data"),
+            }
+        )
+        self.write_rabbit_transition_ledger(
+            phase="attested", source_class="4.2.9", target="4.2"
+        )
+        self.assert_refused(
+            (
+                "--allow-rabbitmq-generation-transition=4.3",
+                "up", "--detach", "--no-deps", "rabbitmq",
+            ),
+            "must first be recreated with the reviewed 4.2 command",
+        )
+        self.assertEqual(self.compose_events("up"), [])
+
+        self.clear_events()
+        self.run_wrapper(
+            "--approved-compose-file", str(rabbit),
+            "--allow-rabbitmq-generation-transition=4.2",
+            "up", "--detach", "--no-deps", "rabbitmq",
+            check=True,
+        )
+        self.assertEqual(len(self.compose_events("up")), 2)
+        ledger = (self.root / ".backupsheep-rabbitmq-transition-state").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("phase=attested\n", ledger)
+        self.assertIn("target_version=4.2.9\n", ledger)
+
+    def test_43_transition_never_commits_env_before_witness_and_canonical_recreation(self):
+        rabbit = self.rabbit_overlay()
+        rabbit_history = f"{self.base_file.resolve()},{rabbit.resolve()}"
+        for failure_key, expected_message in (
+            (
+                "rabbitmq_volume_finalize-transition_exit_code",
+                "could not durably finalize the attested RabbitMQ 4.3 volume witness",
+            ),
+            (
+                "canonical_compose_up_exit_code",
+                "",
+            ),
+        ):
+            with self.subTest(failure_key=failure_key):
+                self.write_env(generation_value="''")
+                self.rabbit_transition_state(
+                    config_files=rabbit_history,
+                    server_version="4.2.9",
+                    feature_flags="name stability state\nkhepri_db stable enabled",
+                )
+                state = self.state()
+                state[failure_key] = 83
+                self.state_path.write_text(json.dumps(state), encoding="utf-8")
+                self.clear_events()
+                result = self.run_wrapper(
+                    "--allow-rabbitmq-generation-transition=4.3",
+                    "up", "--detach", "--no-deps", "rabbitmq",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                if expected_message:
+                    self.assertIn(expected_message, result.stderr)
+                self.assertEqual(
+                    self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "''"
+                )
+
     def test_exact_435_reconciliation_records_witness_but_newer_43_is_not_downgraded(self):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
             server_version="4.3.5",
-            feature_flags="name stability state\nkhepri_db stable enabled",
+            feature_flags=RABBITMQ_43_FEATURE_FLAGS,
         )
         self.run_wrapper(
             "--allow-rabbitmq-generation-transition=4.3",
@@ -2883,7 +4532,7 @@ class SecureComposeWrapperTests(TestCase):
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
             server_version="4.3.6",
-            feature_flags="name stability state\nkhepri_db stable enabled",
+            feature_flags=RABBITMQ_43_FEATURE_FLAGS,
         )
         self.clear_events()
         self.assert_refused(
@@ -2891,7 +4540,7 @@ class SecureComposeWrapperTests(TestCase):
                 "--allow-rabbitmq-generation-transition=4.3",
                 "up", "--detach", "--no-deps", "rabbitmq",
             ),
-            "exact 4.3.5 reconciliation result",
+            "does not report the pinned 4.3.5 server version",
         )
         self.assertEqual(
             self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "''"
@@ -2920,7 +4569,7 @@ class SecureComposeWrapperTests(TestCase):
                 "--allow-rabbitmq-generation-transition=4.3",
                 "up", "--detach", "--no-deps", "rabbitmq",
             ),
-            "override changed the base model's pinned RabbitMQ image",
+            "combined RabbitMQ service must resolve to exactly one reviewed image",
         )
         self.assertEqual(self.compose_events("up"), [])
         self.assertEqual(
@@ -2941,7 +4590,7 @@ class SecureComposeWrapperTests(TestCase):
                 "--allow-rabbitmq-generation-transition=4.3",
                 "up", "--detach", "--no-deps", "rabbitmq",
             ),
-            "not running the exact digest-pinned reviewed image",
+            "not bound to the exact reviewed local image reference and ID",
         )
         self.assertEqual(self.compose_events("up"), [])
         self.assertEqual(self.compose_events("up"), [])
@@ -2950,7 +4599,7 @@ class SecureComposeWrapperTests(TestCase):
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
             server_version="4.3.5",
-            feature_flags="name stability state\nkhepri_db stable enabled",
+            feature_flags=RABBITMQ_43_FEATURE_FLAGS,
             container_image_id="sha256:" + ("d" * 64),
         )
         self.clear_events()
@@ -2959,7 +4608,7 @@ class SecureComposeWrapperTests(TestCase):
                 "--allow-rabbitmq-generation-transition=4.3",
                 "up", "--detach", "--no-deps", "rabbitmq",
             ),
-            "not running the exact digest-pinned reviewed image",
+            "not bound to the exact reviewed local image reference and ID",
         )
         self.assertEqual(self.compose_events("up"), [])
         self.assertEqual(
@@ -2973,12 +4622,12 @@ class SecureComposeWrapperTests(TestCase):
             (
                 "4.1.9",
                 "khepri_db stable enabled",
-                "requires the exact healthy RabbitMQ 4.2.9 source",
+                "requires the exact attested healthy RabbitMQ 4.2.9 source",
             ),
             (
                 "4.3.6",
                 "khepri_db stable enabled",
-                "exact 4.3.5 reconciliation result",
+                "requires the exact attested healthy RabbitMQ 4.2.9 source",
             ),
             (
                 "4.2.9",
@@ -3201,6 +4850,59 @@ release_mutation_lock
         self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr}")
         self.assertFalse(lock_dir.exists())
         self.assertEqual(len(self.compose_events("up")), 1)
+
+    def test_installer_volume_reconcile_is_locked_and_uses_exact_named_oneoff(self):
+        refused = self.run_wrapper("--installer-reconcile-rabbitmq-volume")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("restricted to the locked installer child", refused.stderr)
+
+        override = self.root / "docker-compose.override.yml"
+        override.write_text("services: {}\n", encoding="utf-8")
+        override.chmod(0o600)
+        self.set_state(
+            volumes={
+                "rabbit": self.owned_volume("rabbitmq_data"),
+                "sentinel": self.owned_volume("installation_identity"),
+            }
+        )
+        lock_dir = Path(f"{self.root.resolve()}.backupsheep-mutation-lock")
+        script = r'''
+source "$1"
+INSTALL_DIR="$2"
+acquire_installation_mutation_lock
+"$3" --inherit-installer-lock --installer-reconcile-rabbitmq-volume \
+  --approved-compose-file "$4"
+[[ -d "$MUTATION_LOCK_DIR" && "$(<"$MUTATION_LOCK_OWNER_FILE")" == "$MUTATION_LOCK_TOKEN" ]]
+release_mutation_lock
+'''
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "installer-rabbitmq-volume-reconcile",
+                str(INSTALLER),
+                str(self.root.resolve()),
+                str(self.wrapper),
+                str(override),
+            ],
+            cwd=self.root,
+            env=self.wrapper_environment(),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr}")
+        self.assertFalse(lock_dir.exists())
+        run_events = self.compose_events("run")
+        self.assertEqual(len(run_events), 1)
+        argv = run_events[0]["argv"]
+        self.assertIn("--rm", argv)
+        self.assertIn("--no-deps", argv)
+        self.assertIn("--name", argv)
+        self.assertIn("backupsheep-rabbitmq-transition-witness", argv)
+        self.assertEqual(argv[-1], "rabbitmq-volume-init")
 
     def test_inherited_installer_lock_rejects_wrong_parent_and_extra_entries(self):
         lock_dir = Path(f"{self.root.resolve()}.backupsheep-mutation-lock")
@@ -3454,7 +5156,10 @@ exit "$status"
         run_index = final_run.index("run")
         self.assertEqual(
             final_run[run_index:],
-            ["run", "--rm", "--no-deps", "app", "--privileged=true"],
+            [
+                "run", "--pull", "never", "--rm", "--no-deps", "app",
+                "--privileged=true",
+            ],
         )
 
     def test_egress_backed_run_attests_one_current_live_guard(self):
@@ -3581,8 +5286,8 @@ exit "$status"
         exact = (
             "--allow-reviewed-runtime-overrides",
             "run", "--rm", "--no-deps",
-            "--entrypoint", "/bin/sh",
             "--volume", mount,
+            "--entrypoint", "/bin/sh",
             "app", "-ceu", "true",
         )
         self.assert_refused(
@@ -3591,7 +5296,7 @@ exit "$status"
         )
         self.assertFalse(self.compose_events("run"))
 
-    def test_exact_root_ownership_recipe_is_accepted_and_incomplete_forms_fail(self):
+    def test_former_root_ownership_recipe_is_always_rejected(self):
         exact = (
             "--allow-reviewed-runtime-overrides", "--profile", "operations",
             "run", "--rm", "--no-deps", "--user", "0:0",
@@ -3603,28 +5308,24 @@ exit "$status"
             containers={"guard": self.owned_guard("storage-egress-guard")},
             volumes={"sentinel": self.sentinel()},
         )
-        self.run_wrapper(*exact, check=True)
-        self.assertTrue(self.compose_events("run"))
-
-        incomplete = (
+        attacks = (
+            exact,
             tuple(argument for argument in exact if argument != "--rm"),
             tuple(argument for argument in exact if argument != "--no-deps"),
             (
-                "--allow-reviewed-runtime-overrides", "--profile", "operations",
-                "run", "--rm", "--no-deps", "--user", "0:0",
-                "--cap-add", "CHOWN", "--cap-add", "FOWNER",
+                "--allow-reviewed-runtime-overrides", "run", "--rm", "--no-deps",
+                "--cap-add", "CHOWN", "worker-storage", "true",
+            ),
+            (
+                "--allow-reviewed-runtime-overrides", "run", "--rm", "--no-deps",
                 "--entrypoint", "sh", "worker-storage", "-ceu", "true",
             ),
-            exact[:-2] + ("-c", "true"),
         )
-        for index, arguments in enumerate(incomplete):
+        for arguments in attacks:
             with self.subTest(arguments=arguments):
                 result = self.run_wrapper(*arguments)
                 self.assertNotEqual(result.returncode, 0)
-                if index >= 2:
-                    self.assertIn(
-                        "exact worker-storage ownership migration", result.stderr
-                    )
+                self.assertFalse(self.compose_events("run"))
 
     def test_exact_offline_test_runtime_recipes_are_accepted_and_scoped(self):
         default_entrypoint = (
@@ -3714,9 +5415,11 @@ exit "$status"
             ("build", "--build-arg=TOKEN=secret", "app"),
             ("build", "--builder=attacker", "app"),
             ("build", "--ssh=default", "app"), ("build", "--push", "app"),
+            ("build", "--no-cache=false", "app"),
+            ("build", "unknown-service"),
         ):
             with self.subTest(arguments=arguments):
-                self.assert_refused(arguments, "outside the exact reviewed build")
+                self.assert_refused(arguments, "build options are fixed by the wrapper" if arguments[1].startswith("-") else "unknown or unreviewed Compose build service")
         for arguments in (
             ("up", "--pull=always"), ("up", "--pull=false"),
             ("up", "--pull", "missing"), ("up", "--build"),
@@ -3728,11 +5431,30 @@ exit "$status"
         self.set_state()
         self.clear_events()
         self.run_wrapper("build", "app", check=True)
-        self.assertTrue(self.compose_events("build"))
+        build_event = self.compose_events("build")[-1]["argv"]
+        build_index = build_event.index("build")
+        self.assertEqual(
+            build_event[build_index : build_index + 4],
+            ["build", "--pull", "--no-cache", "app"],
+        )
+        self.assertEqual(build_event.count("-f"), 1)
+        self.assertTrue(build_event[build_event.index("-f") + 1].endswith("docker-compose.yml"))
         self.set_state()
         self.clear_events()
         self.run_wrapper("up", "--pull=never", check=True)
-        self.assertTrue(self.compose_events("up"))
+        up_event = self.compose_events("up")[-1]["argv"]
+        self.assertIn("--no-build", up_event)
+        self.assertIn("--pull=never", up_event)
+
+    def test_run_refuses_missing_local_image_without_implicit_build(self):
+        self.set_state(missing_image_refs=[APP_IMAGE])
+        result = self.assert_refused(
+            ("run", "--rm", "--no-deps", "app", "true"),
+            "local image is absent",
+        )
+        self.assertNotIn(APP_IMAGE, result.stdout)
+        self.assertEqual(self.compose_events("build"), [])
+        self.assertEqual(self.compose_events("run"), [])
 
     def test_compose_menu_is_disabled_and_cannot_trigger_sync_or_exec(self):
         for arguments in (("up", "--menu"), ("up", "--menu=true")):

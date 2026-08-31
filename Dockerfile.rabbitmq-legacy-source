@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
+
+# The historical broker still bundles an unsupported OpenSSL 3.1 runtime.
+# Import only /opt/openssl from the exact reviewed Ubuntu 24.04 RabbitMQ rebuild;
+# this preserves RabbitMQ 3.13.7's data compatibility while moving the crypto
+# runtime actually loaded by Erlang to OpenSSL 3.5.8.
+FROM rabbitmq:4.3.5@sha256:f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f469995a728c298b AS openssl-runtime
+
+# RabbitMQ 3.13 requires OTP 26, but the historical image carries an OTP patch
+# with known high/critical vulnerabilities.  Import the latest reviewed OTP 26
+# patch without changing the RabbitMQ application or its on-disk data format.
+FROM erlang:26.2.5.21@sha256:f9007e3e435761bd7f88aafa4bfab20fd4107baa88e3ff45e935ef2aa3e892d5 AS erlang-runtime
+
+FROM rabbitmq:3.13.7@sha256:87178a0ee3e2f52980ba356d38646ed1056705ff2d5ff281f8965456eaa0c1e3
+
+COPY --from=openssl-runtime /opt/openssl/ /opt/openssl-3.5.8/
+COPY --from=erlang-runtime /usr/local/lib/erlang/ /opt/erlang-26.2.5.21/
+
+# The upstream OTP donor resolves libcrypto through the system loader.  Make
+# the reviewed /opt runtime authoritative, then attest the actual loaded path
+# below instead of trusting package metadata or `openssl version` alone.
+ENV LD_LIBRARY_PATH=/opt/openssl/lib
+
+LABEL org.opencontainers.image.title="BackupSheep RabbitMQ legacy source runtime" \
+      org.opencontainers.image.description="RabbitMQ 3.13.7 migration source with reviewed Ubuntu security package updates" \
+      org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
+      org.opencontainers.image.licenses="MPL-2.0" \
+      com.backupsheep.rabbitmq.runtime-generation="3.13.7-otp26.2.5.21-openssl3.5.8-v3" \
+      com.backupsheep.rabbitmq.base-index-digest="sha256:87178a0ee3e2f52980ba356d38646ed1056705ff2d5ff281f8965456eaa0c1e3" \
+      com.backupsheep.rabbitmq.openssl-donor-index-digest="sha256:f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f469995a728c298b" \
+      com.backupsheep.rabbitmq.erlang-donor-index-digest="sha256:f9007e3e435761bd7f88aafa4bfab20fd4107baa88e3ff45e935ef2aa3e892d5" \
+      com.backupsheep.rabbitmq.erlang-runtime-version="26.2.5.21" \
+      com.backupsheep.rabbitmq.openssl-runtime-version="3.5.8" \
+      com.backupsheep.rabbitmq.gpgv-package-version="2.4.4-2ubuntu17.4" \
+      com.backupsheep.rabbitmq.openssl-package-version="3.0.13-0ubuntu3.15" \
+      com.backupsheep.rabbitmq.enabled-plugins="none"
+
+RUN set -eux; \
+    rm -rf /opt/openssl; \
+    mv /opt/openssl-3.5.8 /opt/openssl; \
+    rm -rf /opt/erlang; \
+    mv /opt/erlang-26.2.5.21 /opt/erlang; \
+    apt-get update; \
+    apt-get install --yes --no-install-recommends --only-upgrade \
+        'gpgv=2.4.4-2ubuntu17.4' \
+        'libssl3t64=3.0.13-0ubuntu3.15' \
+        'openssl=3.0.13-0ubuntu3.15'; \
+    rm -rf /var/lib/apt/lists/*; \
+    test "$(dpkg-query -W -f='${Version}' gpgv)" = '2.4.4-2ubuntu17.4'; \
+    test "$(dpkg-query -W -f='${Version}' libssl3t64)" = '3.0.13-0ubuntu3.15'; \
+    test "$(dpkg-query -W -f='${Version}' openssl)" = '3.0.13-0ubuntu3.15'; \
+    rm -f /usr/sbin/gosu; \
+    ! command -v gosu; \
+    test "$(tr -d '\n' </opt/erlang/releases/26/OTP_VERSION)" = '26.2.5.21'; \
+    set -- $(/opt/openssl/bin/openssl version); test "$2" = '3.5.8'; \
+    erl -noshell -eval 'case crypto:info_lib() of [{_, _, <<"OpenSSL 3.5.8 ", _/binary>>}] -> ok; Value -> io:format("~p~n", [Value]), halt(1) end, {ok, Maps} = file:read_file("/proc/self/maps"), case binary:match(Maps, <<"/opt/openssl/lib/libcrypto.so.3">>) of nomatch -> halt(1); _ -> halt(0) end.'; \
+    rabbitmq-plugins disable --offline rabbitmq_prometheus; \
+    ! rabbitmq-plugins list --offline --enabled --minimal 2>/dev/null \
+        | grep -Eq '^rabbitmq_[a-z0-9_]+$'; \
+    test "$(id -u rabbitmq):$(id -g rabbitmq)" = '999:999'; \
+    test -x /usr/local/bin/docker-entrypoint.sh; \
+    test -x /opt/rabbitmq/sbin/rabbitmq-server
+
+USER 999:999

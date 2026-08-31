@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id_prefix": "https://backupsheep.com/security/openvex/legacy-rabbitmq-otp26",
+  "author": "BackupSheep Security Team",
+  "timestamp": "2026-08-30T23:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {"name": "CVE-2026-59250"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and cannot expose a Megaco listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-49759"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source has no network namespace connectivity and cannot establish or accept an SCTP association."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-55952"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source has no network connectivity or TLS listener and receives no application traffic."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-42792"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time container has an isolated network namespace, so an external actor cannot reach epmd or consume its file descriptors."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-58227"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source has no network connectivity, TLS listener, client role, plugins, or application traffic."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-59251"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source has no network connectivity and performs no inbound or outbound TLS certificate validation."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-55737"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The source starts only after queues are proven drained, has no application traffic or plugins, and has no peer capable of supplying attacker-controlled Erlang external terms."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-55953"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source has no network connectivity and makes no TLS client connections."
+    }
+  ]
+}

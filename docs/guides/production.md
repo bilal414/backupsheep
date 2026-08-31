@@ -321,7 +321,7 @@ with `--require-hashes`. A changed or incomplete lock fails the build.
 
 Every locally built service family—application, database and egress guard—sets
 `pull_policy: never`. Manual deployments must
-run `./backupsheep-compose build db app app-egress-guard` at the exact reviewed commit
+run `./backupsheep-compose build db app app-egress-guard rabbitmq` at the exact reviewed commit
 before `up`; Compose fails instead of pulling a same-named registry image when any reviewed
 local build is absent. The verified installer performs the explicit builds automatically.
 

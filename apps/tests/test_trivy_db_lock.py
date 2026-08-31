@@ -180,23 +180,23 @@ class TrivyDatabaseLockTests(TestCase):
     def test_repository_lock_records_the_independently_verified_database(self):
         lock, _ = trivy_db.load_lock(
             ROOT / "deploy" / "trivy-db-lock.json",
-            now=datetime(2026, 8, 29, 15, 0, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 8, 30, 20, 0, 0, tzinfo=timezone.utc),
         )
         self.assertEqual(
             lock["manifest"]["digest"],
-            "sha256:b494387b91d0e201f9a8945709a02eb66558cba454efa265b4638e7edde45132",
+            "sha256:b50899ac59bda25cea33ba1305154a041f916cc5aeb9e1e0b4efe56caebdbd52",
         )
         self.assertEqual(
             lock["manifest"]["layer"]["digest"],
-            "sha256:7ffd31523ebd6166c80630422336211c3fff6b069f97a31568d327de0d5f9f87",
+            "sha256:8095c5396f62adc5b103548b822c4dfa4748930190353fa2ea770653a575b37c",
         )
         self.assertEqual(
             lock["database"]["metadata_sha256"],
-            "584992a9354fdba6e7f4e59da089e74a102ad19dbceb8045fdadffccb4dc5e77",
+            "6ff0daf3039f212d8a938278cb9db65fc601c6ab917e0da9441e5ca23eefdd8f",
         )
         self.assertEqual(
             lock["database"]["db_sha256"],
-            "9337bbaa4af21678daeebb746810a5802fab1eed2a58ead1d93a7d8c2586e932",
+            "c0337e619c444dea4ccb8e2acf8f2788346d8789597cd0d284bc178becc6acf3",
         )
 
 

@@ -1,11 +1,12 @@
 """Adversarial tests for the private-plaintext/ciphertext-transfer boundary."""
 
 import os
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
+from unittest import mock, skipIf
 
 from django.test import SimpleTestCase
 
@@ -17,6 +18,11 @@ INSTALLATION_ID = "a" * 64
 BACKUP_UUID = "11111111-2222-4333-8444-555555555555"
 HANDOFF_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 ENVELOPE_UUID = "99999999-8888-4777-8666-555555555555"
+
+skip_on_darwin_without_anonymous_staging = skipIf(
+    sys.platform == "darwin",
+    "Darwin does not provide Linux O_TMPFILE/linkat secure anonymous staging.",
+)
 
 
 class StagingIsolationTests(SimpleTestCase):
@@ -204,6 +210,7 @@ class StagingIsolationTests(SimpleTestCase):
             ) as source:
                 self.assertEqual(source.read(), b"BSE1complete-test-envelope")
 
+    @skip_on_darwin_without_anonymous_staging
     def test_real_bse1_envelope_can_cross_only_after_validation(self):
         fence = staging.create_ciphertext_fence(BACKUP_UUID)
         source = self.private / "source.zip"
@@ -458,6 +465,7 @@ class StagingIsolationTests(SimpleTestCase):
             )
         )
 
+    @skip_on_darwin_without_anonymous_staging
     def test_real_bse1_restore_envelope_crosses_reverse_handoff(self):
         os.environ["BACKUPSHEEP_RUNTIME_ROLE"] = "storage"
         fence = staging.create_restore_ciphertext_fence(

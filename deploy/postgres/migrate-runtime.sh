@@ -28,6 +28,14 @@ reconcile_only=false
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source_identity_contract="${script_dir}/source-identity-contract.sh"
 
+[[ "$database_name" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] \
+    || die "database name is outside the stock migration contract"
+case "$database_name" in
+    postgres|template0|template1)
+        die "database name is outside the stock migration contract"
+        ;;
+esac
+
 [[ -f "$source_identity_contract" && ! -L "$source_identity_contract" ]] \
     || die "source identity contract helper is unavailable"
 # shellcheck source=deploy/postgres/source-identity-contract.sh
@@ -57,7 +65,6 @@ readonly host_kernel docker_daemon_identity
 [[ "$installation_id" =~ ^[0-9a-f]{64}$ && "$storage_witness" =~ ^[0-9a-f]{64}$ ]] || die "identity or witness is invalid"
 [[ "$source_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "source image ID is invalid"
 [[ "$source_volume" == "${project}_pgdata" && "$target_volume" == "${project}_postgres_data_v1" ]] || die "source or target volume name is non-canonical"
-[[ "$database_name" =~ ^[a-z_][a-z0-9_]{0,62}$ && "$database_name" != postgres ]] || die "database name is outside the stock migration contract"
 [[ "$bootstrap_user" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || die "bootstrap role is invalid"
 [[ "$storage_intent" == migrated-debian-v1 \
     || "$storage_intent" == migrated-debian-generation2-v1 ]] \

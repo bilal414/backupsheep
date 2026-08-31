@@ -335,7 +335,7 @@ The DigitalOcean-focused tests cover:
 Canonical focused command:
 
 ```bash
-./backupsheep-compose build db app app-egress-guard
+./backupsheep-compose build db app app-egress-guard rabbitmq
 ./backupsheep-compose --allow-reviewed-runtime-overrides run --rm --no-deps \
   -e DJANGO_SERVER=test \
   --entrypoint python app manage.py test \

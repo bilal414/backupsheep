@@ -85,5 +85,12 @@ class PostgresImageHardeningContractTests(TestCase):
         self.assertIn("dockerfile: Dockerfile.postgres", block)
         self.assertIn('user: "70:70"', block)
         self.assertNotIn("cap_add:", block)
-        self.assertIn("- postgres_data_v1:/var/lib/postgresql", block)
-        self.assertNotIn("- pgdata:/var/lib/postgresql", block)
+        self.assertIn(
+            "      - type: volume\n"
+            "        source: postgres_data_v1\n"
+            "        target: /var/lib/postgresql\n"
+            "        volume:\n"
+            "          nocopy: false\n",
+            block,
+        )
+        self.assertNotIn("source: pgdata", block)

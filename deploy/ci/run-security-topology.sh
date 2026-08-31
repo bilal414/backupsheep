@@ -335,6 +335,7 @@ RABBITMQ_VHOST=backupsheep
 RABBITMQ_LEGACY_USER=backupsheep
 BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION=2
 BACKUPSHEEP_RABBITMQ_DATA_GENERATION=4.3
+BACKUPSHEEP_RABBITMQ_NODE_HOST=rabbitmq
 BACKUPSHEEP_CELERY_SECURITY_GENERATION=3
 BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION=1
 BACKUPSHEEP_EGRESS_POLICY_GENERATION=2
@@ -379,7 +380,7 @@ for service, expected in expected_images.items():
         raise SystemExit(f"{service} does not fail closed on a missing local image")
 expected_rabbitmq = (
     "rabbitmq:4.3.5-alpine@sha256:"
-    "d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
+    "290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240"
 )
 for service in ("rabbitmq-volume-init", "rabbitmq", "rabbitmq-provision"):
     if services[service].get("image") != expected_rabbitmq:

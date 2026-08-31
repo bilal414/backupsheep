@@ -59,7 +59,63 @@ def _artifact_record(artifacts_dir: Path, relative_name: str) -> tuple[Path, dic
     return path, {"file": relative_name, "sha256": _sha256_path(path)}
 
 
-def _consumer_record(policy: dict[str, Any], artifacts_dir: Path) -> dict[str, Any]:
+def _vulnerability_database_records_and_bindings(
+    artifacts_dir: Path,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    lock_path, lock = _artifact_record(
+        artifacts_dir, "vulnerability/trivy-db-lock.json"
+    )
+    evidence_path, preparation_evidence = _artifact_record(
+        artifacts_dir, "vulnerability/trivy-db-evidence.json"
+    )
+    secondary_lock_path, secondary_lock = _artifact_record(
+        artifacts_dir, "vulnerability/grype-db-lock.json"
+    )
+    secondary_evidence_path, secondary_preparation_evidence = _artifact_record(
+        artifacts_dir, "vulnerability/grype-db-evidence.json"
+    )
+    trivy_evidence = _load_json(
+        evidence_path, maximum_bytes=MAX_CONTROL_FILE_BYTES
+    )
+    grype_evidence = _load_json(
+        secondary_evidence_path, maximum_bytes=MAX_CONTROL_FILE_BYTES
+    )
+    if not isinstance(trivy_evidence, dict) or not isinstance(grype_evidence, dict):
+        raise ReleaseVerificationError("scanner DB evidence must be JSON objects")
+    database = {
+        "lock": lock,
+        "preparation_evidence": preparation_evidence,
+        "secondary_lock": secondary_lock,
+        "secondary_preparation_evidence": secondary_preparation_evidence,
+    }
+    bindings = {
+        "trivy": {
+            "lock_sha256": lock["sha256"],
+            "preparation_evidence_sha256": preparation_evidence["sha256"],
+            "database_sha256": f"sha256:{trivy_evidence['db_sha256']}",
+            "database_schema_version": trivy_evidence["database_schema_version"],
+            "database_generated_at": trivy_evidence["updated_at"],
+        },
+        "grype": {
+            "lock_sha256": secondary_lock["sha256"],
+            "preparation_evidence_sha256": secondary_preparation_evidence["sha256"],
+            "database_sha256": f"sha256:{grype_evidence['database_sha256']}",
+            "database_schema_version": grype_evidence["database_schema_version"],
+            "database_generated_at": grype_evidence["database_built_at"],
+        },
+    }
+    # Resolve every input before returning so a caller cannot smuggle a symlinked
+    # or missing lock while retaining only its record digest.
+    for path in (lock_path, secondary_lock_path):
+        path.resolve(strict=True)
+    return database, bindings
+
+
+def _consumer_record(
+    policy: dict[str, Any],
+    artifacts_dir: Path,
+    database_bindings: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     consumer = policy["consumer"]
     trusted_policy = consumer["trusted_root"]
     _, trusted_artifact = _artifact_record(
@@ -82,6 +138,9 @@ def _consumer_record(policy: dict[str, Any], artifacts_dir: Path) -> dict[str, A
         _, vulnerability_report = _artifact_record(
             artifacts_dir, f"consumer/release-verifier-{slug}.trivy.json"
         )
+        _, secondary_vulnerability_report = _artifact_record(
+            artifacts_dir, f"consumer/release-verifier-{slug}.grype.json"
+        )
         platform_records.append(
             {
                 "platform": platform,
@@ -98,7 +157,18 @@ def _consumer_record(policy: dict[str, Any], artifacts_dir: Path) -> dict[str, A
                     "scanner_version": policy["vulnerability_policy"]["scanner_version"],
                     "fail_severities": policy["vulnerability_policy"]["fail_severities"],
                     "ignore_unfixed": policy["vulnerability_policy"]["ignore_unfixed"],
+                    "database": dict(database_bindings["trivy"]),
                     **vulnerability_report,
+                },
+                "secondary_vulnerability_report": {
+                    "scanner": policy["vulnerability_policy"]["secondary_scanner"],
+                    "scanner_version": policy["vulnerability_policy"][
+                        "secondary_scanner_version"
+                    ],
+                    "fail_severities": policy["vulnerability_policy"]["fail_severities"],
+                    "ignore_unfixed": policy["vulnerability_policy"]["ignore_unfixed"],
+                    "database": dict(database_bindings["grype"]),
+                    **secondary_vulnerability_report,
                 },
             }
         )
@@ -118,16 +188,6 @@ def _consumer_record(policy: dict[str, Any], artifacts_dir: Path) -> dict[str, A
             "platforms": platform_records,
         },
     }
-
-
-def _vulnerability_database_record(artifacts_dir: Path) -> dict[str, Any]:
-    _, lock = _artifact_record(
-        artifacts_dir, "vulnerability/trivy-db-lock.json"
-    )
-    _, preparation_evidence = _artifact_record(
-        artifacts_dir, "vulnerability/trivy-db-evidence.json"
-    )
-    return {"lock": lock, "preparation_evidence": preparation_evidence}
 
 
 def build_manifest(
@@ -154,6 +214,9 @@ def build_manifest(
         "workflow_run": workflow_run,
         "created_at": created_at,
     }
+    vulnerability_database, database_bindings = (
+        _vulnerability_database_records_and_bindings(artifacts_dir)
+    )
     images: dict[str, Any] = {}
     predicate_type = policy["attestations"]["provenance_predicate_type"]
 
@@ -174,6 +237,7 @@ def build_manifest(
         source_catalogs: list[dict[str, Any]] = []
         sboms: list[dict[str, Any]] = []
         reports: list[dict[str, Any]] = []
+        secondary_reports: list[dict[str, Any]] = []
         for platform in policy["platforms"]:
             platform_slug = platform.replace("/", "-")
             attestation_name = f"oci/{image_name}-{platform_slug}.attestation.json"
@@ -248,7 +312,25 @@ def build_manifest(
                     "scanner_version": policy["vulnerability_policy"]["scanner_version"],
                     "fail_severities": policy["vulnerability_policy"]["fail_severities"],
                     "ignore_unfixed": policy["vulnerability_policy"]["ignore_unfixed"],
+                    "database": dict(database_bindings["trivy"]),
                     **report_artifact,
+                }
+            )
+            secondary_report_name = f"scans/{image_name}-{platform_slug}.grype.json"
+            _, secondary_report_artifact = _artifact_record(
+                artifacts_dir, secondary_report_name
+            )
+            secondary_reports.append(
+                {
+                    "platform": platform,
+                    "scanner": policy["vulnerability_policy"]["secondary_scanner"],
+                    "scanner_version": policy["vulnerability_policy"][
+                        "secondary_scanner_version"
+                    ],
+                    "fail_severities": policy["vulnerability_policy"]["fail_severities"],
+                    "ignore_unfixed": policy["vulnerability_policy"]["ignore_unfixed"],
+                    "database": dict(database_bindings["grype"]),
+                    **secondary_report_artifact,
                 }
             )
 
@@ -268,6 +350,7 @@ def build_manifest(
             "source_catalogs": source_catalogs,
             "sboms": sboms,
             "vulnerability_reports": reports,
+            "secondary_vulnerability_reports": secondary_reports,
         }
     reviewed_path = _safe_artifact(
         artifacts_dir,
@@ -293,8 +376,8 @@ def build_manifest(
         "schema_version": 4,
         "release": release,
         "transition": transition_record,
-        "vulnerability_database": _vulnerability_database_record(artifacts_dir),
-        "consumer": _consumer_record(policy, artifacts_dir),
+        "vulnerability_database": vulnerability_database,
+        "consumer": _consumer_record(policy, artifacts_dir, database_bindings),
         "images": images,
     }
 

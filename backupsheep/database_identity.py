@@ -49,6 +49,8 @@ IDENTITY_GENERATION = "3"
 SECRET_ROOT = Path("/run/secrets")
 MAX_SECRET_BYTES = 4096
 ROLE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,62}\Z")
+DATABASE_NAME_PATTERN = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
+SYSTEM_DATABASE_NAMES = frozenset({"postgres", "template0", "template1"})
 INSTALLATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 LANE_ENVIRONMENT = MappingProxyType(
     {
@@ -204,9 +206,16 @@ class IdentityConfiguration:
             raise ProvisioningError(
                 "BACKUPSHEEP_INSTALLATION_ID must be 64 lowercase hexadecimal characters"
             )
-        database = _required_environment(values, "DB_NAME")
-        if "\x00" in database or len(database) > 63:
-            raise ProvisioningError("DB_NAME is not a valid PostgreSQL identifier")
+        # Do not normalize this value: whitespace or any quoted-identifier syntax
+        # would disagree with the stock image and wrapper contracts.
+        database = str(values.get("DB_NAME") or "")
+        if (
+            not DATABASE_NAME_PATTERN.fullmatch(database)
+            or database in SYSTEM_DATABASE_NAMES
+        ):
+            raise ProvisioningError(
+                "DB_NAME must be a non-system lowercase PostgreSQL database identifier"
+            )
         host = _required_environment(values, "DB_HOST")
         if host != "db":
             raise ProvisioningError("DB_HOST must be the stock internal service name db")

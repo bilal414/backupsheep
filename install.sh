@@ -128,6 +128,7 @@ PROJECT_NAME="backupsheep"
 PROJECT_NAME_WAS_EXPLICIT=false
 ALLOW_ROOT_INSTALL=false
 ADOPT_LEGACY_PROJECT=""
+LEGACY_RABBITMQ_NODE_HOST=""
 APPROVED_COMPOSE_FILE=""
 SKIP_START=false
 ENABLE_OPERATIONS=false
@@ -194,7 +195,8 @@ Required:
                      abbreviated commits are intentionally rejected.
 
 Image source:
-  (default)          Build the three BackupSheep images locally from --ref.
+  (default)          Build the four steady-state BackupSheep images locally from
+                     --ref. Migration-only RabbitMQ derivatives build on demand.
   --local-build      Explicitly select the default local-build mode.
   --release-tag TAG  Consume only the signed official image digests for this exact
                      v-prefixed SemVer tag. TAG and the signed descriptor must bind
@@ -214,6 +216,11 @@ Options:
                      One-time, explicit adoption of the exact four-volume stock
                      legacy project left by `compose down`; creates only the
                      installation-identity sentinel before normal validation.
+  --legacy-rabbitmq-node-host HOST
+                     Exact retained RabbitMQ hostname for a stopped legacy volume:
+                     rabbitmq or its reviewed 12-character lowercase Docker ID.
+                     Local-build and --skip-start only; the wrapper performs the
+                     separate fail-closed 3.13/4.2/4.3 transition.
   --approved-compose-file PATH
                      Accept only the private regular deployment override at
                      INSTALL_DIR/docker-compose.override.yml in canonical order.
@@ -710,6 +717,13 @@ parse_args() {
                 ADOPT_LEGACY_PROJECT="$2"
                 shift 2
                 ;;
+            --legacy-rabbitmq-node-host)
+                [[ $# -ge 2 ]] || die "--legacy-rabbitmq-node-host requires a value"
+                [[ -z "$LEGACY_RABBITMQ_NODE_HOST" ]] \
+                    || die "--legacy-rabbitmq-node-host may be specified only once"
+                LEGACY_RABBITMQ_NODE_HOST="$2"
+                shift 2
+                ;;
             --approved-compose-file)
                 [[ $# -ge 2 ]] || die "--approved-compose-file requires a path"
                 [[ -z "$APPROVED_COMPOSE_FILE" ]] \
@@ -792,8 +806,19 @@ parse_args() {
     if [[ "$IMAGE_MODE" == "signed-release" ]]; then
         [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] \
             || die "--release-tag must be an exact v-prefixed SemVer tag"
+        [[ -z "$ADOPT_LEGACY_PROJECT" ]] \
+            || die "signed-release mode is fresh-only; --adopt-legacy-project requires a separately reviewed local-build recovery or a restore into another fresh signed project"
+        [[ -z "$LEGACY_RABBITMQ_NODE_HOST" ]] \
+            || die "signed-release mode is fresh-only; --legacy-rabbitmq-node-host requires a separately reviewed local-build migration"
     else
         [[ -z "$RELEASE_TAG" ]] || die "a release tag is valid only in signed-release mode"
+    fi
+    if [[ -n "$LEGACY_RABBITMQ_NODE_HOST" ]]; then
+        [[ "$LEGACY_RABBITMQ_NODE_HOST" == rabbitmq \
+            || "$LEGACY_RABBITMQ_NODE_HOST" =~ ^[0-9a-f]{12}$ ]] \
+            || die "--legacy-rabbitmq-node-host must be rabbitmq or exactly 12 lowercase hexadecimal characters"
+        [[ "$SKIP_START" == true ]] \
+            || die "--legacy-rabbitmq-node-host requires --skip-start; complete the broker transition separately through backupsheep-compose"
     fi
     [[ "$ROTATE_CELERY_SIGNING_KEYS" != true || "$ENABLE_OPERATIONS" != true ]] \
         || die "--rotate-celery-signing-keys and --enable-operations cannot be used together"
@@ -1120,6 +1145,8 @@ git_safe() {
         LC_ALL=C \
         GIT_CONFIG_NOSYSTEM=1 \
         GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_ATTR_NOSYSTEM=1 \
+        GIT_NO_REPLACE_OBJECTS=1 \
         GIT_TERMINAL_PROMPT=0 \
         GIT_ASKPASS=/bin/false \
         SSH_ASKPASS=/bin/false \
@@ -1132,6 +1159,103 @@ git_safe() {
         -c core.untrackedCache=false \
         -c diff.external= \
         "$@"
+}
+
+validate_checkout_filter_metadata() {
+    local config_status=0
+    local attribute_path=""
+
+    # Clean/smudge/process filters can make `diff` and `status` compare transformed
+    # bytes rather than the checkout bytes that Docker will build. Inspect the
+    # effective repository configuration before either command can invoke a filter.
+    if git_safe -C "$INSTALL_DIR" config --includes --get-regexp '^filter\.' \
+        >/dev/null 2>&1; then
+        die "Installer-managed checkouts must not define Git content filters."
+    else
+        config_status=$?
+        [[ "$config_status" -eq 1 ]] \
+            || die "Could not prove that the checkout has no Git content filters."
+    fi
+    if git_safe -C "$INSTALL_DIR" config --includes --get-regexp '^core\.attributesfile$' \
+        >/dev/null 2>&1; then
+        die "Installer-managed checkouts must not select an external Git attributes file."
+    else
+        config_status=$?
+        [[ "$config_status" -eq 1 ]] \
+            || die "Could not prove that the checkout has no external Git attributes file."
+    fi
+
+    [[ ! -e "$INSTALL_DIR/.git/info/attributes" \
+        && ! -L "$INSTALL_DIR/.git/info/attributes" ]] \
+        || die "Installer-managed checkouts must not contain .git/info/attributes."
+    # Reject case variants too: on a case-insensitive host Git can resolve an
+    # entry such as `.GITATTRIBUTES` when it asks for `.gitattributes`.
+    attribute_path="$(find "$INSTALL_DIR" -xdev -iname .gitattributes -print -quit)"
+    [[ -z "$attribute_path" ]] \
+        || die "Installer-managed checkouts must not contain .gitattributes files."
+}
+
+validate_tracked_checkout_state() {
+    local tree_status=0
+
+    # Enumerate the commit tree with NUL framing. `hash-object --no-filters`
+    # hashes the literal worktree bytes, so neither attributes nor an index flag
+    # can make a modified build input look clean. Git records one executable bit;
+    # require that bit to agree for every tracked blob as well.
+    if git_safe -C "$INSTALL_DIR" ls-tree -r -z --full-tree "$INSTALL_REF" | (
+        local record="" metadata="" relative_path="" absolute_path=""
+        local git_mode="" git_type="" object_id="" extra="" actual_object_id=""
+        local saw_entry=false
+
+        while IFS= read -r -d '' record; do
+            saw_entry=true
+            [[ "$record" == *$'\t'* ]] || exit 45
+            metadata="${record%%$'\t'*}"
+            relative_path="${record#*$'\t'}"
+            IFS=' ' read -r git_mode git_type object_id extra <<< "$metadata"
+            [[ -z "$extra" && "$git_type" == blob \
+                && "$object_id" =~ ^[0-9a-f]{40}$ ]] || exit 45
+            case "$git_mode" in
+                100644|100755) ;;
+                *) exit 45 ;;
+            esac
+            [[ -n "$relative_path" && "$relative_path" != /* \
+                && "$relative_path" != *$'\n'* && "$relative_path" != *$'\r'* \
+                && "$relative_path" != *$'\t'* ]] || exit 45
+            case "/${relative_path}/" in
+                *'/../'*|*'/./'*) exit 45 ;;
+            esac
+            case "$relative_path" in
+                .gitattributes|*/.gitattributes) exit 41 ;;
+            esac
+
+            absolute_path="${INSTALL_DIR}/${relative_path}"
+            [[ -f "$absolute_path" && ! -L "$absolute_path" ]] || exit 42
+            actual_object_id="$(git_safe -C "$INSTALL_DIR" hash-object \
+                --no-filters "$absolute_path")" || exit 46
+            [[ "$actual_object_id" == "$object_id" ]] || exit 43
+            if [[ "$git_mode" == 100755 ]]; then
+                [[ -x "$absolute_path" ]] || exit 44
+            else
+                [[ ! -x "$absolute_path" ]] || exit 44
+            fi
+        done
+        [[ "$saw_entry" == true ]] || exit 45
+    ); then
+        return 0
+    else
+        tree_status=$?
+    fi
+
+    case "$tree_status" in
+        41) die "Installer-managed commits must not contain .gitattributes files." ;;
+        42) die "A tracked checkout path is missing, non-regular, or a symlink." ;;
+        43) die "A tracked checkout file does not byte-match the requested commit." ;;
+        44) die "A tracked checkout file has a different executable mode than the requested commit." ;;
+        45) die "The requested commit contains an unsupported or malformed tree entry." ;;
+        46) die "Could not hash a tracked checkout file without Git filters." ;;
+        *) die "Could not enumerate the requested commit tree for raw checkout verification." ;;
+    esac
 }
 
 require_regular_checkout_file() {
@@ -1169,6 +1293,9 @@ validate_checkout_cleanliness() {
     local status_file=""
     local unexpected_entry=""
 
+    validate_checkout_filter_metadata
+    validate_tracked_checkout_state
+
     git_safe -C "$INSTALL_DIR" diff --no-ext-diff --no-textconv --quiet -- \
         || die "The existing checkout has modified tracked files. Use a clean, exact release checkout."
     git_safe -C "$INSTALL_DIR" diff --cached --no-ext-diff --no-textconv --quiet -- \
@@ -1197,6 +1324,11 @@ validate_checkout_cleanliness() {
                 || [[ "$relative_path" == ".env.image-source.new" ]] \
                 || [[ "$relative_path" == ".env.fresh.new" ]] \
                 || [[ "$relative_path" =~ ^\.env-(update|artifact-policy)\.[A-Za-z0-9]{8}$ ]] \
+                || [[ "$relative_path" =~ ^\.env\.backupsheep\.[A-Za-z0-9]{6}$ ]] \
+                || [[ "$relative_path" == ".backupsheep-rabbitmq-transition-state" ]] \
+                || [[ "$relative_path" =~ ^\.backupsheep-rabbitmq-transition-state\.[A-Za-z0-9]{6}$ ]] \
+                || [[ "$relative_path" == ".backupsheep-backup-storage-identity" ]] \
+                || [[ "$relative_path" =~ ^\.release-command-output\.[1-9][0-9]*\.[0-9]{1,5}\.[1-8]$ ]] \
                 || [[ "$relative_path" == ".release-request" ]] \
                 || [[ "$relative_path" == ".release-request.new" ]] \
                 || { [[ "$relative_path" == "docker-compose.override.yml" ]] \
@@ -1240,6 +1372,9 @@ validate_checkout() {
 
     require_regular_checkout_file Dockerfile
     require_regular_checkout_file Dockerfile.postgres
+    require_regular_checkout_file Dockerfile.rabbitmq
+    require_regular_checkout_file Dockerfile.rabbitmq-upgrade
+    require_regular_checkout_file Dockerfile.rabbitmq-legacy-source
     require_regular_checkout_file docker-compose.yml
     require_regular_checkout_file .dockerignore
     require_regular_checkout_file .env_sample
@@ -1255,10 +1390,19 @@ validate_checkout() {
     require_regular_checkout_file deploy/postgres/storage-witness.sh
     require_regular_checkout_file deploy/postgres/source-identity-contract.sh
     require_regular_checkout_file deploy/postgres/migrate-runtime.sh
+    require_regular_checkout_file deploy/rabbitmq/upgrade-4.2.9.compose.yml
+    require_regular_checkout_file deploy/rabbitmq/source-3.13.7.compose.yml
+    require_regular_checkout_file deploy/rabbitmq/transition-4.3.compose.yml
+    require_regular_checkout_file deploy/rabbitmq/90-legacy-source.conf
+    require_regular_checkout_file deploy/rabbitmq/entrypoint.sh
+    require_regular_checkout_file deploy/rabbitmq/volume-init.sh
+    require_regular_checkout_file deploy/rabbitmq/uid-transition.sh
     [[ -x "$INSTALL_DIR/backupsheep-compose" ]] \
         || die "The reviewed backupsheep-compose wrapper must remain executable."
     [[ -x "$INSTALL_DIR/deploy/release/consume-signed-release.sh" ]] \
         || die "The reviewed signed-release consumer must remain executable."
+    [[ -x "$INSTALL_DIR/deploy/rabbitmq/uid-transition.sh" ]] \
+        || die "The reviewed RabbitMQ UID transition helper must remain executable."
 
     if ! grep -Eq '^/?\.secrets/?$' "$INSTALL_DIR/.dockerignore"; then
         [[ "$(awk '/^[[:space:]]*($|#)/ { next } { print; exit }' "$INSTALL_DIR/.dockerignore")" == "**" ]] \
@@ -1398,7 +1542,11 @@ set_env_value() {
         die "Could not update ${key} in ${ENV_FILE}."
     fi
     chmod 0600 "$temporary_file"
-    mv -f -- "$temporary_file" "$ENV_FILE"
+    sync || die "Could not durably stage the ${key} environment update."
+    mv -f -- "$temporary_file" "$ENV_FILE" \
+        || die "Could not atomically publish the ${key} environment update."
+    sync || die "Could not durably publish the ${key} environment update."
+    validate_env_file
 }
 
 set_env_values_atomically() {
@@ -1519,8 +1667,9 @@ create_fresh_env_atomically() {
     local app_image="backupsheep:${INSTALL_REF}"
     local postgres_image="backupsheep-postgres:${INSTALL_REF}"
     local egress_image="backupsheep-egress:${INSTALL_REF}"
-    local rabbitmq_image="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
-    local rabbitmq_upgrade_image="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+    local rabbitmq_image="backupsheep-rabbitmq:${INSTALL_REF}"
+    local rabbitmq_upgrade_image="backupsheep-rabbitmq-upgrade:${INSTALL_REF}"
+    local rabbitmq_legacy_source_image="backupsheep-rabbitmq-legacy-source:${INSTALL_REF}"
     local contract="" original_env_file="$ENV_FILE" fresh_key="" fresh_value=""
     local installation_id="" staging_witness="" postgres_witness="" artifact_witness=""
 
@@ -1541,6 +1690,7 @@ create_fresh_env_atomically() {
         egress_image="$release_egress"
         rabbitmq_image="$release_rabbitmq"
         rabbitmq_upgrade_image="$release_rabbitmq_upgrade"
+        rabbitmq_legacy_source_image=""
     fi
     installation_id="$(random_hex 32)"
     staging_witness="$(sha256_text "BackupSheep/staging-layout/v3|${installation_id}|new-empty-v3")"
@@ -1581,6 +1731,8 @@ BACKUPSHEEP_POSTGRES_IMAGE|${postgres_image}
 BACKUPSHEEP_EGRESS_IMAGE|${egress_image}
 BACKUPSHEEP_RABBITMQ_IMAGE|${rabbitmq_image}
 BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE|${rabbitmq_upgrade_image}
+BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE|${rabbitmq_legacy_source_image}
+BACKUPSHEEP_RABBITMQ_NODE_HOST|rabbitmq
 DJANGO_ALLOWED_HOSTS|${PUBLIC_HOST},localhost,127.0.0.1
 APP_DOMAIN|${APP_DOMAIN}
 APP_PROTOCOL|http://
@@ -1720,6 +1872,33 @@ reconcile_linked_artifact_publication_residue() {
 
 reconcile_installer_temp_residues() {
     local path="" base="" entry="" count=0 size="" mode="" links=""
+    local runtime_count=0
+
+    # These files are created owner-only by the wrapper/release consumer, but a
+    # SIGKILL bypasses their EXIT traps. Their fixed names are never authority:
+    # admit only exact bounded identities, then delete rather than promote them.
+    for path in \
+        "${INSTALL_DIR}"/.env.backupsheep.* \
+        "${INSTALL_DIR}"/.backupsheep-rabbitmq-transition-state.* \
+        "${INSTALL_DIR}"/.release-command-output.*; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        base="$(basename -- "$path")"
+        [[ "$base" =~ ^\.env\.backupsheep\.[A-Za-z0-9]{6}$ \
+            || "$base" =~ ^\.backupsheep-rabbitmq-transition-state\.[A-Za-z0-9]{6}$ \
+            || "$base" =~ ^\.release-command-output\.[1-9][0-9]*\.[0-9]{1,5}\.[1-8]$ ]] \
+            || die "Runtime residue has a noncanonical name."
+        runtime_count=$((runtime_count + 1))
+        (( runtime_count <= 24 )) || die "Too many runtime residues exist."
+        [[ -f "$path" && ! -L "$path" && "$(file_uid "$path")" == "$EUID" \
+            && "$(file_links "$path")" == "1" && "$(file_mode "$path")" == "600" ]] \
+            || die "Runtime residue has an unsafe identity."
+        size="$(file_size "$path")"
+        [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) \
+            || die "Runtime residue is too large."
+        rm -f -- "$path" || die "Could not reconcile runtime residue."
+    done
+
+    validate_installer_rabbitmq_transition_state
     for path in "${INSTALL_DIR}"/.env-update.* "${INSTALL_DIR}"/.env-artifact-policy.*; do
         [[ -e "$path" || -L "$path" ]] || continue
         base="$(basename -- "$path")"
@@ -1796,6 +1975,115 @@ reconcile_installer_temp_residues() {
         done < <(find "${INSTALL_DIR}/.secrets" -mindepth 1 -maxdepth 1 -type f -print0)
     fi
     sync || die "Could not durably reconcile installer residues."
+}
+
+validate_installer_rabbitmq_transition_state() {
+    local path="${INSTALL_DIR}/.backupsheep-rabbitmq-transition-state"
+    # main reconciles crash residues before later configuration stages assign
+    # the global ENV_FILE; Bash dynamic scope makes this exact local path apply
+    # to validate_env_file/read_env_value below as well.
+    local ENV_FILE="${INSTALL_DIR}/.env"
+    local -a lines=()
+    local line="" phase="" source_class="" source_binding="" target_version=""
+    local target_config_hash="" target_image_ref="" target_image_id=""
+    local expected_target_image_ref=""
+    local state_installation="" state_project="" env_installation="" env_project=""
+    local env_generation=""
+
+    [[ -e "$path" || -L "$path" ]] || return 0
+    [[ -f "$path" && ! -L "$path" && "$(file_uid "$path")" == "$EUID" \
+        && "$(file_links "$path")" == "1" && "$(file_mode "$path")" == "600" ]] \
+        || die "RabbitMQ durable transition state has an unsafe identity."
+    [[ "$(file_size "$path")" =~ ^[0-9]+$ \
+        && "$(file_size "$path")" -gt 0 && "$(file_size "$path")" -le 4096 ]] \
+        || die "RabbitMQ durable transition state has an invalid size."
+    if IFS= read -r -d '' _rabbit_state_nul < "$path"; then
+        die "RabbitMQ durable transition state contains a NUL byte."
+    fi
+    ! grep -q $'\r' "$path" \
+        || die "RabbitMQ durable transition state contains carriage returns."
+    while IFS= read -r line || [[ -n "$line" ]]; do lines+=("$line"); done < "$path"
+    (( ${#lines[@]} == 10 )) \
+        || die "RabbitMQ durable transition state has an unexpected record count."
+    [[ "${lines[0]}" == version=1 \
+        && "${lines[1]}" == installation_id=* \
+        && "${lines[2]}" == project_name=* \
+        && "${lines[3]}" == phase=* \
+        && "${lines[4]}" == source_class=* \
+        && "${lines[5]}" == source_binding=* \
+        && "${lines[6]}" == target_version=* \
+        && "${lines[7]}" == target_config_hash=* \
+        && "${lines[8]}" == target_image_ref=* \
+        && "${lines[9]}" == target_image_id=* ]] \
+        || die "RabbitMQ durable transition state fields are malformed."
+    state_installation="${lines[1]#installation_id=}"
+    state_project="${lines[2]#project_name=}"
+    phase="${lines[3]#phase=}"
+    source_class="${lines[4]#source_class=}"
+    source_binding="${lines[5]#source_binding=}"
+    target_version="${lines[6]#target_version=}"
+    target_config_hash="${lines[7]#target_config_hash=}"
+    target_image_ref="${lines[8]#target_image_ref=}"
+    target_image_id="${lines[9]#target_image_id=}"
+    [[ "$state_installation" =~ ^[0-9a-f]{64}$ \
+        && "$state_project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ \
+        && "$source_binding" =~ ^[0-9a-f]{64}$ \
+        && "$target_config_hash" =~ ^[0-9a-f]{64}$ \
+        && ${#target_image_ref} -le 512 \
+        && "$target_image_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ \
+        && "$target_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "RabbitMQ durable transition state evidence is malformed."
+    case "${phase}:${source_class}:${target_version}" in
+        prepared:legacy-volume:3.13.7|attested:3.13.7:3.13.7|\
+        prepared:3.13.7:4.2.9|source-clean:3.13.7:4.2.9|\
+        target-ready:3.13.7:4.2.9|attested:4.2.9:4.2.9|\
+        prepared:4.2.9:4.3.5|target-ready:4.2.9:4.3.5|\
+        attested:4.3.5:4.3.5) ;;
+        *) die "RabbitMQ durable transition state has an impossible phase/source/target combination." ;;
+    esac
+    cmp -s "$path" <(printf '%s\n' "${lines[@]}") \
+        || die "RabbitMQ durable transition state bytes are not canonical."
+    [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] \
+        || die "RabbitMQ durable transition state exists without its protected environment."
+    validate_env_file
+    env_installation="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    env_project="$(read_env_value BACKUPSHEEP_COMPOSE_PROJECT_NAME)"
+    env_generation="$(read_env_value BACKUPSHEEP_RABBITMQ_DATA_GENERATION)"
+    case "$target_version" in
+        3.13.7)
+            expected_target_image_ref="$(read_env_value BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE)"
+            ;;
+        4.2.9)
+            expected_target_image_ref="$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)"
+            ;;
+        4.3.5)
+            expected_target_image_ref="$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)"
+            ;;
+        *) die "RabbitMQ durable transition state has an unsupported target version." ;;
+    esac
+    [[ -n "$expected_target_image_ref" \
+        && "$target_image_ref" == "$expected_target_image_ref" ]] \
+        || die "RabbitMQ durable transition state target image differs from the protected image-source contract."
+    [[ "$state_installation" == "$env_installation" && "$state_project" == "$env_project" ]] \
+        || die "RabbitMQ durable transition state belongs to another installation or project."
+    case "$env_generation" in
+        "") ;;
+        4.3)
+            [[ "${phase}:${source_class}:${target_version}" == "attested:4.3.5:4.3.5" ]] \
+                || die "Committed RabbitMQ generation is inconsistent with protected transition state."
+            ;;
+        *) die "RabbitMQ durable transition state is paired with an invalid data generation." ;;
+    esac
+}
+
+refuse_installer_with_outstanding_rabbitmq_transition() {
+    local path="${INSTALL_DIR}/.backupsheep-rabbitmq-transition-state"
+
+    [[ -e "$path" || -L "$path" ]] || return 0
+    # Validate the record before reporting the recovery boundary so malformed or
+    # foreign state is never mistaken for a legitimate resumable transition.
+    validate_installer_rabbitmq_transition_state
+    die "An unfinished RabbitMQ generation transition is recorded in protected host state. Resume or reconcile that exact transition through backupsheep-compose before rerunning install.sh; the installer will not rewrite its coordinated environment or secrets while the ledger exists."
 }
 
 validate_release_request_witness() {
@@ -2664,6 +2952,18 @@ validate_database_role_name() {
         || die "${variable_name} must be a lowercase PostgreSQL role identifier."
 }
 
+validate_database_name() {
+    local value="$1"
+
+    [[ "$value" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] \
+        || die "DB_NAME must be a non-system lowercase PostgreSQL database identifier."
+    case "$value" in
+        postgres|template0|template1)
+            die "DB_NAME must be a non-system lowercase PostgreSQL database identifier."
+            ;;
+    esac
+}
+
 configure_database_identity_generation() {
     local generation=""
     local bootstrap_user=""
@@ -3107,7 +3407,8 @@ finalize_celery_signing_rotation() {
         || die "Signing-key rotation requires the owned RabbitMQ service to remain running."
     queue_state="$(
         "$DOCKER_BIN" exec --user 100:101 "$broker_id" \
-            rabbitmqctl -q -p backupsheep \
+            rabbitmqctl -q -n "rabbit@$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" \
+            -p backupsheep \
             list_queues name messages_ready messages_unacknowledged --silent
     )" || die "Could not prove the owned RabbitMQ queues are drained."
     while IFS=$'\t' read -r queue_name ready unacknowledged; do
@@ -3409,8 +3710,9 @@ validate_requested_image_mode_against_existing() {
             && "$(read_env_value BACKUPSHEEP_IMAGE)" == "backupsheep:local" \
             && "$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)" == "backupsheep-postgres:local" \
             && "$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)" == "backupsheep-egress:local" \
-            && "$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)" == rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7 \
-            && "$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)" == rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095 ]] \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)" == "backupsheep-rabbitmq:${INSTALL_REF}" \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)" == "backupsheep-rabbitmq-upgrade:${INSTALL_REF}" \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE)" == "backupsheep-rabbitmq-legacy-source:${INSTALL_REF}" ]] \
             || die "Interrupted signed-release request found non-pristine image-source fields."
         return 0
     fi
@@ -3453,8 +3755,9 @@ configure_image_source() {
     local expected_app="backupsheep:${INSTALL_REF}"
     local expected_postgres="backupsheep-postgres:${INSTALL_REF}"
     local expected_egress="backupsheep-egress:${INSTALL_REF}"
-    local expected_rabbitmq="rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7"
-    local expected_rabbitmq_upgrade="rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095"
+    local expected_rabbitmq="backupsheep-rabbitmq:${INSTALL_REF}"
+    local expected_rabbitmq_upgrade="backupsheep-rabbitmq-upgrade:${INSTALL_REF}"
+    local expected_rabbitmq_legacy_source="backupsheep-rabbitmq-legacy-source:${INSTALL_REF}"
     local key=""
     local expected=""
     local current=""
@@ -3470,6 +3773,7 @@ configure_image_source() {
         expected_egress="$(release_evidence_value "$descriptor" egress_image)"
         expected_rabbitmq="$(release_evidence_value "$descriptor" rabbitmq_image)"
         expected_rabbitmq_upgrade="$(release_evidence_value "$descriptor" rabbitmq_upgrade_image)"
+        expected_rabbitmq_legacy_source=""
     fi
 
     while IFS='|' read -r key expected; do
@@ -3488,7 +3792,7 @@ configure_image_source() {
                         [[ -z "$current" ]] \
                             || die "${key} must be blank in local-build mode."
                         ;;
-                    BACKUPSHEEP_IMAGE|BACKUPSHEEP_POSTGRES_IMAGE|BACKUPSHEEP_EGRESS_IMAGE|BACKUPSHEEP_RABBITMQ_IMAGE|BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)
+                    BACKUPSHEEP_IMAGE|BACKUPSHEEP_POSTGRES_IMAGE|BACKUPSHEEP_EGRESS_IMAGE|BACKUPSHEEP_RABBITMQ_IMAGE|BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE|BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE)
                         : # Preserve historical behavior: rebind local tags to --ref.
                         ;;
                 esac
@@ -3506,13 +3810,14 @@ BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256|${expected_descriptor_digest}
 BACKUPSHEEP_RELEASE_APP_IMAGE|${expected_app/#backupsheep:${INSTALL_REF}/}
 BACKUPSHEEP_RELEASE_POSTGRES_IMAGE|${expected_postgres/#backupsheep-postgres:${INSTALL_REF}/}
 BACKUPSHEEP_RELEASE_EGRESS_IMAGE|${expected_egress/#backupsheep-egress:${INSTALL_REF}/}
-BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE|${expected_rabbitmq/#rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7/}
-BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE|${expected_rabbitmq_upgrade/#rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095/}
+BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE|${expected_rabbitmq/#backupsheep-rabbitmq:${INSTALL_REF}/}
+BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE|${expected_rabbitmq_upgrade/#backupsheep-rabbitmq-upgrade:${INSTALL_REF}/}
 BACKUPSHEEP_IMAGE|${expected_app}
 BACKUPSHEEP_POSTGRES_IMAGE|${expected_postgres}
 BACKUPSHEEP_EGRESS_IMAGE|${expected_egress}
 BACKUPSHEEP_RABBITMQ_IMAGE|${expected_rabbitmq}
 BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE|${expected_rabbitmq_upgrade}
+BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE|${expected_rabbitmq_legacy_source}
 EOF
     set_image_source_contract_atomically "$contract"
     if [[ "$IMAGE_MODE" == "signed-release" ]]; then
@@ -4235,6 +4540,120 @@ ensure_compose_project_name() {
     set_env_value BACKUPSHEEP_COMPOSE_PROJECT_NAME "$PROJECT_NAME"
 }
 
+valid_rabbitmq_node_host() {
+    local value="$1"
+    [[ "$value" == rabbitmq || "$value" =~ ^[0-9a-f]{12}$ ]]
+}
+
+validate_explicit_legacy_rabbitmq_node_host_target() {
+    local container_listing="" volume_listing=""
+    local resource_id="" service="" resource_name=""
+    local resource_project="" logical_name="" rabbit_volume=""
+
+    # This flag exists only to recover the durable Erlang node name after a
+    # reviewed legacy `compose down` removed the broker container but retained
+    # its one stock data volume. It must never manufacture a legacy identity for
+    # an empty project or bypass the normal container-derived identity path.
+    container_listing="$(
+        "$DOCKER_BIN" ps --all --quiet \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}"
+    )" || die "Could not inventory RabbitMQ containers for the explicit legacy node host."
+    while IFS= read -r resource_id; do
+        [[ -n "$resource_id" ]] || continue
+        service="$(docker_resource_label container "$resource_id" com.docker.compose.service)" \
+            || die "Could not inspect a project container while validating the explicit legacy RabbitMQ node host."
+        [[ "$service" != rabbitmq ]] \
+            || die "--legacy-rabbitmq-node-host requires the legacy RabbitMQ container to be absent; use the normal container-derived identity path instead."
+    done <<< "$container_listing"
+
+    volume_listing="$(
+        "$DOCKER_BIN" volume ls --quiet \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+            --filter 'label=com.docker.compose.volume=rabbitmq_data'
+    )" || die "Could not inventory the RabbitMQ volume for the explicit legacy node host."
+    while IFS= read -r resource_id; do
+        [[ -n "$resource_id" ]] || continue
+        [[ -z "$rabbit_volume" ]] \
+            || die "--legacy-rabbitmq-node-host requires exactly one retained stock RabbitMQ data volume."
+        rabbit_volume="$resource_id"
+    done <<< "$volume_listing"
+    [[ -n "$rabbit_volume" ]] \
+        || die "--legacy-rabbitmq-node-host requires exactly one retained stock RabbitMQ data volume."
+
+    resource_name="$("$DOCKER_BIN" volume inspect --format '{{.Name}}' "$rabbit_volume")" \
+        || die "Could not inspect the retained RabbitMQ volume name."
+    resource_project="$(docker_resource_label volume "$rabbit_volume" com.docker.compose.project)" \
+        || die "Could not inspect the retained RabbitMQ volume project label."
+    logical_name="$(docker_resource_label volume "$rabbit_volume" com.docker.compose.volume)" \
+        || die "Could not inspect the retained RabbitMQ volume logical label."
+    [[ "$resource_name" == "${PROJECT_NAME}_rabbitmq_data" \
+        && "$resource_project" == "$PROJECT_NAME" \
+        && "$logical_name" == rabbitmq_data ]] \
+        || die "--legacy-rabbitmq-node-host requires the exact retained stock RabbitMQ data volume."
+}
+
+configure_rabbitmq_node_host() {
+    local configured="" generation="" container_listing="" volume_listing=""
+    local resource_id="" service="" hostname="" rabbit_container="" rabbit_volume=""
+
+    if [[ -n "$LEGACY_RABBITMQ_NODE_HOST" ]]; then
+        validate_explicit_legacy_rabbitmq_node_host_target
+    fi
+
+    configured="$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)"
+    if [[ -n "$configured" ]]; then
+        valid_rabbitmq_node_host "$configured" \
+            || die "BACKUPSHEEP_RABBITMQ_NODE_HOST must be rabbitmq or an exact 12-character lowercase legacy Docker hostname."
+        [[ -z "$LEGACY_RABBITMQ_NODE_HOST" \
+            || "$LEGACY_RABBITMQ_NODE_HOST" == "$configured" ]] \
+            || die "--legacy-rabbitmq-node-host disagrees with the protected environment."
+        return
+    fi
+
+    if [[ -n "$LEGACY_RABBITMQ_NODE_HOST" ]]; then
+        set_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST "$LEGACY_RABBITMQ_NODE_HOST"
+        return
+    fi
+    container_listing="$(
+        "$DOCKER_BIN" ps --all --quiet \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}"
+    )" || die "Could not inventory RabbitMQ containers while binding the durable node host."
+    while IFS= read -r resource_id; do
+        [[ -n "$resource_id" ]] || continue
+        service="$(docker_resource_label container "$resource_id" com.docker.compose.service)"
+        [[ "$service" == rabbitmq ]] || continue
+        [[ -z "$rabbit_container" ]] \
+            || die "Multiple RabbitMQ containers claim this project; refusing node-host migration."
+        rabbit_container="$resource_id"
+    done <<< "$container_listing"
+    if [[ -n "$rabbit_container" ]]; then
+        hostname="$("$DOCKER_BIN" inspect --format '{{.Config.Hostname}}' "$rabbit_container")" \
+            || die "Could not inspect the existing RabbitMQ durable node hostname."
+        valid_rabbitmq_node_host "$hostname" \
+            || die "The existing RabbitMQ hostname is outside the supported fixed/legacy identity boundary."
+        set_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST "$hostname"
+        return
+    fi
+
+    volume_listing="$(
+        "$DOCKER_BIN" volume ls --quiet \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+            --filter 'label=com.docker.compose.volume=rabbitmq_data'
+    )" || die "Could not inventory the RabbitMQ volume while binding the durable node host."
+    while IFS= read -r resource_id; do
+        [[ -n "$resource_id" ]] || continue
+        [[ -z "$rabbit_volume" ]] \
+            || die "Multiple RabbitMQ data volumes claim this project; refusing node-host migration."
+        rabbit_volume="$resource_id"
+    done <<< "$volume_listing"
+    if [[ -z "$rabbit_volume" ]]; then
+        set_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST rabbitmq
+        return
+    fi
+    generation="$(read_env_value BACKUPSHEEP_RABBITMQ_DATA_GENERATION)"
+    die "A stopped RabbitMQ volume has no unambiguous durable node host. Generation ${generation:-unattested} does not identify its node tree. Inspect its only supported node directory, then rerun local-build mode with --legacy-rabbitmq-node-host HOST --skip-start; ambiguous multi-node volumes require reviewed blue-green recovery."
+}
+
 validate_egress_policy_generation_two() {
     local role=""
     local mode=""
@@ -4392,6 +4811,7 @@ create_or_migrate_configuration() {
     ensure_installation_id
     configure_staging_layout_witness
     ensure_compose_project_name
+    configure_rabbitmq_node_host
     configure_postgres_storage_generation
     configure_egress_policy_generation
     configure_artifact_key_policy
@@ -4492,6 +4912,15 @@ validate_runtime_configuration() {
         value="$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)"
         [[ "$value" == "backupsheep-egress:${INSTALL_REF}" ]] \
             || die "BACKUPSHEEP_EGRESS_IMAGE must bind to this verified source build."
+        value="$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)"
+        [[ "$value" == "backupsheep-rabbitmq:${INSTALL_REF}" ]] \
+            || die "BACKUPSHEEP_RABBITMQ_IMAGE must bind to this verified source build."
+        value="$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)"
+        [[ "$value" == "backupsheep-rabbitmq-upgrade:${INSTALL_REF}" ]] \
+            || die "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE must bind to this verified source build."
+        value="$(read_env_value BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE)"
+        [[ "$value" == "backupsheep-rabbitmq-legacy-source:${INSTALL_REF}" ]] \
+            || die "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE must bind to this verified source build."
         for key in BACKUPSHEEP_RELEASE_TAG BACKUPSHEEP_RELEASE_SOURCE_COMMIT \
             BACKUPSHEEP_RELEASE_DESCRIPTOR_SHA256 BACKUPSHEEP_RELEASE_APP_IMAGE \
             BACKUPSHEEP_RELEASE_POSTGRES_IMAGE BACKUPSHEEP_RELEASE_EGRESS_IMAGE \
@@ -4506,7 +4935,8 @@ validate_runtime_configuration() {
             && "$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_POSTGRES_IMAGE)" \
             && "$(read_env_value BACKUPSHEEP_EGRESS_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_EGRESS_IMAGE)" \
             && "$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_IMAGE)" \
-            && "$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE)" ]] \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)" == "$(read_env_value BACKUPSHEEP_RELEASE_RABBITMQ_UPGRADE_IMAGE)" \
+            && -z "$(read_env_value BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE)" ]] \
             || die "Runtime image references do not match the signed descriptor bindings."
         validate_local_release_images
     fi
@@ -4535,6 +4965,9 @@ validate_runtime_configuration() {
     value="$(read_env_value BACKUPSHEEP_COMPOSE_PROJECT_NAME)"
     [[ "$value" == "$PROJECT_NAME" ]] \
         || die "BACKUPSHEEP_COMPOSE_PROJECT_NAME must match --project-name exactly."
+    value="$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)"
+    valid_rabbitmq_node_host "$value" \
+        || die "BACKUPSHEEP_RABBITMQ_NODE_HOST must be rabbitmq or the exact reviewed 12-character lowercase legacy Docker hostname."
     postgres_storage_state="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION)"
     postgres_storage_intent="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_INTENT)"
     postgres_storage_witness="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_WITNESS)"
@@ -4563,6 +4996,7 @@ validate_runtime_configuration() {
     value="$(read_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION)"
     [[ "$value" =~ ^[1-9][0-9]{0,8}$ ]] \
         || die "BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION must be a positive bounded integer."
+    validate_database_name "$(read_env_value DB_NAME)"
     for variable in "${database_role_variables[@]}"; do
         role="$(read_env_value "$variable")"
         validate_database_role_name "$variable" "$role"
@@ -4793,6 +5227,27 @@ compose() {
     assert_install_root_identity
     validate_env_file
     validate_compose_model_settings
+    local base_model=false
+    local base_build=false
+    local hardened_model_validation=false
+    if [[ "${1-}" == "--installer-base-build" ]]; then
+        base_model=true
+        base_build=true
+        shift
+        [[ "$IMAGE_MODE" == "local-build" && "${1-}" == "build" ]] \
+            || die "The installer base-build path is restricted to local-build Compose builds."
+    elif [[ "${1-}" == "--installer-base-model" ]]; then
+        base_model=true
+        shift
+        [[ "$IMAGE_MODE" == "local-build" ]] \
+            || die "The installer base-model path is restricted to local-build validation."
+    elif [[ "${1-}" == "--installer-hardened-model" ]]; then
+        hardened_model_validation=true
+        shift
+        [[ "$IMAGE_MODE" == "local-build" && $# -eq 2 \
+            && "${1-}" == config && "${2-}" == --quiet ]] \
+            || die "The installer hardened-model path accepts only local-build config --quiet."
+    fi
     local -a compose_environment=(
         /usr/bin/env -i
         "LC_ALL=C"
@@ -4806,7 +5261,11 @@ compose() {
     local transport_variable=""
     local -a compose_model=(-f "$INSTALL_DIR/docker-compose.yml")
 
-    if [[ -n "$APPROVED_COMPOSE_FILE" ]]; then
+    # A reviewed deployment override may change runtime storage, but it is never
+    # a build source. Build every commit-tagged image from the exact checked-out
+    # base model so an override cannot replace a context, Dockerfile, target or
+    # build argument while retaining the trusted local tag.
+    if [[ "$base_model" == false && -n "$APPROVED_COMPOSE_FILE" ]]; then
         compose_model+=(-f "$APPROVED_COMPOSE_FILE")
     fi
     if [[ "$IMAGE_MODE" == "signed-release" ]]; then
@@ -4849,15 +5308,28 @@ compose() {
     unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES
     unset COMPOSE_REMOVE_ORPHANS
     unset COMPOSE_PATH_SEPARATOR COMPOSE_DISABLE_ENV_FILE
-    if [[ "$IMAGE_MODE" == "signed-release" ]]; then
+    if [[ "$IMAGE_MODE" == "signed-release" || "$base_build" == true \
+            || "$hardened_model_validation" == true \
+            || "${1-}" == "--installer-reconcile-rabbitmq-volume" ]]; then
         local -a wrapper_arguments=()
         [[ -x "$INSTALL_DIR/backupsheep-compose" && ! -L "$INSTALL_DIR/backupsheep-compose" ]] \
-            || die "The signed-release Compose wrapper is absent or unsafe."
+            || die "The hardened Compose wrapper is absent or unsafe."
         if [[ "$ALLOW_ROOT_INSTALL" == true ]]; then
             wrapper_arguments+=(--allow-root-install)
         fi
         wrapper_arguments+=(--inherit-installer-lock)
-        run_installer_command 3600 "hardened signed-release Compose operation" \
+        if [[ "${1-}" == "--installer-reconcile-rabbitmq-volume" ]]; then
+            # The wrapper accepts this privileged internal mode only directly
+            # after the inherited installer-lock proof. Deployment overlays are
+            # still parsed and validated afterward, but cannot obscure the
+            # locked-child capability token.
+            wrapper_arguments+=(--installer-reconcile-rabbitmq-volume)
+            shift
+        fi
+        if [[ -n "$APPROVED_COMPOSE_FILE" ]]; then
+            wrapper_arguments+=(--approved-compose-file "$APPROVED_COMPOSE_FILE")
+        fi
+        run_installer_command 3600 "hardened installer Compose operation" \
             "${compose_environment[@]}" "$INSTALL_DIR/backupsheep-compose" \
             "${wrapper_arguments[@]}" "$@"
     else
@@ -4891,6 +5363,56 @@ require_compose_service() {
         || die "The reviewed Compose model is missing expected service ${wanted}."
 }
 
+validate_local_build_compose_model() {
+    local rendered="" service_name="" base_images="" combined_images=""
+
+    rendered="$(compose --profile operations config)" \
+        || die "Could not render the local-build Compose model."
+    awk '
+        function finish_service() {
+            if (in_service && (image == "" || pull != "never")) exit 7
+        }
+        /^services:$/ { in_services = 1; next }
+        in_services && /^[^ ]/ { finish_service(); in_services = 0 }
+        in_services && /^  [A-Za-z0-9_-]+:$/ {
+            finish_service(); in_service = 1; image = ""; pull = ""; next
+        }
+        in_services && /^    image: / {
+            image = substr($0, 12); gsub(/^"|"$/, "", image)
+        }
+        in_services && /^    pull_policy: / {
+            pull = substr($0, 18); gsub(/^"|"$/, "", pull)
+        }
+        END { if (in_services) finish_service() }
+    ' <<< "$rendered" \
+        || die "Every local-build service must retain pull_policy: never."
+
+    # Use the same model-locking wrapper that operators use at runtime. It
+    # compares the complete approved service graph and every non-storage
+    # top-level object against the exact base model before any container can be
+    # created. The only permitted difference is the constrained
+    # backup_storage local bind-volume definition.
+    compose --installer-hardened-model config --quiet
+
+    # Runtime/storage overrides cannot redirect a role to a different local tag.
+    # Combined with base-only no-cache builds and --no-build/--pull never startup,
+    # this keeps override build keys inert and prevents registry fallback.
+    if [[ -n "$APPROVED_COMPOSE_FILE" ]]; then
+        for service_name in \
+            "${CORE_SERVICES[@]}" \
+            "${OPERATION_SERVICES[@]}" \
+            "${OPERATION_GUARD_SERVICES[@]}"; do
+            base_images="$(compose --installer-base-model --profile operations \
+                config --images "$service_name")" \
+                || die "Could not resolve the base ${service_name} image contract."
+            combined_images="$(compose --profile operations config --images "$service_name")" \
+                || die "Could not resolve the approved ${service_name} image contract."
+            [[ -n "$base_images" && "$combined_images" == "$base_images" ]] \
+                || die "The approved Compose override changed the reviewed ${service_name} image reference."
+        done
+    fi
+}
+
 validate_compose_model() {
     local available_services=""
     local service_name=""
@@ -4906,6 +5428,8 @@ validate_compose_model() {
     done
     if [[ "$IMAGE_MODE" == "signed-release" ]]; then
         validate_signed_release_compose_model
+    else
+        validate_local_build_compose_model
     fi
 }
 
@@ -5440,13 +5964,31 @@ validate_rabbitmq_data_generation() {
     done <<< "$volume_listing"
 
     if [[ -z "$rabbit_container_id" && -z "$rabbit_volume_id" ]]; then
+        [[ ! -e "${INSTALL_DIR}/.backupsheep-rabbitmq-transition-state" \
+            && ! -L "${INSTALL_DIR}/.backupsheep-rabbitmq-transition-state" ]] \
+            || die "RabbitMQ transition state exists but its exact broker volume is missing; restore the coordinated recovery set."
         if [[ -z "$generation" ]]; then
-            set_env_value BACKUPSHEEP_RABBITMQ_DATA_GENERATION "4.3"
+            set_env_values_atomically BACKUPSHEEP_RABBITMQ_DATA_GENERATION "4.3"
         fi
         return
     fi
-    [[ -n "$rabbit_container_id" ]] \
-        || die "An existing RabbitMQ volume has no live version witness. Follow docs/guides/rabbitmq-upgrade.md; the installer will not guess its format."
+    if [[ -z "$rabbit_container_id" ]]; then
+        if [[ -z "$generation" && "$SKIP_START" == true \
+            && -n "$LEGACY_RABBITMQ_NODE_HOST" \
+            && "$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" == "$LEGACY_RABBITMQ_NODE_HOST" ]]; then
+            log "Retained the stopped legacy RabbitMQ volume and explicit node host for the separate wrapper migration"
+            return
+        fi
+        [[ "$generation" == "4.3" ]] \
+            || die "An existing RabbitMQ volume has no live version witness or committed 4.3 generation. Follow docs/guides/rabbitmq-upgrade.md; the installer will not guess its format."
+        # A first startup can be interrupted after Docker creates the named volume
+        # but before it creates the broker. The exact networkless initializer is
+        # safe to retry: it accepts only an empty fresh volume, an exact pending
+        # witness, or an exact final witness, and refuses nonempty unwitnessed data.
+        log "Reconciling the committed RabbitMQ 4.3 volume witness without starting the broker"
+        compose --installer-reconcile-rabbitmq-volume
+        return
+    fi
     container_state="$("$DOCKER_BIN" inspect --format '{{.State.Status}}' "$rabbit_container_id")"
     [[ "$container_state" == "running" ]] \
         || die "The existing RabbitMQ container is not running, so its data generation cannot be proven safely. Follow docs/guides/rabbitmq-upgrade.md."
@@ -5456,10 +5998,19 @@ validate_rabbitmq_data_generation() {
     # The official container starts as root only for volume ownership repair. Run
     # diagnostics as the broker identity so this witness cannot create a root-owned
     # Erlang cookie and make the existing node unstartable on its next restart.
-    server_version="$("$DOCKER_BIN" exec --user rabbitmq "$rabbit_container_id" rabbitmq-diagnostics -q server_version 2>/dev/null)" \
+    server_version="$("$DOCKER_BIN" exec --user rabbitmq "$rabbit_container_id" \
+        rabbitmq-diagnostics -q -n "rabbit@$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" \
+        server_version 2>/dev/null)" \
         || die "Could not query the existing RabbitMQ server version without consuming work."
     [[ "$server_version" == "4.3.5" ]] \
         || die "RabbitMQ ${server_version} is not the exact pinned 4.3.5 target. Complete or reconcile the documented 3.13/4.2.9/4.3.5 Khepri migration before install.sh can continue."
+    [[ "$("$DOCKER_BIN" inspect --format '{{.Config.Hostname}}' "$rabbit_container_id")" \
+        == "$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" ]] \
+        || die "The live RabbitMQ container hostname differs from its protected durable node host."
+    [[ "$("$DOCKER_BIN" exec --user rabbitmq "$rabbit_container_id" rabbitmqctl -q \
+        -n "rabbit@$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" eval 'node().' 2>/dev/null)" \
+        == "rabbit@$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" ]] \
+        || die "The live RabbitMQ server opened a different durable node database."
     if [[ -z "$generation" ]]; then
         die "A live RabbitMQ volume has no attested generation witness. Run the wrapper's explicit 4.3 reconciliation command so it can prove the isolated base-model image reference, local image ID, exact 4.3.5 server and Khepri state before atomically recording the witness."
     fi
@@ -5722,8 +6273,9 @@ start_core() {
     stop_operations
 
     if [[ "$IMAGE_MODE" == "local-build" ]]; then
-        log "Building the reviewed PostgreSQL, application, and egress-guard images"
-        compose build --pull db app app-egress-guard
+        log "Building the reviewed PostgreSQL, application, egress-guard, and RabbitMQ images"
+        compose --installer-base-build build \
+            db app app-egress-guard rabbitmq
     else
         log "Re-attesting the pre-pulled signed-release image IDs and immutable digests"
         validate_local_release_images
@@ -5731,7 +6283,7 @@ start_core() {
     run_postgres_runtime_migration
 
     log "Preparing and sealing database identities while every long-lived lane remains blocked"
-    if ! compose up --detach --no-build \
+    if ! compose up --detach --no-build --pull never \
         db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision \
         db-provision migrate db-seal; then
         show_failure_guidance
@@ -5745,14 +6297,14 @@ start_core() {
     validate_compose_model
 
     log "Running the security preflight against the sealed database"
-    if ! compose up --detach --no-build preflight \
+    if ! compose up --detach --no-build --pull never preflight \
         || ! compose wait preflight >/dev/null; then
         show_failure_guidance
         die "Core security preflight failed after the database identity seal."
     fi
 
     log "Force-recreating the web/guard network-namespace pair"
-    if ! compose up --detach --no-build --no-deps --force-recreate \
+    if ! compose up --detach --no-build --pull never --no-deps --force-recreate \
         app-egress-guard app; then
         show_failure_guidance
         die "Core startup failed after the database identity seal."
@@ -5791,14 +6343,14 @@ start_operations() {
     local -a operation_service_names=()
 
     log "Explicit operations opt-in received; starting provider workers and the scheduler"
-    if ! compose --profile operations up --detach --no-build --no-deps \
+    if ! compose --profile operations up --detach --no-build --pull never --no-deps \
         --force-recreate "${OPERATION_GUARD_SERVICES[@]}" \
         "${OPERATION_WORKER_SERVICES[@]}"; then
         quiesce_failed_operations_start
         show_failure_guidance
         die "Operations startup failed; complete-topology quiescence was requested."
     fi
-    if ! compose --profile operations up --detach --no-build --no-deps beat; then
+    if ! compose --profile operations up --detach --no-build --pull never --no-deps beat; then
         quiesce_failed_operations_start
         show_failure_guidance
         die "Beat startup failed after the guarded workers were recreated; complete-topology quiescence was requested."
@@ -5985,6 +6537,10 @@ main() {
     validate_project_name
     validate_install_dir
     acquire_installation_mutation_lock
+    # An unfinished broker transition owns the coordinated .env/secrets recovery
+    # set. Refuse before Docker access, checkout work, or installer reconciliation
+    # can change any member of that set.
+    refuse_installer_with_outstanding_rabbitmq_transition
     validate_approved_compose_file
     validate_docker_access
     clone_or_validate_repository

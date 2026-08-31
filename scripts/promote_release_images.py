@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,7 +23,12 @@ from verify_release import (
 )
 
 
-def _oras(oras: str, arguments: list[str], *, allow_not_found: bool = False) -> str:
+MAX_TAG_LIST_BYTES = 4 * 1024 * 1024
+MAX_REPOSITORY_TAGS = 100_000
+OCI_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
+
+
+def _oras(oras: str, arguments: list[str]) -> str:
     environment = os.environ.copy()
     for name in tuple(environment):
         if name.startswith("ORAS_"):
@@ -35,15 +42,10 @@ def _oras(oras: str, arguments: list[str], *, allow_not_found: bool = False) -> 
             env=environment,
             timeout=600,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
         raise ReleaseVerificationError(f"ORAS invocation failed: {exc}") from exc
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
-        normalized = detail.lower()
-        if allow_not_found and any(
-            marker in normalized for marker in ("manifest_unknown", "manifest unknown", "not found", "404")
-        ):
-            return "NOT_FOUND"
         raise ReleaseVerificationError(f"ORAS failed closed: {detail[:1000]}")
     return result.stdout
 
@@ -53,25 +55,58 @@ def _fetch_and_verify_index(
     reference: str,
     expected_path: Path,
     expected_digest: str,
-    *,
-    allow_not_found: bool = False,
-) -> bool:
-    """Return False only for an authenticated, definitive registry miss."""
+) -> None:
+    """Fetch one required reference and prove its exact retained index bytes."""
 
     with tempfile.TemporaryDirectory(prefix="backupsheep-promote-") as temporary:
         fetched = Path(temporary) / "index.json"
         status = _oras(
             oras,
             ["manifest", "fetch", "--output", str(fetched), reference],
-            allow_not_found=allow_not_found,
         )
-        if status == "NOT_FOUND":
-            return False
+        if status:
+            raise ReleaseVerificationError(
+                f"ORAS emitted unexpected manifest output for {reference}"
+            )
         if _sha256_path(fetched) != expected_digest:
             raise ReleaseVerificationError(f"official reference has the wrong OCI digest: {reference}")
         if fetched.read_bytes() != expected_path.read_bytes():
             raise ReleaseVerificationError(f"official reference has different OCI index bytes: {reference}")
-        return True
+
+
+def _repository_tags(oras: str, repository: str) -> set[str]:
+    """Return a bounded, authenticated tag inventory from successful JSON output."""
+
+    raw = _oras(oras, ["repo", "tags", "--format", "json", repository])
+    try:
+        encoded = raw.encode("utf-8")
+    except UnicodeError as exc:
+        raise ReleaseVerificationError("ORAS returned a non-UTF-8 tag inventory") from exc
+    if not encoded or len(encoded) > MAX_TAG_LIST_BYTES:
+        raise ReleaseVerificationError("ORAS returned an invalid-size tag inventory")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        document: dict[str, object] = {}
+        for key, value in pairs:
+            if key in document:
+                raise ValueError(f"duplicate JSON key: {key}")
+            document[key] = value
+        return document
+
+    try:
+        document = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ReleaseVerificationError("ORAS returned malformed tag inventory JSON") from exc
+    if not isinstance(document, dict) or set(document) != {"tags"}:
+        raise ReleaseVerificationError("ORAS tag inventory has an unexpected schema")
+    tags = document["tags"]
+    if not isinstance(tags, list) or len(tags) > MAX_REPOSITORY_TAGS:
+        raise ReleaseVerificationError("ORAS tag inventory has an invalid tag set")
+    if any(not isinstance(tag, str) or OCI_TAG_RE.fullmatch(tag) is None for tag in tags):
+        raise ReleaseVerificationError("ORAS tag inventory contains a malformed tag")
+    if len(set(tags)) != len(tags):
+        raise ReleaseVerificationError("ORAS tag inventory contains duplicate tags")
+    return set(tags)
 
 
 def promote(policy: dict, manifest: dict, artifacts_dir: Path, oras: str) -> None:
@@ -79,9 +114,11 @@ def promote(policy: dict, manifest: dict, artifacts_dir: Path, oras: str) -> Non
     validate_release(policy, manifest, artifacts_dir)
     tag = manifest["release"]["tag"]
 
-    # Classify every destination before making the first write. An exact tag
-    # from an interrupted earlier attempt is safe to resume; any mismatch,
-    # timeout, authentication failure, or TLS failure stops the whole release.
+    # Classify every destination before making the first write. The earlier
+    # staging phase must already have made the exact digest readable in every
+    # official repository. A successful, structured repository inventory is the
+    # only evidence accepted for tag absence; registries commonly mask denied
+    # reads as a generic 404, so an error string can never authorize a write.
     missing: set[str] = set()
     expected_indexes: dict[str, Path] = {}
     for image_name, image in manifest["images"].items():
@@ -90,14 +127,22 @@ def promote(policy: dict, manifest: dict, artifacts_dir: Path, oras: str) -> Non
             artifacts_dir, image["oci_index"]["file"], f"{image_name} retained OCI index"
         )
         expected_indexes[image_name] = expected_path
-        if not _fetch_and_verify_index(
+        _fetch_and_verify_index(
             oras,
-            official_tag,
+            image["official_reference"],
             expected_path,
             image["digest"],
-            allow_not_found=True,
-        ):
+        )
+        tags = _repository_tags(oras, image["official_repository"])
+        if tag not in tags:
             missing.add(image_name)
+        else:
+            _fetch_and_verify_index(
+                oras,
+                official_tag,
+                expected_path,
+                image["digest"],
+            )
 
     for image_name, image in manifest["images"].items():
         source = image["quarantine_reference"]

@@ -87,13 +87,17 @@ class StableReleaseVerifierPublisherTests(unittest.TestCase):
         )
 
     def test_fresh_publication_copies_only_after_every_destination_is_classified(self):
-        classifications = [False, False, True, True, False, True, True]
         with mock.patch.object(
-            publisher, "_fetch_exact", side_effect=classifications
+            publisher,
+            "_repository_tags",
+            side_effect=[set(), set(), set(), set()],
+        ) as inventories, mock.patch.object(
+            publisher, "_fetch_exact"
         ) as fetch, mock.patch.object(publisher, "_run_oras", return_value="") as run:
             result = self.publish()
 
-        self.assertEqual(fetch.call_count, 7)
+        self.assertEqual(inventories.call_count, 4)
+        self.assertEqual(fetch.call_count, 4)
         self.assertEqual(run.call_count, 2)
         self.assertEqual(
             run.call_args_list[0].args[1],
@@ -122,22 +126,30 @@ class StableReleaseVerifierPublisherTests(unittest.TestCase):
 
     def test_exact_interrupted_publication_is_idempotent(self):
         with mock.patch.object(
-            publisher, "_fetch_exact", return_value=True
+            publisher,
+            "_repository_tags",
+            side_effect=[{self.candidate_tag}, {self.stable_tag}],
+        ) as inventories, mock.patch.object(
+            publisher, "_fetch_exact"
         ) as fetch, mock.patch.object(publisher, "_run_oras") as run:
             result = self.publish()
 
+        self.assertEqual(inventories.call_count, 2)
         self.assertEqual(fetch.call_count, 6)
         run.assert_not_called()
         self.assertEqual(result["candidate"]["status"], "already_exact")
         self.assertEqual(result["official"]["status"], "already_exact")
 
     def test_different_occupied_official_tag_stops_before_first_write(self):
-        def classify(_oras, reference, _expected, **_kwargs):
+        def classify(_oras, reference, _expected):
             if reference == f"{self.official}:{self.stable_tag}":
                 raise publisher.PublicationError("different official bytes")
-            return False
 
         with mock.patch.object(
+            publisher,
+            "_repository_tags",
+            side_effect=[set(), {self.stable_tag}],
+        ), mock.patch.object(
             publisher, "_fetch_exact", side_effect=classify
         ), mock.patch.object(publisher, "_run_oras") as run:
             with self.assertRaisesRegex(
@@ -146,6 +158,40 @@ class StableReleaseVerifierPublisherTests(unittest.TestCase):
                 self.publish()
         run.assert_not_called()
         self.assertFalse(self.evidence.exists())
+
+    def test_masked_404_never_authorizes_a_tag_write(self):
+        result = mock.Mock(returncode=1, stdout="", stderr="404 not found")
+        with mock.patch.object(publisher, "_oras_environment", return_value={}), \
+             mock.patch.object(publisher.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(publisher.PublicationError, "failed closed"):
+                publisher._run_oras(
+                    self.oras,
+                    ["repo", "tags", "--format", "json", self.official],
+                )
+
+    def test_malformed_or_duplicate_tag_inventory_fails_before_any_write(self):
+        invalid = (
+            '{"tags":',
+            '{"tags":[],"extra":true}',
+            '{"tags":["stable","stable"]}',
+            '{"tags":["bad tag"]}',
+            '{"tags":[],"tags":[]}',
+        )
+        for raw in invalid:
+            with self.subTest(raw=raw), mock.patch.object(
+                publisher, "_run_oras", return_value=raw
+            ):
+                with self.assertRaises(publisher.PublicationError):
+                    publisher._repository_tags(self.oras, self.official)
+
+        with mock.patch.object(
+            publisher,
+            "_repository_tags",
+            side_effect=publisher.PublicationError("malformed inventory"),
+        ), mock.patch.object(publisher, "_run_oras") as run:
+            with self.assertRaisesRegex(publisher.PublicationError, "malformed inventory"):
+                self.publish()
+        run.assert_not_called()
 
     def test_only_exact_repositories_and_stable_tag_are_authorized(self):
         cases = (

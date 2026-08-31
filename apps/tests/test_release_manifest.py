@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -23,14 +23,17 @@ import build_release_manifest as builder  # noqa: E402
 import build_release_descriptor as descriptor_builder  # noqa: E402
 import collect_release_evidence as collector  # noqa: E402
 import install_release_tools as installer  # noqa: E402
+import materialize_legacy_rabbitmq_vex as legacy_vex  # noqa: E402
 import normalize_local_scan_evidence as normalizer  # noqa: E402
 import prepare_trivy_db as trivy_db  # noqa: E402
+import protect_release_evidence as protected_export  # noqa: E402
 import promote_release_images as promoter  # noqa: E402
 import release_transition as transition  # noqa: E402
 import release_subprocess  # noqa: E402
 import push_quarantine_layouts as quarantine_pusher  # noqa: E402
 import stage_release_images as stager  # noqa: E402
 import verify_release as verifier  # noqa: E402
+import verify_quarantine_indexes as quarantine_verifier  # noqa: E402
 
 
 class ReleaseFixtureMixin:
@@ -49,22 +52,74 @@ class ReleaseFixtureMixin:
         ):
             (self.artifacts / directory).mkdir(parents=True, mode=0o700, exist_ok=True)
         self.policy = json.loads((ROOT / "deploy" / "release-policy.json").read_text(encoding="utf-8"))
+        self.trivy_lock = json.loads(
+            (ROOT / "deploy" / "trivy-db-lock.json").read_text(encoding="utf-8")
+        )
+        self.grype_lock = json.loads(
+            (ROOT / "deploy" / "grype-db-lock.json").read_text(encoding="utf-8")
+        )
+        trivy_created_at = datetime.fromisoformat(
+            self.trivy_lock["manifest"]["created_at"].replace("Z", "+00:00")
+        )
+        trivy_next_update = datetime.fromisoformat(
+            self.trivy_lock["database"]["next_update"].replace("Z", "+00:00")
+        )
+        self.trivy_prepared_at = trivy_created_at + timedelta(minutes=1)
+        self.release_created_at = self.trivy_prepared_at + timedelta(minutes=1)
+        self.assertLess(self.release_created_at, trivy_next_update)
+        self.release_created_at_text = self.release_created_at.strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         self.commit = "a" * 40
         self.tag = "v1.2.3"
         self.workflow_identity = (
             "https://github.com/bilal414/backupsheep/.github/workflows/"
             "release-images.yml@refs/tags/v1.2.3"
         )
-        self.platform_digests = {
-            "app": {"linux/amd64": "sha256:" + "2" * 64, "linux/arm64": "sha256:" + "3" * 64},
-            "postgres": {"linux/amd64": "sha256:" + "5" * 64, "linux/arm64": "sha256:" + "6" * 64},
-            "egress": {"linux/amd64": "sha256:" + "7" * 64, "linux/arm64": "sha256:" + "8" * 64},
-            "rabbitmq": {"linux/amd64": "sha256:" + "a" * 64, "linux/arm64": "sha256:" + "b" * 64},
-            "rabbitmq-upgrade": {
-                "linux/amd64": "sha256:" + "c" * 64,
-                "linux/arm64": "sha256:" + "d" * 64,
-            },
-        }
+        self.child_manifests = {}
+        self.platform_digests = {}
+        for image_position, image in enumerate(self.policy["images"], start=1):
+            self.platform_digests[image] = {}
+            for platform_position, platform in enumerate(self.policy["platforms"], start=1):
+                seed = f"{image_position:x}{platform_position:x}"
+                config_digest = "sha256:" + seed.ljust(64, "c")
+                layer_digest = "sha256:" + seed.ljust(64, "d")
+                manifest = {
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "config": {"digest": config_digest, "size": 123},
+                    "layers": [{"digest": layer_digest, "size": 456}],
+                }
+                manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+                child_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+                self.platform_digests[image][platform] = child_digest
+                self.child_manifests[(image, platform)] = (
+                    manifest_bytes,
+                    config_digest,
+                    layer_digest,
+                )
+        for platform_position, platform in enumerate(self.policy["platforms"], start=1):
+            seed = f"f{platform_position:x}"
+            config_digest = "sha256:" + seed.ljust(64, "c")
+            layer_digest = "sha256:" + seed.ljust(64, "d")
+            manifest = {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"digest": config_digest, "size": 123},
+                "layers": [{"digest": layer_digest, "size": 456}],
+            }
+            manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+            child_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+            verifier_identity = self.policy["consumer"]["cosign_image"]["platforms"][platform]
+            verifier_identity["manifest_digest"] = child_digest
+            verifier_identity["config_digest"] = config_digest
+            self.child_manifests[("release-verifier", platform)] = (
+                manifest_bytes,
+                config_digest,
+                layer_digest,
+            )
+        self.fixture_policy_path = self.temporary_directory / "release-policy.json"
+        self._json(self.fixture_policy_path, self.policy)
         self.statements = {}
         self._write_vulnerability_database_evidence()
         self._write_consumer_evidence()
@@ -102,6 +157,53 @@ class ReleaseFixtureMixin:
     @staticmethod
     def _hash(path):
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _grype_report(self, reference, manifest_bytes, config_digest, layer_digest):
+        return {
+            "matches": [],
+            "source": {
+                "type": "image",
+                "target": {
+                    "userInput": reference,
+                    "imageID": config_digest,
+                    "manifestDigest": "sha256:" + hashlib.sha256(manifest_bytes).hexdigest(),
+                    "layers": [{"digest": layer_digest}],
+                    "manifest": base64.b64encode(manifest_bytes).decode(),
+                },
+            },
+            "distro": {"name": "debian", "version": "12"},
+            "descriptor": {
+                "name": "grype",
+                "version": "0.116.1",
+                "db": {
+                    "status": {
+                        "schemaVersion": self.grype_lock["database"]["schema_version"],
+                        "from": "manual import",
+                        "built": self.grype_lock["database"]["built_at"],
+                        "path": "/private/grype-cache/6/vulnerability.db",
+                        "valid": True,
+                    },
+                    "providers": {
+                        "nvd": {
+                            "captured": self.grype_lock["database"]["built_at"],
+                            "input": "xxh64:test",
+                        }
+                    },
+                },
+                "configuration": {
+                    "name": "",
+                    "fail-on-severity": "high",
+                    "only-fixed": False,
+                    "only-notfixed": False,
+                    "check-for-app-update": False,
+                    "ignore-wontfix": "",
+                    "ignore": [],
+                    "exclude": [],
+                    "vex-documents": [],
+                    "vex-add": [],
+                },
+            },
+        }
 
     def _statement(self, image, platform, digest):
         image_policy = self.policy["images"][image]
@@ -172,13 +274,38 @@ class ReleaseFixtureMixin:
             self.policy["vulnerability_policy"]["database"]["lock_sha256"],
         )
         lock = json.loads(lock_copy.read_text(encoding="utf-8"))
-        prepared_at = datetime(2026, 8, 29, 13, 12, tzinfo=timezone.utc)
         evidence = trivy_db.evidence_for(
             lock,
             self._hash(lock_copy).removeprefix("sha256:"),
-            prepared_at,
+            self.trivy_prepared_at,
         )
         self._json(vulnerability / "trivy-db-evidence.json", evidence)
+        grype_lock_source = ROOT / "deploy" / "grype-db-lock.json"
+        grype_lock_copy = vulnerability / "grype-db-lock.json"
+        grype_lock_copy.write_bytes(grype_lock_source.read_bytes())
+        grype_lock_copy.chmod(0o600)
+        self.assertEqual(
+            self._hash(grype_lock_copy),
+            self.policy["vulnerability_policy"]["secondary_database"]["lock_sha256"],
+        )
+        grype_lock = json.loads(grype_lock_copy.read_text(encoding="utf-8"))
+        self._json(
+            vulnerability / "grype-db-evidence.json",
+            {
+                "schema_version": 1,
+                "lock_sha256": self._hash(grype_lock_copy).removeprefix("sha256:"),
+                "grype_version": "0.116.1",
+                "prepared_at": (self.release_created_at - timedelta(seconds=1)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "archive_sha256": grype_lock["archive"]["sha256"],
+                "archive_size": grype_lock["archive"]["size"],
+                "database_schema_version": grype_lock["database"]["schema_version"],
+                "database_built_at": grype_lock["database"]["built_at"],
+                "database_sha256": grype_lock["database"]["sha256"],
+                "database_size": grype_lock["database"]["size"],
+            },
+        )
 
     def _write_consumer_evidence(self):
         consumer = self.artifacts / "consumer"
@@ -191,6 +318,9 @@ class ReleaseFixtureMixin:
         for platform, identity in verifier_policy["platforms"].items():
             slug = platform.replace("/", "-")
             reference = f"{verifier_policy['repository']}@{identity['manifest_digest']}"
+            manifest_bytes, config_digest, layer_digest = self.child_manifests[
+                ("release-verifier", platform)
+            ]
             self._json(
                 consumer / f"release-verifier-{slug}.syft.json",
                 {
@@ -207,6 +337,7 @@ class ReleaseFixtureMixin:
                             "userInput": reference,
                             "manifestDigest": identity["manifest_digest"],
                             "imageID": identity["config_digest"],
+                            "manifest": base64.b64encode(manifest_bytes).decode(),
                         },
                     },
                     "descriptor": {"name": "syft", "version": "1.51.0"},
@@ -237,6 +368,12 @@ class ReleaseFixtureMixin:
                     ],
                 },
             )
+            self._json(
+                consumer / f"release-verifier-{slug}.grype.json",
+                self._grype_report(
+                    reference, manifest_bytes, config_digest, layer_digest
+                ),
+            )
 
     def _write_evidence(self):
         self.index_digests = {}
@@ -246,6 +383,9 @@ class ReleaseFixtureMixin:
             quarantine = self.policy["images"][image]["quarantine_repository"]
             for platform, digest in self.platform_digests[image].items():
                 slug = platform.replace("/", "-")
+                manifest_bytes, config_digest, layer_digest = self.child_manifests[
+                    (image, platform)
+                ]
                 statement = self._statement(image, platform, digest)
                 self.statements[(image, platform)] = statement
                 statement_path = self.artifacts / "provenance" / f"{image}-{slug}.intoto.json"
@@ -306,6 +446,8 @@ class ReleaseFixtureMixin:
                             "metadata": {
                                 "userInput": f"{quarantine}@{digest}",
                                 "manifestDigest": digest,
+                                "imageID": config_digest,
+                                "manifest": base64.b64encode(manifest_bytes).decode(),
                             },
                         },
                         "descriptor": {"name": "syft", "version": "1.51.0"},
@@ -348,6 +490,15 @@ class ReleaseFixtureMixin:
                         ],
                     },
                 )
+                self._json(
+                    self.artifacts / "scans" / f"{image}-{slug}.grype.json",
+                    self._grype_report(
+                        f"{quarantine}@{digest}",
+                        manifest_bytes,
+                        config_digest,
+                        layer_digest,
+                    ),
+                )
 
             index_path = self.artifacts / "oci" / f"{image}.index.json"
             self._json(
@@ -367,7 +518,7 @@ class ReleaseFixtureMixin:
             tag=self.tag,
             source_commit=self.commit,
             workflow_run="https://github.com/bilal414/backupsheep/actions/runs/123/attempts/1",
-            created_at="2026-08-29T13:15:00Z",
+            created_at=self.release_created_at_text,
             image_inputs={
                 image: (self.index_digests[image], self.artifacts / "oci" / f"{image}.index.json")
                 for image in self.policy["images"]
@@ -404,7 +555,9 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
         record = manifest["vulnerability_database"]["preparation_evidence"]
         path = self.artifacts / record["file"]
         evidence = json.loads(path.read_text(encoding="utf-8"))
-        evidence["prepared_at"] = "2026-08-29T13:16:00Z"
+        evidence["prepared_at"] = (
+            self.release_created_at + timedelta(seconds=1)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._json(path, evidence)
         record["sha256"] = self._hash(path)
         with self.assertRaisesRegex(
@@ -472,7 +625,7 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
         descriptor_path = self.artifacts / self.policy["consumer"]["descriptor_filename"]
         arguments = [
             "--policy",
-            str(ROOT / "deploy" / "release-policy.json"),
+            str(self.fixture_policy_path),
             "--manifest",
             str(manifest_path),
             "--artifacts-dir",
@@ -543,7 +696,7 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
         output = self.artifacts / "cli-release-manifest.json"
         arguments = [
             "--policy",
-            str(ROOT / "deploy" / "release-policy.json"),
+            str(self.fixture_policy_path),
             "--artifacts-dir",
             str(self.artifacts),
             "--output",
@@ -555,7 +708,7 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
             "--workflow-run",
             "https://github.com/bilal414/backupsheep/actions/runs/123/attempts/1",
             "--created-at",
-            "2026-08-29T13:14:00Z",
+            self.release_created_at_text,
         ]
         for image in ("app", "postgres", "egress", "rabbitmq", "rabbitmq-upgrade"):
             arguments.extend(
@@ -698,6 +851,267 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
         self._rehash_record(record)
         with self.assertRaisesRegex(verifier.ReleaseVerificationError, "release-blocking"):
             verifier.validate_release(self.policy, manifest, self.artifacts)
+
+    def test_grype_report_is_digest_bound_and_fails_high_unfixed(self):
+        manifest = copy.deepcopy(self.manifest)
+        record = manifest["images"]["app"]["secondary_vulnerability_reports"][0]
+        path = self.artifacts / record["file"]
+        report = json.loads(path.read_text())
+        report["matches"] = [
+            {
+                "vulnerability": {"id": "CVE-2099-0002", "severity": "High"},
+                "artifact": {"name": "openssl", "version": "3", "type": "deb"},
+            }
+        ]
+        self._json(path, report)
+        self._rehash_record(record)
+        with self.assertRaisesRegex(verifier.ReleaseVerificationError, "release-blocking"):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+        report["matches"] = []
+        report["source"]["target"]["imageID"] = "sha256:" + "e" * 64
+        self._json(path, report)
+        self._rehash_record(record)
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "child config digest"
+        ):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+    def test_grype_database_lock_and_evidence_are_signed_and_fail_closed(self):
+        database_policy = self.policy["vulnerability_policy"]["secondary_database"]
+        lock_path = ROOT / database_policy["lock_path"]
+        self.assertEqual(self._hash(lock_path), database_policy["lock_sha256"])
+        manifest = copy.deepcopy(self.manifest)
+        record = manifest["vulnerability_database"]["secondary_preparation_evidence"]
+        path = self.artifacts / record["file"]
+        evidence = json.loads(path.read_text())
+        evidence["database_sha256"] = "0" * 64
+        self._json(path, evidence)
+        self._rehash_record(record)
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError,
+            "Grype DB preparation evidence differs from the lock",
+        ):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+    def test_each_scan_report_is_bound_to_the_exact_database_receipt(self):
+        for image_key, report_key, binding_key in (
+            ("app", "vulnerability_reports", "trivy"),
+            ("app", "secondary_vulnerability_reports", "grype"),
+        ):
+            with self.subTest(scanner=binding_key):
+                manifest = copy.deepcopy(self.manifest)
+                record = manifest["images"][image_key][report_key][0]
+                record["database"]["database_sha256"] = "sha256:" + "f" * 64
+                with self.assertRaisesRegex(
+                    verifier.ReleaseVerificationError,
+                    "not bound to the exact reviewed scanner DB",
+                ):
+                    verifier.validate_release(self.policy, manifest, self.artifacts)
+
+    def test_grype_report_descriptor_must_name_the_locked_database(self):
+        manifest = copy.deepcopy(self.manifest)
+        record = manifest["images"]["app"]["secondary_vulnerability_reports"][0]
+        path = self.artifacts / record["file"]
+        report = json.loads(path.read_text(encoding="utf-8"))
+        report["descriptor"]["db"]["status"]["schemaVersion"] = "v6.9.9"
+        self._json(path, report)
+        self._rehash_record(record)
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError,
+            "exact locked Grype DB",
+        ):
+            verifier.validate_release(self.policy, manifest, self.artifacts)
+
+    def test_protected_export_excludes_every_unreferenced_producer_file(self):
+        manifest_path = self.artifacts / "release-manifest.json"
+        builder._write_json(manifest_path, self.manifest)
+        policy_copy = self.artifacts / "release-policy.json"
+        policy_copy.write_bytes(self.fixture_policy_path.read_bytes())
+        policy_copy.chmod(0o600)
+        descriptor_path = self.artifacts / self.policy["consumer"]["descriptor_filename"]
+        descriptor_path.write_bytes(
+            descriptor_builder.descriptor_payload(
+                self.policy,
+                self.manifest,
+                self._hash(manifest_path),
+            )
+        )
+        descriptor_path.chmod(0o600)
+        (self.artifacts / "producer-controlled-extra.bin").write_bytes(b"untrusted")
+
+        exported = self.temporary_directory / "protected-export"
+        expected = protected_export.export(
+            self.fixture_policy_path,
+            self.artifacts,
+            exported,
+        )
+        self.assertNotIn("producer-controlled-extra.bin", expected)
+        self.assertFalse((exported / "producer-controlled-extra.bin").exists())
+        protected_export.verify(self.fixture_policy_path, exported)
+
+        (exported / "attacker-added-after-export.bin").write_bytes(b"untrusted")
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "exact manifest-derived inventory"
+        ):
+            protected_export.verify(self.fixture_policy_path, exported)
+
+    def test_pre_sign_remote_verifier_fetches_every_exact_manifest(self):
+        expected_references = set()
+        for image in self.manifest["images"].values():
+            expected_references.add(image["quarantine_reference"])
+            expected_references.update(
+                f"{image['quarantine_repository']}@{digest}"
+                for digest in image["platforms"].values()
+            )
+            expected_references.update(
+                f"{image['quarantine_repository']}@{record['digest']}"
+                for record in image["attestation_manifests"]
+            )
+        consumer = self.manifest["consumer"]["cosign_image"]
+        expected_references.update(
+            f"{consumer['repository']}@{record['manifest_digest']}"
+            for record in consumer["platforms"]
+        )
+        with mock.patch.object(
+            quarantine_verifier,
+            "_fetch_and_verify_index",
+            return_value=True,
+        ) as fetch:
+            quarantine_verifier.verify(
+                self.policy,
+                self.manifest,
+                self.artifacts,
+                "/private/oras",
+            )
+        self.assertEqual(
+            {call.args[1] for call in fetch.call_args_list},
+            expected_references,
+        )
+        self.assertEqual(fetch.call_count, 27)
+
+    def test_legacy_grype_vex_compensation_is_exact_package_and_cve_bound(self):
+        image = "rabbitmq"
+        platform = "linux/amd64"
+        manifest_bytes, config_digest, layer_digest = self.child_manifests[
+            (image, platform)
+        ]
+        digest = self.platform_digests[image][platform]
+        report = self._grype_report(
+            "legacy-source", manifest_bytes, config_digest, layer_digest
+        )
+        allowed = {
+            "CVE-2026-42792",
+            "CVE-2026-49759",
+            "CVE-2026-55737",
+            "CVE-2026-55952",
+            "CVE-2026-55953",
+            "CVE-2026-58227",
+            "CVE-2026-59250",
+            "CVE-2026-59251",
+        }
+        vex_path = "/private/evidence/rabbitmq-legacy-source.openvex.json"
+        vex_policy = json.loads(
+            (ROOT / "deploy/rabbitmq/legacy-source-otp26.vex-policy.json").read_text()
+        )
+        vex_document = legacy_vex.materialize(vex_policy, digest)
+        legacy_vex.validate_materialized(vex_document, vex_policy, digest)
+        expected_source_tags = [legacy_vex.product_reference(digest)]
+        report["source"]["target"]["tags"] = expected_source_tags
+        report["descriptor"]["configuration"]["name"] = (
+            "backupsheep-rabbitmq-legacy-source"
+        )
+        report["descriptor"]["configuration"]["vex-documents"] = [vex_path]
+        report["descriptor"]["configuration"]["ignore"].extend(
+            ({"vex-status": "not_affected"}, {"vex-status": "fixed"})
+        )
+        report["ignoredMatches"] = [
+            {
+                "vulnerability": {"id": vulnerability, "severity": "High"},
+                "artifact": {
+                    "name": "erlang",
+                    "version": "26.2.5.21",
+                    "type": "binary",
+                    "purl": "pkg:generic/erlang@26.2.5.21",
+                },
+                "appliedIgnoreRules": [
+                    {"namespace": "vex", "vex-status": "not_affected"}
+                ],
+            }
+            for vulnerability in sorted(allowed)
+        ]
+        verifier._validate_grype_report(
+            report,
+            "legacy-source",
+            digest,
+            "0.116.1",
+            {"HIGH", "CRITICAL"},
+            "legacy Grype report",
+            self.grype_lock,
+            allowed_ignored=allowed,
+            expected_vex_document=vex_path,
+            expected_source_tags=expected_source_tags,
+            expected_name="backupsheep-rabbitmq-legacy-source",
+        )
+        report["source"]["target"]["tags"] = [
+            "backupsheep-rabbitmq-legacy-source:manifest-" + "f" * 64
+        ]
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "exact VEX product tag"
+        ):
+            verifier._validate_grype_report(
+                report,
+                "legacy-source",
+                digest,
+                "0.116.1",
+                {"HIGH", "CRITICAL"},
+                "legacy Grype report",
+                self.grype_lock,
+                allowed_ignored=allowed,
+                expected_vex_document=vex_path,
+                expected_source_tags=expected_source_tags,
+                expected_name="backupsheep-rabbitmq-legacy-source",
+            )
+        report["source"]["target"]["tags"] = expected_source_tags
+        report["descriptor"]["configuration"]["name"] = "attacker-controlled"
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "unauthorized Grype source name"
+        ):
+            verifier._validate_grype_report(
+                report,
+                "legacy-source",
+                digest,
+                "0.116.1",
+                {"HIGH", "CRITICAL"},
+                "legacy Grype report",
+                self.grype_lock,
+                allowed_ignored=allowed,
+                expected_vex_document=vex_path,
+                expected_source_tags=expected_source_tags,
+                expected_name="backupsheep-rabbitmq-legacy-source",
+            )
+        report["descriptor"]["configuration"]["name"] = (
+            "backupsheep-rabbitmq-legacy-source"
+        )
+        report["ignoredMatches"][0]["artifact"]["purl"] = (
+            "pkg:generic/erlang@26.2.5.20"
+        )
+        with self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "unauthorized ignored Grype finding"
+        ):
+            verifier._validate_grype_report(
+                report,
+                "legacy-source",
+                digest,
+                "0.116.1",
+                {"HIGH", "CRITICAL"},
+                "legacy Grype report",
+                self.grype_lock,
+                allowed_ignored=allowed,
+                expected_vex_document=vex_path,
+                expected_source_tags=expected_source_tags,
+                expected_name="backupsheep-rabbitmq-legacy-source",
+            )
 
     def test_buildkit_provenance_requires_exact_source_and_max_completeness(self):
         statement = copy.deepcopy(self.statements[("app", "linux/amd64")])
@@ -853,6 +1267,14 @@ class ReleaseToolInstallerTests(TestCase):
         )
         self.assertEqual(stat.S_IMODE((temporary / "bin" / "empty-syft.yaml").stat().st_mode), 0o600)
         self.assertEqual(
+            (temporary / "bin" / "empty-grype.yaml").read_text(encoding="utf-8"),
+            "{}\n",
+        )
+        self.assertEqual(
+            stat.S_IMODE((temporary / "bin" / "empty-grype.yaml").stat().st_mode),
+            0o600,
+        )
+        self.assertEqual(
             (temporary / "bin" / "empty-trivy-secret.yaml").read_text(encoding="utf-8"),
             "{}\n",
         )
@@ -905,23 +1327,31 @@ class ReleasePromotionRecoveryTests(ReleaseFixtureMixin, TestCase):
             for name, image in self.manifest["images"].items()
         }
         registry = {}
+        for name, image in self.manifest["images"].items():
+            registry[image["official_reference"]] = indexes[name]
         for name in initially_present:
             image = self.manifest["images"][name]
             registry[f"{image['official_repository']}:{self.tag}"] = indexes[name]
-            registry[image["official_reference"]] = indexes[name]
         copies = []
 
-        def fake_oras(_oras, arguments, *, allow_not_found=False):
+        def fake_oras(_oras, arguments):
             if arguments[:2] == ["manifest", "fetch"]:
                 output = Path(arguments[arguments.index("--output") + 1])
                 reference = arguments[-1]
                 payload = registry.get(reference)
                 if payload is None:
-                    if allow_not_found:
-                        return "NOT_FOUND"
                     raise verifier.ReleaseVerificationError(f"missing test reference {reference}")
                 output.write_bytes(payload)
                 return ""
+            if arguments[:2] == ["repo", "tags"]:
+                repository = arguments[-1]
+                prefix = f"{repository}:"
+                tags = sorted(
+                    reference.removeprefix(prefix)
+                    for reference in registry
+                    if reference.startswith(prefix)
+                )
+                return json.dumps({"tags": tags})
             if arguments[0] == "cp":
                 destination = arguments[-1]
                 copies.append(destination)
@@ -961,6 +1391,47 @@ class ReleasePromotionRecoveryTests(ReleaseFixtureMixin, TestCase):
     def test_exact_completed_release_is_idempotent(self):
         _registry, copies, fake_oras = self._registry(set(self.manifest["images"]))
         with mock.patch.object(promoter, "_oras", side_effect=fake_oras):
+            promoter.promote(self.policy, self.manifest, self.artifacts, "oras")
+        self.assertEqual(copies, [])
+
+    def test_masked_registry_not_found_error_is_never_tag_absence(self):
+        result = subprocess.CompletedProcess(
+            ["oras"],
+            1,
+            stdout="",
+            stderr="404 Not Found: authorization denied",
+        )
+        with mock.patch.object(subprocess, "run", return_value=result), self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "ORAS failed closed"
+        ):
+            promoter._oras("oras", ["repo", "tags", "--format", "json", "ghcr.io/example/image"])
+
+    def test_tag_inventory_is_strict_bounded_json(self):
+        invalid_documents = (
+            "",
+            "not-json",
+            '{"tags":[],"unknown":true}',
+            '{"tags":[],"tags":["v1.2.3"]}',
+            '{"tags":["v1.2.3","v1.2.3"]}',
+            '{"tags":["bad/tag"]}',
+        )
+        for document in invalid_documents:
+            with self.subTest(document=document), mock.patch.object(
+                promoter, "_oras", return_value=document
+            ), self.assertRaises(verifier.ReleaseVerificationError):
+                promoter._repository_tags("oras", "ghcr.io/example/image")
+
+    def test_invalid_tag_inventory_blocks_every_promotion_write(self):
+        _registry, copies, fake_oras = self._registry(set())
+
+        def malformed_inventory(oras, arguments):
+            if arguments[:2] == ["repo", "tags"]:
+                return '{"tags":["v1.2.3","v1.2.3"]}'
+            return fake_oras(oras, arguments)
+
+        with mock.patch.object(
+            promoter, "_oras", side_effect=malformed_inventory
+        ), self.assertRaisesRegex(verifier.ReleaseVerificationError, "duplicate tags"):
             promoter.promote(self.policy, self.manifest, self.artifacts, "oras")
         self.assertEqual(copies, [])
 
@@ -1018,6 +1489,7 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
         self._json(index_path, index)
         syft_path = self.temporary_directory / "syft.json"
         trivy_path = self.temporary_directory / "trivy.json"
+        grype_path = self.temporary_directory / "grype.json"
         self._json(
             syft_path,
             {
@@ -1042,6 +1514,12 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
                 },
             },
         )
+        self._json(
+            grype_path,
+            self._grype_report(
+                "local-layout", manifest_bytes, config_digest, layer_digest
+            ),
+        )
         normalizer.normalize(
             policy=self.policy,
             index_path=index_path,
@@ -1049,6 +1527,7 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
             platform=platform,
             syft_path=syft_path,
             trivy_path=trivy_path,
+            grype_path=grype_path,
         )
         expected = f"{self.policy['images'][image]['quarantine_repository']}@{actual_child}"
         self.assertEqual(json.loads(syft_path.read_text())["source"]["metadata"]["userInput"], expected)
@@ -1066,6 +1545,7 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
                 platform=platform,
                 syft_path=syft_path,
                 trivy_path=trivy_path,
+                grype_path=grype_path,
             )
 
     def test_consumer_verifier_scan_normalization_uses_only_exact_policy_children(self):
@@ -1088,6 +1568,7 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
 
         syft_path = self.temporary_directory / "consumer-verifier.syft.json"
         trivy_path = self.temporary_directory / "consumer-verifier.trivy.json"
+        grype_path = self.temporary_directory / "consumer-verifier.grype.json"
         self._json(
             syft_path,
             {
@@ -1112,6 +1593,10 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
                 },
             },
         )
+        self._json(
+            grype_path,
+            self._grype_report(reference, manifest_bytes, config_digest, layer_digest),
+        )
         normalizer.normalize(
             policy=policy,
             index_path=None,
@@ -1119,6 +1604,7 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
             platform=platform,
             syft_path=syft_path,
             trivy_path=trivy_path,
+            grype_path=grype_path,
         )
         self.assertEqual(
             json.loads(syft_path.read_text())["source"]["metadata"]["userInput"],
@@ -1135,6 +1621,7 @@ class LocalOCIReleaseEvidenceTests(ReleaseFixtureMixin, TestCase):
                 platform=platform,
                 syft_path=syft_path,
                 trivy_path=trivy_path,
+                grype_path=grype_path,
             )
 
     def test_local_layouts_are_pushed_only_to_commit_bound_quarantine_tags(self):
@@ -1291,14 +1778,139 @@ class ReleaseWorkflowContractTests(TestCase):
             self.workflow.count(
                 "uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
             ),
-            3,
+            4,
         )
-        self.assertEqual(self.workflow.count("ref: ${{ github.sha }}"), 3)
+        self.assertEqual(self.workflow.count("ref: ${{ github.sha }}"), 4)
         build_checkout = self.workflow.split(
             "      - name: Check out the exact tagged commit\n", 1
         )[1].split("      - name: Validate immutable release inputs\n", 1)[0]
         self.assertIn("fetch-depth: 0", build_checkout)
         self.assertIn("persist-credentials: false", build_checkout)
+
+    def test_release_and_privileged_jobs_require_the_fresh_exact_main_tip(self):
+        self.assertNotIn("merge-base --is-ancestor", self.workflow)
+        self.assertEqual(
+            self.workflow.count(
+                "git fetch --no-tags --force origin \\\n"
+                "            +refs/heads/main:refs/remotes/origin/main"
+            ),
+            3,
+        )
+        self.assertEqual(self.workflow.count('test "$SOURCE_COMMIT" = "$MAIN_TIP"'), 3)
+
+    def test_hostile_candidate_artifact_never_enters_protected_or_oidc_jobs(self):
+        protected = self.workflow.split("  protected_rescan:", 1)[1].split(
+            "  sign_promote:", 1
+        )[0]
+        signing = self.workflow.split("  sign_promote:", 1)[1].split(
+            "  publish_evidence:", 1
+        )[0]
+        ordered = (
+            "Rebuild the protected application from the exact remote commit",
+            "Rebuild the protected PostgreSQL image from the exact remote commit",
+            "Rebuild the protected egress guard from the exact remote commit",
+            "Rebuild protected RabbitMQ from the exact remote commit",
+            "Rebuild the protected RabbitMQ upgrade helper from the exact remote commit",
+            "Extract protected indexes and BuildKit provenance from rebuilt layouts",
+            "Regenerate protected migration transition evidence from the exact app child",
+            "Prepare fresh protected scanner databases",
+            "Generate protected SBOMs and scans from every rebuilt platform",
+            "Generate every protected verifier catalog and scan",
+            "Build the protected manifest and exact signer inventory",
+            "scripts/protect_release_evidence.py export",
+            "Push exact verified local layouts to quarantine after approval",
+            "Retain only the protected evidence for the OIDC signing job",
+        )
+        positions = [protected.index(marker) for marker in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("id-token: write", protected)
+        self.assertNotIn("actions/download-artifact", protected)
+        self.assertNotIn("signed-release-candidate", protected)
+        self.assertNotIn("candidate-download", protected)
+        self.assertNotIn("release-candidate", protected)
+        self.assertNotIn("needs.build_scan.outputs", protected)
+        self.assertNotIn("release-candidate/release-layouts", protected)
+        self.assertIn(
+            "docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8",
+            protected,
+        )
+        self.assertIn(
+            "tonistiigi/binfmt:qemu-v10.0.4@sha256:"
+            "8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541",
+            protected,
+        )
+        self.assertIn(
+            "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+            protected,
+        )
+        self.assertIn("version: v0.29.1", protected)
+        self.assertIn(
+            "moby/buildkit:v0.26.2@sha256:"
+            "de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa",
+            protected,
+        )
+        self.assertEqual(protected.count("docker/build-push-action@"), 6)
+        self.assertEqual(
+            protected.count(
+                "context: https://github.com/${{ github.repository }}.git#${{ github.sha }}"
+            ),
+            6,
+        )
+        self.assertEqual(protected.count("platforms: linux/amd64,linux/arm64"), 5)
+        self.assertEqual(protected.count("pull: true"), 5)
+        self.assertEqual(protected.count("push: false"), 5)
+        self.assertEqual(protected.count("outputs: type=oci,dest="), 5)
+        for image in ("app", "postgres", "egress", "rabbitmq", "rabbitmq-upgrade"):
+            self.assertIn(
+                "outputs: type=oci,dest=${{ github.workspace }}/protected-build/"
+                f"release-layouts/{image},tar=false",
+                protected,
+            )
+        self.assertEqual(protected.count("no-cache: true"), 5)
+        self.assertEqual(protected.count("provenance: mode=max,version=v1,builder-id="), 5)
+        self.assertEqual(protected.count("scripts/collect_release_evidence.py"), 5)
+        self.assertEqual(protected.count("scripts/collect_release_transition.py"), 1)
+        self.assertIn('--output "syft-json=$syft_report"', protected)
+        self.assertIn('--output "spdx-json=$spdx_report"', protected)
+        self.assertIn('--output "cyclonedx-json=$cdx_report"', protected)
+        manifest_step = protected.split(
+            "      - name: Build the protected manifest and exact signer inventory\n", 1
+        )[1].split("\n      - name: Authenticate for quarantine write only", 1)[0]
+        for image, step_id in (
+            ("APP", "app"),
+            ("POSTGRES", "postgres"),
+            ("EGRESS", "egress"),
+            ("RABBITMQ", "rabbitmq"),
+            ("RABBITMQ_UPGRADE", "rabbitmq-upgrade"),
+        ):
+            self.assertIn(
+                f"{image}_DIGEST: ${{{{ steps.protected-build-{step_id}.outputs.digest }}}}",
+                manifest_step,
+            )
+        self.assertEqual(manifest_step.count("steps.protected-build-"), 5)
+        self.assertNotIn("needs.build_scan", manifest_step)
+        self.assertIn("path: protected-release-artifacts", protected)
+        self.assertNotIn("path: candidate-download/release-artifacts", protected)
+        self.assertIn("protected-release-evidence-${{ github.run_id }}", signing)
+        self.assertNotIn("signed-release-candidate-${{ github.run_id }}", signing)
+        self.assertNotIn("candidate-download/release-layouts", signing)
+        self.assertIn("scripts/protect_release_evidence.py verify", signing)
+        self.assertIn("Create the private signer-only bundle directory", signing)
+        self.assertIn('test ! -e "$ARTIFACT_DIR/bundles"', signing)
+        self.assertIn('test ! -L "$ARTIFACT_DIR/bundles"', signing)
+        self.assertIn('install -d -m 0700 "$ARTIFACT_DIR/bundles"', signing)
+        self.assertLess(
+            signing.index("Strictly verify protected evidence"),
+            signing.index("Create the private signer-only bundle directory"),
+        )
+        self.assertLess(
+            signing.index("Create the private signer-only bundle directory"),
+            signing.index("Authenticate for signatures and promotion"),
+        )
+        self.assertLess(
+            signing.index("Re-fetch and verify every quarantine index"),
+            signing.index("Sign and attest quarantine digests"),
+        )
 
     def test_release_repeats_the_exact_security_regression_before_building(self):
         self.assertIn("on:\n  workflow_call:\n", self.supply_chain_workflow)
@@ -1319,7 +1931,7 @@ class ReleaseWorkflowContractTests(TestCase):
     def test_signed_release_regression_includes_pinned_static_analysis(self):
         static_job = self.supply_chain_workflow.split(
             "  static-python-security:", 1
-        )[1].split("  application-security-regression:", 1)[0]
+        )[1].split("  rabbitmq-arm64-migration:", 1)[0]
         self.assertIn("deploy/static-analysis-requirements.lock", static_job)
         self.assertIn("--require-hashes", static_job)
         self.assertIn("--only-binary=:all:", static_job)
@@ -1361,7 +1973,9 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertIn("github.repository == 'bilal414/backupsheep'", self.workflow)
         self.assertIn("environment: signed-release", self.workflow)
         self.assertNotIn("workflow_dispatch", self.workflow)
-        build_job = self.workflow.split("  sign_promote:", 1)[0]
+        build_job = self.workflow.split("  build_scan:", 1)[1].split(
+            "  protected_rescan:", 1
+        )[0]
         self.assertNotIn("id-token: write", build_job)
         self.assertNotIn("packages: write", build_job)
         self.assertNotIn("docker/login-action", build_job)
@@ -1369,11 +1983,33 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertEqual(build_job.count("type=oci,dest="), 5)
         self.assertEqual(build_job.count("tar=false"), 5)
         self.assertIn("scripts/normalize_local_scan_evidence.py", build_job)
-        protected_job = self.workflow.split("  sign_promote:", 1)[1].split(
-            "  publish_evidence:", 1
+        protected_job = self.workflow.split("  protected_rescan:", 1)[1].split(
+            "  sign_promote:", 1
         )[0]
         self.assertIn("environment: signed-release", protected_job)
+        self.assertIn("packages: write", protected_job)
+        self.assertNotIn("id-token: write", protected_job)
         self.assertIn("scripts/push_quarantine_layouts.py", protected_job)
+        self.assertIn("scripts/build_release_manifest.py", protected_job)
+        self.assertNotIn("scripts/rebuild_protected_release_manifest.py", protected_job)
+        self.assertIn("Generate protected SBOMs and scans", protected_job)
+        self.assertIn("Generate every protected verifier catalog", protected_job)
+        self.assertNotIn("actions/download-artifact", protected_job)
+        signing_job = self.workflow.split("  sign_promote:", 1)[1].split(
+            "  publish_evidence:", 1
+        )[0]
+        self.assertIn("needs: protected_rescan", signing_job)
+        self.assertIn("id-token: write", signing_job)
+        self.assertIn("packages: write", signing_job)
+        self.assertNotIn("release-layouts", signing_job)
+        self.assertNotIn("--tool trivy", signing_job)
+        self.assertNotIn("--tool grype", signing_job)
+        self.assertNotIn("push_quarantine_layouts.py", signing_job)
+        self.assertIn("scripts/verify_quarantine_indexes.py", signing_job)
+        self.assertLess(
+            signing_job.index("verify_quarantine_indexes.py"),
+            signing_job.index("Sign and attest quarantine digests"),
+        )
         publish_job = self.workflow.split("  publish_evidence:", 1)[1]
         self.assertNotIn("packages: write", publish_job)
         self.assertNotIn("id-token: write", publish_job)
@@ -1411,10 +2047,10 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertIn("scripts/promote_release_images.py", self.workflow)
 
     def test_buildkit_provenance_is_real_remote_source_bound_mode_max(self):
-        self.assertEqual(self.workflow.count("provenance: mode=max,version=v1,builder-id="), 5)
+        self.assertEqual(self.workflow.count("provenance: mode=max,version=v1,builder-id="), 10)
         self.assertEqual(
             self.workflow.count("context: https://github.com/${{ github.repository }}.git#${{ github.sha }}"),
-            6,
+            12,
         )
         self.assertIn("scripts/collect_release_evidence.py", self.workflow)
         self.assertIn("--statement \"$ARTIFACT_DIR/$statement\"", self.workflow)
@@ -1454,10 +2090,40 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertIn('--config "$TOOL_DIR/empty-trivy.yaml"', self.workflow)
         self.assertIn('--ignorefile "$TOOL_DIR/empty-trivy.ignore"', self.workflow)
         self.assertIn('--config "$TOOL_DIR/empty-syft.yaml"', self.workflow)
+        self.assertIn('--config "$TOOL_DIR/empty-grype.yaml"', self.workflow)
         self.assertIn("--list-all-pkgs", self.workflow)
         self.assertIn("--severity HIGH,CRITICAL", self.workflow)
         self.assertIn("--exit-code 1", self.workflow)
         self.assertNotIn("--ignore-unfixed", self.workflow)
+        build_job = self.workflow.split("  build_scan:", 1)[1].split(
+            "  protected_rescan:", 1
+        )[0]
+        self.assertNotIn("--vex", build_job)
+
+    def test_every_release_scan_uses_one_exact_offline_grype_database(self):
+        database = self.policy["vulnerability_policy"]["secondary_database"]
+        lock_path = ROOT / database["lock_path"]
+        self.assertEqual(
+            "sha256:" + hashlib.sha256(lock_path.read_bytes()).hexdigest(),
+            database["lock_sha256"],
+        )
+        build_job = self.workflow.split("  build_scan:", 1)[1].split(
+            "  protected_rescan:", 1
+        )[0]
+        self.assertIn("--tool grype", build_job)
+        self.assertIn("^Version: +0\\.116\\.1$", build_job)
+        self.assertIn("Prepare the exact reviewed Grype vulnerability database", build_job)
+        self.assertIn("scripts/prepare_grype_db.py prepare", build_job)
+        self.assertEqual(build_job.count("scripts/prepare_grype_db.py verify"), 3)
+        self.assertEqual(build_job.count('--config "$TOOL_DIR/empty-grype.yaml"'), 2)
+        self.assertEqual(build_job.count("--fail-on high"), 2)
+        self.assertIn('GRYPE_DB_AUTO_UPDATE=false', build_job)
+        self.assertIn('GRYPE_CHECK_FOR_APP_UPDATE=false', build_job)
+        self.assertIn('"$ARTIFACT_DIR/vulnerability/grype-db-lock.json"', build_job)
+        self.assertIn('"$ARTIFACT_DIR/vulnerability/grype-db-evidence.json"', build_job)
+        self.assertIn('--grype "$ARTIFACT_DIR/scans/$image-$platform_slug.grype.json"', build_job)
+        self.assertIn('--grype "$grype_report"', build_job)
+        self.assertNotIn("--vex", build_job)
 
     def test_every_release_scan_uses_one_exact_offline_trivy_database(self):
         database = self.policy["vulnerability_policy"]["database"]
@@ -1466,7 +2132,9 @@ class ReleaseWorkflowContractTests(TestCase):
             "sha256:" + hashlib.sha256(lock_path.read_bytes()).hexdigest(),
             database["lock_sha256"],
         )
-        build_job = self.workflow.split("  sign_promote:", 1)[0]
+        build_job = self.workflow.split("  build_scan:", 1)[1].split(
+            "  protected_rescan:", 1
+        )[0]
         prepare_position = build_job.index(
             "Prepare the exact reviewed Trivy vulnerability database"
         )
@@ -1479,9 +2147,7 @@ class ReleaseWorkflowContractTests(TestCase):
         bind_position = build_job.index(
             "Bind private scanner state to runner scratch space"
         )
-        build_job_environment = build_job.split("  build_scan:", 1)[1].split(
-            "    steps:", 1
-        )[0]
+        build_job_environment = build_job.split("    steps:", 1)[0]
         self.assertLess(prepare_position, image_scan_position)
         self.assertLess(image_scan_position, verifier_scan_position)
         self.assertLess(bind_position, prepare_position)
@@ -1534,7 +2200,9 @@ class ReleaseWorkflowContractTests(TestCase):
                 self.assertRegex(record["manifest_digest"], r"^sha256:[0-9a-f]{64}$")
                 self.assertRegex(record["config_digest"], r"^sha256:[0-9a-f]{64}$")
 
-        build_job = self.workflow.split("  sign_promote:", 1)[0]
+        build_job = self.workflow.split("  build_scan:", 1)[1].split(
+            "  protected_rescan:", 1
+        )[0]
         verifier_scan = build_job.split(
             "      - name: Freshly scan the separately bootstrapped consumer verifier\n",
             1,
@@ -1633,6 +2301,8 @@ class ReleaseWorkflowContractTests(TestCase):
         )
         verify_position = self.workflow.index(
             '--output "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt" \\\n            --verify'
+            ,
+            sign_position,
         )
         stage_position = self.workflow.index("Stage exact verified indexes")
         publish_position = self.workflow.index(

@@ -552,6 +552,7 @@ semver_at_least 2.34.0-rc.1 2.33.1
         self.assertIn("^[0-9A-Fa-f]{40}$", self.installer)
         self.assertIn("GIT_ALLOW_PROTOCOL=https", self.installer)
         self.assertIn("GIT_CONFIG_NOSYSTEM=1", self.installer)
+        self.assertIn("GIT_ATTR_NOSYSTEM=1", self.installer)
         self.assertIn("http.sslVerify=true", self.installer)
         self.assertIn('cmp -s -- "$SCRIPT_PATH" "$INSTALL_DIR/install.sh"', self.installer)
         self.assertIn("require_regular_checkout_file backupsheep-compose", self.installer)
@@ -559,6 +560,230 @@ semver_at_least 2.34.0-rc.1 2.33.1
         self.assertIn("Mutable branches and tags are not accepted", self.installer)
         self.assertNotIn("DEFAULT_BRANCH", self.installer)
         self.assertNotIn("git clone --depth", self.installer)
+
+    @skipUnless(
+        shutil.which("git"),
+        "requires the host Git executable intentionally absent from the runtime image",
+    )
+    def test_checkout_rejects_content_filters_before_the_filter_can_execute(self):
+        cleanliness = self.installer.split(
+            "validate_checkout_cleanliness() {", 1
+        )[1].split("\n}", 1)[0]
+        self.assertLess(
+            cleanliness.index("validate_checkout_filter_metadata"),
+            cleanliness.index("git_safe -C \"$INSTALL_DIR\" diff"),
+        )
+        self.assertLess(
+            cleanliness.index("validate_tracked_checkout_state"),
+            cleanliness.index("git_safe -C \"$INSTALL_DIR\" diff"),
+        )
+
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-installer-filter-"
+        ) as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir(mode=0o700)
+            payload = checkout / "payload.txt"
+            payload.write_text("trusted bytes\n", encoding="utf-8")
+            subprocess.run(["git", "init", "--quiet", str(checkout)], check=True)
+            subprocess.run(
+                ["git", "-C", str(checkout), "config", "user.email", "security@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(checkout), "config", "user.name", "Security Test"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(checkout), "add", "payload.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", str(checkout), "commit", "--quiet", "-m", "fixture"],
+                check=True,
+            )
+            commit = subprocess.check_output(
+                ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            filter_script = root / "malicious-filter.sh"
+            marker = root / "malicious-filter.sh.called"
+            filter_script.write_text(
+                "#!/bin/sh\nprintf invoked > \"$0.called\"\ncat\n",
+                encoding="utf-8",
+            )
+            filter_script.chmod(0o700)
+            subprocess.run(
+                [
+                    "git", "-C", str(checkout), "config", "filter.attack.clean",
+                    str(filter_script),
+                ],
+                check=True,
+            )
+            (checkout / ".gitattributes").write_text(
+                "payload.txt filter=attack\n", encoding="utf-8"
+            )
+            payload.write_text("attacker bytes\n", encoding="utf-8")
+
+            command = (
+                'source "$1"; INSTALL_DIR="$2"; INSTALL_REF="$3"; '
+                'GIT_BIN="$(command -v git)"; validate_checkout_cleanliness'
+            )
+            refused = subprocess.run(
+                [
+                    "bash", "-c", command, "installer-filter-test",
+                    str(INSTALLER), str(checkout), commit,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("must not define Git content filters", refused.stderr)
+            self.assertFalse(marker.exists(), "clean filter executed before rejection")
+
+            subprocess.run(
+                ["git", "-C", str(checkout), "config", "--unset-all", "filter.attack.clean"],
+                check=True,
+            )
+            (checkout / ".gitattributes").unlink()
+            payload.write_text("trusted bytes\n", encoding="utf-8")
+
+            info_attributes = checkout / ".git" / "info" / "attributes"
+            info_attributes.write_text("payload.txt filter=attack\n", encoding="utf-8")
+            info_refused = subprocess.run(
+                [
+                    "bash", "-c", command, "installer-filter-test",
+                    str(INSTALLER), str(checkout), commit,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(info_refused.returncode, 0)
+            self.assertIn("must not contain .git/info/attributes", info_refused.stderr)
+            info_attributes.unlink()
+
+            external_attributes = root / "external-attributes"
+            external_attributes.write_text("payload.txt filter=attack\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    "git", "-C", str(checkout), "config", "core.attributesFile",
+                    str(external_attributes),
+                ],
+                check=True,
+            )
+            external_refused = subprocess.run(
+                [
+                    "bash", "-c", command, "installer-filter-test",
+                    str(INSTALLER), str(checkout), commit,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(external_refused.returncode, 0)
+            self.assertIn("must not select an external Git attributes file", external_refused.stderr)
+            subprocess.run(
+                ["git", "-C", str(checkout), "config", "--unset-all", "core.attributesFile"],
+                check=True,
+            )
+
+            nested = checkout / "nested"
+            nested.mkdir()
+            (nested / ".GITATTRIBUTES").write_text(
+                "../payload.txt filter=attack\n", encoding="utf-8"
+            )
+            worktree_refused = subprocess.run(
+                [
+                    "bash", "-c", command, "installer-filter-test",
+                    str(INSTALLER), str(checkout), commit,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(worktree_refused.returncode, 0)
+            self.assertIn("must not contain .gitattributes files", worktree_refused.stderr)
+
+    @skipUnless(
+        shutil.which("git"),
+        "requires the host Git executable intentionally absent from the runtime image",
+    )
+    def test_checkout_raw_bytes_and_executable_mode_ignore_index_hiding(self):
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-installer-raw-checkout-"
+        ) as directory:
+            checkout = Path(directory) / "checkout"
+            checkout.mkdir(mode=0o700)
+            payload = checkout / "payload.txt"
+            tool = checkout / "tool.sh"
+            payload.write_text("trusted bytes\n", encoding="utf-8")
+            tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            tool.chmod(0o700)
+            subprocess.run(["git", "init", "--quiet", str(checkout)], check=True)
+            subprocess.run(
+                ["git", "-C", str(checkout), "config", "user.email", "security@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(checkout), "config", "user.name", "Security Test"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(checkout), "add", "payload.txt", "tool.sh"], check=True)
+            subprocess.run(
+                ["git", "-C", str(checkout), "commit", "--quiet", "-m", "fixture"],
+                check=True,
+            )
+            commit = subprocess.check_output(
+                ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+            ).strip()
+            command = (
+                'source "$1"; INSTALL_DIR="$2"; INSTALL_REF="$3"; '
+                'GIT_BIN="$(command -v git)"; validate_checkout_cleanliness'
+            )
+
+            accepted = subprocess.run(
+                ["bash", "-c", command, "installer-raw-test", str(INSTALLER), str(checkout), commit],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+            subprocess.run(
+                ["git", "-C", str(checkout), "update-index", "--assume-unchanged", "payload.txt"],
+                check=True,
+            )
+            payload.write_text("hidden attacker bytes\n", encoding="utf-8")
+            hidden_bytes = subprocess.run(
+                ["bash", "-c", command, "installer-raw-test", str(INSTALLER), str(checkout), commit],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(hidden_bytes.returncode, 0)
+            self.assertIn("does not byte-match the requested commit", hidden_bytes.stderr)
+
+            payload.write_text("trusted bytes\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(checkout), "update-index", "--no-assume-unchanged", "payload.txt"],
+                check=True,
+            )
+            tool.chmod(0o600)
+            hidden_mode = subprocess.run(
+                ["bash", "-c", command, "installer-raw-test", str(INSTALLER), str(checkout), commit],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(hidden_mode.returncode, 0)
+            self.assertIn("different executable mode", hidden_mode.stderr)
 
     def test_installer_refuses_pipe_symlink_and_writable_source(self):
         self.assertIn("not a pipe, device or symlink", self.installer)
@@ -614,7 +839,7 @@ semver_at_least 2.34.0-rc.1 2.33.1
         )
         self.assertIn('"${OPERATION_WORKER_SERVICES[@]}"', self.installer)
         self.assertIn(
-            "compose --profile operations up --detach --no-build --no-deps beat",
+            "compose --profile operations up --detach --no-build --pull never --no-deps beat",
             self.installer,
         )
         self.assertIn("compose --profile operations down --timeout 300", self.installer)
@@ -626,7 +851,7 @@ semver_at_least 2.34.0-rc.1 2.33.1
             stop_operations.index("compose --profile operations down --timeout 300"),
         )
         self.assertIn(
-            "compose up --detach --no-build --no-deps --force-recreate",
+            "compose up --detach --no-build --pull never --no-deps --force-recreate",
             self.installer,
         )
         self.assertNotIn(
@@ -635,8 +860,18 @@ semver_at_least 2.34.0-rc.1 2.33.1
         )
         self.assertLess(
             self.installer.index("    stop_operations\n", self.installer.index("start_core()")),
-            self.installer.index("    compose build --pull db app app-egress-guard", self.installer.index("start_core()")),
+            self.installer.index(
+                "    compose --installer-base-build build",
+                self.installer.index("start_core()"),
+            ),
         )
+        start_core = self.installer.split("start_core() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("db app app-egress-guard rabbitmq", start_core)
+        compose_function = self.installer.split("compose() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn('if [[ "$base_model" == false && -n "$APPROVED_COMPOSE_FILE" ]]', compose_function)
+        self.assertIn('|| "$base_build" == true', compose_function)
+        self.assertIn('|| "$hardened_model_validation" == true', compose_function)
+        self.assertIn("compose --installer-hardened-model config --quiet", self.installer)
         self.assertNotIn("up --build --detach --remove-orphans", self.installer)
         self.assertIn("/proc/1/task/1/children", self.installer)
         self.assertNotIn("celery -A backupsheep inspect ping", self.installer)
@@ -980,17 +1215,44 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
         compose_body = self.installer.split("\ncompose() {", 1)[1].split(
             "\n}\n\nexpected_compose_config_files()", 1
         )[0]
-        self.assertIn('if [[ "$IMAGE_MODE" == "signed-release" ]]', compose_body)
+        self.assertIn(
+            'if [[ "$IMAGE_MODE" == "signed-release" || "$base_build" == true \\',
+            compose_body,
+        )
+        self.assertIn(
+            '|| "$hardened_model_validation" == true \\', compose_body
+        )
+        self.assertIn(
+            '|| "${1-}" == "--installer-reconcile-rabbitmq-volume" ]]',
+            compose_body,
+        )
         self.assertIn('wrapper_arguments+=(--inherit-installer-lock)', compose_body)
+        internal_reconcile = (
+            'wrapper_arguments+=(--installer-reconcile-rabbitmq-volume)'
+        )
+        approved_overlay = (
+            'wrapper_arguments+=(--approved-compose-file "$APPROVED_COMPOSE_FILE")'
+        )
+        self.assertIn(internal_reconcile, compose_body)
+        self.assertIn(approved_overlay, compose_body)
+        self.assertLess(
+            compose_body.index(internal_reconcile),
+            compose_body.index(approved_overlay),
+            "the locked installer reconcile token must precede deployment overlays",
+        )
         self.assertIn('"$INSTALL_DIR/backupsheep-compose"', compose_body)
         self.assertIn(
-            'run_installer_command 3600 "hardened signed-release Compose operation"',
+            'run_installer_command 3600 "hardened installer Compose operation"',
             compose_body,
         )
         signed_branch = compose_body.split(
-            'if [[ "$IMAGE_MODE" == "signed-release" ]]', 1
+            'if [[ "$IMAGE_MODE" == "signed-release" || "$base_build" == true \\',
+            1,
         )[1].split("\n    else", 1)[0]
         self.assertNotIn('"$DOCKER_BIN" compose', signed_branch)
+        self.assertIn(
+            'compose --installer-reconcile-rabbitmq-volume', self.installer
+        )
         wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
         self.assertIn(
             'expected_token="version=1;tool=install.sh;pid=${PPID};uid=${EUID}"',
@@ -1034,13 +1296,613 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
         self.assertNotIn("printf 'Onboarding token:", self.installer)
 
     def test_installer_fails_closed_on_unknown_broker_generation(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        volume_init = (ROOT / "deploy/rabbitmq/volume-init.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            compose.count(
+                "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:-unattested}"
+            ),
+            2,
+        )
+        self.assertIn("[ \"$data_generation\" = '4.3' ]", volume_init)
+        self.assertIn('expected="version=2', volume_init)
+        self.assertIn('node_host=${node_host}', volume_init)
+        self.assertIn('legacy_expected="version=1', volume_init)
+        self.assertIn("validate_khepri_node_layout", volume_init)
         self.assertIn("validate_rabbitmq_data_generation", self.installer)
-        self.assertIn("rabbitmq-diagnostics -q server_version", self.installer)
+        self.assertIn(
+            'rabbitmq-diagnostics -q -n "rabbit@$(read_env_value '
+            'BACKUPSHEEP_RABBITMQ_NODE_HOST)"',
+            self.installer,
+        )
         self.assertIn('exec --user rabbitmq "$rabbit_container_id"', self.installer)
         self.assertNotIn('exec --user 100:101 "$rabbit_container_id"', self.installer)
         self.assertIn("will not guess its format", self.installer)
         self.assertIn("exact pinned 4.3.5 target", self.installer)
         self.assertIn('[[ "$server_version" == "4.3.5" ]]', self.installer)
+        main = self.installer.split("\nmain() {", 1)[1]
+        self.assertLess(
+            main.index("validate_compose_project_ownership"),
+            main.index("validate_rabbitmq_data_generation"),
+        )
+        self.assertLess(
+            main.index("validate_rabbitmq_data_generation"),
+            main.index('if [[ "$SKIP_START" == true ]]'),
+        )
+
+    def test_explicit_legacy_rabbit_node_host_requires_one_orphan_stock_volume(self):
+        command = r'''
+source "$1"
+INSTALL_DIR="$2"
+ENV_FILE="$2/.env"
+PROJECT_NAME=backupsheep
+DOCKER_BIN=mock_docker
+LEGACY_RABBITMQ_NODE_HOST="${TEST_LEGACY_HOST:-}"
+mock_docker() {
+    if [[ "$1" == ps && "$2" == --all && "$3" == --quiet ]]; then
+        if [[ "$SCENARIO" == container ]]; then
+            printf '%s\n' rabbit-container
+        fi
+        return 0
+    fi
+    if [[ "$1" == inspect && "$2" == --format ]]; then
+        case "$3" in
+            *com.docker.compose.service*)
+                printf '%s\n' '8:rabbitmq__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+                ;;
+            *) return 98 ;;
+        esac
+        return 0
+    fi
+    if [[ "$1" == volume && "$2" == ls && "$3" == --quiet ]]; then
+        case "$SCENARIO" in
+            exact|mismatched) printf '%s\n' rabbit-volume ;;
+            multiple) printf '%s\n' rabbit-volume-1 rabbit-volume-2 ;;
+        esac
+        return 0
+    fi
+    if [[ "$1" == volume && "$2" == inspect && "$3" == --format ]]; then
+        case "$4" in
+            '{{.Name}}')
+                if [[ "$SCENARIO" == mismatched ]]; then
+                    printf '%s\n' foreign_rabbitmq_data
+                else
+                    printf '%s\n' backupsheep_rabbitmq_data
+                fi
+                ;;
+            *com.docker.compose.project*)
+                printf '%s\n' '11:backupsheep__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+                ;;
+            *com.docker.compose.volume*)
+                printf '%s\n' '13:rabbitmq_data__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+                ;;
+            *) return 99 ;;
+        esac
+        return 0
+    fi
+    return 97
+}
+configure_rabbitmq_node_host
+'''
+
+        def run(scenario, *, configured=False, generation=None, explicit=True):
+            with tempfile.TemporaryDirectory(
+                prefix="backupsheep-rabbit-node-host-"
+            ) as directory:
+                install_dir = Path(directory)
+                install_dir.chmod(0o700)
+                env_file = install_dir / ".env"
+                content = SAMPLE_ENV.read_text(encoding="utf-8")
+                if configured:
+                    content = content.replace(
+                        "BACKUPSHEEP_RABBITMQ_NODE_HOST=''",
+                        "BACKUPSHEEP_RABBITMQ_NODE_HOST='d34db33fcafe'",
+                        1,
+                    )
+                if generation is not None:
+                    content = content.replace(
+                        "BACKUPSHEEP_RABBITMQ_DATA_GENERATION=''",
+                        f"BACKUPSHEEP_RABBITMQ_DATA_GENERATION='{generation}'",
+                        1,
+                    )
+                env_file.write_text(content, encoding="utf-8")
+                env_file.chmod(0o600)
+                environment = os.environ.copy()
+                environment["SCENARIO"] = scenario
+                environment["TEST_LEGACY_HOST"] = (
+                    "d34db33fcafe" if explicit else ""
+                )
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        command,
+                        "rabbit-node-host-test",
+                        str(INSTALLER),
+                        str(install_dir),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                return result, env_file.read_text(encoding="utf-8")
+
+        for scenario in ("empty", "container", "multiple", "mismatched"):
+            with self.subTest(scenario=scenario):
+                result, configured_env = run(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--legacy-rabbitmq-node-host", result.stderr)
+                self.assertIn("BACKUPSHEEP_RABBITMQ_NODE_HOST=''", configured_env)
+
+        resumed, _ = run("empty", configured=True)
+        self.assertNotEqual(resumed.returncode, 0)
+        self.assertIn("exactly one retained stock RabbitMQ", resumed.stderr)
+
+        exact, exact_env = run("exact")
+        self.assertEqual(exact.returncode, 0, exact.stderr)
+        self.assertIn(
+            "BACKUPSHEEP_RABBITMQ_NODE_HOST='d34db33fcafe'", exact_env
+        )
+
+        inferred, inferred_env = run(
+            "exact", generation="4.3", explicit=False
+        )
+        self.assertNotEqual(inferred.returncode, 0)
+        self.assertIn("Generation 4.3 does not identify its node tree", inferred.stderr)
+        self.assertIn("--legacy-rabbitmq-node-host", inferred.stderr)
+        self.assertIn("BACKUPSHEEP_RABBITMQ_NODE_HOST=''", inferred_env)
+
+    def test_broker_generation_is_recorded_only_after_empty_inventory(self):
+        command = r'''
+source "$1"
+INSTALL_DIR="$2"
+ENV_FILE="$2/.env"
+PROJECT_NAME=backupsheep
+DOCKER_BIN=mock_docker
+mock_docker() {
+    if [[ "$1" == ps && "$2" == --all && "$3" == --quiet ]]; then
+        return 0
+    fi
+    if [[ "$1" == volume && "$2" == ls && "$3" == --quiet ]]; then
+        if [[ "$SCENARIO" == existing-volume \
+                || "$SCENARIO" == committed-volume ]]; then
+            printf '%s\n' rabbit-volume
+        fi
+        return 0
+    fi
+    if [[ "$1" == volume && "$2" == inspect && "$3" == --format ]]; then
+        printf '%s\n' '13:rabbitmq_data__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+        return 0
+    fi
+    return 97
+}
+compose() {
+    printf '%s\n' "$*" >> "$COMPOSE_LOG"
+}
+validate_rabbitmq_data_generation
+'''
+
+        def run(scenario):
+            with tempfile.TemporaryDirectory(
+                prefix="backupsheep-rabbitmq-generation-"
+            ) as directory:
+                install_dir = Path(directory)
+                install_dir.chmod(0o700)
+                env_file = install_dir / ".env"
+                shutil.copyfile(SAMPLE_ENV, env_file)
+                if scenario == "committed-volume":
+                    env_file.write_text(
+                        env_file.read_text(encoding="utf-8").replace(
+                            "BACKUPSHEEP_RABBITMQ_DATA_GENERATION=''",
+                            "BACKUPSHEEP_RABBITMQ_DATA_GENERATION='4.3'",
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
+                env_file.chmod(0o600)
+                compose_log = install_dir / "compose.log"
+                environment = os.environ.copy()
+                environment.update(
+                    SCENARIO=scenario,
+                    COMPOSE_LOG=str(compose_log),
+                )
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        command,
+                        "rabbitmq-generation-test",
+                        str(INSTALLER),
+                        str(install_dir),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                return (
+                    result,
+                    env_file.read_text(encoding="utf-8"),
+                    compose_log.read_text(encoding="utf-8")
+                    if compose_log.exists()
+                    else "",
+                )
+
+        empty, empty_env, empty_compose = run("empty")
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertIn(
+            "BACKUPSHEEP_RABBITMQ_DATA_GENERATION='4.3'", empty_env
+        )
+        self.assertEqual(empty_compose, "")
+
+        collision, collision_env, collision_compose = run("existing-volume")
+        self.assertNotEqual(collision.returncode, 0)
+        self.assertIn("volume has no live version witness", collision.stderr)
+        self.assertIn("BACKUPSHEEP_RABBITMQ_DATA_GENERATION=''", collision_env)
+        self.assertEqual(collision_compose, "")
+
+        committed, committed_env, committed_compose = run("committed-volume")
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+        self.assertIn("BACKUPSHEEP_RABBITMQ_DATA_GENERATION='4.3'", committed_env)
+        self.assertEqual(
+            committed_compose,
+            "--installer-reconcile-rabbitmq-volume\n",
+        )
+
+    def test_installer_transition_ledger_requires_consistent_env_generation(self):
+        installation_id = "1" * 64
+        target_config_hash = "2" * 64
+        source_binding = "3" * 64
+        target_image_id = "sha256:" + ("4" * 64)
+        source_commit = "a" * 40
+        target_image_refs = {
+            "3.13.7": f"backupsheep-rabbitmq-legacy-source:{source_commit}",
+            "4.2.9": f"backupsheep-rabbitmq-upgrade:{source_commit}",
+            "4.3.5": f"backupsheep-rabbitmq:{source_commit}",
+        }
+
+        def run(
+            phase,
+            source_class,
+            target_version,
+            generation,
+            *,
+            target_image_ref_override=None,
+        ):
+            with tempfile.TemporaryDirectory(
+                prefix="backupsheep-installer-rabbit-ledger-"
+            ) as directory:
+                install_dir = Path(directory)
+                install_dir.chmod(0o700)
+                env_file = install_dir / ".env"
+                content = SAMPLE_ENV.read_text(encoding="utf-8")
+                content = content.replace(
+                    "BACKUPSHEEP_COMPOSE_PROJECT_NAME=''",
+                    "BACKUPSHEEP_COMPOSE_PROJECT_NAME='backupsheep'",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_INSTALLATION_ID=''",
+                    f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_RABBITMQ_DATA_GENERATION=''",
+                    f"BACKUPSHEEP_RABBITMQ_DATA_GENERATION='{generation}'",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_RABBITMQ_IMAGE=backupsheep-rabbitmq:local",
+                    f"BACKUPSHEEP_RABBITMQ_IMAGE={target_image_refs['4.3.5']}",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE=backupsheep-rabbitmq-upgrade:local",
+                    f"BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE={target_image_refs['4.2.9']}",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE=backupsheep-rabbitmq-legacy-source:local",
+                    f"BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE={target_image_refs['3.13.7']}",
+                    1,
+                )
+                env_file.write_text(content, encoding="utf-8")
+                env_file.chmod(0o600)
+                state_file = install_dir / ".backupsheep-rabbitmq-transition-state"
+                state_file.write_text(
+                    "\n".join(
+                        (
+                            "version=1",
+                            f"installation_id={installation_id}",
+                            "project_name=backupsheep",
+                            f"phase={phase}",
+                            f"source_class={source_class}",
+                            f"source_binding={source_binding}",
+                            f"target_version={target_version}",
+                            f"target_config_hash={target_config_hash}",
+                            "target_image_ref="
+                            + (
+                                target_image_ref_override
+                                or target_image_refs[target_version]
+                            ),
+                            f"target_image_id={target_image_id}",
+                        )
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                state_file.chmod(0o600)
+                return subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; INSTALL_DIR="$2"; '
+                        "validate_installer_rabbitmq_transition_state",
+                        "installer-rabbit-ledger-test",
+                        str(INSTALLER),
+                        str(install_dir),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+        valid_blank = (
+            ("prepared", "legacy-volume", "3.13.7"),
+            ("attested", "3.13.7", "3.13.7"),
+            ("prepared", "3.13.7", "4.2.9"),
+            ("source-clean", "3.13.7", "4.2.9"),
+            ("target-ready", "3.13.7", "4.2.9"),
+            ("attested", "4.2.9", "4.2.9"),
+            ("prepared", "4.2.9", "4.3.5"),
+            ("target-ready", "4.2.9", "4.3.5"),
+            ("attested", "4.3.5", "4.3.5"),
+        )
+        for phase, source_class, target_version in valid_blank:
+            with self.subTest(
+                phase=phase,
+                source_class=source_class,
+                target_version=target_version,
+                generation="",
+            ):
+                result = run(phase, source_class, target_version, "")
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+        committed = run("attested", "4.3.5", "4.3.5", "4.3")
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+
+        for phase, source_class, target_version in valid_blank[:-1]:
+            with self.subTest(
+                phase=phase,
+                source_class=source_class,
+                target_version=target_version,
+                generation="4.3",
+            ):
+                result = run(phase, source_class, target_version, "4.3")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "inconsistent with protected transition state", result.stderr
+                )
+
+        invalid_combinations = (
+            ("source-clean", "4.2.9", "4.3.5"),
+            ("target-ready", "3.13.7", "4.3.5"),
+            ("target-ready", "4.2.9", "4.2.9"),
+        )
+        for phase, source_class, target_version in invalid_combinations:
+            with self.subTest(
+                phase=phase,
+                source_class=source_class,
+                target_version=target_version,
+                invalid_combination=True,
+            ):
+                result = run(phase, source_class, target_version, "")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "impossible phase/source/target combination", result.stderr
+                )
+
+        mismatched_image = run(
+            "attested",
+            "4.2.9",
+            "4.2.9",
+            "",
+            target_image_ref_override=target_image_refs["4.3.5"],
+        )
+        self.assertNotEqual(mismatched_image.returncode, 0)
+        self.assertIn(
+            "target image differs from the protected image-source contract",
+            mismatched_image.stderr,
+        )
+
+    def test_outstanding_rabbitmq_ledger_blocks_installer_before_docker_or_rewrites(self):
+        installation_id = "1" * 64
+        source_binding = "2" * 64
+        target_config_hash = "3" * 64
+        source_commit = "b" * 40
+        target_image_refs = {
+            "3.13.7": f"backupsheep-rabbitmq-legacy-source:{source_commit}",
+            "4.2.9": f"backupsheep-rabbitmq-upgrade:{source_commit}",
+            "4.3.5": f"backupsheep-rabbitmq:{source_commit}",
+        }
+        target_image_id = "sha256:" + ("5" * 64)
+        cases = (
+            ("prepared", "legacy-volume", "3.13.7", ""),
+            ("attested", "3.13.7", "3.13.7", ""),
+            ("prepared", "3.13.7", "4.2.9", ""),
+            ("source-clean", "3.13.7", "4.2.9", ""),
+            ("target-ready", "3.13.7", "4.2.9", ""),
+            ("attested", "4.2.9", "4.2.9", ""),
+            ("prepared", "4.2.9", "4.3.5", ""),
+            ("target-ready", "4.2.9", "4.3.5", ""),
+            ("attested", "4.3.5", "4.3.5", ""),
+            ("attested", "4.3.5", "4.3.5", "4.3"),
+        )
+
+        main_body = self.installer.split("\nmain() {", 1)[1]
+        guard_index = main_body.index(
+            "\n    refuse_installer_with_outstanding_rabbitmq_transition\n"
+        )
+        for later_call in (
+            "validate_approved_compose_file",
+            "validate_docker_access",
+            "clone_or_validate_repository",
+            "reconcile_installer_temp_residues",
+            "reconcile_fresh_env_candidate",
+            "prepare_image_source",
+            "create_or_migrate_configuration",
+        ):
+            with self.subTest(ordering=later_call):
+                self.assertLess(guard_index, main_body.index(f"\n    {later_call}\n"))
+
+        for phase, source_class, target_version, generation in cases:
+            with self.subTest(
+                phase=phase,
+                source_class=source_class,
+                target_version=target_version,
+                generation=generation,
+            ), tempfile.TemporaryDirectory(
+                prefix="backupsheep-installer-ledger-refusal-"
+            ) as directory:
+                root = Path(directory)
+                install_dir = root / "installation"
+                install_dir.mkdir(mode=0o700)
+                env_file = install_dir / ".env"
+                env_content = SAMPLE_ENV.read_text(encoding="utf-8")
+                env_content = env_content.replace(
+                    "BACKUPSHEEP_COMPOSE_PROJECT_NAME=''",
+                    "BACKUPSHEEP_COMPOSE_PROJECT_NAME='backupsheep'",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_INSTALLATION_ID=''",
+                    f"BACKUPSHEEP_INSTALLATION_ID='{installation_id}'",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_RABBITMQ_DATA_GENERATION=''",
+                    f"BACKUPSHEEP_RABBITMQ_DATA_GENERATION='{generation}'",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_RABBITMQ_IMAGE=backupsheep-rabbitmq:local",
+                    f"BACKUPSHEEP_RABBITMQ_IMAGE={target_image_refs['4.3.5']}",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE=backupsheep-rabbitmq-upgrade:local",
+                    f"BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE={target_image_refs['4.2.9']}",
+                    1,
+                ).replace(
+                    "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE=backupsheep-rabbitmq-legacy-source:local",
+                    f"BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE={target_image_refs['3.13.7']}",
+                    1,
+                )
+                env_file.write_text(env_content, encoding="utf-8")
+                env_file.chmod(0o600)
+
+                secrets_dir = install_dir / ".secrets"
+                secrets_dir.mkdir(mode=0o700)
+                secret_file = secrets_dir / "rabbitmq_app_password"
+                secret_file.write_bytes(b"must-remain-byte-identical\n")
+                secret_file.chmod(0o444)
+
+                state_file = install_dir / ".backupsheep-rabbitmq-transition-state"
+                state_file.write_text(
+                    "\n".join(
+                        (
+                            "version=1",
+                            f"installation_id={installation_id}",
+                            "project_name=backupsheep",
+                            f"phase={phase}",
+                            f"source_class={source_class}",
+                            f"source_binding={source_binding}",
+                            f"target_version={target_version}",
+                            f"target_config_hash={target_config_hash}",
+                            f"target_image_ref={target_image_refs[target_version]}",
+                            f"target_image_id={target_image_id}",
+                        )
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                state_file.chmod(0o600)
+
+                docker_marker = root / "docker-was-called"
+                fake_docker = root / "docker"
+                fake_docker.write_text(
+                    '#!/bin/sh\n: > "$BACKUPSHEEP_DOCKER_CALLED"\nexit 99\n',
+                    encoding="utf-8",
+                )
+                fake_docker.chmod(0o755)
+                expected_env = env_file.read_bytes()
+                expected_secret = secret_file.read_bytes()
+                expected_state = state_file.read_bytes()
+                environment = os.environ.copy()
+                environment["BACKUPSHEEP_DOCKER_CALLED"] = str(docker_marker)
+
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; INSTALL_DIR="$2"; DOCKER_BIN="$3"; '
+                        "refuse_installer_with_outstanding_rabbitmq_transition",
+                        "installer-rabbit-ledger-refusal-test",
+                        str(INSTALLER),
+                        str(install_dir),
+                        str(fake_docker),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unfinished RabbitMQ generation transition", result.stderr)
+                self.assertFalse(docker_marker.exists())
+                self.assertEqual(env_file.read_bytes(), expected_env)
+                self.assertEqual(secret_file.read_bytes(), expected_secret)
+                self.assertEqual(state_file.read_bytes(), expected_state)
+                self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(secrets_dir.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(secret_file.stat().st_mode), 0o444)
+                self.assertEqual(stat.S_IMODE(state_file.stat().st_mode), 0o600)
+
+    def test_database_name_uses_the_bundled_postgres_identifier_contract(self):
+        for accepted in ("backupsheep", "_backupsheep", "tenant_1"):
+            with self.subTest(accepted=accepted):
+                subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; validate_database_name "$2"',
+                        "database-name-test",
+                        str(INSTALLER),
+                        accepted,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        for refused in (
+            "",
+            "postgres",
+            "template0",
+            "template1",
+            "Tenant",
+            "tenant-name",
+            "a" * 64,
+        ):
+            with self.subTest(refused=refused):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; validate_database_name "$2"',
+                        "database-name-test",
+                        str(INSTALLER),
+                        refused,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("DB_NAME must be", result.stderr)
 
     def test_preflight_failure_is_terminal(self):
         self.assertIn("preflight_container_id", self.installer)
@@ -1165,6 +2027,12 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
                 "deploy/release/signed-release.compose.yml",
                 "deploy/release-policy.json",
                 "deploy/runtime/compose-json.awk",
+                "deploy/rabbitmq/upgrade-4.2.9.compose.yml",
+                "deploy/rabbitmq/transition-4.3.compose.yml",
+                "deploy/rabbitmq/90-legacy-source.conf",
+                "deploy/rabbitmq/entrypoint.sh",
+                "deploy/rabbitmq/volume-init.sh",
+                "deploy/rabbitmq/uid-transition.sh",
                 "scripts/release_transition.py",
             ):
                 target = checkout / relative
@@ -1793,6 +2661,7 @@ attest_docker_daemon_platform
             "docker-compose.yml",
             "deploy/release/signed-release.compose.yml",
             "deploy/rabbitmq/upgrade-4.2.9.compose.yml",
+            "deploy/rabbitmq/transition-4.3.compose.yml",
             "deploy/release-policy.json",
         ):
             with self.subTest(relative=relative):
@@ -1879,6 +2748,43 @@ validate_runtime_configuration
                 "BACKUPSHEEP_INSTALLATION_BOOTSTRAP_STATE='complete'",
                 (install_dir / ".env").read_text(encoding="utf-8"),
             )
+            configured_text = (install_dir / ".env").read_text(
+                encoding="utf-8"
+            )
+            configured_values = {}
+            for line in configured_text.splitlines():
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                configured_values[key] = value.strip("'")
+            required_by_compose = set(
+                re.findall(
+                    r"\$\{([A-Z][A-Z0-9_]*):\?",
+                    "\n".join(
+                        (ROOT / relative_path).read_text(encoding="utf-8")
+                        for relative_path in (
+                            "docker-compose.yml",
+                            "deploy/release/signed-release.compose.yml",
+                        )
+                    ),
+                )
+            )
+            self.assertTrue(required_by_compose)
+            self.assertEqual(
+                configured_values.get("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"),
+                "",
+                "fresh configuration must not attest a broker before inventory",
+            )
+            self.assertRegex(
+                configured_values.get("DB_NAME", ""),
+                r"^[a-z_][a-z0-9_]{0,62}$",
+            )
+            for variable in sorted(required_by_compose):
+                with self.subTest(required_compose_variable=variable):
+                    self.assertTrue(
+                        configured_values.get(variable),
+                        f"fresh configuration omitted required Compose variable {variable}",
+                    )
         finally:
             temporary.cleanup()
 
@@ -2082,6 +2988,12 @@ ENV_FILE="$2/.env"
 DOCKER_BIN=mock_docker
 mock_docker() {{
     if [[ "$1" == volume && "$2" == ls && "$3" == --format ]]; then
+        return 0
+    fi
+    if [[ "$1" == ps && "$2" == --all && "$3" == --quiet ]]; then
+        return 0
+    fi
+    if [[ "$1" == volume && "$2" == ls && "$3" == --quiet ]]; then
         return 0
     fi
     return 64
@@ -4061,6 +4973,20 @@ parse_args --project-name first --adopt-legacy-project second
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must name the same project", result.stderr)
+
+    def test_signed_release_refuses_legacy_project_adoption_during_argument_parsing(self):
+        result = subprocess.run(
+            [
+                "/bin/bash", "-c",
+                'source "$1"; parse_args --release-tag v1.2.3 --adopt-legacy-project backupsheep',
+                "signed-adoption-test", str(INSTALLER),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("signed-release mode is fresh-only", result.stderr)
 
     def test_project_name_option_is_single_use_and_boundary_checked(self):
         duplicate = subprocess.run(

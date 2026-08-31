@@ -26,6 +26,7 @@ domain it is intended to recover.
 | `.secrets/artifact_local_file_database_keyring` and `.secrets/artifact_local_file_files_keyring` | The distinct root keys required to unwrap every BSE1 database/files data key, including retained legacy keys | Back up the exact bytes, ownership and modes with PostgreSQL as one encrypted, access-audited cryptographic recovery set; never regenerate or substitute either file |
 | `.env`, remaining `.secrets` / secret-manager object | Runtime/integration settings plus file-backed Django, DB, broker, signing, onboarding and optional lane-specific managed-SSH secrets | Encrypted secret backup with tightly audited access; preserve ownership and modes |
 | Deployment metadata | Exact Git revision/image, Compose overrides, proxy and firewall configuration | Versioned infrastructure repository or encrypted configuration backup |
+| `.backupsheep-backup-storage-identity` | Version-2 installation/project binding, canonical approved Local Storage bind path, separately pinned target device/inode and SHA-256 of only the trusted parent device/inode/owner/mode chain | Preserve the exact owner-only regular file with its override and storage snapshot; the same target inode may transition to storage-service UID `10004`, mode `0700`, but never edit or delete the ledger to authorize a new target |
 | `backup_storage` | Archives stored by the Local Storage destination | Filesystem snapshot/backup to a second system; never the only archive copy |
 | `database_workdir`, `files_workdir`, `storage_workdir` | Lane-private in-flight material, run logs, website caches and BSE1 materialization | Snapshot the exact lane volumes if preserving in-progress local jobs/caches is required |
 | Database/files/restore ciphertext-transfer volumes | Published BSE1 handoffs that can be in flight across a crash | Include them in an application-consistent snapshot; preserve owner/group/mode metadata |
@@ -131,7 +132,8 @@ For an application-consistent snapshot of active work material:
 2. let active database/file/storage/restore work drain;
 3. stop `app` and all workers;
 4. snapshot/copy the three private work volumes, all three ciphertext-transfer volumes,
-   `staging_layout_witness` and `backup_storage` as one recorded recovery set;
+   `staging_layout_witness`, `backup_storage`, its approved override and
+   `.backupsheep-backup-storage-identity` as one recorded recovery set;
 5. restart the stack and verify recovery.
 
 At minimum, separately retain both optional lane-specific managed-key secret files when
@@ -162,6 +164,10 @@ production provider resources.
 - restore the three private work volumes, three ciphertext-transfer volumes, staging
   witness and storage-only Local Storage with their exact identities and metadata; let the
   v3 provisioner validate them rather than adding cross-lane mounts;
+- restore an approved-bind identity ledger only when the same canonical directory and
+  device/inode are still present. A new host, remount, replacement directory or intentional
+  storage move must use a separately named fresh project and authenticated restore; do not
+  transplant, delete or edit the old ledger to make a different target appear unchanged;
 - keep the public endpoint isolated until the database is restored and the first owner is
   confirmed.
 
@@ -172,7 +178,7 @@ The stock services use `pull_policy: never`; they will not fetch an unreviewed r
 substitute:
 
 ```bash
-bs_compose build db app app-egress-guard
+bs_compose build db app app-egress-guard rabbitmq
 bs_compose up --detach db rabbitmq
 DB_CONTAINER="$(bs_compose ps -q db)"
 test -n "${DB_CONTAINER}"

@@ -34,6 +34,7 @@ jobs:
       BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION: "1"
       BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION: "2"
       BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "4.3"
+      BACKUPSHEEP_RABBITMQ_NODE_HOST: "rabbitmq"
       BACKUPSHEEP_EGRESS_POLICY_GENERATION: "2"
       BACKUPSHEEP_STAGING_LAYOUT_INTENT: "new-empty-v3"
       BACKUPSHEEP_STAGING_LAYOUT_WITNESS: "421e9ec501ca8cdcf91e0dcbc9c25b462a5f3569bc1a3ec214e8a8b19ffb571f"
@@ -512,8 +513,213 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  rabbitmq-arm64-migration:
+    name: Native arm64 RabbitMQ migration gate
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    outputs:
+      legacy_archive_sha256: ${{ steps.export_arm64_legacy.outputs.archive_sha256 }}
+      legacy_config_sha256: ${{ steps.export_arm64_legacy.outputs.config_sha256 }}
+      legacy_evidence_sha256: ${{ steps.export_arm64_legacy.outputs.evidence_sha256 }}
+      legacy_image_id: ${{ steps.export_arm64_legacy.outputs.image_id }}
+    env:
+      DOCKER_DEFAULT_PLATFORM: linux/arm64
+      TEST_RABBITMQ_IMAGE: "backupsheep-ci-rabbitmq-arm64:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RABBITMQ_UPGRADE_IMAGE: "backupsheep-ci-rabbitmq-upgrade-arm64:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RABBITMQ_LEGACY_SOURCE_IMAGE: "backupsheep-ci-rabbitmq-legacy-source-arm64:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE: "rabbitmq:3.13.7-management@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69"
+      TEST_RABBITMQ_HISTORICAL_SOURCE_REPO_DIGEST: "rabbitmq@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69"
+      TEST_OWNERSHIP_VALUE: "arm64-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+    steps:
+      - name: Check out the exact source under test
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      # Vulnerability and SBOM enforcement remain on the existing amd64 scanner
+      # jobs, including the release job's linux/amd64 and linux/arm64 layouts.
+      # This job is deliberately native: it closes the arm64 runtime and
+      # cross-version data-migration semantic gap without QEMU.
+      - name: Build and attest the native arm64 RabbitMQ migration images
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          git diff --quiet
+          git diff --cached --quiet
+          [[ "$(uname -m)" =~ ^(aarch64|arm64)$ ]]
+          [[ "$(docker info --format '{{.Architecture}}')" =~ ^(aarch64|arm64)$ ]]
+          test "$(docker version --format '{{.Server.Arch}}')" = arm64
+
+          for image in \
+            "$TEST_RABBITMQ_IMAGE" \
+            "$TEST_RABBITMQ_UPGRADE_IMAGE" \
+            "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"; do
+            if docker image inspect "$image" >/dev/null 2>&1; then
+              printf '%s\n' "Refusing a pre-existing arm64 CI image-tag collision: $image" >&2
+              exit 1
+            fi
+          done
+
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE" .
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE" .
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.rabbitmq-legacy-source \
+            --tag "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" .
+          docker pull --platform linux/arm64 "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE"
+
+          historical_source_repo_digests="$(
+            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" | LC_ALL=C sort
+          )"
+          test "$historical_source_repo_digests" = \
+            "$TEST_RABBITMQ_HISTORICAL_SOURCE_REPO_DIGEST"
+
+          for image in \
+            "$TEST_RABBITMQ_IMAGE" \
+            "$TEST_RABBITMQ_UPGRADE_IMAGE" \
+            "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \
+            "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE"; do
+            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = \
+              linux/arm64
+          done
+          for image in \
+            "$TEST_RABBITMQ_IMAGE" \
+            "$TEST_RABBITMQ_UPGRADE_IMAGE" \
+            "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"; do
+            test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.ci-run"}}' "$image")" = \
+              "$TEST_OWNERSHIP_VALUE"
+            test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.enabled-plugins"}}' "$image")" = none
+            test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-runtime-version"}}' "$image")" = 3.5.8
+            docker run --rm --pull never --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges:true --pids-limit 64 \
+              --memory 256m --memory-swap 256m --cpus 1 --ulimit core=0:0 \
+              --entrypoint /bin/sh "$image" -ceu \
+              'set -- $(/opt/openssl/bin/openssl version); test "$2" = 3.5.8; erl -noshell -eval "case crypto:info_lib() of [{_, _, <<\"OpenSSL 3.5.8 \", _/binary>>}] -> ok; Value -> io:format(\"~p~n\", [Value]), halt(1) end, {ok, Maps} = file:read_file(\"/proc/self/maps\"), case binary:match(Maps, <<\"/opt/openssl/lib/libcrypto.so.3\">>) of nomatch -> halt(1); _ -> halt(0) end."; ! rabbitmq-plugins list --offline --enabled --minimal 2>/dev/null | grep -Eq "^rabbitmq_[a-z0-9_]+$"'
+          done
+
+          test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_IMAGE")" = \
+            '100:101'
+          test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_UPGRADE_IMAGE")" = \
+            '100:101'
+          test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")" = \
+            '999:999'
+          test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-donor-index-digest"}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")" = \
+            'sha256:f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f469995a728c298b'
+          test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.erlang-donor-index-digest"}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")" = \
+            'sha256:f9007e3e435761bd7f88aafa4bfab20fd4107baa88e3ff45e935ef2aa3e892d5'
+          test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.erlang-runtime-version"}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")" = \
+            '26.2.5.21'
+          docker run --rm --pull never --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 \
+            --memory 256m --memory-swap 256m --cpus 1 --ulimit core=0:0 \
+            --entrypoint /bin/sh "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" -ceu \
+            'test "$(tr -d "\n" </opt/erlang/releases/26/OTP_VERSION)" = 26.2.5.21; ! command -v gosu'
+          docker run --rm --pull never --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --memory-swap 256m --cpus 1 --ulimit core=0:0 \
+            --entrypoint rabbitmqctl "$TEST_RABBITMQ_IMAGE" version | grep -Fxq '4.3.5'
+          docker run --rm --pull never --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --memory-swap 256m --cpus 1 --ulimit core=0:0 \
+            --entrypoint rabbitmqctl "$TEST_RABBITMQ_UPGRADE_IMAGE" version | grep -Fxq '4.2.9'
+          docker run --rm --pull never --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --memory-swap 256m --cpus 1 --ulimit core=0:0 \
+            --entrypoint rabbitmqctl "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" version | grep -Fxq '3.13.7'
+
+      - name: Exercise the native arm64 RabbitMQ migration and crash boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 10m \
+            deploy/ci/run-rabbitmq-version-migration-e2e.sh \
+            "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" \
+            "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \
+            "$TEST_RABBITMQ_UPGRADE_IMAGE" \
+            "$TEST_RABBITMQ_IMAGE" \
+            "bs-rmq-$TEST_OWNERSHIP_VALUE" \
+            "$TEST_OWNERSHIP_VALUE"
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Export the exact native arm64 legacy-source image
+        id: export_arm64_legacy
+        shell: bash
+        env:
+          ARM64_TRANSFER_DIR: ${{ runner.temp }}/backupsheep-rabbitmq-arm64-transfer
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          umask 077
+          if [ -e "$ARM64_TRANSFER_DIR" ] || [ -L "$ARM64_TRANSFER_DIR" ]; then
+            printf '%s\n' 'Refusing a pre-existing arm64 image-transfer path.' >&2
+            exit 1
+          fi
+          install -d -m 0700 "$ARM64_TRANSFER_DIR"
+          archive="$ARM64_TRANSFER_DIR/rabbitmq-legacy-source-linux-arm64.tar"
+          evidence="$ARM64_TRANSFER_DIR/rabbitmq-legacy-source-linux-arm64.evidence.json"
+          image_id="$(docker image inspect --format '{{.Id}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_id")" = \
+            linux/arm64
+          test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.ci-run"}}' "$image_id")" = \
+            "$TEST_OWNERSHIP_VALUE"
+          docker image save --output "$archive" "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"
+          chmod 0600 "$archive"
+          config_sha256="$(
+            python3 scripts/attest_arm64_legacy_image.py attest \
+              --archive "$archive" \
+              --evidence "$evidence" \
+              --expected-image-id "$image_id" \
+              --expected-image-ref "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \
+              --expected-owner "$TEST_OWNERSHIP_VALUE" \
+              --source-sha "$GITHUB_SHA"
+          )"
+          archive_sha256="sha256:$(sha256sum "$archive" | awk '{print $1}')"
+          evidence_sha256="sha256:$(sha256sum "$evidence" | awk '{print $1}')"
+          [[ "$archive_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$config_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$evidence_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'archive_sha256=%s\n' "$archive_sha256" >> "$GITHUB_OUTPUT"
+          printf 'config_sha256=%s\n' "$config_sha256" >> "$GITHUB_OUTPUT"
+          printf 'evidence_sha256=%s\n' "$evidence_sha256" >> "$GITHUB_OUTPUT"
+          printf 'image_id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
+
+      - name: Transfer the hash-bound native arm64 legacy-source image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rabbitmq-arm64-legacy-source-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/backupsheep-rabbitmq-arm64-transfer
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Remove exact native arm64 gate images
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -u
+          for image in \
+            "$TEST_RABBITMQ_IMAGE" \
+            "$TEST_RABBITMQ_UPGRADE_IMAGE" \
+            "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"; do
+            if test "$(docker image inspect --format '{{with index .Config.Labels "com.backupsheep.ci-run"}}{{.}}{{end}}' "$image" 2>/dev/null || true)" = \
+              "$TEST_OWNERSHIP_VALUE"; then
+              docker image rm --force "$image" >/dev/null 2>&1 || true
+            fi
+          done
+
   application-security-regression:
     name: Full application/security regression gate
+    needs: rabbitmq-arm64-migration
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -523,6 +729,11 @@ jobs:
       TEST_EGRESS_IMAGE: "backupsheep-ci-egress:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_RABBITMQ_IMAGE: "backupsheep-ci-rabbitmq:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_RABBITMQ_UPGRADE_IMAGE: "backupsheep-ci-rabbitmq-upgrade:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RABBITMQ_LEGACY_SOURCE_IMAGE: "backupsheep-ci-rabbitmq-legacy-source:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE: "rabbitmq:3.13.7-management@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69"
+      TEST_RABBITMQ_HISTORICAL_SOURCE_REPO_DIGEST: "rabbitmq@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69"
+      TEST_RABBITMQ_ARM64_LEGACY_SOURCE_IMAGE: "backupsheep-ci-rabbitmq-legacy-source-arm64:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_ARM64_OWNERSHIP_VALUE: "arm64-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_RELEASE_VERIFIER_IMAGE: "backupsheep-ci-release-verifier:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_NETWORK: "backupsheep-ci-net-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_POSTGRES_CONTAINER: "backupsheep-ci-postgres-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
@@ -531,11 +742,74 @@ jobs:
       TEST_POSTGRES_MIGRATION_PREFIX: "bs-pgm-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
       TEST_OWNERSHIP_VALUE: "${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
     steps:
+      - name: Require the native arm64 migration gate
+        shell: bash
+        env:
+          ARM64_MIGRATION_RESULT: ${{ needs.rabbitmq-arm64-migration.result }}
+        run: |
+          set -euo pipefail
+          test "$ARM64_MIGRATION_RESULT" = success
+
       - name: Check out the exact source under test
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
+
+      - name: Prepare the private native arm64 image-transfer directory
+        shell: bash
+        env:
+          ARM64_TRANSFER_DIR: ${{ runner.temp }}/backupsheep-rabbitmq-arm64-transfer
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -e "$ARM64_TRANSFER_DIR" ] || [ -L "$ARM64_TRANSFER_DIR" ]; then
+            printf '%s\n' 'Refusing a pre-existing downloaded arm64 image-transfer path.' >&2
+            exit 1
+          fi
+          install -d -m 0700 "$ARM64_TRANSFER_DIR"
+
+      - name: Download the exact native arm64 legacy-source image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rabbitmq-arm64-legacy-source-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/backupsheep-rabbitmq-arm64-transfer
+
+      - name: Verify the hash-bound native arm64 legacy-source image
+        shell: bash
+        env:
+          ARM64_TRANSFER_DIR: ${{ runner.temp }}/backupsheep-rabbitmq-arm64-transfer
+          EXPECTED_ARM64_ARCHIVE_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_archive_sha256 }}
+          EXPECTED_ARM64_CONFIG_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_config_sha256 }}
+          EXPECTED_ARM64_EVIDENCE_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_evidence_sha256 }}
+          EXPECTED_ARM64_IMAGE_ID: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_image_id }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          archive="$ARM64_TRANSFER_DIR/rabbitmq-legacy-source-linux-arm64.tar"
+          evidence="$ARM64_TRANSFER_DIR/rabbitmq-legacy-source-linux-arm64.evidence.json"
+          mapfile -d '' transfer_entries < <(
+            find "$ARM64_TRANSFER_DIR" -mindepth 1 -maxdepth 1 -print0
+          )
+          test "${#transfer_entries[@]}" -eq 2
+          for path in "$archive" "$evidence"; do
+            test -f "$path"
+            test ! -L "$path"
+            test "$(stat -c '%h' "$path")" = 1
+            chmod 0600 "$path"
+          done
+          actual_config_sha256="$(
+            python3 scripts/attest_arm64_legacy_image.py verify \
+              --archive "$archive" \
+              --evidence "$evidence" \
+              --expected-archive-sha256 "$EXPECTED_ARM64_ARCHIVE_SHA256" \
+              --expected-evidence-sha256 "$EXPECTED_ARM64_EVIDENCE_SHA256" \
+              --expected-image-id "$EXPECTED_ARM64_IMAGE_ID" \
+              --expected-image-ref "$TEST_RABBITMQ_ARM64_LEGACY_SOURCE_IMAGE" \
+              --expected-owner "$TEST_ARM64_OWNERSHIP_VALUE" \
+              --source-sha "$GITHUB_SHA"
+          )"
+          test "$actual_config_sha256" = "$EXPECTED_ARM64_CONFIG_SHA256"
 
       - name: Build every first-party production and release-verification image
         shell: bash
@@ -562,7 +836,7 @@ jobs:
             printf '%s\n' "Refusing a pre-existing CI network-name collision: $TEST_NETWORK" >&2
             exit 1
           fi
-          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RELEASE_VERIFIER_IMAGE"; do
+          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" "$TEST_RELEASE_VERIFIER_IMAGE"; do
             if docker image inspect "$image" >/dev/null 2>&1; then
               printf '%s\n' "Refusing a pre-existing CI image-tag collision: $image" >&2
               exit 1
@@ -589,26 +863,78 @@ jobs:
             --file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE" .
           docker build --pull --no-cache \
             --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.rabbitmq-legacy-source \
+            --tag "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" .
+          docker pull --platform linux/amd64 "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE"
+          historical_source_image_id="$(docker image inspect --format '{{.Id}}' "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE")"
+          [[ "$historical_source_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          historical_source_repo_digests="$(
+            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" | LC_ALL=C sort
+          )"
+          [[ "$historical_source_repo_digests" == "$TEST_RABBITMQ_HISTORICAL_SOURCE_REPO_DIGEST" ]]
+          printf 'TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE_ID=%s\n' \
+            "$historical_source_image_id" >> "$GITHUB_ENV"
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
             --file Dockerfile.release-verifier --tag "$TEST_RELEASE_VERIFIER_IMAGE" .
-          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RELEASE_VERIFIER_IMAGE"; do
+          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_LEGACY_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" "$TEST_RELEASE_VERIFIER_IMAGE"; do
             test "$(docker image inspect --format '{{.Architecture}}' "$image")" = amd64
           done
           test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_IMAGE")" = '100:101'
           test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_UPGRADE_IMAGE")" = '100:101'
+          test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")" = '999:999'
+          for image in "$TEST_RABBITMQ_IMAGE" "$TEST_RABBITMQ_UPGRADE_IMAGE" "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"; do
+            test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.enabled-plugins"}}' "$image")" = none
+            test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-runtime-version"}}' "$image")" = 3.5.8
+            docker run --rm --pull never --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+              --entrypoint /bin/sh "$image" -ceu \
+              'set -- $(/opt/openssl/bin/openssl version); test "$2" = 3.5.8; erl -noshell -eval "case crypto:info_lib() of [{_, _, <<\"OpenSSL 3.5.8 \", _/binary>>}] -> ok; Value -> io:format(\"~p~n\", [Value]), halt(1) end, {ok, Maps} = file:read_file(\"/proc/self/maps\"), case binary:match(Maps, <<\"/opt/openssl/lib/libcrypto.so.3\">>) of nomatch -> halt(1); _ -> halt(0) end."; ! rabbitmq-plugins list --offline --enabled --minimal 2>/dev/null | grep -Eq "^rabbitmq_[a-z0-9_]+$"'
+          done
+          test -z "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-donor-index-digest"}}' "$TEST_RABBITMQ_IMAGE")"
+          test -z "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-donor-index-digest"}}' "$TEST_RABBITMQ_UPGRADE_IMAGE")"
+          test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.openssl-donor-index-digest"}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")" = \
+            'sha256:f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f469995a728c298b'
+          test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.erlang-donor-index-digest"}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")" = \
+            'sha256:f9007e3e435761bd7f88aafa4bfab20fd4107baa88e3ff45e935ef2aa3e892d5'
+          test "$(docker image inspect --format '{{index .Config.Labels "com.backupsheep.rabbitmq.erlang-runtime-version"}}' "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE")" = \
+            '26.2.5.21'
+          docker run --rm --pull never --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --entrypoint /bin/sh "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" -ceu \
+            'test "$(tr -d "\n" </opt/erlang/releases/26/OTP_VERSION)" = 26.2.5.21; ! command -v gosu'
           test "$(docker image inspect --format '{{.Config.User}}' "$TEST_RELEASE_VERIFIER_IMAGE")" = '65532:65532'
           test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$TEST_RELEASE_VERIFIER_IMAGE")" = '["/ko-app/cosign"]'
-          docker run --rm --network none --read-only --cap-drop ALL \
+          docker run --rm --pull never --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
             --entrypoint rabbitmqctl "$TEST_RABBITMQ_IMAGE" version | grep -Fxq '4.3.5'
-          docker run --rm --network none --read-only --cap-drop ALL \
+          docker run --rm --pull never --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
             --entrypoint rabbitmqctl "$TEST_RABBITMQ_UPGRADE_IMAGE" version | grep -Fxq '4.2.9'
+          docker run --rm --pull never --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
+            --entrypoint rabbitmqctl "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" version | grep -Fxq '3.13.7'
+          timeout --signal=TERM --kill-after=10s 5m \
+            deploy/ci/run-rabbitmq-entrypoint-transition-e2e.sh \
+            "$TEST_RABBITMQ_IMAGE" \
+            "$TEST_RABBITMQ_UPGRADE_IMAGE" \
+            "bs-rmq-entrypoint-$TEST_OWNERSHIP_VALUE" \
+            "$TEST_OWNERSHIP_VALUE"
+          timeout --signal=TERM --kill-after=30s 10m \
+            deploy/ci/run-rabbitmq-version-migration-e2e.sh \
+            "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" \
+            "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \
+            "$TEST_RABBITMQ_UPGRADE_IMAGE" \
+            "$TEST_RABBITMQ_IMAGE" \
+            "bs-rmq-migration-$TEST_OWNERSHIP_VALUE" \
+            "$TEST_OWNERSHIP_VALUE"
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \
             "$TEST_RELEASE_VERIFIER_IMAGE" version | grep -Fq 'v3.1.3-backupsheep.1'
 
-      - name: Install hash-verified Syft, Trivy, and ORAS
+      - name: Install hash-verified Syft, Trivy, Grype, and ORAS
         shell: bash
         env:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
@@ -620,12 +946,15 @@ jobs:
             --destination "$CI_SCAN_TOOL_DIR" \
             --tool syft \
             --tool trivy \
+            --tool grype \
             --tool oras
           "$CI_SCAN_TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
           "$CI_SCAN_TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          "$CI_SCAN_TOOL_DIR/grype" version | grep -Eq '^Version: +0\.116\.1$'
           test "$("$CI_SCAN_TOOL_DIR/oras" version | sed -n '1s/^Version: *//p')" = '1.3.3'
           grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-syft.yaml"
           grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-trivy.yaml"
+          grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-grype.yaml"
           test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"
 
       - name: Prepare the exact reviewed Trivy vulnerability database
@@ -647,6 +976,26 @@ jobs:
             --cache-dir "$CI_TRIVY_CACHE_DIR" \
             --evidence "$CI_TRIVY_DB_EVIDENCE"
 
+      - name: Prepare the exact reviewed Grype vulnerability database
+        shell: bash
+        env:
+          CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
+          CI_GRYPE_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-grype-cache"
+          CI_GRYPE_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-grype-db-evidence.json"
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/prepare_grype_db.py prepare \
+            --lock deploy/grype-db-lock.json \
+            --grype "$CI_SCAN_TOOL_DIR/grype" \
+            --cache-dir "$CI_GRYPE_CACHE_DIR" \
+            --evidence "$CI_GRYPE_DB_EVIDENCE"
+          python3 scripts/prepare_grype_db.py verify \
+            --lock deploy/grype-db-lock.json \
+            --grype "$CI_SCAN_TOOL_DIR/grype" \
+            --cache-dir "$CI_GRYPE_CACHE_DIR" \
+            --evidence "$CI_GRYPE_DB_EVIDENCE"
+
       - name: Generate SBOMs and reject HIGH or CRITICAL findings in exact images
         shell: bash
         env:
@@ -655,6 +1004,9 @@ jobs:
           CI_TRIVY_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-trivy-cache"
           CI_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-trivy-db-evidence.json"
           CI_TRIVY_HOME: "${{ runner.temp }}/backupsheep-ci-trivy-home"
+          CI_GRYPE_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-grype-cache"
+          CI_GRYPE_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-grype-db-evidence.json"
+          CI_GRYPE_HOME: "${{ runner.temp }}/backupsheep-ci-grype-home"
         run: |
           set -euo pipefail
           export LC_ALL=C
@@ -690,10 +1042,17 @@ jobs:
             printf '%s\n' 'Refusing a pre-existing Trivy home path.' >&2
             exit 1
           fi
+          if [ -e "$CI_GRYPE_HOME" ] || [ -L "$CI_GRYPE_HOME" ]; then
+            printf '%s\n' 'Refusing a pre-existing Grype home path.' >&2
+            exit 1
+          fi
           install -d -m 0700 "$CI_SCAN_DIR"
           install -d -m 0700 "$CI_TRIVY_HOME"
+          install -d -m 0700 "$CI_GRYPE_HOME"
           install -m 0600 deploy/trivy-db-lock.json "$CI_SCAN_DIR/trivy-db-lock.json"
           install -m 0600 "$CI_TRIVY_DB_EVIDENCE" "$CI_SCAN_DIR/trivy-db-evidence.json"
+          install -m 0600 deploy/grype-db-lock.json "$CI_SCAN_DIR/grype-db-lock.json"
+          install -m 0600 "$CI_GRYPE_DB_EVIDENCE" "$CI_SCAN_DIR/grype-db-evidence.json"
           cleanup_archives() {
             find "$CI_SCAN_DIR" -maxdepth 1 -type f -name '*.tar' -delete
           }
@@ -707,6 +1066,7 @@ jobs:
             archive="$CI_SCAN_DIR/${image_kind}.tar"
             syft_report="$CI_SCAN_DIR/${image_kind}.syft.json"
             trivy_report="$CI_SCAN_DIR/${image_kind}.trivy.json"
+            grype_report="$CI_SCAN_DIR/${image_kind}.grype.json"
             summary="$CI_SCAN_DIR/${image_kind}.summary.json"
 
             docker image save --output "$archive" "$image_id"
@@ -743,10 +1103,107 @@ jobs:
                 --output "$trivy_report" \
               || trivy_status=$?
 
+            grype_vex=()
+            grype_name=()
+            grype_baseline=""
+            materialized_vex=""
+            if [ "$image_kind" = rabbitmq-legacy-source ]; then
+              grype_baseline="$CI_SCAN_DIR/${image_kind}.grype-unsuppressed.json"
+              materialized_vex="$CI_SCAN_DIR/${image_kind}.openvex.json"
+              baseline_status=0
+              env -i \
+                HOME="$CI_GRYPE_HOME" \
+                PATH="$CI_SCAN_TOOL_DIR:/usr/bin:/bin" \
+                LC_ALL=C \
+                GRYPE_DB_CACHE_DIR="$CI_GRYPE_CACHE_DIR" \
+                GRYPE_DB_AUTO_UPDATE=false \
+                GRYPE_CHECK_FOR_APP_UPDATE=false \
+                GRYPE_DB_VALIDATE_AGE=true \
+                GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h \
+                "$CI_SCAN_TOOL_DIR/grype" \
+                  --config "$CI_SCAN_TOOL_DIR/empty-grype.yaml" \
+                  "docker-archive:$archive" \
+                  --fail-on high \
+                  --output json \
+                  --file "$grype_baseline" \
+                || baseline_status=$?
+              [[ "$baseline_status" -eq 2 ]]
+              vex_image_reference="$(
+                python3 scripts/materialize_legacy_rabbitmq_vex.py \
+                  --policy deploy/rabbitmq/legacy-source-otp26.vex-policy.json \
+                  --grype-report "$grype_baseline" \
+                  --expected-image-id "$image_id" \
+                  --output "$materialized_vex"
+              )"
+              [[ "$vex_image_reference" =~ ^backupsheep-rabbitmq-legacy-source:manifest-[0-9a-f]{64}$ ]]
+              tagged_archive="$CI_SCAN_DIR/${image_kind}.digest-tagged.tar"
+              docker image tag "$image_id" "$vex_image_reference"
+              docker image save --output "$tagged_archive" "$vex_image_reference"
+              chmod 0600 "$tagged_archive"
+              mv -- "$tagged_archive" "$archive"
+
+              SYFT_CHECK_FOR_APP_UPDATE=false \
+                "$CI_SCAN_TOOL_DIR/syft" \
+                  --config "$CI_SCAN_TOOL_DIR/empty-syft.yaml" \
+                  scan "docker-archive:$archive" \
+                  --output "syft-json=$syft_report"
+              trivy_status=0
+              env -i \
+                HOME="$CI_TRIVY_HOME" \
+                PATH="$CI_SCAN_TOOL_DIR:/usr/bin:/bin" \
+                LC_ALL=C \
+                TRIVY_SKIP_VERSION_CHECK=true \
+                "$CI_SCAN_TOOL_DIR/trivy" \
+                  --cache-dir "$CI_TRIVY_CACHE_DIR" \
+                  --config "$CI_SCAN_TOOL_DIR/empty-trivy.yaml" image \
+                  --input "$archive" \
+                  --ignorefile "$CI_SCAN_TOOL_DIR/empty-trivy.ignore" \
+                  --skip-db-update \
+                  --skip-java-db-update \
+                  --skip-check-update \
+                  --offline-scan \
+                  --quiet \
+                  --scanners vuln \
+                  --pkg-types os,library \
+                  --list-all-pkgs \
+                  --severity HIGH,CRITICAL \
+                  --exit-code 1 \
+                  --timeout 30m \
+                  --format json \
+                  --output "$trivy_report" \
+                || trivy_status=$?
+              grype_vex=(--vex "$materialized_vex")
+              grype_name=(--name backupsheep-rabbitmq-legacy-source)
+            fi
+            grype_status=0
+            env -i \
+              HOME="$CI_GRYPE_HOME" \
+              PATH="$CI_SCAN_TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              GRYPE_DB_CACHE_DIR="$CI_GRYPE_CACHE_DIR" \
+              GRYPE_DB_AUTO_UPDATE=false \
+              GRYPE_CHECK_FOR_APP_UPDATE=false \
+              GRYPE_DB_VALIDATE_AGE=true \
+              GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h \
+              "$CI_SCAN_TOOL_DIR/grype" \
+                --config "$CI_SCAN_TOOL_DIR/empty-grype.yaml" \
+                "${grype_name[@]}" \
+                "docker-archive:$archive" \
+                --fail-on high \
+                --output json \
+                --file "$grype_report" \
+                "${grype_vex[@]}" \
+              || grype_status=$?
+
             python3 scripts/prepare_trivy_db.py verify \
               --lock deploy/trivy-db-lock.json \
               --cache-dir "$CI_TRIVY_CACHE_DIR" \
               --evidence "$CI_TRIVY_DB_EVIDENCE"
+            python3 scripts/prepare_grype_db.py verify \
+              --lock deploy/grype-db-lock.json \
+              --grype "$CI_SCAN_TOOL_DIR/grype" \
+              --cache-dir "$CI_GRYPE_CACHE_DIR" \
+              --evidence "$CI_GRYPE_DB_EVIDENCE"
             python3 deploy/ci/validate-image-scan.py \
               --image-kind "$image_kind" \
               --image-id "$image_id" \
@@ -757,8 +1214,110 @@ jobs:
               --trivy-db-lock "$CI_SCAN_DIR/trivy-db-lock.json" \
               --trivy-db-evidence "$CI_SCAN_DIR/trivy-db-evidence.json" \
               --summary "$summary"
+            python3 - \
+              "$grype_report" "$image_id" "$image_kind" "$materialized_vex" <<'PY'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from materialize_legacy_rabbitmq_vex import (  # noqa: E402
+              product_reference,
+              validate_materialized,
+          )
+          from verify_release import (  # noqa: E402
+              MAX_CONTROL_FILE_BYTES,
+              MAX_EVIDENCE_FILE_BYTES,
+              ReleaseVerificationError,
+              _load_json,
+              _mapping,
+              _validate_grype_report,
+          )
+
+          report_path = Path(sys.argv[1])
+          expected_image_id = sys.argv[2]
+          image_kind = sys.argv[3]
+          vex_path = Path(sys.argv[4]) if sys.argv[4] else None
+          report = _mapping(
+              _load_json(report_path, maximum_bytes=MAX_EVIDENCE_FILE_BYTES),
+              "Grype report",
+          )
+          target = _mapping(
+              _mapping(report.get("source"), "Grype source").get("target"),
+              "Grype target",
+          )
+          allowed = (
+              {
+                  "CVE-2026-42792",
+                  "CVE-2026-49759",
+                  "CVE-2026-55737",
+                  "CVE-2026-55952",
+                  "CVE-2026-55953",
+                  "CVE-2026-58227",
+                  "CVE-2026-59250",
+                  "CVE-2026-59251",
+              }
+              if image_kind == "rabbitmq-legacy-source"
+              else set()
+          )
+          grype_lock = _mapping(
+              _load_json(
+                  Path("deploy/grype-db-lock.json"),
+                  maximum_bytes=MAX_CONTROL_FILE_BYTES,
+              ),
+              "Grype DB lock",
+          )
+          expected_vex_document = None
+          expected_source_tags = None
+          if image_kind == "rabbitmq-legacy-source":
+              if vex_path is None:
+                  raise ReleaseVerificationError("legacy Grype scan has no exact-image VEX")
+              vex_policy = _load_json(
+                  Path("deploy/rabbitmq/legacy-source-otp26.vex-policy.json"),
+                  maximum_bytes=MAX_CONTROL_FILE_BYTES,
+              )
+              materialized = _load_json(
+                  vex_path,
+                  maximum_bytes=MAX_CONTROL_FILE_BYTES,
+              )
+              validate_materialized(
+                  materialized,
+                  vex_policy,
+                  target.get("manifestDigest"),
+              )
+              expected_vex_document = str(vex_path)
+              expected_source_tags = [
+                  product_reference(target.get("manifestDigest"))
+              ]
+          elif vex_path is not None:
+              raise ReleaseVerificationError("non-legacy Grype scan unexpectedly used VEX")
+          binding = _validate_grype_report(
+              report,
+              target.get("userInput"),
+              target.get("manifestDigest"),
+              "0.116.1",
+              {"HIGH", "CRITICAL"},
+              "Grype report",
+              grype_lock,
+              allowed_ignored=allowed,
+              expected_vex_document=expected_vex_document,
+              expected_source_tags=expected_source_tags,
+              expected_name=(
+                  "backupsheep-rabbitmq-legacy-source"
+                  if image_kind == "rabbitmq-legacy-source"
+                  else ""
+              ),
+          )
+          if binding["image_id"] != expected_image_id:
+              raise ReleaseVerificationError(
+                  "Grype report image ID does not match the exact Docker image"
+              )
+          PY
             [[ "$trivy_status" -eq 0 ]]
-            chmod 0600 "$syft_report" "$trivy_report" "$summary"
+            [[ "$grype_status" -eq 0 ]]
+            chmod 0600 "$syft_report" "$trivy_report" "$grype_report" "$summary"
+            if [ "$image_kind" = rabbitmq-legacy-source ]; then
+              chmod 0600 "$grype_baseline" "$materialized_vex"
+            fi
             rm -- "$archive"
           done <<EOF
           app	$TEST_APP_IMAGE
@@ -766,11 +1325,419 @@ jobs:
           egress	$TEST_EGRESS_IMAGE
           rabbitmq	$TEST_RABBITMQ_IMAGE
           rabbitmq-upgrade	$TEST_RABBITMQ_UPGRADE_IMAGE
+          rabbitmq-legacy-source	$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE
           release-verifier	$TEST_RELEASE_VERIFIER_IMAGE
           EOF
 
           trap - EXIT HUP INT TERM
           cleanup_archives
+
+      - name: Scan the exact transferred native arm64 legacy-source image
+        shell: bash
+        env:
+          ARM64_TRANSFER_DIR: "${{ runner.temp }}/backupsheep-rabbitmq-arm64-transfer"
+          CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
+          CI_SCAN_DIR: "${{ runner.temp }}/backupsheep-ci-image-evidence"
+          CI_TRIVY_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-trivy-cache"
+          CI_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-trivy-db-evidence.json"
+          CI_TRIVY_HOME: "${{ runner.temp }}/backupsheep-ci-trivy-home"
+          CI_GRYPE_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-grype-cache"
+          CI_GRYPE_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-grype-db-evidence.json"
+          CI_GRYPE_HOME: "${{ runner.temp }}/backupsheep-ci-grype-home"
+          EXPECTED_ARM64_ARCHIVE_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_archive_sha256 }}
+          EXPECTED_ARM64_CONFIG_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_config_sha256 }}
+          EXPECTED_ARM64_EVIDENCE_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_evidence_sha256 }}
+          EXPECTED_ARM64_IMAGE_ID: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_image_id }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          umask 077
+
+          archive="$ARM64_TRANSFER_DIR/rabbitmq-legacy-source-linux-arm64.tar"
+          transfer_evidence="$ARM64_TRANSFER_DIR/rabbitmq-legacy-source-linux-arm64.evidence.json"
+          retained_transfer_evidence="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.transfer.json"
+          scan_archive="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.digest-tagged.tar"
+          scan_evidence="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.digest-tagged.json"
+          transform_receipt="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.retag-receipt.json"
+          syft_report="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.syft.json"
+          trivy_report="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.trivy.json"
+          grype_baseline="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.grype-unsuppressed.json"
+          materialized_vex="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.openvex.json"
+          grype_report="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.grype.json"
+          summary="$CI_SCAN_DIR/rabbitmq-legacy-source-linux-arm64.summary.json"
+
+          for path in "$archive" "$transfer_evidence"; do
+            test -f "$path"
+            test ! -L "$path"
+            test "$(stat -c '%h' "$path")" = 1
+          done
+          for output in \
+            "$retained_transfer_evidence" \
+            "$scan_archive" \
+            "$scan_evidence" \
+            "$transform_receipt" \
+            "$syft_report" \
+            "$trivy_report" \
+            "$grype_baseline" \
+            "$materialized_vex" \
+            "$grype_report" \
+            "$summary"; do
+            test ! -e "$output"
+            test ! -L "$output"
+          done
+          cleanup_scan_archive() {
+            if [ -f "$scan_archive" ] && [ ! -L "$scan_archive" ] \
+              && [ "$(stat -c '%h' "$scan_archive")" = 1 ]; then
+              rm -- "$scan_archive"
+            fi
+          }
+          trap cleanup_scan_archive EXIT HUP INT TERM
+
+          actual_config_sha256="$(
+            python3 scripts/attest_arm64_legacy_image.py verify \
+              --archive "$archive" \
+              --evidence "$transfer_evidence" \
+              --expected-archive-sha256 "$EXPECTED_ARM64_ARCHIVE_SHA256" \
+              --expected-evidence-sha256 "$EXPECTED_ARM64_EVIDENCE_SHA256" \
+              --expected-image-id "$EXPECTED_ARM64_IMAGE_ID" \
+              --expected-image-ref "$TEST_RABBITMQ_ARM64_LEGACY_SOURCE_IMAGE" \
+              --expected-owner "$TEST_ARM64_OWNERSHIP_VALUE" \
+              --source-sha "$GITHUB_SHA"
+          )"
+          test "$actual_config_sha256" = "$EXPECTED_ARM64_CONFIG_SHA256"
+          install -m 0600 "$transfer_evidence" "$retained_transfer_evidence"
+
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$CI_TRIVY_CACHE_DIR" \
+            --evidence "$CI_TRIVY_DB_EVIDENCE"
+          python3 scripts/prepare_grype_db.py verify \
+            --lock deploy/grype-db-lock.json \
+            --grype "$CI_SCAN_TOOL_DIR/grype" \
+            --cache-dir "$CI_GRYPE_CACHE_DIR" \
+            --evidence "$CI_GRYPE_DB_EVIDENCE"
+
+          baseline_status=0
+          env -i \
+            HOME="$CI_GRYPE_HOME" \
+            PATH="$CI_SCAN_TOOL_DIR:/usr/bin:/bin" \
+            LC_ALL=C \
+            GRYPE_DB_CACHE_DIR="$CI_GRYPE_CACHE_DIR" \
+            GRYPE_DB_AUTO_UPDATE=false \
+            GRYPE_CHECK_FOR_APP_UPDATE=false \
+            GRYPE_DB_VALIDATE_AGE=true \
+            GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h \
+            "$CI_SCAN_TOOL_DIR/grype" \
+              --config "$CI_SCAN_TOOL_DIR/empty-grype.yaml" \
+              "docker-archive:$archive" \
+              --fail-on high \
+              --output json \
+              --file "$grype_baseline" \
+            || baseline_status=$?
+          [[ "$baseline_status" -eq 2 ]]
+
+          vex_image_reference="$(
+            python3 scripts/materialize_legacy_rabbitmq_vex.py \
+              --policy deploy/rabbitmq/legacy-source-otp26.vex-policy.json \
+              --grype-report "$grype_baseline" \
+              --expected-image-id "$EXPECTED_ARM64_CONFIG_SHA256" \
+              --output "$materialized_vex"
+          )"
+          [[ "$vex_image_reference" =~ ^backupsheep-rabbitmq-legacy-source:manifest-[0-9a-f]{64}$ ]]
+          retagged_config_sha256="$(
+            python3 scripts/attest_arm64_legacy_image.py retag \
+              --archive "$archive" \
+              --evidence "$transfer_evidence" \
+              --expected-archive-sha256 "$EXPECTED_ARM64_ARCHIVE_SHA256" \
+              --expected-evidence-sha256 "$EXPECTED_ARM64_EVIDENCE_SHA256" \
+              --expected-image-id "$EXPECTED_ARM64_IMAGE_ID" \
+              --expected-image-ref "$TEST_RABBITMQ_ARM64_LEGACY_SOURCE_IMAGE" \
+              --expected-owner "$TEST_ARM64_OWNERSHIP_VALUE" \
+              --source-sha "$GITHUB_SHA" \
+              --target-archive "$scan_archive" \
+              --target-evidence "$scan_evidence" \
+              --target-image-ref "$vex_image_reference" \
+              --receipt "$transform_receipt"
+          )"
+          test "$retagged_config_sha256" = "$EXPECTED_ARM64_CONFIG_SHA256"
+
+          SYFT_CHECK_FOR_APP_UPDATE=false \
+            "$CI_SCAN_TOOL_DIR/syft" \
+              --config "$CI_SCAN_TOOL_DIR/empty-syft.yaml" \
+              scan "docker-archive:$scan_archive" \
+              --output "syft-json=$syft_report"
+
+          trivy_status=0
+          env -i \
+            HOME="$CI_TRIVY_HOME" \
+            PATH="$CI_SCAN_TOOL_DIR:/usr/bin:/bin" \
+            LC_ALL=C \
+            TRIVY_SKIP_VERSION_CHECK=true \
+            "$CI_SCAN_TOOL_DIR/trivy" \
+              --cache-dir "$CI_TRIVY_CACHE_DIR" \
+              --config "$CI_SCAN_TOOL_DIR/empty-trivy.yaml" image \
+              --input "$scan_archive" \
+              --ignorefile "$CI_SCAN_TOOL_DIR/empty-trivy.ignore" \
+              --skip-db-update \
+              --skip-java-db-update \
+              --skip-check-update \
+              --offline-scan \
+              --quiet \
+              --scanners vuln \
+              --pkg-types os,library \
+              --list-all-pkgs \
+              --severity HIGH,CRITICAL \
+              --exit-code 1 \
+              --timeout 30m \
+              --format json \
+              --output "$trivy_report" \
+            || trivy_status=$?
+
+          grype_status=0
+          env -i \
+            HOME="$CI_GRYPE_HOME" \
+            PATH="$CI_SCAN_TOOL_DIR:/usr/bin:/bin" \
+            LC_ALL=C \
+            GRYPE_DB_CACHE_DIR="$CI_GRYPE_CACHE_DIR" \
+            GRYPE_DB_AUTO_UPDATE=false \
+            GRYPE_CHECK_FOR_APP_UPDATE=false \
+            GRYPE_DB_VALIDATE_AGE=true \
+            GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h \
+            "$CI_SCAN_TOOL_DIR/grype" \
+              --config "$CI_SCAN_TOOL_DIR/empty-grype.yaml" \
+              --name backupsheep-rabbitmq-legacy-source \
+              "docker-archive:$scan_archive" \
+              --fail-on high \
+              --output json \
+              --file "$grype_report" \
+              --vex "$materialized_vex" \
+            || grype_status=$?
+
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$CI_TRIVY_CACHE_DIR" \
+            --evidence "$CI_TRIVY_DB_EVIDENCE"
+          python3 scripts/prepare_grype_db.py verify \
+            --lock deploy/grype-db-lock.json \
+            --grype "$CI_SCAN_TOOL_DIR/grype" \
+            --cache-dir "$CI_GRYPE_CACHE_DIR" \
+            --evidence "$CI_GRYPE_DB_EVIDENCE"
+          python3 deploy/ci/validate-image-scan.py \
+            --image-kind rabbitmq-legacy-source \
+            --image-id "$EXPECTED_ARM64_IMAGE_ID" \
+            --archive "$scan_archive" \
+            --syft "$syft_report" \
+            --trivy "$trivy_report" \
+            --requirements-lock "$GITHUB_WORKSPACE/requirements.lock" \
+            --trivy-db-lock "$CI_SCAN_DIR/trivy-db-lock.json" \
+            --trivy-db-evidence "$CI_SCAN_DIR/trivy-db-evidence.json" \
+            --summary "$summary"
+          python3 - \
+            "$grype_report" \
+            "$EXPECTED_ARM64_IMAGE_ID" \
+            "$scan_archive" \
+            "$retained_transfer_evidence" \
+            "$scan_evidence" \
+            "$transform_receipt" \
+            "$materialized_vex" \
+            "$summary" \
+            "$vex_image_reference" \
+            "$EXPECTED_ARM64_EVIDENCE_SHA256" <<'PY'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from materialize_legacy_rabbitmq_vex import (  # noqa: E402
+              EXPECTED_VULNERABILITIES,
+              product_reference,
+              validate_materialized,
+          )
+          from verify_release import (  # noqa: E402
+              MAX_CONTROL_FILE_BYTES,
+              MAX_EVIDENCE_FILE_BYTES,
+              ReleaseVerificationError,
+              _digest,
+              _list,
+              _load_json,
+              _mapping,
+              _sha256_path,
+              _validate_grype_report,
+          )
+
+          report_path = Path(sys.argv[1])
+          expected_docker_image_id = sys.argv[2]
+          archive_path = Path(sys.argv[3]).resolve(strict=True)
+          source_evidence_path = Path(sys.argv[4])
+          scan_evidence_path = Path(sys.argv[5])
+          transform_receipt_path = Path(sys.argv[6])
+          vex_path = Path(sys.argv[7])
+          summary_path = Path(sys.argv[8])
+          vex_image_reference = sys.argv[9]
+          expected_source_evidence_sha256 = sys.argv[10]
+          report = _mapping(
+              _load_json(report_path, maximum_bytes=MAX_EVIDENCE_FILE_BYTES),
+              "arm64 legacy Grype report",
+          )
+          target = _mapping(
+              _mapping(report.get("source"), "arm64 legacy Grype source").get("target"),
+              "arm64 legacy Grype target",
+          )
+          source_transfer = _mapping(
+              _load_json(
+                  source_evidence_path,
+                  maximum_bytes=MAX_EVIDENCE_FILE_BYTES,
+              ),
+              "arm64 source transfer evidence",
+          )
+          scan_transfer = _mapping(
+              _load_json(
+                  scan_evidence_path,
+                  maximum_bytes=MAX_EVIDENCE_FILE_BYTES,
+              ),
+              "arm64 digest-tagged transfer evidence",
+          )
+          expected_config_digest = _digest(
+              _mapping(scan_transfer.get("config"), "arm64 transfer config").get("sha256"),
+              "arm64 transfer config digest",
+          )
+          if source_transfer.get("docker_image_id") != expected_docker_image_id:
+              raise ReleaseVerificationError("arm64 transfer used the wrong Docker image ID")
+          if source_transfer.get("platform") != "linux/arm64":
+              raise ReleaseVerificationError("arm64 transfer used the wrong platform")
+          for immutable_key in (
+              "config",
+              "docker_image_id",
+              "layers",
+              "oci",
+              "ownership",
+              "platform",
+              "source_sha",
+          ):
+              if scan_transfer.get(immutable_key) != source_transfer.get(immutable_key):
+                  raise ReleaseVerificationError(
+                      "arm64 archive retagging changed immutable image content"
+                  )
+          expected_layers = [
+              _digest(
+                  _mapping(layer, "arm64 transfer layer").get("diff_id"),
+                  "arm64 transfer layer diff ID",
+              )
+              for layer in _list(scan_transfer.get("layers"), "arm64 transfer layers")
+          ]
+          vex_policy = _load_json(
+              Path("deploy/rabbitmq/legacy-source-otp26.vex-policy.json"),
+              maximum_bytes=MAX_CONTROL_FILE_BYTES,
+          )
+          materialized = _load_json(
+              vex_path,
+              maximum_bytes=MAX_CONTROL_FILE_BYTES,
+          )
+          validate_materialized(materialized, vex_policy, target.get("manifestDigest"))
+          expected_vex_reference = product_reference(target.get("manifestDigest"))
+          if (
+              vex_image_reference != expected_vex_reference
+              or scan_transfer.get("image_reference") != expected_vex_reference
+              or target.get("tags") != [expected_vex_reference]
+              or target.get("repoDigests") not in (None, [])
+          ):
+              raise ReleaseVerificationError(
+                  "arm64 Grype VEX is not scoped to the digest-derived image tag"
+              )
+          receipt = _mapping(
+              _load_json(
+                  transform_receipt_path,
+                  maximum_bytes=MAX_CONTROL_FILE_BYTES,
+              ),
+              "arm64 archive retag receipt",
+          )
+          expected_receipt = {
+              "config_sha256": expected_config_digest,
+              "docker_image_id": expected_docker_image_id,
+              "operation": "replace-docker-repository-tag",
+              "schema_version": 1,
+              "source": {
+                  "archive_sha256": _mapping(
+                      source_transfer.get("archive"), "arm64 source archive"
+                  ).get("sha256"),
+                  "docker_manifest_sha256": _mapping(
+                      source_transfer.get("docker_manifest"),
+                      "arm64 source Docker manifest",
+                  ).get("sha256"),
+                  "evidence_sha256": expected_source_evidence_sha256,
+                  "image_reference": source_transfer.get("image_reference"),
+              },
+              "target": {
+                  "archive_sha256": _mapping(
+                      scan_transfer.get("archive"), "arm64 scan archive"
+                  ).get("sha256"),
+                  "docker_manifest_sha256": _mapping(
+                      scan_transfer.get("docker_manifest"),
+                      "arm64 scan Docker manifest",
+                  ).get("sha256"),
+                  "evidence_sha256": _sha256_path(scan_evidence_path),
+                  "image_reference": expected_vex_reference,
+              },
+          }
+          if receipt != expected_receipt:
+              raise ReleaseVerificationError(
+                  "arm64 archive retag receipt does not bind the exact transformation"
+              )
+          grype_lock = _mapping(
+              _load_json(
+                  Path("deploy/grype-db-lock.json"),
+                  maximum_bytes=MAX_CONTROL_FILE_BYTES,
+              ),
+              "Grype DB lock",
+          )
+          binding = _validate_grype_report(
+              report,
+              str(archive_path),
+              target.get("manifestDigest"),
+              "0.116.1",
+              {"HIGH", "CRITICAL"},
+              "arm64 legacy Grype report",
+              grype_lock,
+              allowed_ignored=EXPECTED_VULNERABILITIES,
+              expected_vex_document=str(vex_path),
+              expected_source_tags=[expected_vex_reference],
+              expected_name="backupsheep-rabbitmq-legacy-source",
+          )
+          if binding["image_id"] != expected_config_digest:
+              raise ReleaseVerificationError("arm64 Grype report used the wrong config digest")
+          observed_layers = [
+              _digest(
+                  _mapping(layer, "arm64 Grype layer").get("digest"),
+                  "arm64 Grype layer digest",
+              )
+              for layer in _list(binding["target"].get("layers"), "arm64 Grype layers")
+          ]
+          if observed_layers != expected_layers:
+              raise ReleaseVerificationError("arm64 Grype layers do not match the transfer")
+          scan_summary = _mapping(
+              _load_json(summary_path, maximum_bytes=MAX_EVIDENCE_FILE_BYTES),
+              "arm64 legacy scan summary",
+          )
+          if (
+              scan_summary.get("docker_image_id") != expected_docker_image_id
+              or scan_summary.get("archive_config_image_id") != expected_config_digest
+              or scan_summary.get("archive_sha256")
+              != _mapping(scan_transfer.get("archive"), "arm64 scan archive").get("sha256")
+              or scan_summary.get("image_kind") != "rabbitmq-legacy-source"
+              or scan_summary.get("trivy_high_critical_count") != 0
+          ):
+              raise ReleaseVerificationError("arm64 scan summary is not bound to the transfer")
+          PY
+          [[ "$trivy_status" -eq 0 ]]
+          [[ "$grype_status" -eq 0 ]]
+          chmod 0600 \
+            "$syft_report" \
+            "$trivy_report" \
+            "$grype_baseline" \
+            "$materialized_vex" \
+            "$grype_report" \
+            "$summary"
+          cleanup_scan_archive
+          trap - EXIT HUP INT TERM
 
       - name: Retain exact-image SBOM and vulnerability evidence
         if: ${{ always() }}
@@ -945,6 +1912,7 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.egress.dockerignore,target=/code/Dockerfile.egress.dockerignore,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.postgres,target=/code/Dockerfile.postgres,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.rabbitmq,target=/code/Dockerfile.rabbitmq,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.rabbitmq-legacy-source,target=/code/Dockerfile.rabbitmq-legacy-source,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.rabbitmq-upgrade,target=/code/Dockerfile.rabbitmq-upgrade,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.release-verifier,target=/code/Dockerfile.release-verifier,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/LICENSE,target=/code/LICENSE,readonly" \
@@ -1242,6 +2210,9 @@ jobs:
           fi
           if owned_image "$TEST_RABBITMQ_UPGRADE_IMAGE"; then
             docker image rm --force "$TEST_RABBITMQ_UPGRADE_IMAGE" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"; then
+            docker image rm --force "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" >/dev/null 2>&1 || true
           fi
           if owned_image "$TEST_RELEASE_VERIFIER_IMAGE"; then
             docker image rm --force "$TEST_RELEASE_VERIFIER_IMAGE" >/dev/null 2>&1 || true

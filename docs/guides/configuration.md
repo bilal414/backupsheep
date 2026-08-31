@@ -196,6 +196,10 @@ Do not put `ssl_*` overrides in the broker URL; they are rejected so certificate
 cannot be disabled. Use one certificate-valid broker/load-balancer hostname in production
 rather than a semicolon-separated failover URL.
 
+The dedicated `backupsheep` vhost carries the stock topology. RabbitMQ's `/` vhost is
+retained but inaccessible and must remain exactly empty; provisioning does not
+destructively delete it.
+
 ## Artifact encryption and local-file keys
 
 Stock production requires `BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=bse1`, enterprise mode,
@@ -301,10 +305,26 @@ The legacy `backup_workdir` is not a runtime handoff. It is mounted only in the 
 empty before the v3 layout witness is committed. Do not restore data into it or attach it to
 an application role.
 
-Stock Compose fixes `BS_LOCAL_STORAGE_PATH` at `/backups`. A reviewed override that changes
-the path must mount the same durable target read/write only in `worker-storage` and must pass
-the entrypoint/preflight mount checks; do not add a Local Storage mount to app, cloud,
-database, files, logs or Beat.
+Stock Compose fixes `BS_LOCAL_STORAGE_PATH` at `/backups`. The only accepted override keeps
+that in-container path unchanged and backs the canonical `backup_storage` volume with an
+exact local `type: none`, `o: bind`, bounded absolute host `device`. It must pass the
+wrapper's full-model and realized-volume checks; do not add or change a Local Storage mount,
+service, network, secret, image, build, command, privilege or port.
+
+That bind contract requires explicit `DOCKER_HOST=unix:///var/run/docker.sock` or
+`DOCKER_HOST=unix:///run/docker.sock` and rejects every `DOCKER_CONTEXT` value. The socket
+must resolve to the canonical rootful, root-owned, non-symlink endpoint; its device/inode
+and trusted parent chain are captured and rechecked. Remote TCP/SSH endpoints, forwarded
+Unix sockets, rootless Docker sockets, and Docker Desktop endpoints must use the default
+named volume. The target and every parent must already be real directories with no symlink
+component. The first mutating wrapper command records the canonical path,
+installation/project binding and target device/inode separately, plus a SHA-256 of only the
+trusted parent device/inode/owner/mode chain, in the owner-only version-2
+`.backupsheep-backup-storage-identity` ledger. Because target owner/mode is not hashed, the
+same inode may safely transition to storage-service UID `10004` and mode `0700`. Later path,
+remount or inode replacement fails closed. Preserve the ledger with the override and storage
+recovery evidence. For an intentional storage move, create a fresh project and restore into
+its newly attested target; never delete or edit the ledger to repin an existing project.
 
 The web/API process can request an incremental-cache reset but has no staging mount.
 `reset_incremental_cache` runs in the files lane, validates the canonical node ID, anchors

@@ -1,9 +1,12 @@
 # BackupSheep Docker cyber-defense assessment: 2026-08-29 addendum
 
-**Status:** release candidate; not yet merged or deployed  
-**Repository:** `bilal414/backupsheep`  
-**Candidate branch:** `codex/cyber-defense-completion-20260829`  
-**Implementation snapshot:** `4bfc3f3b0c225750d7535eb47af7c9f18165bead`
+**Status:** release candidate under final verification; not yet merged or deployed
+
+**Repository:** `bilal414/backupsheep`
+
+**Candidate branch:** `codex/cyber-defense-final-20260830`
+
+**Implementation snapshot:** final committed SHA pending
 
 **Primary change:** replace the application artifact-encryption dependency on AWS KMS
 with installation-local, lane-scoped wrapping-key files  
@@ -253,12 +256,81 @@ The five-image release chain uses exact action commits; the application build ac
 the reviewed upstream `docker/build-push-action` v7.3.0 commit. Release-transition
 production helpers are not copied into the application runtime image.
 
+## RabbitMQ loaded-crypto boundary
+
+RabbitMQ's Erlang crypto NIF is linked to the upstream image's bundled
+`/opt/openssl`; upgrading Alpine's `libcrypto3` and `libssl3` packages does not by
+itself patch the broker process. The candidate therefore pins the exact 2026-08-27
+official multi-architecture indexes for RabbitMQ 4.3.5 and the isolated 4.2.9
+compatibility hop. Both upstream rebuilds bundle OpenSSL 3.5.8, and the derivatives
+also install the exact Alpine 3.5.8-r0 packages.
+
+The Docker Official Image's own Alpine Dockerfile states that Alpine is not officially
+supported by the RabbitMQ team. The repository's native amd64/arm64 migration,
+runtime, SBOM and vulnerability gates therefore establish BackupSheep-maintained
+security evidence; they do not establish RabbitMQ-vendor support for this Alpine
+runtime. Operators whose enterprise policy requires vendor-backed broker support need
+either a separately reviewed Ubuntu-based runtime or the applicable licensed VMware
+Tanzu RabbitMQ artifact. See the upstream
+[`4.2/alpine` Dockerfile](https://github.com/docker-library/rabbitmq/blob/master/4.2/alpine/Dockerfile).
+
+RabbitMQ 3.13.7 must remain at that broker version long enough to reopen its historical
+data directory. Its unchanged upstream image bundles unsupported OpenSSL 3.1.8, so the
+networkless legacy-source derivative imports `/opt/openssl` 3.5.8 from the exact
+Ubuntu 24.04 RabbitMQ 4.3.5 index and OTP 26.2.5.21 from the exact official Erlang
+index. The source RabbitMQ version and filesystem remain 3.13.7-compatible; both donor
+digests and the exact OTP patch are immutable image labels and wrapper contracts.
+The base image's unversioned `gosu` helper is removed: this derivative has a fixed
+`USER 999:999`, and its networkless migration entrypoint never performs a root-to-user
+transition. Both the scanner and runtime gate reject its reintroduction.
+
+The latest compatible OTP 26 patch eliminates the Critical findings in the historical
+runtime but cannot eliminate eight newer High findings whose fixes exist only in OTP
+major versions outside RabbitMQ 3.13.7's published compatibility ceiling. A dedicated
+OpenVEX document marks exactly those findings `not_affected` only in the enforced
+legacy-source model: no network, secrets, plugins, peer process or application traffic,
+and drained queues before start. Grype must report exactly that ignored set and no
+other ignored or active High/Critical finding. This exception does not apply to the
+steady broker, release images, or any networked use of OTP 26.
+
+The Docker builds, secure wrapper, installer and release CI do not trust package lists
+or labels as proof. Their offline, read-only runtime check requires all of the following:
+
+- the exact expected RabbitMQ version;
+- exact OTP 26.2.5.21 for the legacy source;
+- `/opt/openssl/bin/openssl` version 3.5.8;
+- Erlang `crypto:info_lib()` version 3.5.8;
+- the running Erlang VM's `/proc/self/maps` contains
+  `/opt/openssl/lib/libcrypto.so.3`;
+- zero enabled RabbitMQ plugins.
+
+Steady-state provisioning now classifies all durable broker control-plane state before
+its first identity mutation and independently rechecks it after reconciliation. The
+allowlist covers exact vhost metadata and classic queue arguments, built-in and product
+exchanges, bindings, policies, permissions, user/vhost limits, per-vhost runtime
+parameters, the two RabbitMQ-owned global parameters, the hidden definition-import hash,
+and zero client connections. User classification combines strict tabular parsing with a
+server-side exact-membership/count proof, so spaces, tabs, newlines or other binary suffixes
+cannot collapse into an allowed username. Global parameters are enumerated and matched as
+server-side Erlang terms rather than trusting raw TSV, closing the same record-framing class
+for parameter names and pinning the internal cluster ID across reconciliation. The default
+`/` vhost is retained only when inaccessible and exactly empty. The cross-version E2E
+separately attests the same state,
+injects visible and hidden forbidden global parameters, and creates space/tab/newline
+username fixtures to prove that every rejection occurs before credential rotation.
+
+The local arm64 no-cache builds and those constrained runtime checks passed for all
+three derivatives. The real entrypoint-transition E2E also passed. Exact amd64 and
+multi-architecture release builds, scanner evidence, signatures and the full
+cross-version migration/crash E2E remain release gates until attached to the final
+commit.
+
 ## Evidence at this snapshot
 
 | Evidence | Result | Scope |
 | --- | --- | --- |
 | Standalone keyring lifecycle/adversarial tests | 21 passed | SIGKILL recovery, parent rename/replacement before write and during publication, exact-inode cleanup, ambiguous hard links, unrelated replacement preservation, zeroization, and lock release |
-| Independent final code review | No remaining P0/P1/P2 | keyring directory binding, runtime packaging, signed-install refusal boundary, and release-action pin |
+| Independent final code review | Reviewed P1/P2 source remediations implemented; release acceptance remains separate | Grype release enforcement, OTP 26 migration-only VEX, final-byte RabbitMQ migration/scans, native arm64 semantics, rebuild durability, and documentation accuracy |
 | Application runtime, build-context, Compose, and release-transition tests | 155 passed, 1 expected skip | final image exclusions, wrapper controls, fresh signed install, unsupported-upgrade refusal, and release-manifest contracts |
 | Focused AWS-free provider/settings/migration series | 64 passed | provider construction, lane and installation binding, production policy, empty-estate migration, and rollback refusal; final lifecycle delta is covered by the 21-test row above |
 | Installer security series | 94 passed | installer ownership, no-host-mutation, Compose identity, keyring generation/rotation, signed fresh install, rollback, and unsupported-upgrade refusal |
@@ -270,7 +342,7 @@ production helpers are not copied into the application runtime image.
 | Static runtime-provider audit | Pass | no AWS KMS provider export, factory branch, client construction, or dynamic provider import |
 | Rendered Compose mount review | Pass | only matching source workers receive matching keyrings; storage receives neither |
 | Signed-upgrade refusal contract | Pass | former stage/upgrade forms made no Docker call, mutation lock, or installation byte/metadata change |
-| Enterprise docs and Bruno validation | Pass | 891 API operations and 296 configuration variables |
+| Enterprise docs and Bruno validation | Pass | 891 API operations and 298 configuration variables |
 | JavaScript production dependency audit | 0 vulnerabilities | lockfile-only high-severity audit |
 | Shell/Python syntax and whitespace checks | Pass | implementation snapshot |
 
@@ -296,9 +368,10 @@ This addendum is not release approval. At the implementation snapshot:
 - live key creation, backup, ciphertext-only storage, restore, cross-lane denial,
   rotation, old-key restore, tamper, key-loss, restart, and crash recovery had not yet
   been evidenced on the final demo deployment;
-- on 2026-08-30 at 00:12 UTC the public health endpoint returned HTTP 200 `ok`, but SSH
-  to `demo.backupsheep.com:22` still refused connections. Health is not revision or
-  deployment proof, so runtime, rollback, and deployment provenance remain unverified.
+- SSH access to `demo.backupsheep.com` was restored on 2026-08-30. A cold encrypted
+  pre-cutover rollback bundle was created and its database and volume archives were
+  reopened successfully, but the final commit has not yet been deployed or cut over.
+  Health remains distinct from revision, rollback, and deployment provenance proof.
 
 ## Enterprise release acceptance
 
