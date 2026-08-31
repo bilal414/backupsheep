@@ -256,178 +256,36 @@ class CISecurityTopologyContractTests(TestCase):
             with self.subTest(evidence=evidence):
                 self.assertIn(evidence, gate_source)
 
-    def test_workflow_runs_native_arm64_rabbitmq_version_migration_gate(self):
-        self.assertEqual(self.workflow.count("  rabbitmq-arm64-migration:\n"), 1)
-        arm_gate = self.workflow.split(
-            "  rabbitmq-arm64-migration:\n", 1
-        )[1].split("  application-security-regression:\n", 1)[0]
-        expected_call = """          timeout --signal=TERM --kill-after=30s 30m \\
-            deploy/ci/run-rabbitmq-version-migration-e2e.sh \\
-            "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" \\
-            "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \\
-            "$TEST_RABBITMQ_UPGRADE_IMAGE" \\
-            "$TEST_RABBITMQ_IMAGE" \\
-            "bs-rmq-$TEST_OWNERSHIP_VALUE" \\
-            "$TEST_OWNERSHIP_VALUE"
-"""
-        for expected in (
-            "name: Native arm64 RabbitMQ migration gate",
-            "runs-on: ubuntu-24.04-arm",
-            "timeout-minutes: 45",
-            "DOCKER_DEFAULT_PLATFORM: linux/arm64",
-            'TEST_OWNERSHIP_VALUE: "arm64-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"',
-            "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
-            "persist-credentials: false",
-            "ref: ${{ github.sha }}",
-            '[[ "$(uname -m)" =~ ^(aarch64|arm64)$ ]]',
-            '[[ "$(docker info --format \'{{.Architecture}}\')" =~ ^(aarch64|arm64)$ ]]',
-            'test "$(docker version --format \'{{.Server.Arch}}\')" = arm64',
-            '--file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE"',
-            '--file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE"',
-            "--file Dockerfile.rabbitmq-legacy-source",
-            '--tag "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"',
-            'docker pull --platform linux/arm64 "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE"',
-            "TEST_RABBITMQ_HISTORICAL_SOURCE_REPO_DIGEST",
-            "'{{.Os}}/{{.Architecture}}'",
-            "linux/arm64",
-            "com.backupsheep.ci-run",
-            "com.backupsheep.rabbitmq.enabled-plugins",
-            "com.backupsheep.rabbitmq.openssl-runtime-version",
-            "/opt/openssl/bin/openssl version",
-            "crypto:info_lib()",
-            "/proc/self/maps",
-            "/opt/openssl/lib/libcrypto.so.3",
-            "rabbitmq-plugins list --offline --enabled --minimal",
-            "com.backupsheep.rabbitmq.openssl-donor-index-digest",
-            "com.backupsheep.rabbitmq.erlang-donor-index-digest",
-            "com.backupsheep.rabbitmq.erlang-runtime-version",
-            "/opt/erlang/releases/26/OTP_VERSION",
-            "! command -v gosu",
-            '--entrypoint rabbitmqctl "$TEST_RABBITMQ_IMAGE" version | grep -Fxq \'4.3.5\'',
-            '--entrypoint rabbitmqctl "$TEST_RABBITMQ_UPGRADE_IMAGE" version | grep -Fxq \'4.2.9\'',
-            '--entrypoint rabbitmqctl "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" version | grep -Fxq \'3.13.7\'',
-            expected_call,
-            "if: ${{ always() }}",
-            "Remove exact native arm64 gate images",
-        ):
-            with self.subTest(expected=expected):
-                self.assertIn(expected, arm_gate)
-        for forbidden in (
-            "docker/setup-qemu-action",
-            "docker/setup-buildx-action",
-            "scripts/install_release_tools.py",
-            "--privileged",
-            "docker.sock",
-            "continue-on-error",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, arm_gate)
+    def test_workflow_is_amd64_only_and_preserves_migration_and_scanning(self):
+        regression_gate = self.workflow.split(
+            "  application-security-regression:\n", 1
+        )[1]
         self.assertEqual(
             self.workflow.count("deploy/ci/run-rabbitmq-version-migration-e2e.sh"),
-            2,
+            1,
         )
-        regression_gate = self.workflow.split(
-            "  application-security-regression:\n", 1
-        )[1]
-        for dependency_evidence in (
-            "needs: rabbitmq-arm64-migration",
-            "if: ${{ always() }}",
-            "name: Require the native arm64 migration gate",
-            "ARM64_MIGRATION_RESULT: ${{ needs.rabbitmq-arm64-migration.result }}",
-            'test "$ARM64_MIGRATION_RESULT" = success',
+        for required in (
+            "docker pull --platform linux/amd64",
+            "test \"$(docker image inspect --format '{{.Architecture}}' \"$image\")\" = amd64",
+            "Generate SBOMs and reject HIGH or CRITICAL findings in exact images",
+            "rabbitmq-legacy-source\t$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE",
+            "deploy/ci/validate-image-scan.py",
+            "Retain exact-image SBOM and vulnerability evidence",
         ):
-            with self.subTest(dependency_evidence=dependency_evidence):
-                self.assertIn(dependency_evidence, regression_gate)
-
-    def test_native_arm64_legacy_image_is_hash_bound_and_scanned_offline(self):
-        arm_gate = self.workflow.split(
-            "  rabbitmq-arm64-migration:\n", 1
-        )[1].split("  application-security-regression:\n", 1)[0]
-        regression_gate = self.workflow.split(
-            "  application-security-regression:\n", 1
-        )[1]
-        arm_scan = regression_gate.split(
-            "      - name: Scan the exact transferred native arm64 legacy-source image\n",
-            1,
-        )[1].split(
-            "      - name: Retain exact-image SBOM and vulnerability evidence\n",
-            1,
-        )[0]
-
-        for producer_contract in (
-            "legacy_archive_sha256: ${{ steps.export_arm64_legacy.outputs.archive_sha256 }}",
-            "legacy_config_sha256: ${{ steps.export_arm64_legacy.outputs.config_sha256 }}",
-            "legacy_evidence_sha256: ${{ steps.export_arm64_legacy.outputs.evidence_sha256 }}",
-            "legacy_image_id: ${{ steps.export_arm64_legacy.outputs.image_id }}",
-            "id: export_arm64_legacy",
-            "scripts/attest_arm64_legacy_image.py attest",
-            'docker image save --output "$archive" "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"',
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-            "rabbitmq-arm64-legacy-source-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}",
-            "retention-days: 1",
-        ):
-            with self.subTest(producer_contract=producer_contract):
-                self.assertIn(producer_contract, arm_gate)
-
-        for consumer_contract in (
-            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-            "EXPECTED_ARM64_ARCHIVE_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_archive_sha256 }}",
-            "EXPECTED_ARM64_CONFIG_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_config_sha256 }}",
-            "EXPECTED_ARM64_EVIDENCE_SHA256: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_evidence_sha256 }}",
-            "EXPECTED_ARM64_IMAGE_ID: ${{ needs.rabbitmq-arm64-migration.outputs.legacy_image_id }}",
-            "scripts/attest_arm64_legacy_image.py verify",
-            'test "$actual_config_sha256" = "$EXPECTED_ARM64_CONFIG_SHA256"',
-        ):
-            with self.subTest(consumer_contract=consumer_contract):
-                self.assertIn(consumer_contract, regression_gate)
-
-        for scan_contract in (
-            "scripts/prepare_trivy_db.py verify",
-            "scripts/prepare_grype_db.py verify",
-            '"docker-archive:$archive"',
-            '[[ "$baseline_status" -eq 2 ]]',
-            "scripts/materialize_legacy_rabbitmq_vex.py",
-            "deploy/rabbitmq/legacy-source-otp26.vex-policy.json",
-            'vex_image_reference="$(' ,
-            '[[ "$vex_image_reference" =~ ^backupsheep-rabbitmq-legacy-source:manifest-[0-9a-f]{64}$ ]]',
-            "scripts/attest_arm64_legacy_image.py retag",
-            '--target-archive "$scan_archive"',
-            '--target-evidence "$scan_evidence"',
-            '--receipt "$transform_receipt"',
-            'scan "docker-archive:$scan_archive"',
-            '--input "$scan_archive"',
-            '--name backupsheep-rabbitmq-legacy-source',
-            '"docker-archive:$scan_archive"',
-            '--vex "$materialized_vex"',
-            "allowed_ignored=EXPECTED_VULNERABILITIES",
-            "expected_source_tags=[expected_vex_reference]",
-            'expected_name="backupsheep-rabbitmq-legacy-source"',
-            'target.get("tags") != [expected_vex_reference]',
-            "scan_transfer.get(immutable_key) != source_transfer.get(immutable_key)",
-            'scan_transfer.get("archive")',
-            "arm64 archive retag receipt does not bind the exact transformation",
-            "arm64 Grype layers do not match the transfer",
-            '[[ "$trivy_status" -eq 0 ]]',
-            '[[ "$grype_status" -eq 0 ]]',
-            "cleanup_scan_archive",
-        ):
-            with self.subTest(scan_contract=scan_contract):
-                self.assertIn(scan_contract, arm_scan)
-
+            with self.subTest(required=required):
+                self.assertIn(required, regression_gate)
         for forbidden in (
-            "docker image load",
-            "docker load",
-            "docker run",
-            "docker/setup-qemu-action",
-            "curl ",
-            "wget ",
-            "continue-on-error",
+            "rabbitmq-arm64-migration",
+            "ubuntu-24.04-arm",
+            "linux/arm64",
+            "aarch64",
+            "TEST_RABBITMQ_ARM64_LEGACY_SOURCE_IMAGE",
+            "TEST_ARM64_OWNERSHIP_VALUE",
+            "attest_arm64_legacy_image.py",
+            "actions/download-artifact",
         ):
             with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, arm_scan)
-        self.assertNotIn("scripts/install_release_tools.py", arm_gate)
-        self.assertEqual(arm_scan.count('"docker-archive:$archive"'), 1)
-        self.assertEqual(arm_scan.count('"docker-archive:$scan_archive"'), 2)
+                self.assertNotIn(forbidden, self.workflow)
 
     def test_rabbitmq_scan_requires_exact_patched_openssl_packages(self):
         expected = {"libcrypto3": "3.5.8-r0", "libssl3": "3.5.8-r0"}

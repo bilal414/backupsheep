@@ -592,7 +592,7 @@ class SourceScanGateTests(TestCase):
             ROOT / ".github" / "workflows" / "supply-chain-security.yml"
         ).read_text(encoding="utf-8")
         static_job = workflow.split("  static-python-security:\n", 1)[1].split(
-            "  rabbitmq-arm64-migration:\n", 1
+            "  application-security-regression:\n", 1
         )[0]
         checkout_step = static_job.split(
             "      - name: Check out exact source\n", 1
@@ -602,9 +602,9 @@ class SourceScanGateTests(TestCase):
             workflow.count(
                 "uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
             ),
-            4,
+            3,
         )
-        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 4)
+        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 3)
         for expected in (
             "deploy/static-analysis-requirements.lock",
             "c7234adc0f4ccc3e17fee62e41971c73bdfdf717623b43faf9bfd0b32bb8d76d",
@@ -763,7 +763,7 @@ class SourceScanInstallerContractTests(TestCase):
             ROOT / ".github" / "workflows" / "supply-chain-security.yml"
         ).read_text(encoding="utf-8")
         static_job = workflow.split("  static-python-security:\n", 1)[1].split(
-            "  rabbitmq-arm64-migration:\n", 1
+            "  application-security-regression:\n", 1
         )[0]
         regression_job = workflow.split(
             "  application-security-regression:\n", 1

@@ -51,6 +51,54 @@ class InstallerSecurityContractTests(TestCase):
         self.assertIn("Effective UID 0 is refused by default", self.installer)
         self.assertIn("validate_invocation_mode", self.installer)
 
+    def test_installer_accepts_only_exact_linux_amd64_docker_server(self):
+        command = r'''
+source "$1"
+MOCK_PLATFORM="$2"
+IMAGE_MODE=local-build
+DOCKER_BIN=/reviewed/docker
+run_installer_command() { return 0; }
+run_installer_capture() {
+    local label="$2" target_name="$3" value=""
+    case "$label" in
+        "Docker daemon platform probe") value="$MOCK_PLATFORM" ;;
+        "Docker Engine version probe") value="28.0.0" ;;
+        "Docker Compose version probe") value="2.33.1" ;;
+        *) return 1 ;;
+    esac
+    printf -v "$target_name" '%s' "$value"
+}
+validate_docker_access
+'''
+        for platform, accepted in (
+            ("linux|amd64", True),
+            ("linux|arm64", False),
+            ("linux|386", False),
+            ("darwin|amd64", False),
+            ("linux|x86_64", False),
+            ("linux|amd64\nlinux|arm64", False),
+            ("", False),
+        ):
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    command,
+                    "installer-platform-test",
+                    str(INSTALLER),
+                    platform,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            with self.subTest(platform=repr(platform)):
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                if not accepted:
+                    self.assertIn(
+                        "supports only a linux/amd64 Docker server", result.stderr
+                    )
+
     def test_rootful_daemon_mode_is_explicit_root_owned_and_never_chowns(self):
         wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
         self.assertTrue(self.installer.startswith("#!/bin/bash\n"))
@@ -2557,7 +2605,7 @@ attest_docker_daemon_platform
         with tempfile.TemporaryDirectory(prefix="backupsheep-platform-capture-") as directory:
             for platform, accepted in (
                 ("linux|amd64", True),
-                ("linux|arm64", True),
+                ("linux|arm64", False),
                 ("linux|386", False),
                 ("darwin|arm64", False),
                 ("linux|x86_64", False),

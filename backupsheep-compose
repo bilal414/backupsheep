@@ -2351,6 +2351,15 @@ rabbit_43_clean_inspect_compose_command=(
 
 docker_command=("${safe_environment[@]}" "$docker_bin")
 
+validate_docker_daemon_platform() {
+    local daemon_platform=""
+    daemon_platform="$(
+        "${docker_command[@]}" version --format '{{.Server.Os}}|{{.Server.Arch}}'
+    )" || die "could not read the Docker server platform."
+    [[ "$daemon_platform" == "linux|amd64" ]] \
+        || die "BackupSheep supports only a linux/amd64 Docker server (found: ${daemon_platform:-unparseable})."
+}
+
 validate_backup_storage_docker_endpoint() {
     local endpoint="" socket_path="" socket_parent=""
     local socket_owner=""
@@ -6514,6 +6523,11 @@ verify_and_record_completed_rabbitmq_43_transition() {
     clear_attested_rabbitmq_43_state \
         "$transition_state_identity" "$transition_state_digest"
 }
+
+# Refuse an unsupported daemon before acquiring a mutation lock or invoking
+# Compose. This check attests the platform reported for this invocation; it does
+# not claim to pin a mutable Docker transport across separate invocations.
+validate_docker_daemon_platform
 
 # Serialize every real mutation across this wrapper and install.sh. The atomic
 # directory works on both GNU/Linux and macOS without a flock package. A crash can

@@ -13,6 +13,14 @@ with installation-local, lane-scoped wrapping-key files
 **Parent assessment:**
 [`docker-hardening-20260823.md`](docker-hardening-20260823.md)
 
+> **Current platform-scope decision, 2026-08-31:** Linux AMD64 (`linux/amd64`) is now
+> the sole supported release platform. ARM64 builds, runtime checks, digests, and migration
+> results recorded below remain historical evidence for the implementation snapshot only;
+> they are not a current support claim or release gate. Any later reference in this dated
+> addendum to multi-architecture publication or an ARM64 release gate is superseded by this
+> decision. The dormant V2 signed-release trust contract must stay disabled until it is
+> converted atomically to an AMD64-only contract and reviewed as a whole.
+
 This addendum records the current repository-owned Docker and application-security
 delta. It does not revise the historical image digests, test counts, live observations,
 or deployment claims in the parent assessment.
@@ -240,12 +248,14 @@ it is not an AWS-account dependency in the stock encryption path.
 
 ## Signed-release lifecycle boundary
 
-Fresh signed-release installation remains supported: the consumer authenticates the exact
-release descriptor, manifest, image digests, provenance labels, verifier identity and local
-image receipts before the installer mutates the runtime. Automatic signed-to-signed upgrade
-and rollback are intentionally unsupported. The unfinished controller, journal tests,
-source/target evidence states, runtime image copy, and stage-upgrade consumer branch were
-removed rather than exposing an unaudited partial recovery protocol.
+The retained V2 consumer was designed to authenticate an exact release descriptor,
+manifest, image digests, provenance labels, verifier identity and local image receipts
+before a fresh installation mutates the runtime. Under the 2026-08-31 AMD64-only support
+boundary, that multi-platform V2 publication and consumption path is dormant and is not an
+approved current installation mode. Automatic signed-to-signed upgrade and rollback are
+also intentionally unsupported. The unfinished controller, journal tests, source/target
+evidence states, runtime image copy, and stage-upgrade consumer branch were removed rather
+than exposing an unaudited partial recovery protocol.
 
 The consumer now accepts only the exact fresh-install argument shape. Former stage/upgrade
 forms fail before the mutation lock, Docker access, downloads, or installation writes. A
@@ -261,15 +271,16 @@ production helpers are not copied into the application runtime image.
 RabbitMQ's Erlang crypto NIF is linked to the upstream image's bundled
 `/opt/openssl`; upgrading Alpine's `libcrypto3` and `libssl3` packages does not by
 itself patch the broker process. The candidate therefore pins the exact 2026-08-27
-official multi-architecture indexes for RabbitMQ 4.3.5 and the isolated 4.2.9
-compatibility hop. Both upstream rebuilds bundle OpenSSL 3.5.8, and the derivatives
+historical official multi-architecture indexes for RabbitMQ 4.3.5 and the isolated
+4.2.9 compatibility hop. Those digest pins do not expand current platform support.
+Both upstream rebuilds bundle OpenSSL 3.5.8, and the derivatives
 also install the exact Alpine 3.5.8-r0 packages.
 
 The Docker Official Image's own Alpine Dockerfile states that Alpine is not officially
-supported by the RabbitMQ team. The repository's native amd64/arm64 migration,
-runtime, SBOM and vulnerability gates therefore establish BackupSheep-maintained
-security evidence; they do not establish RabbitMQ-vendor support for this Alpine
-runtime. Operators whose enterprise policy requires vendor-backed broker support need
+supported by the RabbitMQ team. The current native AMD64 migration, runtime, SBOM and
+vulnerability gates establish BackupSheep-maintained security evidence; the prior ARM64
+results below are historical only. Neither establishes RabbitMQ-vendor support for this
+Alpine runtime. Operators whose enterprise policy requires vendor-backed broker support need
 either a separately reviewed Ubuntu-based runtime or the applicable licensed VMware
 Tanzu RabbitMQ artifact. See the upstream
 [`4.2/alpine` Dockerfile](https://github.com/docker-library/rabbitmq/blob/master/4.2/alpine/Dockerfile).
@@ -319,11 +330,11 @@ separately attests the same state,
 injects visible and hidden forbidden global parameters, and creates space/tab/newline
 username fixtures to prove that every rejection occurs before credential rotation.
 
-The local arm64 no-cache builds and those constrained runtime checks passed for all
-three derivatives. The real entrypoint-transition E2E also passed. Exact amd64 and
-multi-architecture release builds, scanner evidence, signatures and the full
-cross-version migration/crash E2E remain release gates until attached to the final
-commit.
+The historical local ARM64 no-cache builds and constrained runtime checks passed for all
+three derivatives. The real entrypoint-transition E2E also passed. For the current support
+scope, exact AMD64 builds, scanner evidence and the full cross-version migration/crash E2E
+remain release gates until attached to the final commit. The multi-platform V2 signature
+path is dormant rather than a current gate.
 
 ## Evidence at this snapshot
 
@@ -363,7 +374,7 @@ This addendum is not release approval. At the implementation snapshot:
   evidence cannot substitute for the Linux anonymous-file and exact built-image gates;
 - the current branch had not been pushed to the pull request, approved, or merged into
   `develop`;
-- fresh exact-image multi-architecture build, SBOM, provenance, CodeQL, locked Trivy
+- fresh exact-image AMD64 build, SBOM, provenance, CodeQL, locked Trivy
   database, and zero-High/Critical gates had not yet completed for that final commit;
 - live key creation, backup, ciphertext-only storage, restore, cross-lane denial,
   rotation, old-key restore, tamper, key-loss, restart, and crash recovery had not yet
@@ -378,7 +389,8 @@ This addendum is not release approval. At the implementation snapshot:
 Close this addendum only when one exact commit has all of the following evidence:
 
 1. green local and GitHub application/security regression gates;
-2. signed, digest-pinned release descriptors for every production image and platform;
+2. signed, digest-pinned release descriptors for every production image on the sole
+   supported `linux/amd64` platform, after the dormant V2 trust contract is converted;
 3. matching SBOM/scanner identities with no unreviewed High/Critical finding;
 4. a fresh installation with two distinct keyrings and no AWS account or ambient AWS
    credential;

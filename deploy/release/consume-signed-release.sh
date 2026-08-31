@@ -333,8 +333,8 @@ attest_docker_daemon_platform() {
         || die "could not attest Docker daemon platform"
     platform="$BOUNDED_CAPTURE_VALUE"
     case "$platform" in
-        linux\|amd64|linux\|arm64) ;;
-        *) die "signed releases require a scanned linux/amd64 or linux/arm64 Docker daemon" ;;
+        linux\|amd64) ;;
+        *) die "signed releases require the supported linux/amd64 Docker daemon" ;;
     esac
     DAEMON_OS="${platform%%|*}"
     DAEMON_ARCH="${platform#*|}"
@@ -350,7 +350,7 @@ attest_docker_daemon_platform() {
 
 attest_local_image_platform() {
     local role="$1" reference="$2" state="" image_os="" image_arch="" image_id=""
-    [[ "$DAEMON_OS" == linux && ( "$DAEMON_ARCH" == amd64 || "$DAEMON_ARCH" == arm64 ) ]] \
+    [[ "$DAEMON_OS" == linux && "$DAEMON_ARCH" == amd64 ]] \
         || die "Docker daemon platform was not attested before ${role} image use"
     state="$(docker_client image inspect --format '{{.Os}}|{{.Architecture}}|{{.Id}}' "$reference")" \
         || die "could not inspect ${role} image platform"
@@ -666,13 +666,9 @@ validate_signed_transition_metadata() {
     value="$(strict_json_path "$migration" leaf_set_sha256)" \
         || die "release migration leaf-set digest is absent"
     MIGRATION_LEAF_SET_SHA256="$(json_string_scalar "$value" '^sha256:[0-9a-f]{64}$' 'release migration leaf-set digest')"
-    if [[ "$DAEMON_ARCH" == amd64 ]]; then
-        VERIFIER_MANIFEST_DIGEST="$ACTIVE_VERIFIER_AMD64_MANIFEST"
-    elif [[ "$DAEMON_ARCH" == arm64 ]]; then
-        VERIFIER_MANIFEST_DIGEST="$ACTIVE_VERIFIER_ARM64_MANIFEST"
-    else
-        die "release transition metadata requires an attested daemon architecture"
-    fi
+    [[ "$DAEMON_OS" == linux && "$DAEMON_ARCH" == amd64 ]] \
+        || die "release transition metadata requires the supported attested Docker daemon platform"
+    VERIFIER_MANIFEST_DIGEST="$ACTIVE_VERIFIER_AMD64_MANIFEST"
 }
 
 validate_residue_dir() {
@@ -1206,7 +1202,6 @@ attest_cosign_image() {
     attest_local_image_platform cosign "$reference"
     case "$DAEMON_ARCH" in
         amd64) expected_image_id="$ACTIVE_VERIFIER_AMD64_IMAGE_ID" ;;
-        arm64) expected_image_id="$ACTIVE_VERIFIER_ARM64_IMAGE_ID" ;;
         *) die "Cosign verifier platform was not admitted by release policy" ;;
     esac
     [[ "$image_id" == "$expected_image_id" ]] \
@@ -1321,13 +1316,9 @@ write_signature_verification_receipt() {
     ( set -o noclobber; : > "$candidate" ) \
         || die "could not allocate signature-verification receipt"
     chmod 0600 "$candidate"
-    if [[ "$DAEMON_ARCH" == amd64 ]]; then
-        verifier_config="$ACTIVE_VERIFIER_AMD64_IMAGE_ID"
-    elif [[ "$DAEMON_ARCH" == arm64 ]]; then
-        verifier_config="$ACTIVE_VERIFIER_ARM64_IMAGE_ID"
-    else
-        die "signature-verification receipt requires an attested daemon platform"
-    fi
+    [[ "$DAEMON_OS" == linux && "$DAEMON_ARCH" == amd64 ]] \
+        || die "signature-verification receipt requires the supported attested Docker daemon platform"
+    verifier_config="$ACTIVE_VERIFIER_AMD64_IMAGE_ID"
     # Every interpolated value has already passed a strict lowercase digest,
     # SemVer, commit, platform, or fixed identity grammar.  Keep the bytes in a
     # canonical, sorted-key JSON form so recovery evidence can retain this

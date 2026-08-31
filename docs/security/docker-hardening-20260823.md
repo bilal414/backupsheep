@@ -10,6 +10,14 @@
 entrypoint, secret loading, startup checks, and application changes required to make
 those boundaries trustworthy
 
+> **Current platform-scope decision, 2026-08-31:** Linux AMD64 (`linux/amd64`) is now
+> the sole supported release platform. This dated assessment intentionally preserves its
+> ARM64 and multi-architecture build, scan, digest, and migration observations as historical
+> evidence; they do not establish current ARM64 support and are no longer release gates.
+> Forward-looking multi-architecture requirements later in this report are superseded.
+> The dormant V2 signed-release path remains disabled pending an atomic, reviewed AMD64-only
+> trust-contract conversion.
+
 > **Current-repository follow-up, 2026-08-25:** The commit, image digests, 2,298-test
 > run, scans and demo observations below remain an immutable evidence snapshot for
 > `7be0729...`. The current working tree subsequently implemented BSE1 chunked
@@ -98,8 +106,9 @@ is not a signed release claim. The locally scanned application runtime's Python 
 matched that implementation tree byte for byte. Later CodeQL remediations changed
 application source, and the bounded-DNS reconciliation fix changed the egress image, so
 the app/egress identities below are retained only as predecessor evidence. The current
-PR's native-amd64 rebuild, scans and tests are authoritative for the merge candidate;
-the protected multi-architecture release workflow remains authoritative for publication.
+PR's native-AMD64 rebuild, scans and tests are authoritative for the merge candidate.
+Signed publication remains disabled until the retained V2 multi-platform workflow and
+trust contract are converted atomically to AMD64 only.
 
 The release-candidate gate now saves each locally built image by its immutable Docker
 ID, verifies the Docker/OCI archive descriptor chain from the outer index to the exact
@@ -165,7 +174,7 @@ checks, exact native-amd64 image scans, the full application suite and the produ
 topology/egress attack gates. The PR's successful evidence artifacts, not the predecessor
 image table above, bind those checks to the exact head under review.
 
-Those repository checks do not close protected signed multi-architecture publication,
+Those repository checks do not close the currently dormant signed-release publication path,
 fresh-host or demo deployment, production keyring custody and denied cross-lane unwraps,
 or live provider backup/restore/chaos acceptance. The historical Google API credential
 incident below also remains open until provider-side revocation is proven.
@@ -1138,8 +1147,8 @@ be read as current-candidate deployment evidence.
 ### P0 — before claiming enterprise protection for sensitive backups
 
 1. Cut an exact release and run the complete tests, CodeQL/source/secret scans and image
-   scans; publish signed multi-architecture images, SBOMs and provenance tied to the
-   protected commit.
+   scans. Publish signed AMD64 images, SBOMs and provenance tied to the protected commit
+   only after the retained V2 trust contract is converted and reviewed atomically.
 2. Exercise the exact-ref installer on a fresh user-owned host and the fail-closed v3
    migration on a recoverable existing-volume copy. Include the exact drained stock
    RabbitMQ 3.13.7 source, isolated UID conversion, 4.2.9 feature/Khepri gate, 4.3.5
@@ -1177,7 +1186,7 @@ be read as current-candidate deployment evidence.
 
 - Rescan exact digests on every build and on vulnerability-database refresh.
 - Re-run the full suite and hostile build-context tests after Dockerfile/Compose changes.
-- Test cgroup v1/v2, amd64/arm64, Docker Engine upgrades, reboot/restart behavior, and
+- Test cgroup v1/v2 on AMD64, Docker Engine upgrades, reboot/restart behavior, and
   supported PostgreSQL/RabbitMQ upgrade paths.
 - Offer host guidance for rootless Docker, AppArmor/SELinux, firewalling, encryption,
   quotas, log shipping, and daemon protection without silently changing the host.

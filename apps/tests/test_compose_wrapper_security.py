@@ -1479,6 +1479,11 @@ def handle_collection(kind, arguments, state):
 def handle_raw_docker(arguments, state):
     if not arguments:
         return
+    if arguments[0] == "version":
+        if option_value(arguments, "--format") != "{{.Server.Os}}|{{.Server.Arch}}":
+            sys.exit(1)
+        emit(state.get("docker_server_platform", "linux|amd64"))
+        return
     if arguments[0:2] == ["context", "show"]:
         emit(state.get("docker_context", os.environ.get("DOCKER_CONTEXT", "default")))
         return
@@ -1851,6 +1856,33 @@ class SecureComposeWrapperTests(TestCase):
             event for event in self.events()
             if event["argv"][: len(prefix)] == list(prefix)
         ]
+
+    def test_wrapper_accepts_only_exact_linux_amd64_docker_server(self):
+        for platform, accepted in (
+            ("linux|amd64", True),
+            ("linux|arm64", False),
+            ("linux|386", False),
+            ("darwin|amd64", False),
+            ("linux|x86_64", False),
+            ("linux|amd64\nlinux|arm64", False),
+            ("", False),
+        ):
+            with self.subTest(platform=repr(platform)):
+                self.set_state(docker_server_platform=platform)
+                self.clear_events()
+                result = self.run_wrapper("config", "--quiet")
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                self.assertEqual(len(self.raw_events("version")), 1)
+                if accepted:
+                    self.assertTrue(self.compose_events("config"))
+                else:
+                    self.assertIn(
+                        "supports only a linux/amd64 Docker server", result.stderr
+                    )
+                    self.assertEqual(self.compose_events(), [])
+                    self.assertFalse(
+                        Path(f"{self.root.resolve()}.backupsheep-mutation-lock").exists()
+                    )
 
     def run_wrapper(self, *arguments, check=False, extra_environment=None):
         environment = self.wrapper_environment(extra_environment)

@@ -1101,6 +1101,7 @@ validate_approved_compose_file() {
 }
 
 validate_docker_access() {
+    local daemon_platform=""
     local engine_version=""
     local compose_version=""
     local selected_context=""
@@ -1118,6 +1119,11 @@ validate_docker_access() {
     run_installer_command 30 "Docker daemon availability probe" \
         "$DOCKER_BIN" info >/dev/null 2>&1 \
         || die "The Docker daemon is unavailable to the effective invoking UID. Install/configure Docker on the host, then retry."
+    run_installer_capture 30 "Docker daemon platform probe" daemon_platform \
+        "$DOCKER_BIN" version --format '{{.Server.Os}}|{{.Server.Arch}}' 2>/dev/null \
+        || die "Could not read the Docker server platform from the selected daemon."
+    [[ "$daemon_platform" == "linux|amd64" ]] \
+        || die "BackupSheep supports only a linux/amd64 Docker server (found: ${daemon_platform:-unparseable})."
     run_installer_capture 30 "Docker Engine version probe" engine_version \
         "$DOCKER_BIN" version --format '{{.Server.Version}}' 2>/dev/null \
         || die "Could not read the Docker Engine server version from the selected daemon."

@@ -26,15 +26,18 @@ Hash authentication is not byte-for-byte reproducibility. Locally built wheels c
 by toolchain/date, and signed Debian/PGDG repository snapshots can change even though the
 Dockerfile exact-version selects packages. Before calling a release fully reproducible:
 
-1. build and test the exact commit on Linux `amd64` and `arm64` with the pinned Dockerfile
-   frontend/base image and compare dependency inventories;
+1. build and test the exact commit on the sole supported platform, Linux `amd64`, with
+   the pinned Dockerfile frontend/base image and compare the dependency inventory with
+   the reviewed lock and prior release;
 2. run Django plus PostgreSQL, MySQL, MariaDB, SFTP and enabled provider client smoke tests
-   against each resulting image;
+   against the resulting image;
 3. generate an SPDX or CycloneDX SBOM, attach it to the release, and sign the image digest
    and provenance;
 4. retain or mirror the exact authenticated APT and upstream source artifacts required to
    rebuild after repositories move.
 
-The multi-architecture gate matters because cloud SDK, cryptography and source-built wheel
-outputs can differ by platform. A lock generated on one developer machine is artifact
-authentication input, not sufficient release reproducibility evidence.
+The native Linux AMD64 gate still matters because cloud SDK, cryptography and source-built
+wheel outputs can differ by toolchain and build environment even on one architecture. A
+lock generated on one developer machine is artifact authentication input, not sufficient
+release reproducibility evidence. ARM64 and other architectures are outside the supported
+release and test matrix.

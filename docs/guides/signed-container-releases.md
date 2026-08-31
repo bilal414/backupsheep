@@ -1,9 +1,19 @@
 # Signed container releases
 
+> **Current support boundary (2026-08-31):** BackupSheep's supported release platform is
+> Linux AMD64 (`linux/amd64`) only. The V2 workflow, descriptor, verifier, and evidence
+> model documented below still encode a dual AMD64/ARM64 contract. They are retained as
+> dormant legacy scaffolding and audit history; they are **not approved** for current
+> publication or consumption. Keep `BACKUPSHEEP_SIGNED_RELEASES_ENABLED` unset. Re-enabling
+> signed publication requires one atomic, reviewed conversion of the workflow, descriptor,
+> manifest, verifier, installer platform selection, and evidence policy to an AMD64-only
+> trust contract. The historical design details below do not constitute ARM64 support.
+
 BackupSheep's release workflow is checked in but deliberately dormant. Merging it
 does not build, sign, promote, or publish anything. An administrator must protect
 the `signed-release` environment and set
-`BACKUPSHEEP_SIGNED_RELEASES_ENABLED=true` before a SemVer tag can start it.
+`BACKUPSHEEP_SIGNED_RELEASES_ENABLED=true` before a SemVer tag can start it. That flag
+must not be set while the retained V2 contract remains multi-platform.
 
 ## Trust and promotion model
 

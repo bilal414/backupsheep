@@ -33,8 +33,9 @@ For the verified installer:
 - an installation parent owned by that same effective invoking UID and not writable by
   group or other users;
 - outbound HTTPS access to GitHub, registries and package sources used by the image build;
-- a supported CPU architecture: `x86_64` or `aarch64` (the Dockerfile installs the
-  Oracle MySQL 8.4 client for those two architectures);
+- a Docker daemon whose server platform is exactly Linux AMD64 (`linux/amd64`, also
+  called `x86_64`). Other daemon operating systems and architectures are unsupported;
+  the installer refuses them before starting or changing the Compose project;
 - enough working disk for the image, PostgreSQL, RabbitMQ, the largest concurrent
   database/file backup, website incremental caches and any Local Storage archives.
 
@@ -117,11 +118,20 @@ Supported options are:
 The script does not look up the server's public IP, configure DNS, open a firewall,
 issue a TLS certificate or install a reverse proxy.
 
-### Signed-release consumer mode
+### Signed-release consumer mode (currently dormant)
+
+The checked-in V2 signed-release path is legacy multi-platform scaffolding, not an
+approved publication or installation path for the current Linux AMD64-only release
+scope. Keep `BACKUPSHEEP_SIGNED_RELEASES_ENABLED` unset and do not consume a V2 release.
+It may be enabled only after the workflow, descriptor, manifest, verifier, installer
+selection, and evidence policy are converted together to one AMD64-only trust contract
+and that complete transition passes security review and exact-release tests. The details
+below document the retained dormant design; they do not expand the supported platform.
 
 Local build remains the default and requires no release assets. To consume a published
-official release, obtain both the exact tag and the 40-character commit to which that tag
-points, download `install.sh` from that commit, and add `--release-tag`:
+official release after that atomic conversion, obtain both the exact tag and the
+40-character commit to which that tag points, download `install.sh` from that commit,
+and add `--release-tag`:
 
 ```bash
 RELEASE_TAG='v1.2.3'
@@ -134,11 +144,13 @@ COMMIT='<40-character-commit-for-v1.2.3>'
   --domain backups.example.com
 ```
 
-This mode downloads only three bounded GitHub release assets: the canonical V2 descriptor,
-its Sigstore bundle, and the digest-bound release manifest. It does not install Cosign or
-any host package. Instead it pulls BackupSheep's reviewed first-party verifier, built from
-Cosign 3.1.3, by an exact index digest and binds the selected amd64/arm64 manifest and
-configuration digest. It confirms its non-root user and entrypoint and runs it without the Docker
+The dormant V2 mode downloads only three bounded GitHub release assets: its canonical
+descriptor, its Sigstore bundle, and the digest-bound release manifest. It does not
+install Cosign or any host package. Instead it pulls BackupSheep's reviewed first-party
+verifier, built from Cosign 3.1.3, by an exact index digest and binds the selected legacy
+AMD64/ARM64 manifest and configuration digest. That dual-platform descriptor is retained
+for audit compatibility only and is not an approved current release contract. The verifier
+confirms its non-root user and entrypoint and runs it without the Docker
 socket or network, with all capabilities dropped, `no-new-privileges`, a read-only root
 filesystem, a private bounded tmpfs, and bounded PIDs/CPU/memory.
 

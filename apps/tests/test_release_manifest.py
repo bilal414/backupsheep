@@ -1931,7 +1931,7 @@ class ReleaseWorkflowContractTests(TestCase):
     def test_signed_release_regression_includes_pinned_static_analysis(self):
         static_job = self.supply_chain_workflow.split(
             "  static-python-security:", 1
-        )[1].split("  rabbitmq-arm64-migration:", 1)[0]
+        )[1].split("  application-security-regression:", 1)[0]
         self.assertIn("deploy/static-analysis-requirements.lock", static_job)
         self.assertIn("--require-hashes", static_job)
         self.assertIn("--only-binary=:all:", static_job)
