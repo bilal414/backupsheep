@@ -301,6 +301,8 @@ acquire_mutation_lock() {
 validate_inherited_installer_lock() {
     local expected_token="version=1;tool=install.sh;pid=${PPID};uid=${EUID}"
     local entry_count=0 entry=""
+    local completion_marker="__BACKUPSHEEP_FIND_COMPLETE_$$_${RANDOM}__"
+    local inventory_complete=false
 
     [[ "$inherit_installer_lock" == true ]] \
         || die "internal installer-lock validation was requested without inheritance."
@@ -318,10 +320,17 @@ validate_inherited_installer_lock() {
         && "$(<"$mutation_lock_owner_file")" == "$expected_token" ]] \
         || die "the inherited installer mutation-lock witness does not name this direct child."
     while IFS= read -r -d '' entry; do
+        if [[ "$entry" == "$completion_marker" ]]; then
+            inventory_complete=true
+            continue
+        fi
         entry_count=$((entry_count + 1))
         [[ "$entry" == "$mutation_lock_owner_file" ]] \
             || die "the inherited installer mutation lock contains an unexpected entry."
-    done < <(find "$mutation_lock_dir" -mindepth 1 -maxdepth 1 -print0)
+    done < <(find "$mutation_lock_dir" -mindepth 1 -maxdepth 1 -print0 \
+        && printf '%s\0' "$completion_marker")
+    [[ "$inventory_complete" == true ]] \
+        || die "the inherited installer mutation lock could not be inventoried completely."
     [[ "$entry_count" -eq 1 ]] \
         || die "the inherited installer mutation lock must contain exactly its owner witness."
     inherited_installer_lock_token="$expected_token"
@@ -1065,13 +1074,22 @@ else
             || die "signed-release evidence ${evidence_name} must have mode 0600."
     done
     evidence_count=0
+    evidence_completion_marker="__BACKUPSHEEP_FIND_COMPLETE_$$_${RANDOM}__"
+    evidence_inventory_complete=false
     while IFS= read -r -d '' evidence_path; do
+        if [[ "$evidence_path" == "$evidence_completion_marker" ]]; then
+            evidence_inventory_complete=true
+            continue
+        fi
         evidence_count=$((evidence_count + 1))
         case "$(basename -- "$evidence_path")" in
             backupsheep-release-descriptor-v2.txt|backupsheep-release-descriptor-v2.sigstore.json|release-manifest.json|sigstore-trusted-root.json|signature-verification.json|local-images.txt) ;;
             *) die "signed-release evidence contains an unexpected entry." ;;
         esac
-    done < <(find "$release_evidence_dir" -mindepth 1 -maxdepth 1 -print0)
+    done < <(find "$release_evidence_dir" -mindepth 1 -maxdepth 1 -print0 \
+        && printf '%s\0' "$evidence_completion_marker")
+    [[ "$evidence_inventory_complete" == true ]] \
+        || die "signed-release evidence could not be inventoried completely."
     [[ "$evidence_count" -eq 6 ]] \
         || die "signed-release evidence must contain exactly six control files."
     descriptor="$release_evidence_dir/backupsheep-release-descriptor-v2.txt"

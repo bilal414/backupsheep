@@ -8,6 +8,7 @@ import sys
 import tempfile
 import uuid
 import zipfile
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock, skipIf
@@ -34,6 +35,7 @@ from apps._tasks.integration.restore_common import (
     _destination_ledger_exists,
     fetch_backup_zip,
 )
+from apps._tasks.integration.restore import _schedule_local_restore_handoff_cleanup
 from apps.console.backup.models import (
     CoreBackupArtifact,
     CoreBackupEncryptionEnvelope,
@@ -301,11 +303,12 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         )
         plan = restore_encryption_plan(point)
         handoff = restore_ciphertext_handoff_identity(restore, plan)
+        ready_at = timezone.now().isoformat()
         restore.execution_metadata = {
             "local_restore_ciphertext_handoff": {
                 **handoff,
                 "status": "ready",
-                "ready_at": timezone.now().isoformat(),
+                "ready_at": ready_at,
             }
         }
         restore.save(update_fields=["execution_metadata", "modified"])
@@ -325,6 +328,34 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             self.assertEqual(
                 restored.read("data/backup.txt"), b"authenticated backup payload"
             )
+        restore.refresh_from_db()
+        authenticated = restore.execution_metadata[
+            "local_restore_ciphertext_handoff"
+        ]
+        self.assertEqual(authenticated["status"], "authenticated")
+        self.assertEqual(authenticated["ready_at"], ready_at)
+        first_authenticated_at = authenticated["authenticated_at"]
+
+        output.unlink()
+        with override_settings(LOCAL_STORAGE_ROOT=str(local_root)), mock.patch(
+            "backupsheep.staging.private_plaintext_root",
+            return_value=self.root,
+        ), mock.patch(
+            "backupsheep.staging.require_private_capacity",
+            return_value=self.root,
+        ), mock.patch(
+            "backupsheep.staging.open_restore_ciphertext",
+            side_effect=lambda *_args, **_kwargs: open(remote, "rb"),
+        ):
+            fetch_backup_zip(point, output, restore=restore)
+        restore.refresh_from_db()
+        retried = restore.execution_metadata[
+            "local_restore_ciphertext_handoff"
+        ]
+        self.assertEqual(
+            retried["authenticated_at"],
+            first_authenticated_at,
+        )
 
         output.unlink()
         payload = bytearray(remote.read_bytes())
@@ -370,6 +401,119 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             response = self.client.get(f"/api/v1/storage/local/file/{point.pk}/")
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["artifact_format"], "bse1")
+
+    @skip_on_darwin_without_anonymous_staging
+    def test_tampered_ciphertext_never_creates_authentication_witness(self):
+        source_artifact, ciphertext = self._seal()
+        point, destination, remote, local_root = self._local_destination(
+            source_artifact, ciphertext
+        )
+        restore = CoreWebsiteRestore.objects.create(
+            backup=self.backup,
+            storage_point=point,
+            name="Tampered reverse handoff",
+            params={},
+        )
+        plan = restore_encryption_plan(point)
+        expected = restore_ciphertext_handoff_identity(restore, plan)
+        ready_at = timezone.now().isoformat()
+        restore.execution_metadata = {
+            "local_restore_ciphertext_handoff": {
+                **expected,
+                "status": "ready",
+                "ready_at": ready_at,
+            }
+        }
+        restore.save(update_fields=["execution_metadata", "modified"])
+        payload = bytearray(remote.read_bytes())
+        payload[-1] ^= 1
+        remote.write_bytes(payload)
+        forged_checksum = hashlib.sha256(payload).hexdigest()
+        CoreBackupArtifact.objects.filter(
+            pk__in=(source_artifact.pk, destination.pk)
+        ).update(checksum_value=forged_checksum)
+        output = self.root / "tampered-must-not-exist.zip"
+
+        with override_settings(LOCAL_STORAGE_ROOT=str(local_root)), mock.patch(
+            "backupsheep.staging.private_plaintext_root",
+            return_value=self.root,
+        ), mock.patch(
+            "backupsheep.staging.require_private_capacity",
+            return_value=self.root,
+        ), mock.patch(
+            "backupsheep.staging.open_restore_ciphertext",
+            side_effect=lambda *_args, **_kwargs: open(remote, "rb"),
+        ):
+            with self.assertRaises(RestoreError):
+                fetch_backup_zip(point, output, restore=restore)
+        self.assertFalse(output.exists())
+        restore.refresh_from_db()
+        state = restore.execution_metadata["local_restore_ciphertext_handoff"]
+        self.assertEqual(state["status"], "ready")
+        self.assertEqual(state["ready_at"], ready_at)
+        self.assertNotIn("authenticated_at", state)
+
+    @skip_on_darwin_without_anonymous_staging
+    def test_local_handoff_rejects_noncausal_or_unreviewed_witnesses(self):
+        source_artifact, ciphertext = self._seal()
+        point, _destination, remote, local_root = self._local_destination(
+            source_artifact, ciphertext
+        )
+        restore = CoreWebsiteRestore.objects.create(
+            backup=self.backup,
+            storage_point=point,
+            name="Unsafe reverse handoff witness",
+            params={},
+        )
+        plan = restore_encryption_plan(point)
+        expected = restore_ciphertext_handoff_identity(restore, plan)
+        ready_at = timezone.now().isoformat()
+        bad_states = (
+            {
+                **expected,
+                "status": "authenticated",
+                "ready_at": ready_at,
+                "authenticated_at": (
+                    timezone.now() + timedelta(days=1)
+                ).isoformat(),
+            },
+            {
+                **expected,
+                "status": "ready",
+                "ready_at": ready_at,
+                "unreviewed": "must-not-be-canonicalized-away",
+            },
+        )
+
+        for index, bad_state in enumerate(bad_states):
+            with self.subTest(index=index):
+                restore.execution_metadata = {
+                    "local_restore_ciphertext_handoff": bad_state
+                }
+                restore.save(update_fields=["execution_metadata", "modified"])
+                output = self.root / f"unsafe-handoff-{index}.zip"
+                with override_settings(
+                    LOCAL_STORAGE_ROOT=str(local_root)
+                ), mock.patch(
+                    "backupsheep.staging.private_plaintext_root",
+                    return_value=self.root,
+                ), mock.patch(
+                    "backupsheep.staging.require_private_capacity",
+                    return_value=self.root,
+                ), mock.patch(
+                    "backupsheep.staging.open_restore_ciphertext",
+                    side_effect=lambda *_args, **_kwargs: open(remote, "rb"),
+                ):
+                    with self.assertRaises(RestoreError):
+                        fetch_backup_zip(point, output, restore=restore)
+                self.assertFalse(output.exists())
+                restore.refresh_from_db()
+                self.assertEqual(
+                    restore.execution_metadata[
+                        "local_restore_ciphertext_handoff"
+                    ],
+                    bad_state,
+                )
 
     @skip_on_darwin_without_anonymous_staging
     def test_local_restore_uses_storage_owned_reverse_ciphertext_handoff(self):
@@ -428,13 +572,141 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             "backupsheep.staging.cleanup_restore_ciphertext_fence",
             return_value=True,
         ) as cleanup:
+            with self.assertRaisesRegex(
+                ArtifactPipelineError, "witness is incomplete"
+            ):
+                cleanup_terminal_restore_ciphertext_handoff(restore)
+        cleanup.assert_not_called()
+
+        ready = restore.execution_metadata["local_restore_ciphertext_handoff"]
+        authenticated_at = timezone.now().isoformat()
+        restore.execution_metadata = {
+            "local_restore_ciphertext_handoff": {
+                **ready,
+                "status": "authenticated",
+                "authenticated_at": authenticated_at,
+            }
+        }
+        restore.save(update_fields=["execution_metadata", "modified"])
+        with mock.patch(
+            "backupsheep.staging.cleanup_restore_ciphertext_fence",
+            return_value=True,
+        ) as cleanup:
             self.assertTrue(cleanup_terminal_restore_ciphertext_handoff(restore))
         cleanup.assert_called_once()
         restore.refresh_from_db()
+        completed = restore.execution_metadata["local_restore_ciphertext_handoff"]
+        self.assertEqual(completed["status"], "cleanup_complete")
+        self.assertEqual(completed["ready_at"], ready["ready_at"])
+        self.assertEqual(completed["authenticated_at"], authenticated_at)
+        self.assertEqual(completed["terminal_restore_status"], "complete")
+        first_completed_at = completed["completed_at"]
+        self.assertFalse(cleanup_terminal_restore_ciphertext_handoff(restore))
+        restore.refresh_from_db()
+        retried = restore.execution_metadata[
+            "local_restore_ciphertext_handoff"
+        ]
         self.assertEqual(
-            restore.execution_metadata["local_restore_ciphertext_handoff"]["status"],
-            "cleanup_complete",
+            retried["completed_at"],
+            first_completed_at,
         )
+        tampered = dict(completed)
+        tampered["completed_at"] = (
+            timezone.now() + timedelta(days=1)
+        ).isoformat()
+        restore.execution_metadata = {
+            "local_restore_ciphertext_handoff": tampered
+        }
+        restore.save(update_fields=["execution_metadata", "modified"])
+        with self.assertRaisesRegex(
+            ArtifactPipelineError, "cleanup witness is in the future"
+        ):
+            cleanup_terminal_restore_ciphertext_handoff(restore)
+
+        tampered = dict(completed)
+        tampered["authenticated_at"] = "2000-01-01T00:00:00+00:00"
+        restore.execution_metadata = {
+            "local_restore_ciphertext_handoff": tampered
+        }
+        restore.save(update_fields=["execution_metadata", "modified"])
+        with self.assertRaisesRegex(
+            ArtifactPipelineError, "authentication predates ciphertext readiness"
+        ):
+            cleanup_terminal_restore_ciphertext_handoff(restore)
+
+    @skip_on_darwin_without_anonymous_staging
+    def test_failed_restore_cleans_ready_handoff_without_inventing_authentication(self):
+        source_artifact, ciphertext = self._seal()
+        point, _destination, _remote, _local_root = self._local_destination(
+            source_artifact, ciphertext
+        )
+        restore = CoreWebsiteRestore.objects.create(
+            backup=self.backup,
+            storage_point=point,
+            name="Failed before authentication",
+            params={},
+            status=CoreWebsiteRestore.Status.FAILED,
+        )
+        plan = restore_encryption_plan(point)
+        expected = restore_ciphertext_handoff_identity(restore, plan)
+        ready_at = timezone.now().isoformat()
+        restore.execution_metadata = {
+            "local_restore_ciphertext_handoff": {
+                **expected,
+                "status": "ready",
+                "ready_at": (
+                    timezone.now() + timedelta(days=1)
+                ).isoformat(),
+            }
+        }
+        restore.save(update_fields=["execution_metadata", "modified"])
+
+        with mock.patch(
+            "backupsheep.staging.cleanup_restore_ciphertext_fence",
+            return_value=True,
+        ) as cleanup:
+            with self.assertRaisesRegex(
+                ArtifactPipelineError, "readiness witness is in the future"
+            ):
+                cleanup_terminal_restore_ciphertext_handoff(restore)
+        cleanup.assert_not_called()
+
+        restore.execution_metadata = {
+            "local_restore_ciphertext_handoff": {
+                **expected,
+                "status": "ready",
+                "ready_at": ready_at,
+            }
+        }
+        restore.save(update_fields=["execution_metadata", "modified"])
+        with mock.patch(
+            "backupsheep.staging.cleanup_restore_ciphertext_fence",
+            return_value=True,
+        ) as cleanup:
+            self.assertTrue(cleanup_terminal_restore_ciphertext_handoff(restore))
+        cleanup.assert_called_once()
+        restore.refresh_from_db()
+        completed = restore.execution_metadata["local_restore_ciphertext_handoff"]
+        self.assertEqual(completed["status"], "cleanup_complete")
+        self.assertEqual(completed["ready_at"], ready_at)
+        self.assertEqual(completed["terminal_restore_status"], "failed")
+        self.assertNotIn("authenticated_at", completed)
+
+    def test_complete_restore_does_not_schedule_cleanup_from_ready_handoff(self):
+        restore = CoreWebsiteRestore.objects.create(
+            backup=self.backup,
+            name="Complete without authentication witness",
+            params={},
+            status=CoreWebsiteRestore.Status.COMPLETE,
+            execution_metadata={
+                "local_restore_ciphertext_handoff": {"status": "ready"}
+            },
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactPipelineError, "no durable authenticated-ciphertext witness"
+        ):
+            _schedule_local_restore_handoff_cleanup(restore)
 
     @skip_on_darwin_without_anonymous_staging
     def test_local_restore_never_reads_backups_mount_and_rejects_handoff_drift(self):

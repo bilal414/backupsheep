@@ -1050,12 +1050,13 @@ def _preflight_restore_target(
     password,
     ssh_key_path,
 ):
-    """Verify every non-root SFTP restore parent before archive download.
+    """Verify every non-root SFTP restore parent after archive authentication.
 
-    The probe creates a tiny staging directory, writes one tiny payload, moves
-    that payload to a sibling, and then removes both paths. It never addresses
-    the configured final target. A transport loss is retryable but no upload or
-    publication is attempted by this call.
+    The caller validates the authenticated archive before this probe. The probe
+    then creates a tiny staging directory, writes one tiny payload, moves that
+    payload to a sibling, and removes both paths before restored target data is
+    staged. It never addresses the configured final target. A transport loss is
+    retryable but no restored upload or publication is attempted by this call.
     """
     if auth.protocol != CoreAuthWebsite.Protocol.SFTP:
         return
@@ -2173,6 +2174,18 @@ def restore_website(backup, restore):
         restore.execution_metadata = metadata
         _save_restore(restore, ["execution_metadata"])
 
+        # Authenticate and validate the complete archive before any writable
+        # target probe.  The SFTP permission preflight deliberately creates,
+        # renames, and removes restore-owned probe paths, so it must never run
+        # for a missing, swapped, or tampered BSE1 object.
+        _ensure_restore_fence(restore)
+        fetch_backup_zip(stored_backup, local_zip, restore=restore)
+        _ensure_restore_fence(restore)
+        extract_backup_zip(local_zip, local_dir)
+        tree_root = maybe_extract_tar(local_dir, backup.uuid_str)
+        _ensure_restore_fence(restore)
+        records, manifest = _prepare_sources(tree_root, sources, backup)
+
         _ensure_restore_fence(restore)
         auth.check_connection()
         if auth.protocol == CoreAuthWebsite.Protocol.SFTP:
@@ -2197,9 +2210,10 @@ def restore_website(backup, restore):
             protocol = "ftp"
         host_url = f"{protocol}://{_lftp_url_host(auth.host)}"
 
-        # Permission checks run before archive download and before any remote
-        # website upload or publication. Root/all_paths keeps its historical
-        # convergent mirror semantics and is excluded from sibling staging.
+        # Permission checks run only after authenticated archive validation and
+        # before any restored website data is staged. Root/all_paths keeps its
+        # historical convergent mirror semantics and is excluded from sibling
+        # staging.
         _preflight_restore_target(
             node,
             backup,
@@ -2213,13 +2227,6 @@ def restore_website(backup, restore):
             ssh_key_path,
         )
         _ensure_restore_fence(restore)
-        fetch_backup_zip(stored_backup, local_zip, restore=restore)
-        _ensure_restore_fence(restore)
-        extract_backup_zip(local_zip, local_dir)
-        tree_root = maybe_extract_tar(local_dir, backup.uuid_str)
-        _ensure_restore_fence(restore)
-
-        records, manifest = _prepare_sources(tree_root, sources, backup)
         # Filename representability is checked only after the archive is
         # available and validated, but still before any target data is staged.
         # This avoids touching the target on every archive-provider retry.

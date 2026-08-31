@@ -2151,8 +2151,61 @@ class WebsiteRestoreEngineTests(RestoreBackendBase):
             with self.assertRaisesRegex(RestoreError, "still preparing"):
                 RW.restore_website(backup, restore)
 
-        permission_probe.assert_called_once()
+        permission_probe.assert_not_called()
         name_probe.assert_not_called()
+
+    def test_archive_authentication_precedes_every_writable_target_probe(self):
+        node, backup = self._website_backup(
+            all_paths=False,
+            paths=[{"path": "public_html", "type": "directory"}],
+        )
+        auth = node.connection.auth_website
+        auth.protocol = CoreAuthWebsite.Protocol.SFTP
+        auth.port = 22
+        auth.save(update_fields=["protocol", "port", "modified"])
+        self._last_zip = self._make_zip({"public_html/index.html": "hi"})
+        restore = self._restore_row(backup)
+        events = []
+        real_fetch = RW.fetch_backup_zip
+
+        def fetch(*args, **kwargs):
+            result = real_fetch(*args, **kwargs)
+            events.append("archive_authenticated")
+            return result
+
+        with mock.patch.object(
+            CoreAuthWebsite, "check_connection", lambda *args, **kwargs: None
+        ), mock.patch.object(
+            CoreAuthWebsite,
+            "materialize_lftp_known_hosts",
+            autospec=True,
+            side_effect=self._approved_trust,
+        ), mock.patch.object(
+            RW, "fetch_backup_zip", side_effect=fetch
+        ), mock.patch.object(
+            RW,
+            "_preflight_restore_target",
+            side_effect=lambda *args, **kwargs: events.append("permission_probe"),
+        ), mock.patch.object(
+            RW,
+            "_preflight_restore_name_fidelity",
+            side_effect=lambda *args, **kwargs: events.append("name_probe"),
+        ), mock.patch.object(
+            RW,
+            "_legacy_restore_source",
+            side_effect=lambda *args, **kwargs: events.append("restore_write"),
+        ), mock.patch.object(RW, "delete_from_disk"):
+            RW.restore_website(backup, restore)
+
+        self.assertEqual(
+            events,
+            [
+                "archive_authenticated",
+                "permission_probe",
+                "name_probe",
+                "restore_write",
+            ],
+        )
 
     def test_missing_path_in_archive_fails_before_lftp(self):
         node, backup = self._website_backup(
