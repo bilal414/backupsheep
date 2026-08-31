@@ -957,8 +957,12 @@ summary is retained. The current PR's exact-SHA execution remains authoritative.
 Repository secret scanning, push protection, Dependabot updates and private vulnerability
 reporting are enabled. Provider validity checks and non-provider secret patterns remained
 disabled when requested through the GitHub API, so they are treated as a platform/account
-capability gap rather than silently claimed as active. Current-tree scanning also does
-not close the historical Google credential incident described below.
+capability gap rather than silently claimed as active. The separate historical Google-key
+incident is closed: on 2026-08-29 provider validation returned `REQUEST_DENIED` because the
+key was invalid, and GitHub secret-scanning alert 1 was resolved as `revoked`. The alert's
+resolution record also states that current `main`, `develop` and candidate tips contain no
+matching key. This closure does not erase historical copies or substitute for retrospective
+usage and billing review.
 
 Two real issues found during that review were remediated rather than allowlisted:
 
@@ -1032,21 +1036,13 @@ be read as current-candidate deployment evidence.
 
 ### Critical
 
-1. **A historically committed Google API key remains an open credential incident.**
-   GitHub secret scanning identifies one publicly leaked Google API key introduced in
-   2024. The unused helper that contained it is absent from the current main, develop and
-   candidate tips, but deleting source does not revoke a credential and public forks
-   retain historical copies. The Google Cloud owner must revoke or rotate the key,
-   inspect its restrictions, usage, audit/billing records and downstream dependencies,
-   and then resolve the GitHub alert as revoked. A history rewrite may reduce casual
-   discovery only after revocation; it cannot erase existing clones or forks.
-2. **The new artifact-custody and staging boundary is implemented but not
+1. **The new artifact-custody and staging boundary is implemented but not
    release-proven.** The original demo/digests do not include BSE1, the local-file keyring boundary or
    private layout v3. Do not treat the old 2,298-test run as closure. Cut and attest an
    exact release, exercise the fresh installer and existing-volume migration, prove
    denied cross-lane unwraps and filesystem access, and run tamper, tenant/context-swap,
    rotation, key-loss, provider-upload and authenticated restore-before-write tests.
-3. **A source-lane compromise remains high-impact by design.** Database/files workers
+2. **A source-lane compromise remains high-impact by design.** Database/files workers
    must temporarily read the plaintext they collect and hold their own root-key access.
    Stock egress now denies outward traffic, but a role must receive some network path to
    perform Internet-dependent work. A remote-code-execution flaw in one of those lanes
@@ -1128,20 +1124,23 @@ be read as current-candidate deployment evidence.
    is test-proven but not live-proven on that root-owned path.
 8. GitHub provider validity checks and non-provider secret patterns remain disabled at
    the repository capability layer. Core secret scanning and push protection are active,
-   but provider-side revocation and the strict repository CI scan remain necessary.
+   so future incidents still require independent provider-side validation and the strict
+   repository CI scan.
+9. GitHub's default `main` branch reports 43 open Dependabot alerts: 1 Critical, 28 High,
+   12 Moderate and 2 Low. The `develop` candidate pins the currently alerted Python
+   dependencies at patched versions and no longer contains the alerted historical console
+   lockfile path, but that does not close alerts on the default branch. Promote a verified
+   release to `main` or remediate it independently before representing the default branch
+   as enterprise-ready.
 
 ## Enterprise remediation order
 
 ### P0 — before claiming enterprise protection for sensitive backups
 
-1. Revoke or rotate the historically exposed Google API key at the provider, review
-   restrictions, use, audit and billing evidence, update any legitimate dependent
-   workload, and resolve the repository alert only after provider-side revocation is
-   proven.
-2. Cut an exact release and run the complete tests, CodeQL/source/secret scans and image
+1. Cut an exact release and run the complete tests, CodeQL/source/secret scans and image
    scans; publish signed multi-architecture images, SBOMs and provenance tied to the
    protected commit.
-3. Exercise the exact-ref installer on a fresh user-owned host and the fail-closed v3
+2. Exercise the exact-ref installer on a fresh user-owned host and the fail-closed v3
    migration on a recoverable existing-volume copy. Include the exact drained stock
    RabbitMQ 3.13.7 source, isolated UID conversion, 4.2.9 feature/Khepri gate, 4.3.5
    canonical commit, and crash retry from every P313/A313,
@@ -1149,16 +1148,16 @@ be read as current-candidate deployment evidence.
    absent and genuine narrowly admitted stale-PID same-version recovery at each applicable
    source/target checkpoint. Inspect every resulting mount, identity, capability,
    healthcheck, restart policy and egress namespace.
-4. Prove allowed same-lane plus denied cross-lane unwraps, BSE1 context/tamper/swap
+3. Prove allowed same-lane plus denied cross-lane unwraps, BSE1 context/tamper/swap
    rejection, key-wrap rotation and key-loss recovery. Keep every old key until database
    evidence shows no active envelope uses it and recovery is rehearsed.
-5. Prove storage and Local Storage contain BSE1 ciphertext only, source lanes cannot
+4. Prove storage and Local Storage contain BSE1 ciphertext only, source lanes cannot
    mount `/backups`, and no role can read or mutate another lane's private/transfer data.
-6. Put database/files lanes in reviewed egress `allowlist` mode (or a controlled proxy)
+5. Put database/files lanes in reviewed egress `allowlist` mode (or a controlled proxy)
    before sensitive operation, without broadening the exact internal DB/broker tuples.
-7. Deploy and retain evidence for generation-3 database identity, generation-2 RabbitMQ
+6. Deploy and retain evidence for generation-3 database identity, generation-2 RabbitMQ
    identity and generation-3 signed-task/replay enforcement.
-8. Run provider-specific backup, restore, crash, retry, duplicate and unknown-outcome
+7. Run provider-specific backup, restore, crash, retry, duplicate and unknown-outcome
    reconciliation gates with fresh ownership evidence.
 
 ### P1 — production hardening
