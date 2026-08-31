@@ -74,12 +74,23 @@ class Arm64LegacyImageEvidenceTests(TestCase):
         architecture="arm64",
         diff_id=None,
         extra_manifest=False,
+        extra_manifest_field=None,
         hostile_member=None,
         duplicate_layer=False,
+        include_layer_sources=False,
+        layer_source_key=None,
+        layer_source_descriptor=None,
     ):
         layer_payload = b"arm64 legacy source layer\n"
+        actual_diff_id = diff_id or (
+            f"sha256:{hashlib.sha256(layer_payload).hexdigest()}"
+        )
         config_payload = self._json_bytes(
-            self._config(layer_payload, architecture=architecture, diff_id=diff_id)
+            self._config(
+                layer_payload,
+                architecture=architecture,
+                diff_id=actual_diff_id,
+            )
         )
         config_digest = hashlib.sha256(config_payload).hexdigest()
         config_name = f"{config_digest}.json"
@@ -89,6 +100,19 @@ class Arm64LegacyImageEvidenceTests(TestCase):
             "Layers": [layer_name],
             "RepoTags": [self.image_ref],
         }
+        if include_layer_sources:
+            descriptor = layer_source_descriptor
+            if descriptor is None:
+                descriptor = {
+                    "digest": actual_diff_id,
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": len(layer_payload),
+                }
+            entry["LayerSources"] = {
+                layer_source_key or actual_diff_id: descriptor
+            }
+        if extra_manifest_field is not None:
+            entry[extra_manifest_field] = "unexpected"
         manifest = [entry, entry] if extra_manifest else [entry]
         with tarfile.open(self.archive, "w") as archive:
             self._add_member(archive, config_name, config_payload)
@@ -101,10 +125,19 @@ class Arm64LegacyImageEvidenceTests(TestCase):
             self._add_member(archive, "manifest.json", self._json_bytes(manifest))
         return f"sha256:{config_digest}"
 
-    def _write_oci_archive(self):
+    def _write_oci_archive(
+        self, *, include_layer_sources=False, moby_direct_manifest=False
+    ):
         raw_layer = b"native arm64 compressed legacy layer\n"
-        compressed_layer = gzip.compress(raw_layer, mtime=0)
-        layer_digest = f"sha256:{hashlib.sha256(compressed_layer).hexdigest()}"
+        layer_payload = (
+            raw_layer if include_layer_sources else gzip.compress(raw_layer, mtime=0)
+        )
+        layer_media_type = (
+            "application/vnd.oci.image.layer.v1.tar"
+            if include_layer_sources
+            else "application/vnd.oci.image.layer.v1.tar+gzip"
+        )
+        layer_digest = f"sha256:{hashlib.sha256(layer_payload).hexdigest()}"
         diff_id = f"sha256:{hashlib.sha256(raw_layer).hexdigest()}"
         config_payload = self._json_bytes(self._config(raw_layer, diff_id=diff_id))
         config_digest = f"sha256:{hashlib.sha256(config_payload).hexdigest()}"
@@ -117,8 +150,8 @@ class Arm64LegacyImageEvidenceTests(TestCase):
             "layers": [
                 {
                     "digest": layer_digest,
-                    "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                    "size": len(compressed_layer),
+                    "mediaType": layer_media_type,
+                    "size": len(layer_payload),
                 }
             ],
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -128,49 +161,70 @@ class Arm64LegacyImageEvidenceTests(TestCase):
         image_manifest_digest = (
             f"sha256:{hashlib.sha256(image_manifest_payload).hexdigest()}"
         )
+        image_index_descriptor = {
+            "digest": image_manifest_digest,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {"architecture": "arm64", "os": "linux"},
+            "size": len(image_manifest_payload),
+        }
         image_index = {
-            "manifests": [
-                {
-                    "digest": image_manifest_digest,
-                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "platform": {"architecture": "arm64", "os": "linux"},
-                    "size": len(image_manifest_payload),
-                }
-            ],
+            "manifests": [image_index_descriptor],
             "mediaType": "application/vnd.oci.image.index.v1+json",
             "schemaVersion": 2,
         }
         image_index_payload = self._json_bytes(image_index)
-        image_id = f"sha256:{hashlib.sha256(image_index_payload).hexdigest()}"
+        image_index_digest = (
+            f"sha256:{hashlib.sha256(image_index_payload).hexdigest()}"
+        )
+        image_id = config_digest if moby_direct_manifest else image_index_digest
+        root_descriptor = (
+            {
+                "annotations": {
+                    "io.containerd.image.name": self.image_ref,
+                    "org.opencontainers.image.ref.name": self.image_ref.split(":", 1)[1],
+                },
+                "digest": image_manifest_digest,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "size": len(image_manifest_payload),
+            }
+            if moby_direct_manifest
+            else {
+                "digest": image_index_digest,
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "size": len(image_index_payload),
+            }
+        )
         root_index = {
-            "manifests": [
-                {
-                    "digest": image_id,
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
-                    "size": len(image_index_payload),
-                }
-            ],
+            "manifests": [root_descriptor],
             "mediaType": "application/vnd.oci.image.index.v1+json",
             "schemaVersion": 2,
         }
-        docker_manifest = [
-            {
-                "Config": f"blobs/sha256/{config_digest.removeprefix('sha256:')}",
-                "Layers": [
-                    f"blobs/sha256/{layer_digest.removeprefix('sha256:')}"
-                ],
-                "RepoTags": [self.image_ref],
+        docker_manifest_entry = {
+            "Config": f"blobs/sha256/{config_digest.removeprefix('sha256:')}",
+            "Layers": [f"blobs/sha256/{layer_digest.removeprefix('sha256:')}"],
+            "RepoTags": [self.image_ref],
+        }
+        if include_layer_sources:
+            docker_manifest_entry["LayerSources"] = {
+                diff_id: {
+                    "digest": layer_digest,
+                    "mediaType": layer_media_type,
+                    "size": len(layer_payload),
+                }
             }
-        ]
+        docker_manifest = [docker_manifest_entry]
         members = {
             f"blobs/sha256/{config_digest.removeprefix('sha256:')}": config_payload,
-            f"blobs/sha256/{image_id.removeprefix('sha256:')}": image_index_payload,
             f"blobs/sha256/{image_manifest_digest.removeprefix('sha256:')}": image_manifest_payload,
-            f"blobs/sha256/{layer_digest.removeprefix('sha256:')}": compressed_layer,
+            f"blobs/sha256/{layer_digest.removeprefix('sha256:')}": layer_payload,
             "index.json": self._json_bytes(root_index),
             "manifest.json": self._json_bytes(docker_manifest),
             "oci-layout": self._json_bytes({"imageLayoutVersion": "1.0.0"}),
         }
+        if not moby_direct_manifest:
+            members[
+                f"blobs/sha256/{image_index_digest.removeprefix('sha256:')}"
+            ] = image_index_payload
         with tarfile.open(self.archive, "w") as archive:
             for name, payload in members.items():
                 self._add_member(archive, name, payload)
@@ -218,6 +272,7 @@ class Arm64LegacyImageEvidenceTests(TestCase):
         self.assertEqual(recorded["ownership"], self.owner)
         self.assertEqual(recorded["config"]["sha256"], image_id)
         self.assertEqual(len(recorded["layers"]), 1)
+        self.assertEqual(recorded["docker_layer_sources"], [])
         self.assertIsNone(recorded["oci"])
         self.assertEqual(stat.S_IMODE(self.record.stat().st_mode), 0o600)
 
@@ -230,6 +285,124 @@ class Arm64LegacyImageEvidenceTests(TestCase):
         self.assertRegex(recorded["oci"]["image_manifest_sha256"], r"^sha256:")
         self.assertNotEqual(recorded["config"]["sha256"], image_id)
         self.assertEqual(config_digest, recorded["config"]["sha256"])
+
+    def test_moby_layer_sources_are_bound_in_oci_archive_and_preserved_by_retag(self):
+        image_id = self._write_oci_archive(
+            include_layer_sources=True,
+            moby_direct_manifest=True,
+        )
+        self._attest(image_id)
+        source = json.loads(self.record.read_text())
+        self.assertEqual(len(source["docker_layer_sources"]), 1)
+        self.assertEqual(
+            source["docker_layer_sources"][0]["diff_id"],
+            source["layers"][0]["diff_id"],
+        )
+        self.assertEqual(
+            source["oci"]["image_manifest_sha256"],
+            source["oci"]["top_level_sha256"],
+        )
+        self.assertNotEqual(source["oci"]["top_level_sha256"], image_id)
+
+        source_archive_digest = evidence._sha256_path(
+            self.archive, evidence.MAX_ARCHIVE_BYTES, "test archive"
+        )[0]
+        source_evidence_digest = evidence._sha256_path(
+            self.record, evidence.MAX_EVIDENCE_BYTES, "test evidence"
+        )[0]
+        target_archive = self.root / "layer-sources-retagged.tar"
+        target_evidence = self.root / "layer-sources-retagged.evidence.json"
+        target_ref = f"backupsheep-rabbitmq-legacy-source:manifest-{'c' * 64}"
+        evidence.retag(
+            SimpleNamespace(
+                archive=self.archive,
+                evidence=self.record,
+                expected_archive_sha256=source_archive_digest,
+                expected_evidence_sha256=source_evidence_digest,
+                expected_image_id=image_id,
+                expected_image_ref=self.image_ref,
+                expected_owner=self.owner,
+                source_sha=self.source_sha,
+                target_archive=target_archive,
+                target_evidence=target_evidence,
+                target_image_ref=target_ref,
+                receipt=self.root / "layer-sources-retagged.receipt.json",
+            )
+        )
+        target = json.loads(target_evidence.read_text())
+        self.assertEqual(
+            target["docker_layer_sources"], source["docker_layer_sources"]
+        )
+
+    def test_unknown_or_malformed_layer_source_metadata_fails_closed(self):
+        bad_cases = (
+            (
+                {"extra_manifest_field": "Parent"},
+                "manifest entry shape",
+            ),
+            (
+                {
+                    "include_layer_sources": True,
+                    "layer_source_key": "sha256:" + "f" * 64,
+                },
+                "bind every Docker layer",
+            ),
+            (
+                {
+                    "include_layer_sources": True,
+                    "layer_source_descriptor": {
+                        "digest": "sha256:" + "f" * 64,
+                        "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                        "size": 1,
+                        "urls": ["https://example.invalid/layer"],
+                    },
+                },
+                "descriptor shape",
+            ),
+            (
+                {
+                    "include_layer_sources": True,
+                    "layer_source_descriptor": {
+                        "digest": "sha256:" + "f" * 64,
+                        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                        "size": 1,
+                    },
+                },
+                "media type is unsupported",
+            ),
+            (
+                {
+                    "include_layer_sources": True,
+                    "layer_source_descriptor": {
+                        "digest": "sha256:"
+                        + hashlib.sha256(
+                            b"arm64 legacy source layer\n"
+                        ).hexdigest(),
+                        "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                        "size": 1,
+                    },
+                },
+                "does not match the exported layer",
+            ),
+            (
+                {
+                    "include_layer_sources": True,
+                    "layer_source_descriptor": {
+                        "digest": "sha256:" + "f" * 64,
+                        "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                        "size": len(b"arm64 legacy source layer\n"),
+                    },
+                },
+                "does not match the exported layer",
+            ),
+        )
+        for options, diagnostic in bad_cases:
+            with self.subTest(options=options):
+                if self.archive.exists():
+                    self.archive.unlink()
+                image_id = self._write_classic_archive(**options)
+                with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):
+                    self._attest(image_id)
 
     def test_changed_archive_or_evidence_fails_producer_digest_binding(self):
         image_id = self._write_classic_archive()

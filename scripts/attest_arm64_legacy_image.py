@@ -30,6 +30,9 @@ OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
 IMAGE_REF_RE = re.compile(
     r"^[a-z0-9][a-z0-9._/-]{0,199}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
 )
+DOCKER_MANIFEST_FIELDS = frozenset({"Config", "RepoTags", "Layers"})
+DOCKER_MANIFEST_OPTIONAL_FIELDS = frozenset({"LayerSources"})
+LAYER_SOURCE_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar"
 
 EXPECTED_LABELS = {
     "com.backupsheep.rabbitmq.base-index-digest": (
@@ -86,6 +89,77 @@ def _string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise EvidenceError(f"{label} must be a non-empty string")
     return value
+
+
+def _docker_manifest_entry(value: Any) -> dict[str, Any]:
+    entry = _mapping(value, "Docker manifest entry")
+    fields = frozenset(entry)
+    if not DOCKER_MANIFEST_FIELDS.issubset(fields) or not fields.issubset(
+        DOCKER_MANIFEST_FIELDS | DOCKER_MANIFEST_OPTIONAL_FIELDS
+    ):
+        raise EvidenceError("Docker manifest entry shape is not canonical")
+    return entry
+
+
+def _validated_layer_sources(
+    manifest_entry: dict[str, Any], layer_records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if "LayerSources" not in manifest_entry:
+        return []
+    sources = _mapping(manifest_entry["LayerSources"], "Docker layer sources")
+    layers_by_diff_id = {record["diff_id"]: record for record in layer_records}
+    if not sources or set(sources) != set(layers_by_diff_id):
+        raise EvidenceError("Docker layer sources do not bind every Docker layer")
+
+    records: list[dict[str, Any]] = []
+    source_digests: set[str] = set()
+    for layer_record in layer_records:
+        diff_id = layer_record["diff_id"]
+        descriptor = _mapping(
+            sources[diff_id],
+            f"Docker layer source {layer_record['position']}",
+        )
+        if set(descriptor) != {"mediaType", "size", "digest"}:
+            raise EvidenceError("Docker layer source descriptor shape is not canonical")
+        media_type = _string(
+            descriptor.get("mediaType"),
+            f"Docker layer source {layer_record['position']} media type",
+        )
+        if media_type != LAYER_SOURCE_MEDIA_TYPE:
+            raise EvidenceError("Docker layer source media type is unsupported")
+        size = descriptor.get("size")
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+            or size > MAX_ARCHIVE_BYTES
+        ):
+            raise EvidenceError(
+                "Docker layer source size is outside the accepted boundary"
+            )
+        digest = _string(
+            descriptor.get("digest"),
+            f"Docker layer source {layer_record['position']} digest",
+        )
+        if not SHA256_RE.fullmatch(digest) or digest in source_digests:
+            raise EvidenceError(
+                "Docker layer source digest is malformed or duplicate"
+            )
+        source_digests.add(digest)
+        if digest != layer_record["sha256"] or size != layer_record["size"]:
+            raise EvidenceError(
+                "Docker layer source does not match the exported layer"
+            )
+        records.append(
+            {
+                "diff_id": diff_id,
+                "digest": digest,
+                "media_type": media_type,
+                "position": layer_record["position"],
+                "size": size,
+            }
+        )
+    return records
 
 
 def _regular_file(path: Path, maximum_bytes: int, label: str) -> os.stat_result:
@@ -247,15 +321,32 @@ def _oci_binding(
     )
     if index.get("schemaVersion") != 2:
         raise EvidenceError("OCI index schema is not supported")
-    descriptors = _list(index.get("manifests"), "OCI index manifests")
-    matching = [
+    descriptors = [
         _mapping(descriptor, "OCI index descriptor")
-        for descriptor in descriptors
-        if isinstance(descriptor, dict) and descriptor.get("digest") == expected_image_id
+        for descriptor in _list(index.get("manifests"), "OCI index manifests")
     ]
-    if len(matching) != 1:
-        raise EvidenceError("Docker image ID is not uniquely bound by the OCI index")
-    top_descriptor = matching[0]
+    moby_direct_manifest = expected_image_id == config_digest
+    if moby_direct_manifest:
+        if (
+            len(descriptors) != 1
+            or descriptors[0].get("mediaType")
+            != "application/vnd.oci.image.manifest.v1+json"
+        ):
+            raise EvidenceError(
+                "Moby OCI index does not contain one direct image manifest"
+            )
+        top_descriptor = descriptors[0]
+    else:
+        matching = [
+            descriptor
+            for descriptor in descriptors
+            if descriptor.get("digest") == expected_image_id
+        ]
+        if len(matching) != 1:
+            raise EvidenceError(
+                "Docker image ID is not uniquely bound by the OCI index"
+            )
+        top_descriptor = matching[0]
     top_member = _validate_descriptor_blob(
         top_descriptor, members, member_records, "OCI top-level descriptor"
     )
@@ -273,7 +364,9 @@ def _oci_binding(
     )
 
     media_type = top_descriptor.get("mediaType")
-    if media_type == "application/vnd.oci.image.index.v1+json":
+    if moby_direct_manifest:
+        image_descriptor = top_descriptor
+    elif media_type == "application/vnd.oci.image.index.v1+json":
         child_descriptors = _list(
             top_payload.get("manifests"), "OCI image-index manifests"
         )
@@ -396,9 +489,7 @@ def inspect_archive(
         )
         if len(docker_manifest) != 1:
             raise EvidenceError("Docker archive must contain exactly one image")
-        manifest_entry = _mapping(docker_manifest[0], "Docker manifest entry")
-        if set(manifest_entry) != {"Config", "RepoTags", "Layers"}:
-            raise EvidenceError("Docker manifest entry shape is not canonical")
+        manifest_entry = _docker_manifest_entry(docker_manifest[0])
         repo_tags = _list(manifest_entry.get("RepoTags"), "Docker repository tags")
         if repo_tags != [expected_image_ref]:
             raise EvidenceError("Docker archive repository tag is not the expected exact tag")
@@ -463,6 +554,9 @@ def inspect_archive(
                     "size": record["size"],
                 }
             )
+        docker_layer_sources = _validated_layer_sources(
+            manifest_entry, layer_records
+        )
 
         oci = _oci_binding(
             archive,
@@ -500,6 +594,7 @@ def inspect_archive(
             "size": len(config_payload),
         },
         "docker_image_id": expected_image_id,
+        "docker_layer_sources": docker_layer_sources,
         "docker_manifest": {
             "member": "manifest.json",
             "sha256": f"sha256:{hashlib.sha256(manifest_payload).hexdigest()}",
@@ -631,11 +726,7 @@ def _retag_archive(source_path: Path, target_path: Path, image_ref: str) -> None
                             raise EvidenceError(
                                 "Docker archive must contain exactly one image"
                             )
-                        entry = _mapping(manifest[0], "Docker manifest entry")
-                        if set(entry) != {"Config", "RepoTags", "Layers"}:
-                            raise EvidenceError(
-                                "Docker manifest entry shape is not canonical"
-                            )
+                        entry = _docker_manifest_entry(manifest[0])
                         entry = dict(entry)
                         entry["RepoTags"] = [image_ref]
                         payload = (
@@ -689,6 +780,7 @@ def retag(arguments: argparse.Namespace) -> str:
     for key in (
         "config",
         "docker_image_id",
+        "docker_layer_sources",
         "layers",
         "oci",
         "ownership",
