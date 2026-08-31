@@ -1580,6 +1580,18 @@ raise SystemExit(99)
         self.assertIn("question.qtype != 1U && question.qtype != 28U", dns_proxy)
         self.assertIn("two-byte immutable-name index", dns_proxy)
         self.assertIn("SO_PEERCRED", dns_proxy)
+        self.assertIn(
+            "encode_question(&question, response, response_length,",
+            dns_proxy,
+        )
+        self.assertLess(
+            dns_proxy.index(
+                "encode_question(&question, response, response_length,"
+            ),
+            dns_proxy.index(
+                "memcpy(response, request, 2U); /* restore only the workload's local ID */"
+            ),
+        )
         self.assertIn("DNS_FORWARDER_UID 10022U", dns_forwarder)
         self.assertIn("received == 2", dns_forwarder)
         self.assertIn("peer.uid != DNS_PROXY_UID", dns_forwarder)
