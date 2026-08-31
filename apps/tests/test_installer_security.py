@@ -3305,6 +3305,14 @@ fi
         self.assertEqual(candidate_registry["version"], 2)
         self.assertEqual(candidate_registry["generation"], 2)
 
+    def test_noop_celery_signing_rotation_returns_success_to_fail_fast_installer(self):
+        result = self.run_installer_functions(
+            "finalize_celery_signing_rotation\n"
+            "printf 'installer-continued\\n'"
+        )
+
+        self.assertEqual(result.stdout, "installer-continued\n")
+
     def test_artifact_lane_keyrings_require_distinct_ids_and_material(self):
         secret_dir = self.temp_dir / ".secrets"
         secret_dir.mkdir(mode=0o700)

@@ -3382,7 +3382,7 @@ finalize_celery_signing_rotation() {
     local temporary=""
 
     security_generation="$(read_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION)"
-    [[ "$security_generation" == 3-pending-rotation ]] || return
+    [[ "$security_generation" == 3-pending-rotation ]] || return 0
     [[ "$ROTATE_CELERY_SIGNING_KEYS" == true ]] \
         || die "Celery key rotation is pending; rerun with --rotate-celery-signing-keys."
     signing_generation="$(read_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION)"
