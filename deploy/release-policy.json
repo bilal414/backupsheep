@@ -135,7 +135,7 @@
     "secondary_scanner_version": "0.116.1",
     "database": {
       "lock_path": "deploy/trivy-db-lock.json",
-      "lock_sha256": "sha256:097deeec887a7deeda154ed12211062caaab9cc2d4898f7f12ebce689f6accae"
+      "lock_sha256": "sha256:dd5161885e56cd0cd4211ed0e96afc63ea00a61a265129f3fcb49628184e95ef"
     },
     "secondary_database": {
       "lock_path": "deploy/grype-db-lock.json",
