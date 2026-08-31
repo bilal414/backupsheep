@@ -56,6 +56,7 @@ docker_resource_label() {
 }
 
 for name in TEST_APP_IMAGE TEST_POSTGRES_IMAGE TEST_EGRESS_IMAGE \
+    TEST_RABBITMQ_IMAGE \
     TEST_TOPOLOGY_PROJECT TEST_OWNERSHIP_VALUE; do
     [[ -n "${!name:-}" ]] || fail "${name} is required."
 done
@@ -70,7 +71,8 @@ if docker info --format '{{json .SecurityOptions}}' | grep -q 'name=rootless'; t
     fail "the file-secret topology requires a rootful Docker daemon."
 fi
 
-for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE"; do
+for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" \
+    "$TEST_RABBITMQ_IMAGE"; do
     docker image inspect "$image" >/dev/null 2>&1 \
         || fail "the required local image ${image} is absent."
     [[ "$(docker_resource_label image "$image" com.backupsheep.ci-run)" == "$TEST_OWNERSHIP_VALUE" ]] \
@@ -297,6 +299,7 @@ cat > "$environment_file" <<EOF
 BACKUPSHEEP_IMAGE=${TEST_APP_IMAGE}
 BACKUPSHEEP_POSTGRES_IMAGE=${TEST_POSTGRES_IMAGE}
 BACKUPSHEEP_EGRESS_IMAGE=${TEST_EGRESS_IMAGE}
+BACKUPSHEEP_RABBITMQ_IMAGE=${TEST_RABBITMQ_IMAGE}
 BACKUPSHEEP_COMPOSE_PROJECT_NAME=${TEST_TOPOLOGY_PROJECT}
 BACKUPSHEEP_INSTALLATION_ID=${installation_id}
 BACKUPSHEEP_POSTGRES_STORAGE_GENERATION=18-alpine-icu-v1-pending-fresh
@@ -349,7 +352,8 @@ EOF
 chmod 0600 "$environment_file"
 
 compose --profile operations config --format json > "$rendered_config"
-python3 - "$rendered_config" "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE" <<'PY'
+python3 - "$rendered_config" "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" \
+    "$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" <<'PY'
 import json
 import pathlib
 import sys
@@ -371,6 +375,9 @@ expected_images = {
     "worker-cloud": sys.argv[2],
     "worker-database": sys.argv[2],
     "worker-files": sys.argv[2],
+    "rabbitmq-volume-init": sys.argv[5],
+    "rabbitmq": sys.argv[5],
+    "rabbitmq-provision": sys.argv[5],
 }
 for service, expected in expected_images.items():
     actual = services[service].get("image")
@@ -378,13 +385,6 @@ for service, expected in expected_images.items():
         raise SystemExit(f"{service} image drifted: {actual!r}")
     if services[service].get("pull_policy") != "never":
         raise SystemExit(f"{service} does not fail closed on a missing local image")
-expected_rabbitmq = (
-    "rabbitmq:4.3.5-alpine@sha256:"
-    "290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240"
-)
-for service in ("rabbitmq-volume-init", "rabbitmq", "rabbitmq-provision"):
-    if services[service].get("image") != expected_rabbitmq:
-        raise SystemExit(f"{service} does not use the reviewed RabbitMQ digest")
 for service in (
     "app-egress-guard",
     "cloud-egress-guard",
@@ -526,6 +526,9 @@ assert_guard_healthy() {
 }
 for service in db; do
     assert_runtime_image "$service" "$TEST_POSTGRES_IMAGE"
+done
+for service in rabbitmq-volume-init rabbitmq rabbitmq-provision; do
+    assert_runtime_image "$service" "$TEST_RABBITMQ_IMAGE"
 done
 db_container="$(compose ps --all --quiet db)"
 docker exec "$db_container" /usr/local/bin/backupsheep-postgres-storage-witness finalize-fresh \

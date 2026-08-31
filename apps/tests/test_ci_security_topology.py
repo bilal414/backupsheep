@@ -125,6 +125,25 @@ class CISecurityTopologyContractTests(TestCase):
             "BACKUPSHEEP_RABBITMQ_NODE_HOST=rabbitmq", self.runner
         )
 
+    def test_topology_uses_the_exact_built_and_scanned_rabbitmq_image(self):
+        for expected in (
+            "    TEST_RABBITMQ_IMAGE \\",
+            "    TEST_TOPOLOGY_PROJECT TEST_OWNERSHIP_VALUE",
+            '"$TEST_RABBITMQ_IMAGE"; do',
+            "BACKUPSHEEP_RABBITMQ_IMAGE=${TEST_RABBITMQ_IMAGE}",
+            '"$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" <<\'PY\'',
+            '"rabbitmq-volume-init": sys.argv[5]',
+            '"rabbitmq": sys.argv[5]',
+            '"rabbitmq-provision": sys.argv[5]',
+            'assert_runtime_image "$service" "$TEST_RABBITMQ_IMAGE"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.runner)
+        self.assertNotIn(
+            "290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240",
+            self.runner,
+        )
+
     def test_recurring_workflow_scans_exact_images_with_strict_pinned_tools(self):
         gate = self.workflow.split("  application-security-regression:\n", 1)[1]
         job_environment = gate.split("    steps:\n", 1)[0]
@@ -1338,6 +1357,7 @@ database_password=test-only-password
             TEST_APP_IMAGE="unused-app",
             TEST_POSTGRES_IMAGE="unused-postgres",
             TEST_EGRESS_IMAGE="unused-egress",
+            TEST_RABBITMQ_IMAGE="unused-rabbitmq",
             TEST_TOPOLOGY_PROJECT="BackupsheepCI",
             TEST_OWNERSHIP_VALUE="unused-owner",
         )
@@ -1426,6 +1446,7 @@ raise SystemExit(99)
                     TEST_APP_IMAGE="test-app",
                     TEST_POSTGRES_IMAGE="test-postgres",
                     TEST_EGRESS_IMAGE="test-egress",
+                    TEST_RABBITMQ_IMAGE="test-rabbitmq",
                     TEST_TOPOLOGY_PROJECT="backupsheep-ci",
                     TEST_OWNERSHIP_VALUE="expected-owner",
                 )
