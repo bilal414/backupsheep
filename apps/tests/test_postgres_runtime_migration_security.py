@@ -506,6 +506,22 @@ class PostgresSourceIdentityContractTests(TestCase):
         self.assertLess(source.index(reset_guard), source.index('volume rm "$target_volume"'))
         self.assertLess(source.index(create_guard), source.index("volume create \\\n"))
 
+    def test_empty_target_witness_receives_validated_database_identity(self):
+        source = MIGRATOR.read_text(encoding="utf-8")
+        entrypoint = (
+            "--entrypoint /usr/local/bin/backupsheep-postgres-storage-witness"
+        )
+        end = source.index('"$target_image_id" initialize-migration')
+        start = source.rindex(entrypoint, 0, end)
+        invocation = source[start:end]
+
+        for environment in (
+            '-e "POSTGRES_DB=${database_name}"',
+            '-e "POSTGRES_USER=${bootstrap_user}"',
+        ):
+            with self.subTest(environment=environment):
+                self.assertEqual(invocation.count(environment), 1)
+
     def test_restore_is_unprivileged_and_code_bearing_objects_are_preflighted(self):
         source = MIGRATOR.read_text(encoding="utf-8")
         self.assertIn(

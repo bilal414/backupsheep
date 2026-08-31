@@ -670,6 +670,7 @@ restore_role="backupsheep_restore_${storage_witness:0:24}"
     -e "BACKUPSHEEP_INSTALLATION_ID=${installation_id}" \
     -e "BACKUPSHEEP_POSTGRES_STORAGE_INTENT=${storage_intent}" \
     -e "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS=${storage_witness}" \
+    -e "POSTGRES_DB=${database_name}" -e "POSTGRES_USER=${bootstrap_user}" \
     -v "${target_volume}:/var/lib/postgresql" \
     "$target_image_id" initialize-migration >/dev/null || die "could not witness the empty migration target"
 
