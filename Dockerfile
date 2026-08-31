@@ -386,15 +386,35 @@ RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt,target
         'Acquire::https::CaInfo "/tmp/backupsheep-build-ca-certificates.crt";' \
         > /etc/apt/apt.conf.d/99backupsheep-build-ca; \
     printf '%s\n' \
-        'Acquire::Retries "5";' \
+        'Acquire::Retries "3";' \
         'Acquire::https::Timeout "30";' \
         > /etc/apt/apt.conf.d/98backupsheep-snapshot-retries; \
+    snapshot_apt_retry() { \
+        snapshot_attempt=1; \
+        while [ "$snapshot_attempt" -le 4 ]; do \
+            if "$@"; then \
+                return 0; \
+            else \
+                snapshot_status=$?; \
+            fi; \
+            if [ "$snapshot_status" -ge 126 ]; then \
+                return "$snapshot_status"; \
+            fi; \
+            case "$snapshot_attempt" in \
+                1) sleep 15 ;; \
+                2) sleep 30 ;; \
+                3) sleep 60 ;; \
+                4) return "$snapshot_status" ;; \
+            esac; \
+            snapshot_attempt=$((snapshot_attempt + 1)); \
+        done; \
+    }; \
     rm -rf /var/lib/apt/lists/*; \
     install -d -m 0755 /runtime-debs/partial /extract-debs \
         /mariadb-dump-package/DEBIAN \
         /mariadb-dump-package/usr/bin \
         /mariadb-dump-package/usr/share/backupsheep/provenance; \
-    apt-get -o APT::Update::Error-Mode=any update; \
+    snapshot_apt_retry apt-get -o APT::Update::Error-Mode=any update; \
     snapshot_uris="$(apt-get indextargets --format '$(URI)' | LC_ALL=C sort -u)"; \
     test -n "$snapshot_uris"; \
     for snapshot_uri in $snapshot_uris; do \
@@ -409,7 +429,7 @@ RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt,target
         esac; \
     done; \
     cd /extract-debs; \
-    apt-get download "mariadb-client=1:11.8.6-5ubuntu0.1"; \
+    snapshot_apt_retry apt-get download "mariadb-client=1:11.8.6-5ubuntu0.1"; \
     mariadb_archive="$(find /extract-debs -maxdepth 1 -type f -name 'mariadb-client_*.deb' -print -quit)"; \
     test -n "$mariadb_archive"; \
     test "$(dpkg-deb --field "$mariadb_archive" Package)" = "mariadb-client"; \
@@ -446,7 +466,8 @@ RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt,target
     test "$(dpkg-deb --field /runtime-debs/backupsheep-mariadb-dump_*.deb Package)" = "backupsheep-mariadb-dump"; \
     test "$(dpkg-deb --field /runtime-debs/backupsheep-mariadb-dump_*.deb Version)" = "11.8.6-5ubuntu0.1+backupsheep1"; \
     cd /; \
-    DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends \
+    snapshot_apt_retry env DEBIAN_FRONTEND=noninteractive \
+        apt-get -y --no-install-recommends \
         -o Dir::Cache::archives=/runtime-debs \
         --download-only install \
         "bsdutils=1:2.41.3-3ubuntu2" \

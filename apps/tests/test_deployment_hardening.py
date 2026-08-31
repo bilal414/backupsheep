@@ -210,7 +210,16 @@ class DeploymentHardeningContractTests(TestCase):
             "Components: main",
             "Architectures: amd64",
             "APT::Update::Error-Mode=any",
-            'Acquire::Retries "5"',
+            "snapshot_apt_retry()",
+            'while [ "$snapshot_attempt" -le 4 ]; do',
+            '1) sleep 15',
+            '2) sleep 30',
+            '3) sleep 60',
+            '4) return "$snapshot_status"',
+            'if [ "$snapshot_status" -ge 126 ]; then',
+            "snapshot_apt_retry apt-get -o APT::Update::Error-Mode=any update",
+            "snapshot_apt_retry apt-get install --yes --no-install-recommends --only-upgrade",
+            'Acquire::Retries "3"',
             'Acquire::https::Timeout "30"',
             "apt-get indextargets --format '$(URI)'",
             "Ubuntu metadata escaped the reviewed snapshot:",
@@ -234,6 +243,9 @@ class DeploymentHardeningContractTests(TestCase):
             "USER 999:999",
         ):
             self.assertIn(expected, legacy)
+        self.assertEqual(legacy.count("snapshot_apt_retry "), 2)
+        self.assertIn("else \\\n                snapshot_status=$?;", legacy)
+        self.assertNotIn("|| true", legacy)
         self.assertIn(
             "rm -f \\\n        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries",
             legacy,

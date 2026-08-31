@@ -61,15 +61,35 @@ RUN --mount=from=openssl-runtime,source=/etc/ssl/certs/ca-certificates.crt,targe
         'Acquire::https::CaInfo "/tmp/backupsheep-build-ca-certificates.crt";' \
         > /etc/apt/apt.conf.d/99backupsheep-build-ca; \
     printf '%s\n' \
-        'Acquire::Retries "5";' \
+        'Acquire::Retries "3";' \
         'Acquire::https::Timeout "30";' \
         > /etc/apt/apt.conf.d/98backupsheep-snapshot-retries; \
+    snapshot_apt_retry() { \
+        snapshot_attempt=1; \
+        while [ "$snapshot_attempt" -le 4 ]; do \
+            if "$@"; then \
+                return 0; \
+            else \
+                snapshot_status=$?; \
+            fi; \
+            if [ "$snapshot_status" -ge 126 ]; then \
+                return "$snapshot_status"; \
+            fi; \
+            case "$snapshot_attempt" in \
+                1) sleep 15 ;; \
+                2) sleep 30 ;; \
+                3) sleep 60 ;; \
+                4) return "$snapshot_status" ;; \
+            esac; \
+            snapshot_attempt=$((snapshot_attempt + 1)); \
+        done; \
+    }; \
     rm -rf /var/lib/apt/lists/*; \
     rm -rf /opt/openssl; \
     mv /opt/openssl-3.5.8 /opt/openssl; \
     rm -rf /opt/erlang; \
     mv /opt/erlang-26.2.5.21 /opt/erlang; \
-    apt-get -o APT::Update::Error-Mode=any update; \
+    snapshot_apt_retry apt-get -o APT::Update::Error-Mode=any update; \
     snapshot_uris="$(apt-get indextargets --format '$(URI)' | LC_ALL=C sort -u)"; \
     test -n "$snapshot_uris"; \
     for snapshot_uri in $snapshot_uris; do \
@@ -80,7 +100,7 @@ RUN --mount=from=openssl-runtime,source=/etc/ssl/certs/ca-certificates.crt,targe
             *) echo "Ubuntu metadata escaped the reviewed snapshot: $snapshot_uri" >&2; exit 1 ;; \
         esac; \
     done; \
-    apt-get install --yes --no-install-recommends --only-upgrade \
+    snapshot_apt_retry apt-get install --yes --no-install-recommends --only-upgrade \
         'gpgv=2.4.4-2ubuntu17.4' \
         'libssl3t64=3.0.13-0ubuntu3.15' \
         'openssl=3.0.13-0ubuntu3.15'; \

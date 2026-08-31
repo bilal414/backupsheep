@@ -257,17 +257,30 @@ class RuntimeImageHardeningTests(TestCase):
             "Architectures: amd64",
             "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg",
             "APT::Update::Error-Mode=any",
+            "snapshot_apt_retry()",
+            'while [ "$snapshot_attempt" -le 4 ]; do',
+            '1) sleep 15',
+            '2) sleep 30',
+            '3) sleep 60',
+            '4) return "$snapshot_status"',
+            'if [ "$snapshot_status" -ge 126 ]; then',
+            "snapshot_apt_retry apt-get -o APT::Update::Error-Mode=any update",
+            'snapshot_apt_retry apt-get download "mariadb-client=1:11.8.6-5ubuntu0.1"',
+            "snapshot_apt_retry env DEBIAN_FRONTEND=noninteractive",
             "apt-get indextargets --format '$(URI)'",
             'test "$(dpkg --print-architecture)" = amd64',
             "Ubuntu metadata escaped the reviewed snapshot:",
             "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
             "RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt",
             "Acquire::https::CaInfo",
-            'Acquire::Retries "5"',
+            'Acquire::Retries "3"',
             'Acquire::https::Timeout "30"',
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, stage)
+        self.assertEqual(stage.count("snapshot_apt_retry "), 3)
+        self.assertIn("else \\\n                snapshot_status=$?;", stage)
+        self.assertNotIn("|| true", stage)
         self.assertIn(
             "rm -f \\\n        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries",
             stage,
