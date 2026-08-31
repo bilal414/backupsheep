@@ -199,7 +199,7 @@ class CISecurityTopologyContractTests(TestCase):
         self.assertGreaterEqual(gate.count('vex "$materialized_vex"'), 1)
 
     def test_workflow_runs_genuine_rabbitmq_version_migration_gate(self):
-        expected_call = """          timeout --signal=TERM --kill-after=30s 10m \\
+        expected_call = """          timeout --signal=TERM --kill-after=30s 30m \\
             deploy/ci/run-rabbitmq-version-migration-e2e.sh \\
             "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" \\
             "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \\
@@ -261,7 +261,7 @@ class CISecurityTopologyContractTests(TestCase):
         arm_gate = self.workflow.split(
             "  rabbitmq-arm64-migration:\n", 1
         )[1].split("  application-security-regression:\n", 1)[0]
-        expected_call = """          timeout --signal=TERM --kill-after=30s 10m \\
+        expected_call = """          timeout --signal=TERM --kill-after=30s 30m \\
             deploy/ci/run-rabbitmq-version-migration-e2e.sh \\
             "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" \\
             "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \\

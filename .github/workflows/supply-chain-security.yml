@@ -639,7 +639,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=30s 10m \
+          # Eight bounded broker starts may each consume part of their 180-second
+          # readiness allowance on a cold native runner. Keep one outer deadline
+          # above that reviewed aggregate without weakening any inner assertion.
+          timeout --signal=TERM --kill-after=30s 30m \
             deploy/ci/run-rabbitmq-version-migration-e2e.sh \
             "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" \
             "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \
@@ -921,7 +924,9 @@ jobs:
             "$TEST_RABBITMQ_UPGRADE_IMAGE" \
             "bs-rmq-entrypoint-$TEST_OWNERSHIP_VALUE" \
             "$TEST_OWNERSHIP_VALUE"
-          timeout --signal=TERM --kill-after=30s 10m \
+          # Match the native gate's reviewed aggregate deadline. The harness keeps
+          # its per-start bounds and fails every incomplete migration assertion.
+          timeout --signal=TERM --kill-after=30s 30m \
             deploy/ci/run-rabbitmq-version-migration-e2e.sh \
             "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" \
             "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \
