@@ -20,11 +20,26 @@ over the exact platform wheelhouse. The final image installs that wheelhouse off
 Regenerate the lock only as a reviewed dependency change. A changed direct-constraint
 digest, missing artifact hash or unexpected dependency causes the image build to fail.
 
+## Ubuntu runtime snapshot
+
+The application and RabbitMQ migration images resolve their Ubuntu packages only from
+the fixed, signed `20260831T131500Z` Ubuntu archive snapshot. Both source definitions
+are AMD64-only, replace every inherited APT source, reject partial index updates, and
+verify that every loaded package index came from the exact snapshot URI. The final
+images retain neither an APT source nor the build-only CA bootstrap.
+
+A frozen snapshot prevents repository drift; it does not provide automatic patching.
+For every release, review current Ubuntu Security Notices, advance the snapshot and
+exact package pins together, and rerun the full image, SBOM, Trivy, and Grype gates.
+Canonical currently commits to retaining snapshots for at least two years, so retain or
+mirror the signed package artifacts required for longer historical rebuilds. See the
+[Ubuntu Snapshot Service](https://snapshot.ubuntu.com/).
+
 ## Remaining reproducibility gate
 
 Hash authentication is not byte-for-byte reproducibility. Locally built wheels can differ
-by toolchain/date, and signed Debian/PGDG repository snapshots can change even though the
-Dockerfile exact-version selects packages. Before calling a release fully reproducible:
+by toolchain/date, and live signed Debian/PGDG repository inputs can change even though
+the Dockerfile exact-version selects packages. Before calling a release fully reproducible:
 
 1. build and test the exact commit on the sole supported platform, Linux `amd64`, with
    the pinned Dockerfile frontend/base image and compare the dependency inventory with

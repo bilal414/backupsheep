@@ -203,6 +203,20 @@ class DeploymentHardeningContractTests(TestCase):
             'openssl-runtime-version="3.5.8"',
             "COPY --from=openssl-runtime /opt/openssl/ /opt/openssl-3.5.8/",
             "COPY --from=erlang-runtime /usr/local/lib/erlang/ /opt/erlang-26.2.5.21/",
+            "RUN --mount=from=openssl-runtime,source=/etc/ssl/certs/ca-certificates.crt",
+            "snapshot_id='20260831T131500Z'",
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/",
+            "Suites: noble noble-updates noble-security",
+            "Components: main",
+            "Architectures: amd64",
+            "APT::Update::Error-Mode=any",
+            "apt-get indextargets --format '$(URI)'",
+            "Ubuntu metadata escaped the reviewed snapshot:",
+            "9481fcd95f41b221f02f14d896535fe500bec539bc563c4cdca1acee483a8bdd",
+            'com.backupsheep.ubuntu.snapshot="20260831T131500Z"',
+            'test "$(dpkg --print-architecture)" = amd64',
+            "test ! -e /etc/apt/sources.list",
+            "find /etc/apt/sources.list.d -mindepth 1 -maxdepth 1",
             "ENV LD_LIBRARY_PATH=/opt/openssl/lib",
             "/opt/erlang/releases/26/OTP_VERSION",
             "crypto:info_lib()",
@@ -220,6 +234,17 @@ class DeploymentHardeningContractTests(TestCase):
             self.assertIn(expected, legacy)
         self.assertNotIn("apt-get upgrade", legacy)
         self.assertNotIn("dist-upgrade", legacy)
+        self.assertNotIn("archive.ubuntu.com", legacy)
+        self.assertNotIn("security.ubuntu.com", legacy)
+        for forbidden in (
+            "trusted=yes",
+            "AllowUnauthenticated",
+            "Check-Valid-Until",
+            "Verify-Peer",
+            "Verify-Host",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, legacy)
 
     def test_release_verifier_rebuilds_exact_cosign_source_with_fixed_graph(self):
         dockerfile = (ROOT / "Dockerfile.release-verifier").read_text(

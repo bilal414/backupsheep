@@ -62,6 +62,24 @@ As requested, it does not own or change:
 The installer validates the Docker capabilities it needs and fails closed when its
 container contract is absent. It does not modify the host to create those conditions.
 
+## Ubuntu runtime supply-chain correction
+
+The final AMD64 candidate resolves Ubuntu runtime packages only through the fixed,
+signed `20260831T131500Z` archive snapshot. It replaces all inherited APT sources,
+rejects partial index updates, checks every loaded index URI against an exact allowlist,
+and removes APT sources from the final application and RabbitMQ migration images. The
+snapshot TLS bootstrap is an ephemeral mount from a digest-pinned donor image and is
+hash-checked before use.
+
+This correction also advances the Resolute OpenSSL runtime from
+`3.5.5-1ubuntu3.4` to `3.5.5-1ubuntu3.5`. Ubuntu records that the initially announced
+`.4` build did not actually close
+[CVE-2026-75803](https://ubuntu.com/security/CVE-2026-75803); the signed `.5` source
+changelog contains the follow-up fix. A disposable native AMD64 resolver probe loaded
+only the exact snapshot indexes and downloaded the complete 47-package runtime closure.
+That probe is dependency evidence, not a substitute for the exact committed image build
+and vulnerability gates.
+
 ## Updated threat model
 
 The KMS replacement assumes an attacker may:
@@ -355,6 +373,7 @@ path is dormant rather than a current gate.
 | Signed-upgrade refusal contract | Pass | former stage/upgrade forms made no Docker call, mutation lock, or installation byte/metadata change |
 | Enterprise docs and Bruno validation | Pass | 891 API operations and 298 configuration variables |
 | JavaScript production dependency audit | 0 vulnerabilities | lockfile-only high-severity audit |
+| Fixed Ubuntu AMD64 snapshot resolver probe | Pass; 47 runtime debs | exact `20260831T131500Z` signed indexes, OpenSSL `.5`, no live-source fallback, and complete probe cleanup; final image build remains a release gate |
 | Shell/Python syntax and whitespace checks | Pass | implementation snapshot |
 
 The complete BSE1 envelope suite depends on Linux `O_TMPFILE`/`linkat` behavior and is
