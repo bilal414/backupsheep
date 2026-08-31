@@ -576,7 +576,7 @@ jobs:
           docker pull --platform linux/arm64 "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE"
 
           historical_source_repo_digests="$(
-            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            docker image inspect --format '{{join .RepoDigests "\n"}}' \
               "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" | LC_ALL=C sort
           )"
           test "$historical_source_repo_digests" = \
@@ -869,7 +869,7 @@ jobs:
           historical_source_image_id="$(docker image inspect --format '{{.Id}}' "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE")"
           [[ "$historical_source_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
           historical_source_repo_digests="$(
-            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            docker image inspect --format '{{join .RepoDigests "\n"}}' \
               "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" | LC_ALL=C sort
           )"
           [[ "$historical_source_repo_digests" == "$TEST_RABBITMQ_HISTORICAL_SOURCE_REPO_DIGEST" ]]
