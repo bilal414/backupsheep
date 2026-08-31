@@ -25,8 +25,11 @@ from typing import Any
 
 MAX_CONTROL_BYTES = 1024 * 1024
 MAX_ORAS_OUTPUT_BYTES = 1024 * 1024
+MAX_TAG_LIST_BYTES = 4 * 1024 * 1024
+MAX_REPOSITORY_TAGS = 100_000
 ORAS_TIMEOUT_SECONDS = 600
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+OCI_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 CANDIDATE_TAG_RE = re.compile(
     r"^bootstrap-[0-9a-f]{40}-[1-9][0-9]*-[1-9][0-9]*$"
 )
@@ -312,12 +315,7 @@ def _oras_environment() -> dict[str, str]:
     }
 
 
-def _run_oras(
-    oras: Path,
-    arguments: list[str],
-    *,
-    allow_not_found: bool = False,
-) -> str:
+def _run_oras(oras: Path, arguments: list[str]) -> str:
     try:
         result = subprocess.run(
             [str(oras), *arguments],
@@ -337,17 +335,6 @@ def _run_oras(
         raise PublicationError("ORAS emitted oversized output")
     if result.returncode:
         detail = (stderr or stdout).strip()
-        normalized = detail.lower()
-        if allow_not_found and any(
-            marker in normalized
-            for marker in (
-                "manifest_unknown",
-                "manifest unknown",
-                "not found",
-                "404",
-            )
-        ):
-            return "NOT_FOUND"
         raise PublicationError(f"ORAS failed closed: {detail[:1000]}")
     return stdout
 
@@ -356,18 +343,17 @@ def _fetch_exact(
     oras: Path,
     reference: str,
     expected: bytes,
-    *,
-    allow_not_found: bool = False,
-) -> bool:
+) -> None:
     with tempfile.TemporaryDirectory(prefix="backupsheep-verifier-fetch-") as temporary:
         output = Path(temporary) / "manifest.json"
         status = _run_oras(
             oras,
             ["manifest", "fetch", "--output", str(output), reference],
-            allow_not_found=allow_not_found,
         )
-        if status == "NOT_FOUND":
-            return False
+        if status:
+            raise PublicationError(
+                f"ORAS emitted unexpected manifest output for {reference}"
+            )
         actual = _read_regular(
             output,
             maximum=MAX_CONTROL_BYTES,
@@ -375,7 +361,39 @@ def _fetch_exact(
         )
     if not secrets_compare(actual, expected):
         raise PublicationError(f"registry reference has different index bytes: {reference}")
-    return True
+
+
+def _repository_tags(oras: Path, repository: str) -> set[str]:
+    """Return a bounded tag set only from a successful authenticated listing."""
+
+    raw = _run_oras(oras, ["repo", "tags", "--format", "json", repository])
+    try:
+        encoded = raw.encode("utf-8")
+    except UnicodeError as exc:
+        raise PublicationError("ORAS returned a non-UTF-8 tag inventory") from exc
+    if not encoded or len(encoded) > MAX_TAG_LIST_BYTES:
+        raise PublicationError("ORAS returned an invalid-size tag inventory")
+    try:
+        document = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError("ORAS returned malformed tag inventory JSON") from exc
+    if not isinstance(document, dict) or set(document) != {"tags"}:
+        raise PublicationError("ORAS tag inventory has an unexpected schema")
+    tags = document["tags"]
+    if not isinstance(tags, list) or len(tags) > MAX_REPOSITORY_TAGS:
+        raise PublicationError("ORAS tag inventory has an invalid tag set")
+    if any(
+        not isinstance(tag, str) or OCI_TAG_RE.fullmatch(tag) is None
+        for tag in tags
+    ):
+        raise PublicationError("ORAS tag inventory contains a malformed tag")
+    if len(set(tags)) != len(tags):
+        raise PublicationError("ORAS tag inventory contains duplicate tags")
+    return set(tags)
 
 
 def secrets_compare(left: bytes, right: bytes) -> bool:
@@ -452,32 +470,39 @@ def publish(
     official_tag_reference = f"{official_repository}:{stable_tag}"
     official_digest_reference = f"{official_repository}@{index_digest}"
 
-    # Classify every mutable destination before the first write. Exact content
-    # is a resumable state; any other outcome (including auth/TLS/timeouts) is a
-    # hard failure rather than permission to replace a tag.
-    quarantine_exists = _fetch_exact(
-        oras,
-        quarantine_tag_reference,
-        index,
-        allow_not_found=True,
-    )
-    official_exists = _fetch_exact(
-        oras,
-        official_tag_reference,
-        index,
-        allow_not_found=True,
-    )
+    # Classify every mutable destination before the first write. Only a
+    # successful, strict tag inventory can prove absence: registries commonly
+    # mask denied reads as a generic 404, so an error string never authorizes a
+    # tag write. Both package repositories must therefore exist before this
+    # one-time publication ceremony starts.
+    quarantine_tags = _repository_tags(oras, quarantine_repository)
+    official_tags = _repository_tags(oras, official_repository)
+    quarantine_exists = candidate_tag in quarantine_tags
+    official_exists = stable_tag in official_tags
+    if quarantine_exists:
+        _fetch_exact(oras, quarantine_tag_reference, index)
+    if official_exists:
+        _fetch_exact(oras, official_tag_reference, index)
 
     if not quarantine_exists:
-        _run_oras(
-            oras,
-            [
-                "cp",
-                "--from-oci-layout",
-                f"{layout}:{candidate_tag}",
-                quarantine_tag_reference,
-            ],
+        # Recheck immediately before the mutable write. GHCR does not expose a
+        # conditional tag-create primitive; repository write exclusivity and
+        # workflow concurrency remain part of this bootstrap ceremony.
+        quarantine_exists = candidate_tag in _repository_tags(
+            oras, quarantine_repository
         )
+        if quarantine_exists:
+            _fetch_exact(oras, quarantine_tag_reference, index)
+        else:
+            _run_oras(
+                oras,
+                [
+                    "cp",
+                    "--from-oci-layout",
+                    f"{layout}:{candidate_tag}",
+                    quarantine_tag_reference,
+                ],
+            )
     _fetch_exact(oras, quarantine_tag_reference, index)
     _fetch_exact(oras, quarantine_digest_reference, index)
 
@@ -485,13 +510,10 @@ def publish(
         # Recheck immediately before the only official tag write. GHCR has no
         # conditional create operation; repository write access and workflow
         # concurrency are therefore part of this one-time ceremony boundary.
-        official_exists = _fetch_exact(
-            oras,
-            official_tag_reference,
-            index,
-            allow_not_found=True,
-        )
-        if not official_exists:
+        official_exists = stable_tag in _repository_tags(oras, official_repository)
+        if official_exists:
+            _fetch_exact(oras, official_tag_reference, index)
+        else:
             _run_oras(
                 oras,
                 ["cp", quarantine_digest_reference, official_tag_reference],

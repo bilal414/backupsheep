@@ -190,6 +190,7 @@ class ProductionTransportSettingsSubprocessTests(SimpleTestCase):
 
     CONFIG_KEYS = {
         "BACKUPSHEEP_SECRETS",
+        "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION",
         "DATABASE_URL",
         "DJANGO_SECRET_KEY_FILE",
         "DB_PASSWORD_FILE",
@@ -287,6 +288,60 @@ class ProductionTransportSettingsSubprocessTests(SimpleTestCase):
             "43200 True True Lax 300",
             result.stdout,
         )
+
+    def test_stock_database_name_rejects_system_and_malformed_identifiers(self):
+        for database_name in (
+            "",
+            "postgres",
+            "template0",
+            "template1",
+            "Tenant",
+            "tenant-name",
+            "ténant",
+            "1tenant",
+            " tenant",
+            "tenant ",
+            "a" * 64,
+        ):
+            with self.subTest(database_name=database_name):
+                self.assertSettingsRejected(
+                    {
+                        "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION": "3",
+                        "DB_NAME": database_name,
+                    },
+                    "DB_NAME must be a non-system lowercase PostgreSQL database identifier",
+                )
+
+    def test_external_discrete_database_name_keeps_provider_identifier_rules(self):
+        result = self._run_settings(
+            {
+                "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION": "",
+                "DB_NAME": "Managed-DB",
+                "DB_HOST": "postgres.example.invalid",
+                "DB_SSLMODE": "verify-full",
+                "DB_SSLROOTCERT": "/run/secrets/postgres-ca.pem",
+            },
+            code="print(s.DATABASES['default']['NAME'])",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "Managed-DB")
+
+    def test_database_url_precedes_stock_discrete_name_contract(self):
+        result = self._run_settings(
+            {
+                "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION": "3",
+                "DB_NAME": "template0",
+                "DATABASE_URL": (
+                    "postgresql://backup:secret@postgres.example.invalid:5432/Managed-DB"
+                    "?sslmode=verify-full&sslrootcert=%2Frun%2Fsecrets%2Fpostgres-ca.pem"
+                ),
+            },
+            code="print(s.DATABASES['default']['NAME'])",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "Managed-DB")
 
     def test_external_postgresql_rejects_plaintext_or_weak_tls(self):
         self.assertSettingsRejected(

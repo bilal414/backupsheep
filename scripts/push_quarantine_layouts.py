@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 from collect_release_evidence import _OCILayoutArchive, _OCILayoutDirectory
-from promote_release_images import _fetch_and_verify_index, _oras
+from promote_release_images import _fetch_and_verify_index, _oras, _repository_tags
 from verify_release import (
     MAX_CONTROL_FILE_BYTES,
     ReleaseVerificationError,
@@ -86,14 +86,16 @@ def push(
         inputs[image_name] = (layout, expected_path)
 
         destination = f"{image['quarantine_repository']}:{quarantine_tag}"
-        if not _fetch_and_verify_index(
-            oras,
-            destination,
-            expected_path,
-            image["digest"],
-            allow_not_found=True,
-        ):
+        tags = _repository_tags(oras, image["quarantine_repository"])
+        if quarantine_tag not in tags:
             missing.add(image_name)
+        else:
+            _fetch_and_verify_index(
+                oras,
+                destination,
+                expected_path,
+                image["digest"],
+            )
 
     for image_name, image in manifest["images"].items():
         layout, expected_path = inputs[image_name]

@@ -75,7 +75,11 @@ jobs:
           test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
           git diff --quiet
           git diff --cached --quiet
-          git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main
+          git fetch --no-tags --force origin \
+            +refs/heads/main:refs/remotes/origin/main
+          MAIN_TIP="$(git rev-parse --verify refs/remotes/origin/main)"
+          [[ "$MAIN_TIP" =~ ^[0-9a-f]{40}$ ]]
+          test "$SOURCE_COMMIT" = "$MAIN_TIP"
           python3 -m json.tool deploy/release-policy.json >/dev/null
 
       - name: Install hash-verified scanners without registry credentials
@@ -88,10 +92,13 @@ jobs:
             --destination "$TOOL_DIR" \
             --tool syft \
             --tool trivy \
+            --tool grype \
             --tool oras
           "$TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
           "$TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          "$TOOL_DIR/grype" version | grep -Eq '^Version: +0\.116\.1$'
           "$TOOL_DIR/oras" version | grep -Eq '1\.3\.3'
+          grep -qx '{}' "$TOOL_DIR/empty-grype.yaml"
 
       - name: Bind private scanner state to runner scratch space
         shell: bash
@@ -104,6 +111,12 @@ jobs:
             "$RUNNER_TEMP/backupsheep-release-trivy-db-evidence.json" >>"$GITHUB_ENV"
           printf 'TRIVY_HOME=%s\n' \
             "$RUNNER_TEMP/backupsheep-release-trivy-home" >>"$GITHUB_ENV"
+          printf 'GRYPE_CACHE_DIR=%s\n' \
+            "$RUNNER_TEMP/backupsheep-release-grype-cache" >>"$GITHUB_ENV"
+          printf 'GRYPE_DB_EVIDENCE=%s\n' \
+            "$RUNNER_TEMP/backupsheep-release-grype-db-evidence.json" >>"$GITHUB_ENV"
+          printf 'GRYPE_HOME=%s\n' \
+            "$RUNNER_TEMP/backupsheep-release-grype-home" >>"$GITHUB_ENV"
 
       - name: Prepare the exact reviewed Trivy vulnerability database
         shell: bash
@@ -124,6 +137,27 @@ jobs:
             --lock deploy/trivy-db-lock.json \
             --cache-dir "$TRIVY_CACHE_DIR" \
             --evidence "$TRIVY_DB_EVIDENCE"
+
+      - name: Prepare the exact reviewed Grype vulnerability database
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for path in "$GRYPE_CACHE_DIR" "$GRYPE_DB_EVIDENCE" "$GRYPE_HOME"; do
+            test ! -e "$path"
+            test ! -L "$path"
+          done
+          install -d -m 0700 "$GRYPE_HOME"
+          python3 scripts/prepare_grype_db.py prepare \
+            --lock deploy/grype-db-lock.json \
+            --grype "$TOOL_DIR/grype" \
+            --cache-dir "$GRYPE_CACHE_DIR" \
+            --evidence "$GRYPE_DB_EVIDENCE"
+          python3 scripts/prepare_grype_db.py verify \
+            --lock deploy/grype-db-lock.json \
+            --grype "$TOOL_DIR/grype" \
+            --cache-dir "$GRYPE_CACHE_DIR" \
+            --evidence "$GRYPE_DB_EVIDENCE"
 
       - name: Install pinned QEMU emulation
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -278,6 +312,10 @@ jobs:
             "$ARTIFACT_DIR/vulnerability/trivy-db-lock.json"
           install -m 0600 "$TRIVY_DB_EVIDENCE" \
             "$ARTIFACT_DIR/vulnerability/trivy-db-evidence.json"
+          install -m 0600 deploy/grype-db-lock.json \
+            "$ARTIFACT_DIR/vulnerability/grype-db-lock.json"
+          install -m 0600 "$GRYPE_DB_EVIDENCE" \
+            "$ARTIFACT_DIR/vulnerability/grype-db-evidence.json"
           python3 scripts/collect_release_evidence.py \
             --policy deploy/release-policy.json \
             --artifacts-dir "$ARTIFACT_DIR" \
@@ -373,6 +411,29 @@ jobs:
               --evidence "$TRIVY_DB_EVIDENCE"
 
             env -i \
+              HOME="$GRYPE_HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              GRYPE_DB_CACHE_DIR="$GRYPE_CACHE_DIR" \
+              GRYPE_DB_AUTO_UPDATE=false \
+              GRYPE_CHECK_FOR_APP_UPDATE=false \
+              GRYPE_DB_VALIDATE_AGE=true \
+              GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h \
+              "$TOOL_DIR/grype" \
+                --config "$TOOL_DIR/empty-grype.yaml" \
+                "oci-dir:$LAYOUT_DIR/$image" \
+                --platform "$platform" \
+                --fail-on high \
+                --output json \
+                --file "$ARTIFACT_DIR/scans/$image-$platform_slug.grype.json"
+
+            python3 scripts/prepare_grype_db.py verify \
+              --lock deploy/grype-db-lock.json \
+              --grype "$TOOL_DIR/grype" \
+              --cache-dir "$GRYPE_CACHE_DIR" \
+              --evidence "$GRYPE_DB_EVIDENCE"
+
+            env -i \
               HOME="$HOME" \
               PATH="$TOOL_DIR:/usr/bin:/bin" \
               DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
@@ -389,7 +450,8 @@ jobs:
               --image "$image" \
               --platform "$platform" \
               --syft "$ARTIFACT_DIR/sbom/$image-$platform_slug.syft.json" \
-              --trivy "$ARTIFACT_DIR/scans/$image-$platform_slug.trivy.json"
+              --trivy "$ARTIFACT_DIR/scans/$image-$platform_slug.trivy.json" \
+              --grype "$ARTIFACT_DIR/scans/$image-$platform_slug.grype.json"
           done < <(
             python3 - <<'PY'
           import os
@@ -432,6 +494,7 @@ jobs:
             reference="ghcr.io/bilal414/backupsheep-release-verifier@$child_digest"
             syft_report="$ARTIFACT_DIR/consumer/release-verifier-$slug.syft.json"
             trivy_report="$ARTIFACT_DIR/consumer/release-verifier-$slug.trivy.json"
+            grype_report="$ARTIFACT_DIR/consumer/release-verifier-$slug.grype.json"
 
             env -i \
               HOME="$verifier_home" \
@@ -472,12 +535,36 @@ jobs:
               --cache-dir "$TRIVY_CACHE_DIR" \
               --evidence "$TRIVY_DB_EVIDENCE"
 
+            env -i \
+              HOME="$GRYPE_HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              GRYPE_DB_CACHE_DIR="$GRYPE_CACHE_DIR" \
+              GRYPE_DB_AUTO_UPDATE=false \
+              GRYPE_CHECK_FOR_APP_UPDATE=false \
+              GRYPE_DB_VALIDATE_AGE=true \
+              GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h \
+              "$TOOL_DIR/grype" \
+                --config "$TOOL_DIR/empty-grype.yaml" \
+                "registry:$reference" \
+                --platform "$platform" \
+                --fail-on high \
+                --output json \
+                --file "$grype_report"
+
+            python3 scripts/prepare_grype_db.py verify \
+              --lock deploy/grype-db-lock.json \
+              --grype "$TOOL_DIR/grype" \
+              --cache-dir "$GRYPE_CACHE_DIR" \
+              --evidence "$GRYPE_DB_EVIDENCE"
+
             python3 scripts/normalize_local_scan_evidence.py \
               --policy deploy/release-policy.json \
               --image release-verifier \
               --platform "$platform" \
               --syft "$syft_report" \
-              --trivy "$trivy_report"
+              --trivy "$trivy_report" \
+              --grype "$grype_report"
           done < <(
             python3 - <<'PY'
           import json
@@ -552,32 +639,60 @@ jobs:
           retention-days: 90
           compression-level: 9
 
-  sign_promote:
-    name: Sign, verify, and promote exact digests
+  protected_rescan:
+    name: Approve, independently re-scan, and quarantine exact digests
     needs: build_scan
     if: >-
       github.repository == 'bilal414/backupsheep' &&
       vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 240
     environment: signed-release
     permissions:
       contents: read
-      id-token: write
       packages: write
     env:
-      ARTIFACT_DIR: candidate-download/release-artifacts
-      LAYOUT_DIR: candidate-download/release-layouts
+      APP_QUARANTINE: ghcr.io/bilal414/backupsheep-quarantine
+      POSTGRES_QUARANTINE: ghcr.io/bilal414/backupsheep-postgres-quarantine
+      EGRESS_QUARANTINE: ghcr.io/bilal414/backupsheep-egress-quarantine
+      RABBITMQ_QUARANTINE: ghcr.io/bilal414/backupsheep-rabbitmq-quarantine
+      RABBITMQ_UPGRADE_QUARANTINE: ghcr.io/bilal414/backupsheep-rabbitmq-upgrade-quarantine
+      ARTIFACT_DIR: protected-build/release-artifacts
+      LAYOUT_DIR: protected-build/release-layouts
+      PROTECTED_ARTIFACT_DIR: protected-release-artifacts
       PUBLICATION_DIR: release-publication
       TOOL_DIR: /tmp/backupsheep-release-tools
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+      DOCKER_BUILD_SUMMARY: "false"
     steps:
-      - name: Check out verifier from the tagged commit
+      - name: Check out protected verifier from the tagged commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Install hash-verified signing tools before registry login
+      - name: Reconfirm the protected release is the current main tip
+        shell: bash
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_REF" == "refs/tags/$RELEASE_TAG" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse --verify HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
+          git fetch --no-tags --force origin \
+            +refs/heads/main:refs/remotes/origin/main
+          MAIN_TIP="$(git rev-parse --verify refs/remotes/origin/main)"
+          [[ "$MAIN_TIP" =~ ^[0-9a-f]{40}$ ]]
+          test "$SOURCE_COMMIT" = "$MAIN_TIP"
+          git diff --quiet
+          git diff --cached --quiet
+
+      - name: Install hash-verified scanners before registry login
         shell: bash
         run: |
           set -euo pipefail
@@ -585,31 +700,534 @@ jobs:
           python3 scripts/install_release_tools.py \
             --policy deploy/release-policy.json \
             --destination "$TOOL_DIR" \
-            --tool cosign \
-            --tool oras
-          "$TOOL_DIR/cosign" version | grep -Eq 'v?3\.1\.3'
+            --tool syft \
+            --tool oras \
+            --tool trivy \
+            --tool grype
+          "$TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
           "$TOOL_DIR/oras" version | grep -Eq '1\.3\.3'
+          "$TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          "$TOOL_DIR/grype" version | grep -Eq '^Version: +0\.116\.1$'
+          grep -qx '{}' "$TOOL_DIR/empty-grype.yaml"
 
-      - name: Download candidate evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Install pinned QEMU for the protected rebuild
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
         with:
-          name: signed-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: candidate-download
+          image: tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541
+          platforms: arm64
 
-      - name: Revalidate candidate evidence before credentials
+      - name: Create a pinned protected BuildKit builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: v0.29.1
+          driver-opts: >-
+            image=moby/buildkit:v0.26.2@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa
+          use: true
+
+      - name: Prepare fresh protected build roots
         shell: bash
         run: |
           set -euo pipefail
-          chmod -R go-rwx "$ARTIFACT_DIR"
-          chmod -R go-rwx "$LAYOUT_DIR"
-          cmp -s deploy/release-policy.json "$ARTIFACT_DIR/release-policy.json"
+          umask 077
+          test ! -e protected-build
+          test ! -L protected-build
+          install -d -m 0700 "$LAYOUT_DIR"
+
+      - name: Rebuild the protected application from the exact remote commit
+        id: protected-build-app
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/protected-build/release-layouts/app,tar=false
+          tags: ghcr.io/bilal414/backupsheep-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Materialize the protected exact amd64 application child
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: backupsheep-protected-release-migration-inventory:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: false
+          sbom: false
+
+      - name: Rebuild the protected PostgreSQL image from the exact remote commit
+        id: protected-build-postgres
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.postgres
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/protected-build/release-layouts/postgres,tar=false
+          tags: ghcr.io/bilal414/backupsheep-postgres-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Rebuild the protected egress guard from the exact remote commit
+        id: protected-build-egress
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.egress
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/protected-build/release-layouts/egress,tar=false
+          tags: ghcr.io/bilal414/backupsheep-egress-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Rebuild protected RabbitMQ from the exact remote commit
+        id: protected-build-rabbitmq
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.rabbitmq
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/protected-build/release-layouts/rabbitmq,tar=false
+          tags: ghcr.io/bilal414/backupsheep-rabbitmq-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Rebuild the protected RabbitMQ upgrade helper from the exact remote commit
+        id: protected-build-rabbitmq-upgrade
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
+          file: Dockerfile.rabbitmq-upgrade
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ github.workspace }}/protected-build/release-layouts/rabbitmq-upgrade,tar=false
+          tags: ghcr.io/bilal414/backupsheep-rabbitmq-upgrade-quarantine:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max,version=v1,builder-id=https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@${{ github.ref }}
+          sbom: true
+
+      - name: Extract protected indexes and BuildKit provenance from rebuilt layouts
+        shell: bash
+        env:
+          APP_DIGEST: ${{ steps.protected-build-app.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.protected-build-postgres.outputs.digest }}
+          EGRESS_DIGEST: ${{ steps.protected-build-egress.outputs.digest }}
+          RABBITMQ_DIGEST: ${{ steps.protected-build-rabbitmq.outputs.digest }}
+          RABBITMQ_UPGRADE_DIGEST: ${{ steps.protected-build-rabbitmq-upgrade.outputs.digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          for digest in \
+            "$APP_DIGEST" "$POSTGRES_DIGEST" "$EGRESS_DIGEST" \
+            "$RABBITMQ_DIGEST" "$RABBITMQ_UPGRADE_DIGEST"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
+          install -d -m 0700 "$ARTIFACT_DIR"/{oci,provenance,sbom,scans,bundles,consumer,vulnerability}
+          install -m 0600 deploy/release-policy.json "$ARTIFACT_DIR/release-policy.json"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image app --digest "$APP_DIGEST" --oci-layout "$LAYOUT_DIR/app"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image postgres --digest "$POSTGRES_DIGEST" --oci-layout "$LAYOUT_DIR/postgres"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image egress --digest "$EGRESS_DIGEST" --oci-layout "$LAYOUT_DIR/egress"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image rabbitmq --digest "$RABBITMQ_DIGEST" --oci-layout "$LAYOUT_DIR/rabbitmq"
+          python3 scripts/collect_release_evidence.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --image rabbitmq-upgrade --digest "$RABBITMQ_UPGRADE_DIGEST" \
+            --oci-layout "$LAYOUT_DIR/rabbitmq-upgrade"
+
+      - name: Regenerate protected migration transition evidence from the exact app child
+        shell: bash
+        env:
+          BACKUPSHEEP_RELEASE_DOCKER_HOME: ${{ runner.temp }}/backupsheep-protected-release-docker-home
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test ! -e "$BACKUPSHEEP_RELEASE_DOCKER_HOME"
+          install -d -m 0700 "$BACKUPSHEEP_RELEASE_DOCKER_HOME"
+          docker_bin="$(command -v docker)"
+          test -n "$docker_bin"
+          python3 scripts/collect_release_transition.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --oci-layout "$LAYOUT_DIR/app" \
+            --image "backupsheep-protected-release-migration-inventory:$SOURCE_COMMIT" \
+            --docker "$docker_bin" \
+            --source-commit "$SOURCE_COMMIT" \
+            --release-tag "$RELEASE_TAG"
+
+      - name: Bind protected scanner state to fresh runner scratch space
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf 'TRIVY_CACHE_DIR=%s\n' \
+            "$RUNNER_TEMP/backupsheep-protected-trivy-cache" >>"$GITHUB_ENV"
+          printf 'TRIVY_DB_EVIDENCE=%s\n' \
+            "$RUNNER_TEMP/backupsheep-protected-trivy-db-evidence.json" >>"$GITHUB_ENV"
+          printf 'TRIVY_HOME=%s\n' \
+            "$RUNNER_TEMP/backupsheep-protected-trivy-home" >>"$GITHUB_ENV"
+          printf 'GRYPE_CACHE_DIR=%s\n' \
+            "$RUNNER_TEMP/backupsheep-protected-grype-cache" >>"$GITHUB_ENV"
+          printf 'GRYPE_DB_EVIDENCE=%s\n' \
+            "$RUNNER_TEMP/backupsheep-protected-grype-db-evidence.json" >>"$GITHUB_ENV"
+          printf 'GRYPE_HOME=%s\n' \
+            "$RUNNER_TEMP/backupsheep-protected-grype-home" >>"$GITHUB_ENV"
+
+      - name: Prepare fresh protected scanner databases
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for path in \
+            "$TRIVY_CACHE_DIR" "$TRIVY_DB_EVIDENCE" "$TRIVY_HOME" \
+            "$GRYPE_CACHE_DIR" "$GRYPE_DB_EVIDENCE" "$GRYPE_HOME"; do
+            test ! -e "$path"
+            test ! -L "$path"
+          done
+          install -d -m 0700 "$TRIVY_HOME" "$GRYPE_HOME"
+          python3 scripts/prepare_trivy_db.py prepare \
+            --lock deploy/trivy-db-lock.json \
+            --oras "$TOOL_DIR/oras" \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --evidence "$TRIVY_DB_EVIDENCE"
+          python3 scripts/prepare_trivy_db.py verify \
+            --lock deploy/trivy-db-lock.json \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --evidence "$TRIVY_DB_EVIDENCE"
+          python3 scripts/prepare_grype_db.py prepare \
+            --lock deploy/grype-db-lock.json \
+            --grype "$TOOL_DIR/grype" \
+            --cache-dir "$GRYPE_CACHE_DIR" \
+            --evidence "$GRYPE_DB_EVIDENCE"
+          python3 scripts/prepare_grype_db.py verify \
+            --lock deploy/grype-db-lock.json \
+            --grype "$TOOL_DIR/grype" \
+            --cache-dir "$GRYPE_CACHE_DIR" \
+            --evidence "$GRYPE_DB_EVIDENCE"
+          install -m 0600 deploy/trivy-db-lock.json \
+            "$ARTIFACT_DIR/vulnerability/trivy-db-lock.json"
+          install -m 0600 "$TRIVY_DB_EVIDENCE" \
+            "$ARTIFACT_DIR/vulnerability/trivy-db-evidence.json"
+          install -m 0600 deploy/grype-db-lock.json \
+            "$ARTIFACT_DIR/vulnerability/grype-db-lock.json"
+          install -m 0600 "$GRYPE_DB_EVIDENCE" \
+            "$ARTIFACT_DIR/vulnerability/grype-db-evidence.json"
+
+      - name: Generate protected SBOMs and scans from every rebuilt platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          syft_home="$RUNNER_TEMP/backupsheep-protected-syft-home"
+          test ! -e "$syft_home"
+          test ! -L "$syft_home"
+          install -d -m 0700 "$syft_home"
+          while IFS=$'\t' read -r image platform digest; do
+            [[ "$platform" == "linux/amd64" || "$platform" == "linux/arm64" ]]
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            slug="${platform//\//-}"
+            syft_report="$ARTIFACT_DIR/sbom/$image-$slug.syft.json"
+            spdx_report="$ARTIFACT_DIR/sbom/$image-$slug.spdx.json"
+            cdx_report="$ARTIFACT_DIR/sbom/$image-$slug.cdx.json"
+            trivy_report="$ARTIFACT_DIR/scans/$image-$slug.trivy.json"
+            grype_report="$ARTIFACT_DIR/scans/$image-$slug.grype.json"
+            for report in \
+              "$syft_report" "$spdx_report" "$cdx_report" \
+              "$trivy_report" "$grype_report"; do
+              test ! -e "$report"
+              test ! -L "$report"
+            done
+
+            env -i \
+              HOME="$TRIVY_HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              TRIVY_SKIP_VERSION_CHECK=true \
+              "$TOOL_DIR/trivy" --config "$TOOL_DIR/empty-trivy.yaml" image \
+                --cache-dir "$TRIVY_CACHE_DIR" \
+                --ignorefile "$TOOL_DIR/empty-trivy.ignore" \
+                --skip-db-update \
+                --skip-java-db-update \
+                --skip-check-update \
+                --offline-scan \
+                --quiet \
+                --scanners vuln \
+                --pkg-types os,library \
+                --list-all-pkgs \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                --timeout 30m \
+                --format json \
+                --output "$trivy_report" \
+                --platform "$platform" \
+                --input "$LAYOUT_DIR/$image"
+            python3 scripts/prepare_trivy_db.py verify \
+              --lock deploy/trivy-db-lock.json \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --evidence "$TRIVY_DB_EVIDENCE"
+
+            env -i \
+              HOME="$GRYPE_HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              GRYPE_DB_CACHE_DIR="$GRYPE_CACHE_DIR" \
+              GRYPE_DB_AUTO_UPDATE=false \
+              GRYPE_CHECK_FOR_APP_UPDATE=false \
+              GRYPE_DB_VALIDATE_AGE=true \
+              GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h \
+              "$TOOL_DIR/grype" \
+                --config "$TOOL_DIR/empty-grype.yaml" \
+                "oci-dir:$LAYOUT_DIR/$image" \
+                --platform "$platform" \
+                --fail-on high \
+                --output json \
+                --file "$grype_report"
+            python3 scripts/prepare_grype_db.py verify \
+              --lock deploy/grype-db-lock.json \
+              --grype "$TOOL_DIR/grype" \
+              --cache-dir "$GRYPE_CACHE_DIR" \
+              --evidence "$GRYPE_DB_EVIDENCE"
+
+            env -i \
+              HOME="$syft_home" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              SYFT_CHECK_FOR_APP_UPDATE=false \
+              "$TOOL_DIR/syft" --config "$TOOL_DIR/empty-syft.yaml" \
+                scan "oci-dir:$LAYOUT_DIR/$image" \
+                --platform "$platform" \
+                --output "syft-json=$syft_report" \
+                --output "spdx-json=$spdx_report" \
+                --output "cyclonedx-json=$cdx_report"
+            python3 scripts/normalize_local_scan_evidence.py \
+              --policy deploy/release-policy.json \
+              --index "$ARTIFACT_DIR/oci/$image.index.json" \
+              --image "$image" \
+              --platform "$platform" \
+              --syft "$syft_report" \
+              --trivy "$trivy_report" \
+              --grype "$grype_report"
+          done < <(
+            python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from build_release_manifest import _platform_digests
+
+          policy = json.loads(Path("deploy/release-policy.json").read_text(encoding="utf-8"))
+          for image in policy["images"]:
+              index = Path(os.environ["ARTIFACT_DIR"]) / "oci" / f"{image}.index.json"
+              for platform, digest in _platform_digests(index, policy["platforms"]).items():
+                  print(image, platform, digest, sep="\t")
+          PY
+          )
+
+      - name: Generate every protected verifier catalog and scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          verifier_home="$RUNNER_TEMP/backupsheep-protected-verifier-scan-home"
+          test ! -e "$verifier_home"
+          test ! -L "$verifier_home"
+          install -d -m 0700 "$verifier_home"
+          install -m 0600 deploy/release/sigstore-trusted-root.json \
+            "$ARTIFACT_DIR/consumer/sigstore-trusted-root.json"
+          while IFS=$'\t' read -r platform child_digest; do
+            [[ "$platform" == "linux/amd64" || "$platform" == "linux/arm64" ]]
+            [[ "$child_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            slug="${platform//\//-}"
+            reference="ghcr.io/bilal414/backupsheep-release-verifier@$child_digest"
+            syft_report="$ARTIFACT_DIR/consumer/release-verifier-$slug.syft.json"
+            trivy_report="$ARTIFACT_DIR/consumer/release-verifier-$slug.trivy.json"
+            grype_report="$ARTIFACT_DIR/consumer/release-verifier-$slug.grype.json"
+            for report in "$syft_report" "$trivy_report" "$grype_report"; do
+              test ! -e "$report"
+              test ! -L "$report"
+            done
+
+            env -i \
+              HOME="$verifier_home" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              SYFT_CHECK_FOR_APP_UPDATE=false \
+              "$TOOL_DIR/syft" --config "$TOOL_DIR/empty-syft.yaml" \
+                scan "registry:$reference" \
+                --platform "$platform" \
+                --output "syft-json=$syft_report"
+
+            env -i \
+              HOME="$TRIVY_HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              TRIVY_SKIP_VERSION_CHECK=true \
+              "$TOOL_DIR/trivy" --config "$TOOL_DIR/empty-trivy.yaml" image \
+                --cache-dir "$TRIVY_CACHE_DIR" \
+                --image-src remote \
+                --ignorefile "$TOOL_DIR/empty-trivy.ignore" \
+                --skip-db-update \
+                --skip-java-db-update \
+                --skip-check-update \
+                --offline-scan \
+                --quiet \
+                --scanners vuln \
+                --pkg-types os,library \
+                --list-all-pkgs \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                --timeout 30m \
+                --format json \
+                --output "$trivy_report" \
+                --platform "$platform" \
+                "$reference"
+            python3 scripts/prepare_trivy_db.py verify \
+              --lock deploy/trivy-db-lock.json \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --evidence "$TRIVY_DB_EVIDENCE"
+
+            env -i \
+              HOME="$GRYPE_HOME" \
+              PATH="$TOOL_DIR:/usr/bin:/bin" \
+              LC_ALL=C \
+              GRYPE_DB_CACHE_DIR="$GRYPE_CACHE_DIR" \
+              GRYPE_DB_AUTO_UPDATE=false \
+              GRYPE_CHECK_FOR_APP_UPDATE=false \
+              GRYPE_DB_VALIDATE_AGE=true \
+              GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h \
+              "$TOOL_DIR/grype" \
+                --config "$TOOL_DIR/empty-grype.yaml" \
+                "registry:$reference" \
+                --platform "$platform" \
+                --fail-on high \
+                --output json \
+                --file "$grype_report"
+            python3 scripts/prepare_grype_db.py verify \
+              --lock deploy/grype-db-lock.json \
+              --grype "$TOOL_DIR/grype" \
+              --cache-dir "$GRYPE_CACHE_DIR" \
+              --evidence "$GRYPE_DB_EVIDENCE"
+            python3 scripts/normalize_local_scan_evidence.py \
+              --policy deploy/release-policy.json \
+              --image release-verifier \
+              --platform "$platform" \
+              --syft "$syft_report" \
+              --trivy "$trivy_report" \
+              --grype "$grype_report"
+          done < <(
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          verifier = json.loads(
+              Path("deploy/release-policy.json").read_text(encoding="utf-8")
+          )["consumer"]["cosign_image"]
+          for platform in ("linux/amd64", "linux/arm64"):
+              print(platform, verifier["platforms"][platform]["manifest_digest"], sep="\t")
+          PY
+          )
+
+      - name: Build the protected manifest and exact signer inventory
+        shell: bash
+        env:
+          APP_DIGEST: ${{ steps.protected-build-app.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.protected-build-postgres.outputs.digest }}
+          EGRESS_DIGEST: ${{ steps.protected-build-egress.outputs.digest }}
+          RABBITMQ_DIGEST: ${{ steps.protected-build-rabbitmq.outputs.digest }}
+          RABBITMQ_UPGRADE_DIGEST: ${{ steps.protected-build-rabbitmq-upgrade.outputs.digest }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          WORKFLOW_RUN: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          umask 077
+          created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python3 scripts/build_release_manifest.py \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --output "$ARTIFACT_DIR/release-manifest.json" \
+            --tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --workflow-run "$WORKFLOW_RUN" \
+            --created-at "$created_at" \
+            --app-digest "$APP_DIGEST" \
+            --app-index "$ARTIFACT_DIR/oci/app.index.json" \
+            --postgres-digest "$POSTGRES_DIGEST" \
+            --postgres-index "$ARTIFACT_DIR/oci/postgres.index.json" \
+            --egress-digest "$EGRESS_DIGEST" \
+            --egress-index "$ARTIFACT_DIR/oci/egress.index.json" \
+            --rabbitmq-digest "$RABBITMQ_DIGEST" \
+            --rabbitmq-index "$ARTIFACT_DIR/oci/rabbitmq.index.json" \
+            --rabbitmq-upgrade-digest "$RABBITMQ_UPGRADE_DIGEST" \
+            --rabbitmq-upgrade-index "$ARTIFACT_DIR/oci/rabbitmq-upgrade.index.json"
+          python3 scripts/build_release_descriptor.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --output "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt"
           python3 scripts/verify_release.py \
             --policy deploy/release-policy.json \
             --manifest "$ARTIFACT_DIR/release-manifest.json" \
             --artifacts-dir "$ARTIFACT_DIR" \
             --offline
+          python3 scripts/protect_release_evidence.py export \
+            --policy deploy/release-policy.json \
+            --source-dir "$ARTIFACT_DIR" \
+            --output-dir "$PROTECTED_ARTIFACT_DIR"
 
-      - name: Authenticate for signatures and promotion
+      - name: Authenticate for quarantine write only
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
@@ -629,6 +1247,125 @@ jobs:
             --artifacts-dir "$ARTIFACT_DIR" \
             --layouts-dir "$LAYOUT_DIR" \
             --quarantine-tag "$QUARANTINE_TAG" \
+            --oras "$TOOL_DIR/oras"
+
+      - name: Retain only the protected evidence for the OIDC signing job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: protected-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: protected-release-artifacts
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
+
+  sign_promote:
+    name: Sign, verify, and promote protected exact digests
+    needs: protected_rescan
+    if: >-
+      github.repository == 'bilal414/backupsheep' &&
+      vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      ARTIFACT_DIR: protected-download/release-artifacts
+      PUBLICATION_DIR: release-publication
+      TOOL_DIR: /tmp/backupsheep-release-tools
+    steps:
+      - name: Check out signer from the tagged commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reconfirm signer source is the current main tip
+        shell: bash
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_REF" == "refs/tags/$RELEASE_TAG" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse --verify HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
+          git fetch --no-tags --force origin \
+            +refs/heads/main:refs/remotes/origin/main
+          MAIN_TIP="$(git rev-parse --verify refs/remotes/origin/main)"
+          [[ "$MAIN_TIP" =~ ^[0-9a-f]{40}$ ]]
+          test "$SOURCE_COMMIT" = "$MAIN_TIP"
+          git diff --quiet
+          git diff --cached --quiet
+
+      - name: Install hash-verified signing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/install_release_tools.py \
+            --policy deploy/release-policy.json \
+            --destination "$TOOL_DIR" \
+            --tool cosign \
+            --tool oras
+          "$TOOL_DIR/cosign" version | grep -Eq 'v?3\.1\.3'
+          "$TOOL_DIR/oras" version | grep -Eq '1\.3\.3'
+
+      - name: Download only protected release evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: protected-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: protected-download/release-artifacts
+
+      - name: Strictly verify protected evidence before registry credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod -R go-rwx "$ARTIFACT_DIR"
+          python3 scripts/protect_release_evidence.py verify \
+            --policy deploy/release-policy.json \
+            --artifacts-dir "$ARTIFACT_DIR"
+          cmp -s deploy/release-policy.json "$ARTIFACT_DIR/release-policy.json"
+          python3 scripts/verify_release.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --offline
+          python3 scripts/build_release_descriptor.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --output "$ARTIFACT_DIR/backupsheep-release-descriptor-v2.txt" \
+            --verify
+
+      - name: Create the private signer-only bundle directory after verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$ARTIFACT_DIR/bundles"
+          test ! -L "$ARTIFACT_DIR/bundles"
+          install -d -m 0700 "$ARTIFACT_DIR/bundles"
+
+      - name: Authenticate for signatures and promotion
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+          logout: true
+
+      - name: Re-fetch and verify every quarantine index before OIDC signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_quarantine_indexes.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
             --oras "$TOOL_DIR/oras"
 
       - name: Sign and attest quarantine digests

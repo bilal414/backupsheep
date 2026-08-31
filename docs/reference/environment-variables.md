@@ -65,6 +65,7 @@ These values control Compose/installer behavior rather than Django application f
 | `BACKUPSHEEP_BIND_ADDRESS` | `127.0.0.1` | Host address that publishes the app; the verified installer accepts loopback only |
 | `BACKUPSHEEP_BIND_PORT` | `8000` | Host loopback port published to container port 8000 |
 | `BACKUPSHEEP_RABBITMQ_DATA_GENERATION` | blank sample; wrapper/installer records `4.3` | Broker data-format witness, not a version switch. Never set it by guess to bypass the legacy-volume migration gate |
+| `BACKUPSHEEP_RABBITMQ_NODE_HOST` | blank sample; installer records `rabbitmq` for fresh installs | Durable RabbitMQ node host used by container hostname, `RABBITMQ_NODENAME`, network aliases, volume inspection, provisioning, and transition evidence. A reviewed legacy source may retain exactly one 12-character lowercase hexadecimal Docker hostname. Never infer or edit this after the old container is removed; ambiguous/multiple node trees require reviewed blue-green recovery |
 
 The installation ID labels service containers and an empty `installation_identity`
 sentinel volume. The installer combines that persistent witness with Compose project,
@@ -79,15 +80,29 @@ project/logical-name labels is a collision, even if it is otherwise unused, and 
 install. Delete, rename or deliberately migrate that foreign object; never relabel it to
 bypass the ownership proof.
 
-For the broker witness, the installer records `4.3` only for a fresh project with no
-broker resources. Existing broker data delegates witness creation to the reviewed wrapper
-after the explicit 4.3 hop, and only when
-the post-transition container passes exact base-model, installation-ID, image-reference,
-local image-ID, health, version and Khepri attestation.
+For the broker witnesses, the installer records node host `rabbitmq` and generation `4.3`
+only for a fresh project with no broker resources. A stopped legacy volume can persist a
+reviewed `rabbitmq` or 12-lowercase-hex node host only in local-build mode through
+`--legacy-rabbitmq-node-host HOST --skip-start`; that installer run does not open or
+migrate the broker. Signed releases are fresh-only and reject legacy adoption plus every
+wrapper transition command. Existing broker data delegates generation creation to the
+reviewed wrapper after the explicit pinned 3.13.7 source, 4.2.9, and 4.3.5 hops, and only
+when the post-transition container passes exact base-model, installation-ID,
+node-host/node-name, image-reference, local image-ID, health, version and Khepri
+attestation.
 The proof command runs inside the container as the named `rabbitmq` account using
-`rabbitmq-diagnostics -q server_version`; it does not borrow root's cookie. A stopped broker,
-orphan volume, duplicate resource, unknown generation, or 3.13/4.2 result requires the
-documented operator-run migration. The installer never migrates broker data automatically.
+`rabbitmq-diagnostics -q server_version`; it does not borrow root's cookie. The installer
+refuses a stopped broker, orphan volume, duplicate resource, unknown generation, or
+3.13/4.2 result and never migrates broker data automatically. Explicit-hop crash recovery
+requires the installation-owner-only host transition ledger bound to the exact source,
+target image ID and target configuration hash. The only valid progression is prepared
+legacy-volume to attested 3.13.7 (P313/A313), prepared 3.13.7 to attested 4.2.9 (P42/A42),
+then prepared 4.2.9 to attested 4.3.5 (P43/A43). With A43, the wrapper's networkless path
+may repair or create the secondary volume witness on the already-migrated nonempty tree
+before canonical proof and the `.env`-last commit. The broker uid can write that volume
+and invoke its mounted helper, so the pending/final volume record is never authorization
+by itself. See the operator-run migration guide for the complete boundary. The normal
+first-start initializer creates a missing witness only for an empty volume.
 
 Installer-managed `.env` files may not define `LD_AUDIT`, `LD_LIBRARY_PATH`,
 `LD_PRELOAD` or `SSLKEYLOGFILE`. Stock Compose blanks those four values, and the image
@@ -151,7 +166,7 @@ API token is issued.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DB_NAME` | `backupsheep` | Database name; also initializes bundled PostgreSQL |
+| `DB_NAME` | `backupsheep` | Database name. Stock Docker requires `[a-z_][a-z0-9_]{0,62}` and refuses `postgres`, `template0`, and `template1`; it also initializes bundled PostgreSQL |
 | `BACKUPSHEEP_DATABASE_IDENTITY_GENERATION` | blank sample / installer-owned `3` | Fail-closed stock identity/ACL/RLS contract witness. Pending values cannot start a long-lived lane; never change it manually |
 | `DB_BOOTSTRAP_USER` | `backupsheep_bootstrap` | Bundled PostgreSQL bootstrap login. The official image initializes it as cluster superuser; only PostgreSQL, `db-provision`, and `db-seal` receive its password |
 | `DB_MIGRATOR_USER` | `backupsheep_migrator` | Non-superuser database/schema/object owner used by `migrate`; its password also enters provision/seal |
@@ -168,7 +183,7 @@ API token is issued.
 | `DB_PASSWORD_FILE` | unset outside stock Compose | Absolute database-password pointer; stock long-lived services receive only `/run/secrets/db_<lane>_password` |
 | `DB_HOST` | `db` | Database hostname in stock Compose |
 | `DB_PORT` | `5432` | Database port |
-| `DATABASE_URL` | blank | `postgres://` or `postgresql://` URL; overrides the five discrete Django values |
+| `DATABASE_URL` | blank | `postgres://` or `postgresql://` URL; overrides the five discrete Django values, including `DB_NAME` |
 | `DB_SSLMODE` | blank | libpq `sslmode`; external production databases require `verify-full` |
 | `DB_SSLROOTCERT` | blank | CA/root-certificate bundle for external PostgreSQL hostname verification |
 
@@ -177,6 +192,19 @@ The bundled `db` service consumes `DB_NAME`/`DB_BOOTSTRAP_USER` and
 marked identities and revokes runtime access; `migrate` receives only
 `db_migrator_password`; then `db-seal` applies the exact per-lane grants and
 RLS contract. App, preflight, Beat and each worker receive only their own lane password.
+For the stock Docker identity generations (`3`, `3-pending-fresh`, and
+`3-pending-upgrade`), `DB_NAME` is an unquoted ASCII lowercase PostgreSQL identifier:
+it begins with `a-z` or `_`, contains only `a-z`, `0-9`, or `_`, is at most 63 bytes, and
+is not `postgres`, `template0`, or `template1`. Compose requires it explicitly. The
+installer and wrapper reject violations before Docker mutation, and the PostgreSQL
+entrypoint, storage/migration helpers, and database-identity code repeat the boundary.
+
+This stock-image restriction does not narrow external-provider naming. A non-Compose
+deployment using `DATABASE_URL` keeps that URL's provider-valid database path and takes
+precedence over ambient discrete `DB_*` values. A non-stock discrete configuration without
+a stock database-identity generation likewise retains its provider-valid `DB_NAME`.
+External transport and TLS requirements below still apply in both cases.
+
 Database/files workers cannot read any `core_storage*` table or change the
 storage-owned per-backup destination authorization witness; source access begins only
 after the storage lane has durably validated the frozen destination set.

@@ -32,10 +32,10 @@ class RabbitMQCapacityPolicyTests(SimpleTestCase):
         probe = (self.root / "deploy/rabbitmq/flood-probe.py").read_text(
             encoding="utf-8"
         )
-        # Existing durable queues retain empty declaration arguments; the policy
-        # can be applied in place without deleting queued recovery work.
+        # Durable queues explicitly retain their classic type argument; the
+        # policy can be applied in place without deleting queued recovery work.
         self.assertIn('"queues":[{"name":"default"', entrypoint)
-        self.assertIn('"arguments":{}', entrypoint)
+        self.assertEqual(entrypoint.count('"arguments":{"x-queue-type":"classic"}'), 6)
         self.assertNotIn("delete_queue", provision)
         self.assertIn('transport_options={"confirm_publish": True}', probe)
         self.assertIn("MessageNacked", probe)

@@ -3,11 +3,11 @@
     {
       "finding_sha256": "0999cc03ddc17614db90af2c22d22d0c8f2c2e8444ab37d785df46a9da6c6579",
       "id": "DS-0017",
-      "reason": "The reported APT update is paired with authenticated apt-get downloads whose package versions, archive hashes, metadata, and repackaged payload hashes are verified before use.",
+      "reason": "The reported APT update runs only in authenticated builder stages. Ubuntu runtime packages come from a fixed signed AMD64 snapshot with exact versions, imported clients are bound to reviewed archive and payload hashes, and the final image installs the verified closure offline.",
       "severity": "HIGH",
       "status": "FAIL",
       "target": "Dockerfile",
-      "target_sha256": "692c1b71d004e6ffa9b3d986064e726350939f2578510d4df439d5182f319d3e"
+      "target_sha256": "d6c6e91031719b0d9c2a7136fef44ff0e36d7f98a0fcbbbf325c88517e16f71a"
     },
     {
       "finding_sha256": "2fef229054b3d84e89962c7d8c5c1cf8ad73ac7d5d62f16072f95108e8ec2b6f",

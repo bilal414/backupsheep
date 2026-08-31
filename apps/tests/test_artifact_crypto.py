@@ -5,11 +5,12 @@ import json
 import os
 import stat
 import struct
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
+from unittest import mock, skipIf
 
 from django.test import SimpleTestCase
 
@@ -50,6 +51,11 @@ ENVELOPE_ID = uuid.UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 LOCAL_KEY_V1 = "lfk-11111111111111111111111111111111"
 LOCAL_KEY_V2 = "lfk-22222222222222222222222222222222"
 INSTALLATION_ID = "a" * 64
+
+skip_on_darwin_without_anonymous_staging = skipIf(
+    sys.platform == "darwin",
+    "Darwin does not provide Linux O_TMPFILE/linkat secure anonymous staging.",
+)
 
 
 def artifact_context(**overrides):
@@ -105,6 +111,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         self.assertFalse(destination.exists())
         self.assertEqual(list(self.root.glob(f".{destination.name}.*.bse-tmp")), [])
 
+    @skip_on_darwin_without_anonymous_staging
     def test_round_trip_boundaries_and_private_permissions(self):
         sizes = [0, 1, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 1, 2 * CHUNK_SIZE + 17]
         for position, size in enumerate(sizes):
@@ -135,6 +142,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
                 self.assertEqual(os.stat(encrypted).st_mode & 0o777, 0o600)
                 self.assertEqual(os.stat(restored).st_mode & 0o777, 0o600)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_public_header_exposes_no_private_digest_or_backup_identity(self):
         payload = b"backup" * 1000
         _source, encrypted, descriptor = self._seal(payload)
@@ -162,6 +170,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         self.assertNotIn(self.context.sha256.encode("ascii"), raw)
         self.assertNotIn(self.context.backup_id.encode("ascii"), raw)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_equal_plaintexts_have_no_stable_public_equality_witness(self):
         payload = b"the same private backup" * 100
         first_source = self._source(payload, "equal-first.zip")
@@ -197,6 +206,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         self.assertFalse(hasattr(first_public, "plaintext_sha256"))
         self.assertFalse(hasattr(second_public, "plaintext_sha256"))
 
+    @skip_on_darwin_without_anonymous_staging
     def test_normative_bse1_v2_vector_is_byte_for_byte_deterministic(self):
         vector_path = Path(__file__).with_name("fixtures") / "bse1-v2-vector.json"
         vector = json.loads(vector_path.read_text(encoding="utf-8"))
@@ -249,6 +259,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         )
         self.assertEqual(restored.read_bytes(), plaintext)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_wrong_key_context_and_ledger_expectation_fail_without_plaintext(self):
         _source, encrypted, descriptor = self._seal(b"sensitive backup bytes")
         self._decrypt_failure(encrypted, data_key=b"x" * 32)
@@ -272,6 +283,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         )
         self._decrypt_failure(encrypted, expected=private_mismatch)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_header_and_ciphertext_tampering_fail_closed(self):
         _source, encrypted, _descriptor = self._seal(b"A" * (CHUNK_SIZE + 71))
         original = bytearray(encrypted.read_bytes())
@@ -305,6 +317,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         terminal_path.write_bytes(terminal_tampered)
         self._decrypt_failure(terminal_path)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_swapped_authenticated_terminal_never_publishes_plaintext(self):
         first_source, first_path, _first = self._seal(
             b"first terminal payload", "terminal-first.bse1"
@@ -337,6 +350,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         self._decrypt_failure(swapped)
         self.assertTrue(first_source.exists())
 
+    @skip_on_darwin_without_anonymous_staging
     def test_truncation_at_every_format_boundary_never_publishes_plaintext(self):
         _source, encrypted, _descriptor = self._seal(b"B" * (CHUNK_SIZE + 29))
         original = encrypted.read_bytes()
@@ -368,6 +382,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
                 truncated.write_bytes(original[:cut])
                 self._decrypt_failure(truncated, error=ArtifactTruncatedError)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_reordered_duplicated_and_appended_records_are_rejected(self):
         _source, encrypted, _descriptor = self._seal(b"C" * (2 * CHUNK_SIZE + 23))
         original = encrypted.read_bytes()
@@ -394,6 +409,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         appended.write_bytes(original + b"unauthenticated")
         self._decrypt_failure(appended)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_invalid_record_index_length_and_terminal_type_are_rejected(self):
         _source, encrypted, _descriptor = self._seal(b"D" * (CHUNK_SIZE + 5))
         original = bytearray(encrypted.read_bytes())
@@ -425,6 +441,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         wrong_terminal_path.write_bytes(wrong_terminal)
         self._decrypt_failure(wrong_terminal_path)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_unknown_version_algorithm_noncanonical_and_oversized_header_rejected(self):
         _source, encrypted, _descriptor = self._seal(b"format")
         original = bytearray(encrypted.read_bytes())
@@ -489,6 +506,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
 
         self.assertEqual(destination.read_bytes(), b"keep-me")
 
+    @skip_on_darwin_without_anonymous_staging
     def test_source_symbolic_links_are_rejected_for_seal_and_open(self):
         source = self._source(b"source")
         source_link = self.root / "source-link.zip"
@@ -507,6 +525,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         encrypted_link.symlink_to(encrypted)
         self._decrypt_failure(encrypted_link, error=ArtifactFormatError)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_source_change_between_hash_and_encryption_aborts_and_cleans_staging(self):
         source = self._source(b"before" * 1000)
         destination = self.root / "changed.bse"
@@ -628,6 +647,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
                 trusted_destination_root=self.root,
             )
 
+    @skip_on_darwin_without_anonymous_staging
     def test_failed_terminal_authentication_never_creates_named_plaintext_staging(self):
         payload = b"private" * (4 * CHUNK_SIZE)
         _source, encrypted, _descriptor = self._seal(payload)
@@ -664,7 +684,7 @@ class ArtifactEnvelopeTests(SimpleTestCase):
         source = self._source(b"private")
         destination = self.root / "unsupported-staging.bse"
 
-        with mock.patch.object(envelope_module.os, "O_TMPFILE", 0):
+        with mock.patch.object(envelope_module.os, "O_TMPFILE", 0, create=True):
             with self.assertRaises(ArtifactConfigurationError):
                 encrypt_file(
                     source,
@@ -719,6 +739,7 @@ class KeyProviderTests(SimpleTestCase):
         with self.assertRaises(KeyProviderConfigurationError):
             provider.generate_data_key(self.context)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_seal_and_unseal_use_provider_and_zero_plaintext_key(self):
         source = self.root / "source.zip"
         encrypted = self.root / "source.bse"

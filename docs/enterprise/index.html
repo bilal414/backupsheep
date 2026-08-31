@@ -194,9 +194,9 @@
             <section id="overview-coverage" class="section-block coverage-band">
               <div><p class="eyebrow">Repository-derived coverage</p><h2>One manual, three layers of truth</h2><p>Feature guidance explains intended behavior. The generated catalogs map current interfaces. Dated engineering reports retain test evidence without turning a single run into a universal guarantee.</p></div>
               <dl class="coverage-ledger">
-                <div><dt data-api-total>917</dt><dd>resolver operations indexed</dd></div>
+                <div><dt data-api-total>891</dt><dd>resolver operations indexed</dd></div>
                 <div><dt>26</dt><dd>storage destinations mapped</dd></div>
-                <div><dt data-config-total>171</dt><dd>configuration variables indexed</dd></div>
+                <div><dt data-config-total>298</dt><dd>configuration variables indexed</dd></div>
                 <div><dt>1</dt><dd>restore rehearsal still required</dd></div>
               </dl>
             </section>
@@ -315,7 +315,7 @@
               <div class="section-heading"><p class="eyebrow">Authenticated service boundaries</p><h2>A queue name is routing—not authorization</h2><p>Stock Compose binds database, broker, and signed-task authority to the exact role that needs it. Custom deployments must reproduce all three layers.</p></div>
               <div class="table-wrap wide-table"><table><thead><tr><th>Boundary</th><th>Current stock generation</th><th>Fail-closed contract</th></tr></thead><tbody>
                 <tr><td><strong>PostgreSQL</strong></td><td>Identity generation 3</td><td>Ten independently authenticated bootstrap, migrator, app, preflight, Beat, cloud, database, files, storage, and logs identities. Exact grants, column limits, ownership checks, and row-level policies replace a shared runtime login.</td></tr>
-                <tr><td><strong>RabbitMQ</strong></td><td>Identity generation 2</td><td>Per-lane file-backed passwords, fixed vhost/queue ACLs, imported topology, and no shared broker login. Workers cannot configure topology or read another lane's queue.</td></tr>
+                <tr><td><strong>RabbitMQ</strong></td><td>Identity generation 2</td><td>Per-lane file-backed passwords, fixed vhost/queue ACLs, imported topology, and no shared broker login. Workers cannot configure topology or read another lane's queue. The <code>/</code> vhost is retained but inaccessible, must remain exactly empty, and is never destructively deleted.</td></tr>
                 <tr><td><strong>Celery task authorization</strong></td><td>Generation 3</td><td>Each publisher signs the complete protocol envelope with its own Ed25519 key. Consumers hold only the installation-bound public registry and reject unsigned, expired, modified, wrong-lane, cross-installation, or replay-conflicting work before task code.</td></tr>
                 <tr><td><strong>Internal egress</strong></td><td>Exact peer tuples</td><td>Each guard admits PostgreSQL/RabbitMQ only as current directly connected interface/address/TCP-port tuples on distinct bridges, refreshes every second, and blocks both when peer resolution is absent or ambiguous.</td></tr>
               </tbody></table></div>
@@ -388,7 +388,7 @@
               <div class="section-heading"><p class="eyebrow">Safe sequence</p><h2>Bring the stack online in observable stages</h2></div>
               <ol class="runbook-steps">
                 <li><span>1</span><div><h3>Provide the host boundary</h3><p>As an unprivileged Docker-authorized user, provide Git, Docker Engine 28.0.0+, Compose 2.33.1+, storage, network, TLS, and host policy. The installer changes none of them.</p></div></li>
-                <li><span>2</span><div><h3>Run the exact-commit installer</h3><p>Use a full 40-character commit and explicit project/domain. The installer creates distinct database/files artifact keyrings and other file-backed secrets, then explicitly builds <code>db</code>, <code>app</code>, and <code>app-egress-guard</code>; stock services use <code>pull_policy: never</code>.</p></div></li>
+                <li><span>2</span><div><h3>Run the exact-commit installer</h3><p>Use a full 40-character commit and explicit project/domain. The installer creates distinct database/files artifact keyrings and other file-backed secrets, then explicitly builds <code>db</code>, <code>app</code>, <code>app-egress-guard</code>, and the hardened <code>rabbitmq</code> derivative from the base model; stock services use <code>pull_policy: never</code>.</p></div></li>
                 <li><span>3</span><div><h3>Verify the core gates</h3><p>Require the staging, broker, database provision/migrate/seal, preflight, egress guard, and web health checks to pass. Profile-less startup has no provider workers or Beat.</p></div></li>
                 <li><span>4</span><div><h3>Complete the five-step wizard</h3><p>Read the onboarding token from the protected host secret file, create the owner, set identity/time, configure email, add storage, and add sources.</p></div></li>
                 <li><span>5</span><div><h3>Review dormant work</h3><p>Inspect restored schedules, durable executions, broker queues, destinations, credentials, and provider ownership before enabling operations.</p></div></li>
@@ -1060,7 +1060,7 @@ Authorization: Token &lt;api-key&gt;</code></pre></div>
             </section>
 
             <section id="api-explorer" class="section-block explorer-section">
-              <div class="section-heading split-heading"><div><p class="eyebrow">Generated reference</p><h2><span data-api-total>917</span> operations across <span data-api-paths>524</span> paths</h2></div><p>Open a source file for implementation context or the corresponding Bruno request for an executable starting point. Generated examples still require serializer/permission review.</p></div>
+              <div class="section-heading split-heading"><div><p class="eyebrow">Generated reference</p><h2><span data-api-total>891</span> operations across <span data-api-paths>510</span> paths</h2></div><p>Open a source file for implementation context or the corresponding Bruno request for an executable starting point. Generated examples still require serializer/permission review.</p></div>
 
               <div class="explorer-toolbar">
                 <label class="explorer-search"><svg><use href="#icon-search"/></svg><span class="sr-only">Search API operations</span><input type="search" id="api-search" placeholder="Search path, action, view, source…"></label>
@@ -1272,7 +1272,7 @@ Authorization: Token &lt;api-key&gt;</code></pre></div>
             </section>
 
             <section id="configuration-explorer" class="section-block explorer-section">
-              <div class="section-heading split-heading"><div><p class="eyebrow">Generated reference</p><h2><span data-config-total>171</span> environment reads indexed</h2></div><p>The source column distinguishes normal operator sample variables from settings-only support/test controls. The catalog never reads <code>.env</code>.</p></div>
+              <div class="section-heading split-heading"><div><p class="eyebrow">Generated reference</p><h2><span data-config-total>298</span> environment reads indexed</h2></div><p>The source column distinguishes normal operator sample variables from settings-only support/test controls. The catalog never reads <code>.env</code>.</p></div>
               <div class="explorer-toolbar config-toolbar"><label class="explorer-search"><svg><use href="#icon-search"/></svg><span class="sr-only">Search configuration variables</span><input type="search" id="config-search" placeholder="Search name, purpose, category…"></label><label><span>Category</span><select id="config-category-filter"><option value="all">All categories</option></select></label><label><span>Scope</span><select id="config-scope-filter"><option value="all">All variables</option><option value="required">Required</option><option value="sensitive">Sensitive</option><option value="settings-only">Settings-only</option></select></label></div>
               <div class="explorer-meta"><span id="config-result-count" aria-live="polite">Loading configuration catalog…</span><button type="button" id="config-reset">Reset filters</button></div>
               <div class="config-results" id="config-results"></div>

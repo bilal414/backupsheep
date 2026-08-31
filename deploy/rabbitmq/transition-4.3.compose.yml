@@ -1,0 +1,22 @@
+# Temporary final hop for an existing RabbitMQ 4.2.9 data volume.
+# backupsheep-compose adds this exact file only for the explicit 4.3 transition
+# and removes it again before committing the durable generation witness.
+services:
+  rabbitmq:
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-entrypoint", "transition"]
+    environment:
+      BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET: "4.3"
+    secrets: !reset []
+    volumes: !override
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        volume:
+          nocopy: true
+      - ./deploy/rabbitmq/90-legacy-source.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro
+      - ./deploy/rabbitmq/entrypoint.sh:/usr/local/bin/backupsheep-rabbitmq-entrypoint:ro
+      - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
+    depends_on: !reset {}
+    networks: !reset []
+    network_mode: none
+    restart: "no"

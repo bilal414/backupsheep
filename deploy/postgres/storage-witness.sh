@@ -19,6 +19,15 @@ database_name="${POSTGRES_DB:-}"
 database_user="${POSTGRES_USER:-}"
 password_file="${POSTGRES_PASSWORD_FILE:-}"
 
+case "$database_name" in
+    ''|postgres|template0|template1|[0123456789]*|\
+    *[!abcdefghijklmnopqrstuvwxyz0123456789_]*)
+        die 'POSTGRES_DB must be a non-system lowercase PostgreSQL database identifier'
+        ;;
+esac
+[ "${#database_name}" -le 63 ] \
+    || die 'POSTGRES_DB must be a non-system lowercase PostgreSQL database identifier'
+
 [ "$(id -u):$(id -g)" = '70:70' ] || die 'witness must run as UID/GID 70'
 case "$installation_id" in *[!0-9a-f]*|'') die 'installation identity is malformed' ;; esac
 case "$storage_witness" in *[!0-9a-f]*|'') die 'storage witness is malformed' ;; esac
@@ -55,7 +64,9 @@ if [ "$mode" = 'initialize-migration' ]; then
     exit 0
 fi
 
-case "$database_name:$database_user" in *[!a-z0-9_:]*|:*|*:) die 'database identifiers are invalid' ;; esac
+case "$database_user" in
+    ''|*[!abcdefghijklmnopqrstuvwxyz0123456789_]*) die 'database identifiers are invalid' ;;
+esac
 [ -f "$password_file" ] && [ ! -L "$password_file" ] || die 'bootstrap password file is unavailable'
 [ -f "${data}/PG_VERSION" ] && [ "$(cat "${data}/PG_VERSION")" = '18' ] || die 'target is not PostgreSQL 18'
 

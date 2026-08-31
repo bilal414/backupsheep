@@ -163,6 +163,12 @@ class SourceScanGateTests(TestCase):
                     "MisconfSummary": {"Successes": 20, "Failures": 0},
                 },
                 {
+                    "Target": "Dockerfile.rabbitmq-legacy-source",
+                    "Class": "config",
+                    "Type": "dockerfile",
+                    "MisconfSummary": {"Successes": 20, "Failures": 0},
+                },
+                {
                     "Target": "Dockerfile.rabbitmq-upgrade",
                     "Class": "config",
                     "Type": "dockerfile",

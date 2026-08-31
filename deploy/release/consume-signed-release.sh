@@ -333,8 +333,8 @@ attest_docker_daemon_platform() {
         || die "could not attest Docker daemon platform"
     platform="$BOUNDED_CAPTURE_VALUE"
     case "$platform" in
-        linux\|amd64|linux\|arm64) ;;
-        *) die "signed releases require a scanned linux/amd64 or linux/arm64 Docker daemon" ;;
+        linux\|amd64) ;;
+        *) die "signed releases require the supported linux/amd64 Docker daemon" ;;
     esac
     DAEMON_OS="${platform%%|*}"
     DAEMON_ARCH="${platform#*|}"
@@ -350,7 +350,7 @@ attest_docker_daemon_platform() {
 
 attest_local_image_platform() {
     local role="$1" reference="$2" state="" image_os="" image_arch="" image_id=""
-    [[ "$DAEMON_OS" == linux && ( "$DAEMON_ARCH" == amd64 || "$DAEMON_ARCH" == arm64 ) ]] \
+    [[ "$DAEMON_OS" == linux && "$DAEMON_ARCH" == amd64 ]] \
         || die "Docker daemon platform was not attested before ${role} image use"
     state="$(docker_client image inspect --format '{{.Os}}|{{.Architecture}}|{{.Id}}' "$reference")" \
         || die "could not inspect ${role} image platform"
@@ -362,7 +362,7 @@ attest_local_image_platform() {
 
 git_client() {
     /usr/bin/env -i LC_ALL=C LANG=C HOME=/ PATH=/usr/local/bin:/usr/bin:/bin \
-        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0 \
         GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GIT_ALLOW_PROTOCOL=https \
         "$GIT_BIN" -c core.hooksPath=/dev/null -c init.templateDir=/dev/null \
         -c http.sslVerify=true -c core.fsmonitor=false -c core.untrackedCache=false \
@@ -395,7 +395,7 @@ validate_source_checkout() {
     git_client -C "$INSTALL_DIR" fsck --strict --no-dangling >/dev/null || die "release checkout object verification failed"
     git_client -C "$INSTALL_DIR" diff --no-ext-diff --no-textconv --quiet -- || die "release checkout has modified tracked files"
     git_client -C "$INSTALL_DIR" diff --cached --no-ext-diff --no-textconv --quiet -- || die "release checkout has staged changes"
-    for relative in deploy/release/consume-signed-release.sh deploy/release/sigstore-trusted-root.json deploy/release-policy.json deploy/release/signed-release.compose.yml deploy/runtime/compose-json.awk scripts/release_transition.py; do
+    for relative in deploy/release/consume-signed-release.sh deploy/release/sigstore-trusted-root.json deploy/release-policy.json deploy/release/signed-release.compose.yml deploy/runtime/compose-json.awk deploy/rabbitmq/upgrade-4.2.9.compose.yml deploy/rabbitmq/transition-4.3.compose.yml deploy/rabbitmq/90-legacy-source.conf deploy/rabbitmq/entrypoint.sh deploy/rabbitmq/volume-init.sh deploy/rabbitmq/uid-transition.sh scripts/release_transition.py; do
         validate_checkout_control_file "$relative"
     done
 }
@@ -666,13 +666,9 @@ validate_signed_transition_metadata() {
     value="$(strict_json_path "$migration" leaf_set_sha256)" \
         || die "release migration leaf-set digest is absent"
     MIGRATION_LEAF_SET_SHA256="$(json_string_scalar "$value" '^sha256:[0-9a-f]{64}$' 'release migration leaf-set digest')"
-    if [[ "$DAEMON_ARCH" == amd64 ]]; then
-        VERIFIER_MANIFEST_DIGEST="$ACTIVE_VERIFIER_AMD64_MANIFEST"
-    elif [[ "$DAEMON_ARCH" == arm64 ]]; then
-        VERIFIER_MANIFEST_DIGEST="$ACTIVE_VERIFIER_ARM64_MANIFEST"
-    else
-        die "release transition metadata requires an attested daemon architecture"
-    fi
+    [[ "$DAEMON_OS" == linux && "$DAEMON_ARCH" == amd64 ]] \
+        || die "release transition metadata requires the supported attested Docker daemon platform"
+    VERIFIER_MANIFEST_DIGEST="$ACTIVE_VERIFIER_AMD64_MANIFEST"
 }
 
 validate_residue_dir() {
@@ -1162,6 +1158,31 @@ cleanup_residues() {
     done < <(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -type d \( -name '.release-evidence.download.*' -o -name '.release-evidence.verify.*' \) -print0)
 }
 
+cleanup_command_output_residues() {
+    local residue="" base="" size="" count=0
+    for residue in "${INSTALL_DIR}"/.release-command-output.*; do
+        [[ -e "$residue" || -L "$residue" ]] || continue
+        base="$(basename -- "$residue")"
+        [[ "$base" =~ ^\.release-command-output\.[1-9][0-9]*\.[0-9]{1,5}\.[1-8]$ ]] \
+            || die "protected output capture residue has a noncanonical name"
+        count=$((count + 1)); (( count <= 8 )) \
+            || die "too many protected output capture residues exist"
+        [[ -f "$residue" && ! -L "$residue" \
+            && "$(file_uid "$residue")" == "$EUID" \
+            && "$(file_mode "$residue")" == "600" \
+            && "$(file_links "$residue")" == "1" ]] \
+            || die "protected output capture residue has an unsafe identity"
+        size="$(file_size "$residue")"
+        [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) \
+            || die "protected output capture residue is too large"
+        rm -f -- "$residue" \
+            || die "could not remove protected output capture residue"
+    done
+    if (( count > 0 )); then
+        durable_sync
+    fi
+}
+
 image_repo_digest_present() { docker_client image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null | grep -Fxq -- "$2"; }
 
 attest_cosign_image() {
@@ -1181,7 +1202,6 @@ attest_cosign_image() {
     attest_local_image_platform cosign "$reference"
     case "$DAEMON_ARCH" in
         amd64) expected_image_id="$ACTIVE_VERIFIER_AMD64_IMAGE_ID" ;;
-        arm64) expected_image_id="$ACTIVE_VERIFIER_ARM64_IMAGE_ID" ;;
         *) die "Cosign verifier platform was not admitted by release policy" ;;
     esac
     [[ "$image_id" == "$expected_image_id" ]] \
@@ -1296,13 +1316,9 @@ write_signature_verification_receipt() {
     ( set -o noclobber; : > "$candidate" ) \
         || die "could not allocate signature-verification receipt"
     chmod 0600 "$candidate"
-    if [[ "$DAEMON_ARCH" == amd64 ]]; then
-        verifier_config="$ACTIVE_VERIFIER_AMD64_IMAGE_ID"
-    elif [[ "$DAEMON_ARCH" == arm64 ]]; then
-        verifier_config="$ACTIVE_VERIFIER_ARM64_IMAGE_ID"
-    else
-        die "signature-verification receipt requires an attested daemon platform"
-    fi
+    [[ "$DAEMON_OS" == linux && "$DAEMON_ARCH" == amd64 ]] \
+        || die "signature-verification receipt requires the supported attested Docker daemon platform"
+    verifier_config="$ACTIVE_VERIFIER_AMD64_IMAGE_ID"
     # Every interpolated value has already passed a strict lowercase digest,
     # SemVer, commit, platform, or fixed identity grammar.  Keep the bytes in a
     # canonical, sorted-key JSON form so recovery evidence can retain this
@@ -1553,6 +1569,7 @@ main() {
     for docker_variable in DOCKER_API_VERSION DOCKER_CERT_PATH DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY SSL_CERT_DIR SSL_CERT_FILE; do [[ -n "${!docker_variable-}" ]] && DOCKER_ENV+=("${docker_variable}=${!docker_variable}"); done
     acquire_or_inherit_mutation_lock
     assert_mutation_lock_ownership
+    cleanup_command_output_residues
     attest_docker_daemon_platform
     INSTALLATION_PATH_DIGEST="$(sha256_text "$INSTALL_DIR")"
     WORKFLOW_IDENTITY="https://github.com/${SOURCE_REPOSITORY}/${RELEASE_WORKFLOW}@refs/tags/${RELEASE_TAG}"

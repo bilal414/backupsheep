@@ -4,12 +4,13 @@ import base64
 import hashlib
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
+from unittest import mock, skipIf
 
 from django.core.management.base import CommandError
 from django.test import override_settings
@@ -52,6 +53,11 @@ from apps.tests.base import BaseTestCase
 
 INSTALLATION_ID = "a" * 64
 LOCAL_KEY = base64.b64encode(bytes(range(32))).decode("ascii")
+
+skip_on_darwin_without_anonymous_staging = skipIf(
+    sys.platform == "darwin",
+    "Darwin does not provide Linux O_TMPFILE/linkat secure anonymous staging.",
+)
 
 
 @override_settings(
@@ -185,6 +191,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         ):
             self.assertEqual(_new_envelope_id(self.backup.uuid_str), expected)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_source_validates_zip_before_key_provider_and_activates_atomically(self):
         self.archive.write_bytes(b"not-a-zip")
         provider = mock.Mock()
@@ -233,6 +240,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         self.assertFalse(CoreBackupEncryptionEnvelope.objects.exists())
         self.assertFalse(any(self.fence.glob("*.bse1")))
 
+    @skip_on_darwin_without_anonymous_staging
     def test_storage_copies_and_verifies_ciphertext_before_adapter_reads_it(self):
         source_artifact, ciphertext = self._seal()
         storage_root = Path(self.temporary.name) / "storage-private"
@@ -276,6 +284,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
                 ):
                     self.fail("tampered ciphertext reached an adapter")
 
+    @skip_on_darwin_without_anonymous_staging
     def test_restore_authenticates_bse1_and_never_falls_back_for_missing_ledger(self):
         source_artifact, ciphertext = self._seal()
         point, destination, remote, local_root = self._local_destination(
@@ -346,6 +355,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
                 fetch_backup_zip(point, output, restore=restore)
         point.generate_download_url.assert_not_called()
 
+    @skip_on_darwin_without_anonymous_staging
     def test_encrypted_local_artifact_has_no_direct_zip_download_bypass(self):
         source_artifact, ciphertext = self._seal()
         point, _destination, _remote, local_root = self._local_destination(
@@ -361,6 +371,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["artifact_format"], "bse1")
 
+    @skip_on_darwin_without_anonymous_staging
     def test_local_restore_uses_storage_owned_reverse_ciphertext_handoff(self):
         source_artifact, ciphertext = self._seal()
         point, _destination, remote, local_root = self._local_destination(
@@ -425,6 +436,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             "cleanup_complete",
         )
 
+    @skip_on_darwin_without_anonymous_staging
     def test_local_restore_never_reads_backups_mount_and_rejects_handoff_drift(self):
         source_artifact, ciphertext = self._seal()
         point, _destination, _remote, _local_root = self._local_destination(
@@ -468,6 +480,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         unseal.assert_not_called()
         self.assertFalse(output.exists())
 
+    @skip_on_darwin_without_anonymous_staging
     def test_destination_evidence_is_automatically_bound_to_active_envelope(self):
         source_artifact, ciphertext = self._seal()
         point, destination, _remote, _local_root = self._local_destination(
@@ -480,6 +493,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         )
         ensure_destination_ciphertext_ledger(self.backup, point, source_artifact)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_destination_gate_never_synthesizes_or_adopts_same_storage_evidence(self):
         source_artifact, ciphertext = self._seal()
         point, destination, _remote, _local_root = self._local_destination(
@@ -514,6 +528,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         with self.assertRaisesRegex(ArtifactPipelineError, "exactly one verified"):
             restore_encryption_plan(point)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_duplicate_exact_destination_records_are_ambiguous(self):
         source_artifact, ciphertext = self._seal()
         point, destination, _remote, _local_root = self._local_destination(
@@ -544,6 +559,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         with self.assertRaisesRegex(ArtifactPipelineError, "exactly one verified"):
             restore_encryption_plan(point)
 
+    @skip_on_darwin_without_anonymous_staging
     def test_restore_binds_selected_object_version_and_etag(self):
         source_artifact, ciphertext = self._seal()
         point, destination, _remote, _local_root = self._local_destination(
@@ -636,6 +652,7 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             )
         )
 
+    @skip_on_darwin_without_anonymous_staging
     def test_source_fence_cleanup_requires_terminal_db_state_and_is_idempotent(self):
         source_artifact, _ciphertext = self._seal()
         with mock.patch("backupsheep.staging.cleanup_ciphertext_fence") as cleanup:

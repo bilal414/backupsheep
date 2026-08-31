@@ -12,6 +12,11 @@
 /.env.fresh.new
 /.env-update.*
 /.env-artifact-policy.*
+/.env.backupsheep.*
+/.backupsheep-rabbitmq-transition-state
+/.backupsheep-rabbitmq-transition-state.*
+/.backupsheep-backup-storage-identity
+/.release-command-output.*
 /.release-request
 /.release-request.new
 /_storage/

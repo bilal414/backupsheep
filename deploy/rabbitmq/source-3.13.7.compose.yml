@@ -1,0 +1,33 @@
+# Local-build-only adoption model for the stock `rabbitmq:3-management` volume.
+# The wrapper is the only supported caller and scopes this model to the exact
+# `up --detach --no-deps rabbitmq` preparation command.
+services:
+  rabbitmq:
+    image: "${BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE:-backupsheep-rabbitmq-legacy-source:local}"
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq-legacy-source
+    pull_policy: never
+    user: "999:999"
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-entrypoint", "legacy-source"]
+    environment:
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "unattested"
+      BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET: "3.13"
+    secrets: !reset []
+    volumes: !override
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        volume:
+          nocopy: true
+      - ./deploy/rabbitmq/90-legacy-source.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro
+      - ./deploy/rabbitmq/entrypoint.sh:/usr/local/bin/backupsheep-rabbitmq-entrypoint:ro
+      - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,nodev,size=${RABBITMQ_TMPFS_SIZE:-128m},mode=1777
+      - /var/log/rabbitmq:rw,noexec,nosuid,nodev,size=64m,mode=0750,uid=999,gid=999
+      - /run/backupsheep-rabbitmq:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=999,gid=999
+    depends_on: !reset {}
+    networks: !reset []
+    network_mode: none
+    restart: "no"

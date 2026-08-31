@@ -2,11 +2,11 @@
   "schema_version": 1,
   "repository": "ghcr.io/aquasecurity/trivy-db",
   "manifest": {
-    "digest": "sha256:b494387b91d0e201f9a8945709a02eb66558cba454efa265b4638e7edde45132",
+    "digest": "sha256:b50899ac59bda25cea33ba1305154a041f916cc5aeb9e1e0b4efe56caebdbd52",
     "size": 616,
     "media_type": "application/vnd.oci.image.manifest.v1+json",
     "artifact_type": "application/vnd.aquasec.trivy.config.v1+json",
-    "created_at": "2026-08-29T13:10:08Z",
+    "created_at": "2026-08-30T19:06:40Z",
     "config": {
       "mediaType": "application/vnd.oci.empty.v1+json",
       "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -15,8 +15,8 @@
     },
     "layer": {
       "mediaType": "application/vnd.aquasec.trivy.db.layer.v1.tar+gzip",
-      "digest": "sha256:7ffd31523ebd6166c80630422336211c3fff6b069f97a31568d327de0d5f9f87",
-      "size": 115298303,
+      "digest": "sha256:8095c5396f62adc5b103548b822c4dfa4748930190353fa2ea770653a575b37c",
+      "size": 115199825,
       "annotations": {
         "org.opencontainers.image.title": "db.tar.gz"
       }
@@ -24,12 +24,12 @@
   },
   "database": {
     "schema_version": 2,
-    "updated_at": "2026-08-29T13:02:57.331758962Z",
-    "next_update": "2026-08-30T13:02:57.331758258Z",
+    "updated_at": "2026-08-30T19:01:43.110912224Z",
+    "next_update": "2026-08-31T19:01:43.110911954Z",
     "downloaded_at": "0001-01-01T00:00:00Z",
-    "metadata_sha256": "584992a9354fdba6e7f4e59da089e74a102ad19dbceb8045fdadffccb4dc5e77",
+    "metadata_sha256": "6ff0daf3039f212d8a938278cb9db65fc601c6ab917e0da9441e5ca23eefdd8f",
     "metadata_size": 143,
-    "db_sha256": "9337bbaa4af21678daeebb746810a5802fab1eed2a58ead1d93a7d8c2586e932",
-    "db_size": 1330548736
+    "db_sha256": "c0337e619c444dea4ccb8e2acf8f2788346d8789597cd0d284bc178becc6acf3",
+    "db_size": 1328930816
   }
 }

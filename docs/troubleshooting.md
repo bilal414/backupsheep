@@ -34,7 +34,7 @@ Static files are collected into the immutable image at build time and served by
 WhiteNoise. Explicitly rebuild the reviewed checkout, then recreate the core:
 
 ```bash
-./backupsheep-compose build db app app-egress-guard
+./backupsheep-compose build db app app-egress-guard rabbitmq
 ./backupsheep-compose up --detach --no-build --no-deps --force-recreate \
   app-egress-guard app
 ```

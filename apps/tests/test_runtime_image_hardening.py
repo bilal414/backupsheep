@@ -211,10 +211,10 @@ class RuntimeImageHardeningTests(TestCase):
             '"libmariadb3=1:11.8.6-5ubuntu0.1"',
             '"libncurses6=6.6+20251231-1"',
             '"libpq5=18.6-0ubuntu0.26.04.1"',
-            '"libssl3t64=3.5.5-1ubuntu3.4"',
+            '"libssl3t64=3.5.5-1ubuntu3.5"',
             '"openssh-client=1:10.2p1-2ubuntu3.5"',
-            '"openssl=3.5.5-1ubuntu3.4"',
-            '"openssl-provider-legacy=3.5.5-1ubuntu3.4"',
+            '"openssl=3.5.5-1ubuntu3.5"',
+            '"openssl-provider-legacy=3.5.5-1ubuntu3.5"',
             '"tzdata=2026c-0ubuntu0.26.04.1"',
         )
         for package in security_updates:
@@ -222,17 +222,18 @@ class RuntimeImageHardeningTests(TestCase):
                 self.assertIn(package, self.dockerfile)
 
         self.assertEqual(self.dockerfile.count("3.5.5-1ubuntu3.3"), 0)
+        self.assertEqual(self.dockerfile.count("3.5.5-1ubuntu3.4"), 0)
         self.assertEqual(
-            self.dockerfile.count("libssl3t64 (= 3.5.5-1ubuntu3.4)"), 3
+            self.dockerfile.count("libssl3t64 (= 3.5.5-1ubuntu3.5)"), 3
         )
         self.assertIn(
-            "assert_package libssl3t64 3.5.5-1ubuntu3.4", self.dockerfile
+            "assert_package libssl3t64 3.5.5-1ubuntu3.5", self.dockerfile
         )
         self.assertIn(
-            "assert_package openssl 3.5.5-1ubuntu3.4", self.dockerfile
+            "assert_package openssl 3.5.5-1ubuntu3.5", self.dockerfile
         )
         self.assertIn(
-            "assert_package openssl-provider-legacy 3.5.5-1ubuntu3.4",
+            "assert_package openssl-provider-legacy 3.5.5-1ubuntu3.5",
             self.dockerfile,
         )
 
@@ -243,6 +244,46 @@ class RuntimeImageHardeningTests(TestCase):
         )
         self.assertIn('dpkg-deb --fsys-tarfile "$mariadb_archive"', self.dockerfile)
         self.assertIn("tar -xOf - ./usr/bin/mariadb-dump", self.dockerfile)
+
+    def test_ubuntu_runtime_closure_uses_only_the_reviewed_amd64_snapshot(self):
+        stage = self.dockerfile.split(
+            "FROM ubuntu-runtime-base AS ubuntu-runtime-packages\n", 1
+        )[1].split("\n\nFROM ubuntu-runtime-base AS runtime", 1)[0]
+        for expected in (
+            "snapshot_id='20260831T131500Z'",
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/",
+            "Suites: resolute resolute-updates resolute-security",
+            "Components: main universe",
+            "Architectures: amd64",
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg",
+            "APT::Update::Error-Mode=any",
+            "apt-get indextargets --format '$(URI)'",
+            'test "$(dpkg --print-architecture)" = amd64',
+            "Ubuntu metadata escaped the reviewed snapshot:",
+            "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
+            "RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt",
+            "Acquire::https::CaInfo",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, stage)
+        self.assertIn('com.backupsheep.ubuntu.snapshot="20260831T131500Z"', self.runtime)
+        self.assertNotIn("archive.ubuntu.com", stage)
+        self.assertNotIn("security.ubuntu.com", stage)
+        self.assertNotIn("arm64", stage)
+        for forbidden in (
+            "trusted=yes",
+            "AllowUnauthenticated",
+            "Check-Valid-Until",
+            "Verify-Peer",
+            "Verify-Host",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, stage)
+        self.assertIn("test ! -e /etc/apt/sources.list", self.runtime)
+        self.assertIn(
+            "find /etc/apt/sources.list.d -mindepth 1 -maxdepth 1",
+            self.runtime,
+        )
         self.assertNotIn(
             'dpkg-deb --extract "$mariadb_archive"', self.dockerfile
         )

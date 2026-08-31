@@ -30,7 +30,7 @@ silently substitute a registry image when a reviewed local image is missing:
 
 ```bash
 cd /opt/backupsheep
-./backupsheep-compose build db app app-egress-guard
+./backupsheep-compose build db app app-egress-guard rabbitmq
 ./backupsheep-compose up --detach --no-build --no-deps --force-recreate \
   app-egress-guard app
 ./backupsheep-compose ps --all

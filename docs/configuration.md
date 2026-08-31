@@ -116,6 +116,10 @@ precedence over the Compose default URL when no fragments are present.
 | `SSH_MANAGED_FILES_PUBLIC_KEY` | optional | blank | Public half of the files-worker Ed25519 identity; must match its lane secret and differ from the database identity. |
 | `SSH_MANAGED_PRIVATE_KEY_PATH` / `SSH_MANAGED_PUBLIC_KEY` | legacy | blank | Shared-identity compatibility settings; both must remain blank in stock Compose. |
 
+The dedicated `backupsheep` vhost carries the stock topology. RabbitMQ's `/` vhost is
+retained but inaccessible and must remain exactly empty; provisioning does not
+destructively delete it.
+
 Production allows plaintext AMQP only on loopback or the exact stock `rabbitmq` Compose
 service. External and multi-host brokers must use `amqps`; certificate validation and
 hostname matching are mandatory. System trust roots are used unless a private CA is set.
@@ -266,6 +270,26 @@ volumes:
       o: bind
       device: /mnt/storage/backupsheep
 ```
+
+Pass that exact private regular file with
+`./backupsheep-compose --approved-compose-file "$PWD/docker-compose.override.yml" ...` on
+every wrapper command. The wrapper rejects every other service, network, secret, volume or
+top-level model change and attests the realized local-volume options before use.
+
+The bind target requires explicit `DOCKER_HOST=unix:///var/run/docker.sock` or
+`DOCKER_HOST=unix:///run/docker.sock`; every `DOCKER_CONTEXT` value is rejected. The
+resolved endpoint must be the canonical rootful, root-owned, non-symlink socket, and its
+device/inode and trusted parent chain are rechecked. Remote TCP/SSH, forwarded Unix,
+rootless, and Docker Desktop endpoints must use the default named volume. The target's
+canonical absolute path and every parent must already be real directories, never symlinks.
+Before the first mutating wrapper call reaches Docker, the owner-only version-2
+`.backupsheep-backup-storage-identity` ledger records the project and installation,
+canonical path, target device/inode separately, and a SHA-256 of only the trusted parent
+device/inode/owner/mode chain. The same target inode may safely transition to the fixed
+storage-service UID `10004` and mode `0700`; later path, remount or directory replacement
+still fails closed. Back up that ledger with the override and Local Storage recovery set.
+Move storage through a fresh project and authenticated restore; do not delete or edit the
+ledger to approve a different target for the existing project.
 
 Each Local Storage destination can optionally scope itself to a subdirectory of this
 root (the *Path* field in the UI).

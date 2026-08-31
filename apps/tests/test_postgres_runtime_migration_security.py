@@ -140,6 +140,54 @@ def target_placeholder_records():
 
 
 class PostgresSourceIdentityContractTests(TestCase):
+    def test_migrator_rejects_system_and_malformed_database_names_before_docker(self):
+        arguments = [
+            "/bin/false",
+            "backupsheep",
+            INSTALLATION_ID,
+            SOURCE_IMAGE_ID,
+            "backupsheep-postgres:test",
+            "backupsheep_pgdata",
+            "backupsheep_postgres_data_v1",
+            "/tmp/not-read",
+            "__DATABASE_NAME__",
+            BOOTSTRAP_ROLE,
+            GENERATION3_ROSTER,
+            "e" * 64,
+            STRICT_INTENT,
+            "1",
+        ]
+        for database_name in (
+            "",
+            "postgres",
+            "template0",
+            "template1",
+            "Tenant",
+            "tenant-name",
+            "ténant",
+            "1tenant",
+            "a" * 64,
+        ):
+            with self.subTest(database_name=database_name):
+                result = subprocess.run(
+                    [
+                        str(MIGRATOR),
+                        *(
+                            database_name if value == "__DATABASE_NAME__" else value
+                            for value in arguments
+                        ),
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertIn(
+                    "database name is outside the stock migration contract",
+                    result.stderr,
+                )
+
     def run_contract(self, body, **environment):
         env = os.environ.copy()
         env.update(environment)
@@ -457,6 +505,22 @@ class PostgresSourceIdentityContractTests(TestCase):
         self.assertIn(create_guard, source)
         self.assertLess(source.index(reset_guard), source.index('volume rm "$target_volume"'))
         self.assertLess(source.index(create_guard), source.index("volume create \\\n"))
+
+    def test_empty_target_witness_receives_validated_database_identity(self):
+        source = MIGRATOR.read_text(encoding="utf-8")
+        entrypoint = (
+            "--entrypoint /usr/local/bin/backupsheep-postgres-storage-witness"
+        )
+        end = source.index('"$target_image_id" initialize-migration')
+        start = source.rindex(entrypoint, 0, end)
+        invocation = source[start:end]
+
+        for environment in (
+            '-e "POSTGRES_DB=${database_name}"',
+            '-e "POSTGRES_USER=${bootstrap_user}"',
+        ):
+            with self.subTest(environment=environment):
+                self.assertEqual(invocation.count(environment), 1)
 
     def test_restore_is_unprivileged_and_code_bearing_objects_are_preflighted(self):
         source = MIGRATOR.read_text(encoding="utf-8")

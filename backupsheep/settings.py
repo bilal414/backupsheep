@@ -425,6 +425,23 @@ def _database_config():
         }
         return _validate_database_transport(database, config)
 
+    database_name = str(config.get("DB_NAME") or "")
+    stock_identity_generation = str(
+        config.get("BACKUPSHEEP_DATABASE_IDENTITY_GENERATION") or ""
+    )
+    if stock_identity_generation in {
+        "3",
+        "3-pending-fresh",
+        "3-pending-upgrade",
+    }:
+        if (
+            re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", database_name) is None
+            or database_name in {"postgres", "template0", "template1"}
+        ):
+            raise ImproperlyConfigured(
+                "DB_NAME must be a non-system lowercase PostgreSQL database identifier."
+            )
+
     options = {}
     if config.get("DB_SSLMODE"):
         options["sslmode"] = config["DB_SSLMODE"]
@@ -433,7 +450,7 @@ def _database_config():
 
     database = {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": config["DB_NAME"],
+        "NAME": database_name,
         "USER": config["DB_USER"],
         "PASSWORD": config["DB_PASSWORD"],
         "HOST": config["DB_HOST"],

@@ -36,8 +36,38 @@ class CISecurityTopologyContractTests(TestCase):
         cls.override = (
             ROOT / "deploy" / "ci" / "docker-compose.security-topology.yml"
         ).read_text(encoding="utf-8")
+        cls.rabbitmq_legacy_source = (
+            ROOT / "deploy" / "rabbitmq" / "source-3.13.7.compose.yml"
+        ).read_text(encoding="utf-8")
+        cls.rabbitmq_legacy_source_dockerfile = (
+            ROOT / "Dockerfile.rabbitmq-legacy-source"
+        ).read_text(encoding="utf-8")
 
     def test_workflow_builds_and_exercises_product_images_and_pinned_pg_fixture(self):
+        historical_source_image = (
+            "rabbitmq:3.13.7-management@sha256:"
+            "e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69"
+        )
+        reviewed_source_base = (
+            "rabbitmq:3.13.7@sha256:"
+            "87178a0ee3e2f52980ba356d38646ed1056705ff2d5ff281f8965456eaa0c1e3"
+        )
+        self.assertIn(
+            "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE", self.rabbitmq_legacy_source
+        )
+        self.assertNotIn(historical_source_image, self.rabbitmq_legacy_source)
+        self.assertIn(
+            f"FROM {reviewed_source_base}",
+            self.rabbitmq_legacy_source_dockerfile,
+        )
+        self.assertNotIn(
+            historical_source_image,
+            self.rabbitmq_legacy_source_dockerfile,
+        )
+        self.assertIn(
+            f'TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE: "{historical_source_image}"',
+            self.workflow,
+        )
         for expected in (
             'TEST_APP_IMAGE: "backupsheep-ci-app:',
             'TEST_POSTGRES_IMAGE: "backupsheep-ci-postgres:',
@@ -45,6 +75,9 @@ class CISecurityTopologyContractTests(TestCase):
             'TEST_EGRESS_IMAGE: "backupsheep-ci-egress:',
             'TEST_RABBITMQ_IMAGE: "backupsheep-ci-rabbitmq:',
             'TEST_RABBITMQ_UPGRADE_IMAGE: "backupsheep-ci-rabbitmq-upgrade:',
+            'TEST_RABBITMQ_LEGACY_SOURCE_IMAGE: "backupsheep-ci-rabbitmq-legacy-source:',
+            'TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE: "rabbitmq:3.13.7-management@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69"',
+            'TEST_RABBITMQ_HISTORICAL_SOURCE_REPO_DIGEST: "rabbitmq@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69"',
             'TEST_RELEASE_VERIFIER_IMAGE: "backupsheep-ci-release-verifier:',
             '--file Dockerfile --tag "$TEST_APP_IMAGE"',
             '--file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE"',
@@ -53,6 +86,23 @@ class CISecurityTopologyContractTests(TestCase):
             '--file Dockerfile.egress --tag "$TEST_EGRESS_IMAGE"',
             '--file Dockerfile.rabbitmq --tag "$TEST_RABBITMQ_IMAGE"',
             '--file Dockerfile.rabbitmq-upgrade --tag "$TEST_RABBITMQ_UPGRADE_IMAGE"',
+            '--file Dockerfile.rabbitmq-legacy-source',
+            '--tag "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE"',
+            'docker pull --platform linux/amd64 "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE"',
+            '[[ "$historical_source_repo_digests" == "$TEST_RABBITMQ_HISTORICAL_SOURCE_REPO_DIGEST" ]]',
+            'TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE_ID=%s',
+            'com.backupsheep.rabbitmq.enabled-plugins',
+            'com.backupsheep.rabbitmq.openssl-runtime-version',
+            'com.backupsheep.rabbitmq.openssl-donor-index-digest',
+            'sha256:f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f469995a728c298b',
+            '/opt/openssl/bin/openssl version',
+            'crypto:info_lib()',
+            '/proc/self/maps',
+            '/opt/openssl/lib/libcrypto.so.3',
+            '! command -v gosu',
+            'rabbitmq-plugins list --offline --enabled --minimal',
+            'docker run --rm --pull never --network none --read-only --cap-drop ALL',
+            '--entrypoint rabbitmqctl "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" version | grep -Fxq \'3.13.7\'',
             '--file Dockerfile.release-verifier --tag "$TEST_RELEASE_VERIFIER_IMAGE"',
             'BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION: "1"',
             'BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION: "2"',
@@ -64,6 +114,36 @@ class CISecurityTopologyContractTests(TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.workflow)
 
+    def test_ci_models_bind_the_fixed_rabbitmq_node_host(self):
+        dependency_job = self.workflow.split(
+            "  dependency-and-deployment-checks:\n", 1
+        )[1].split("  static-python-security:\n", 1)[0]
+        self.assertIn(
+            'BACKUPSHEEP_RABBITMQ_NODE_HOST: "rabbitmq"', dependency_job
+        )
+        self.assertIn(
+            "BACKUPSHEEP_RABBITMQ_NODE_HOST=rabbitmq", self.runner
+        )
+
+    def test_topology_uses_the_exact_built_and_scanned_rabbitmq_image(self):
+        for expected in (
+            "    TEST_RABBITMQ_IMAGE \\",
+            "    TEST_TOPOLOGY_PROJECT TEST_OWNERSHIP_VALUE",
+            '"$TEST_RABBITMQ_IMAGE"; do',
+            "BACKUPSHEEP_RABBITMQ_IMAGE=${TEST_RABBITMQ_IMAGE}",
+            '"$TEST_EGRESS_IMAGE" "$TEST_RABBITMQ_IMAGE" <<\'PY\'',
+            '"rabbitmq-volume-init": sys.argv[5]',
+            '"rabbitmq": sys.argv[5]',
+            '"rabbitmq-provision": sys.argv[5]',
+            'assert_runtime_image "$service" "$TEST_RABBITMQ_IMAGE"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.runner)
+        self.assertNotIn(
+            "290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240",
+            self.runner,
+        )
+
     def test_recurring_workflow_scans_exact_images_with_strict_pinned_tools(self):
         gate = self.workflow.split("  application-security-regression:\n", 1)[1]
         job_environment = gate.split("    steps:\n", 1)[0]
@@ -72,18 +152,24 @@ class CISecurityTopologyContractTests(TestCase):
             "scripts/install_release_tools.py",
             "--tool syft",
             "--tool trivy",
+            "--tool grype",
             "--tool oras",
             "1\\.51\\.0",
             "0\\.74\\.0",
+            "0\\.116\\.1",
             "scripts/prepare_trivy_db.py prepare",
             "scripts/prepare_trivy_db.py verify",
             "deploy/trivy-db-lock.json",
+            "scripts/prepare_grype_db.py prepare",
+            "scripts/prepare_grype_db.py verify",
+            "deploy/grype-db-lock.json",
             'docker image save --output "$archive" "$image_id"',
             'owner="$(ci_image_ownership_label "$image_id")"',
             '[[ "$owner" == "$TEST_OWNERSHIP_VALUE" ]]',
             'scan "docker-archive:$archive"',
             '--config "$CI_SCAN_TOOL_DIR/empty-syft.yaml"',
             '--config "$CI_SCAN_TOOL_DIR/empty-trivy.yaml" image',
+            '--config "$CI_SCAN_TOOL_DIR/empty-grype.yaml"',
             '--cache-dir "$CI_TRIVY_CACHE_DIR"',
             '--ignorefile "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"',
             "--skip-db-update",
@@ -95,6 +181,20 @@ class CISecurityTopologyContractTests(TestCase):
             "--list-all-pkgs",
             "--severity HIGH,CRITICAL",
             "--exit-code 1",
+            '"docker-archive:$archive"',
+            "--fail-on high",
+            'GRYPE_DB_AUTO_UPDATE=false',
+            'GRYPE_CHECK_FOR_APP_UPDATE=false',
+            'Refusing a pre-existing Grype home path.',
+            'grype_report="$CI_SCAN_DIR/${image_kind}.grype.json"',
+            'grype_baseline="$CI_SCAN_DIR/${image_kind}.grype-unsuppressed.json"',
+            "scripts/materialize_legacy_rabbitmq_vex.py",
+            "deploy/rabbitmq/legacy-source-otp26.vex-policy.json",
+            'vex_image_reference="$(' ,
+            'docker image tag "$image_id" "$vex_image_reference"',
+            'grype_vex=(--vex "$materialized_vex")',
+            'allowed_ignored=allowed',
+            "expected_vex_document=expected_vex_document",
             "deploy/ci/validate-image-scan.py",
             '--requirements-lock "$GITHUB_WORKSPACE/requirements.lock"',
             '--trivy-db-lock "$CI_SCAN_DIR/trivy-db-lock.json"',
@@ -104,6 +204,7 @@ class CISecurityTopologyContractTests(TestCase):
             "egress\t$TEST_EGRESS_IMAGE",
             "rabbitmq\t$TEST_RABBITMQ_IMAGE",
             "rabbitmq-upgrade\t$TEST_RABBITMQ_UPGRADE_IMAGE",
+            "rabbitmq-legacy-source\t$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE",
             "release-verifier\t$TEST_RELEASE_VERIFIER_IMAGE",
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             'CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"',
@@ -113,6 +214,97 @@ class CISecurityTopologyContractTests(TestCase):
                 self.assertIn(expected, gate)
         self.assertNotIn("--ignore-unfixed", gate)
         self.assertIn('test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"', gate)
+        self.assertNotIn("legacy-source-otp26.openvex.json", gate)
+        self.assertGreaterEqual(gate.count('vex "$materialized_vex"'), 1)
+
+    def test_workflow_runs_genuine_rabbitmq_version_migration_gate(self):
+        expected_call = """          timeout --signal=TERM --kill-after=30s 30m \\
+            deploy/ci/run-rabbitmq-version-migration-e2e.sh \\
+            "$TEST_RABBITMQ_HISTORICAL_SOURCE_IMAGE" \\
+            "$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE" \\
+            "$TEST_RABBITMQ_UPGRADE_IMAGE" \\
+            "$TEST_RABBITMQ_IMAGE" \\
+            "bs-rmq-migration-$TEST_OWNERSHIP_VALUE" \\
+            "$TEST_OWNERSHIP_VALUE"
+"""
+        self.assertIn(expected_call, self.workflow)
+        migration_gate = ROOT / "deploy" / "ci" / "run-rabbitmq-version-migration-e2e.sh"
+        self.assertTrue(migration_gate.is_file())
+        self.assertTrue(os.access(migration_gate, os.X_OK))
+        gate_source = migration_gate.read_text(encoding="utf-8")
+        for evidence in (
+            "rabbitmq:3.13.7-management@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69",
+            "assert_migration_message \"$historical_container\"",
+            "assert_migration_message \"$upgrade_container\"",
+            "assert_migration_message \"$target_container\"",
+            "rabbitmqctl -q -n \"$node_name\" enable_feature_flag khepri_db",
+            "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=3.13.7",
+            "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.2.9",
+            "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.3.5",
+            'docker container kill --signal KILL "$container_name"',
+            "assert_final_topology \"$steady_container\"",
+            "list_global_parameters",
+            "lookup_global(imported_definition_hash_value)",
+            "list_parameters",
+            "list_user_limits --global",
+            "list_vhost_limits --global",
+            "name tracing default_queue_type description tags protected_from_deletion cluster_state",
+            'name type durable auto_delete exclusive arguments',
+            "list_exchanges",
+            "list_bindings",
+            "list_policies",
+            "list_operator_policies",
+            "list_permissions",
+            "list_topic_permissions",
+            "list_connections pid user vhost",
+            "backupsheep_e2e_forbidden",
+            "imported_definition_hash_value",
+            "forbidden-framed-global-parameter",
+            "crafted_global_parameter",
+            "did not spoof raw TSV",
+            "failed to restore the exact internal cluster ID",
+            "forbidden-spaced-username",
+            "forbidden-${crafted_case}-username",
+            "$'backupsheep_app\\tevil'",
+            "$'backupsheep_app\\nevil'",
+            "backupsheep_app evil",
+            "expect_pre_mutation_provisioner_rejection",
+            "capture_identity_state",
+            "mutated identities before rejecting",
+        ):
+            with self.subTest(evidence=evidence):
+                self.assertIn(evidence, gate_source)
+
+    def test_workflow_is_amd64_only_and_preserves_migration_and_scanning(self):
+        regression_gate = self.workflow.split(
+            "  application-security-regression:\n", 1
+        )[1]
+        self.assertEqual(
+            self.workflow.count("deploy/ci/run-rabbitmq-version-migration-e2e.sh"),
+            1,
+        )
+        for required in (
+            "docker pull --platform linux/amd64",
+            "test \"$(docker image inspect --format '{{.Architecture}}' \"$image\")\" = amd64",
+            "Generate SBOMs and reject HIGH or CRITICAL findings in exact images",
+            "rabbitmq-legacy-source\t$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE",
+            "deploy/ci/validate-image-scan.py",
+            "Retain exact-image SBOM and vulnerability evidence",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, regression_gate)
+        for forbidden in (
+            "rabbitmq-arm64-migration",
+            "ubuntu-24.04-arm",
+            "linux/arm64",
+            "aarch64",
+            "TEST_RABBITMQ_ARM64_LEGACY_SOURCE_IMAGE",
+            "TEST_ARM64_OWNERSHIP_VALUE",
+            "attest_arm64_legacy_image.py",
+            "actions/download-artifact",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.workflow)
 
     def test_rabbitmq_scan_requires_exact_patched_openssl_packages(self):
         expected = {"libcrypto3": "3.5.8-r0", "libssl3": "3.5.8-r0"}
@@ -128,6 +320,158 @@ class CISecurityTopologyContractTests(TestCase):
                     image_scan.validate_rabbitmq_security_packages(
                         observed, "fixture"
                     )
+
+    def test_legacy_rabbitmq_source_scan_requires_ubuntu_deb_inventory(self):
+        self.assertEqual(
+            image_scan.EXPECTED_OS_PACKAGE_TYPES["rabbitmq-legacy-source"],
+            ("deb", "ubuntu"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "rabbitmq-legacy-source.tar"
+            archive.write_bytes(b"fixture")
+            image_id = "sha256:" + "a" * 64
+            syft_report = {
+                "schema": {
+                    "version": "16.1.10",
+                    "url": (
+                        "https://raw.githubusercontent.com/anchore/syft/main/"
+                        "schema/json/schema-16.1.10.json"
+                    ),
+                },
+                "descriptor": {"name": "syft", "version": "1.51.0"},
+                "artifacts": [
+                    {"name": "base-files", "version": "13ubuntu10.3", "type": "deb"},
+                    {"name": "gpgv", "version": "2.4.4-2ubuntu17.4", "type": "deb"},
+                    {"name": "libssl3t64", "version": "3.0.13-0ubuntu3.15", "type": "deb"},
+                    {"name": "openssl", "version": "3.0.13-0ubuntu3.15", "type": "deb"},
+                ],
+                "source": {
+                    "type": "image",
+                    "metadata": {"userInput": str(archive), "imageID": image_id},
+                },
+            }
+            trivy_report = {
+                "SchemaVersion": 2,
+                "Trivy": {"Version": "0.74.0"},
+                "ArtifactID": image_id,
+                "ArtifactName": str(archive),
+                "ArtifactType": "container_image",
+                "Metadata": {"ImageID": image_id},
+                "Results": [
+                    {
+                        "Class": "os-pkgs",
+                        "Type": "ubuntu",
+                        "Packages": [
+                            {"Name": "base-files", "Version": "13ubuntu10.3"},
+                            {
+                                "Name": "gpgv",
+                                "Version": "2.4.4",
+                                "Release": "2ubuntu17.4",
+                            },
+                            {
+                                "Name": "libssl3t64",
+                                "Version": "3.0.13",
+                                "Release": "0ubuntu3.15",
+                            },
+                            {
+                                "Name": "openssl",
+                                "Version": "3.0.13",
+                                "Release": "0ubuntu3.15",
+                            },
+                        ],
+                    }
+                ],
+            }
+
+            image_scan.validate_syft(
+                syft_report,
+                "rabbitmq-legacy-source",
+                image_id,
+                archive,
+                {},
+            )
+            image_scan.validate_trivy(
+                trivy_report,
+                "rabbitmq-legacy-source",
+                image_id,
+                archive,
+                (),
+                {},
+            )
+
+            wrong_syft = json.loads(json.dumps(syft_report))
+            for artifact in wrong_syft["artifacts"]:
+                artifact["type"] = "apk"
+            with self.assertRaises(SystemExit):
+                image_scan.validate_syft(
+                    wrong_syft,
+                    "rabbitmq-legacy-source",
+                    image_id,
+                    archive,
+                    {},
+                )
+            wrong_trivy = json.loads(json.dumps(trivy_report))
+            wrong_trivy["Results"][0]["Type"] = "alpine"
+            with self.assertRaises(SystemExit):
+                image_scan.validate_trivy(
+                    wrong_trivy,
+                    "rabbitmq-legacy-source",
+                    image_id,
+                    archive,
+                    (),
+                    {},
+                )
+            vulnerable_trivy = json.loads(json.dumps(trivy_report))
+            vulnerable_trivy["Results"][0]["Vulnerabilities"] = [
+                {"VulnerabilityID": "CVE-TEST-LEGACY", "Severity": "HIGH"}
+            ]
+            with self.assertRaisesRegex(SystemExit, "CVE-TEST-LEGACY"):
+                image_scan.validate_trivy(
+                    vulnerable_trivy,
+                    "rabbitmq-legacy-source",
+                    image_id,
+                    archive,
+                    (),
+                    {},
+                )
+
+            for package_name in (
+                "gpgv",
+                "libssl3t64",
+                "openssl",
+            ):
+                with self.subTest(package_name=package_name):
+                    downgraded_syft = json.loads(json.dumps(syft_report))
+                    package = next(
+                        item
+                        for item in downgraded_syft["artifacts"]
+                        if item["name"] == package_name
+                    )
+                    package["version"] = "0-vulnerable"
+                    with self.assertRaises(SystemExit):
+                        image_scan.validate_syft(
+                            downgraded_syft,
+                            "rabbitmq-legacy-source",
+                            image_id,
+                            archive,
+                            {},
+                        )
+                    downgraded_trivy = json.loads(json.dumps(trivy_report))
+                    package = next(
+                        item
+                        for item in downgraded_trivy["Results"][0]["Packages"]
+                        if item["Name"] == package_name
+                    )
+                    package["Release"] = "0vulnerable"
+                    with self.assertRaises(SystemExit):
+                        image_scan.validate_trivy(
+                            downgraded_trivy,
+                            "rabbitmq-legacy-source",
+                            image_id,
+                            archive,
+                            (),
+                            {},
+                        )
 
     def test_release_verifier_scan_requires_exact_patched_go_graph(self):
         syft = {
@@ -975,6 +1319,10 @@ database_password=test-only-password
             ("docs", "/code/docs"),
             ("Dockerfile.rabbitmq", "/code/Dockerfile.rabbitmq"),
             (
+                "Dockerfile.rabbitmq-legacy-source",
+                "/code/Dockerfile.rabbitmq-legacy-source",
+            ),
+            (
                 "Dockerfile.rabbitmq-upgrade",
                 "/code/Dockerfile.rabbitmq-upgrade",
             ),
@@ -1009,6 +1357,7 @@ database_password=test-only-password
             TEST_APP_IMAGE="unused-app",
             TEST_POSTGRES_IMAGE="unused-postgres",
             TEST_EGRESS_IMAGE="unused-egress",
+            TEST_RABBITMQ_IMAGE="unused-rabbitmq",
             TEST_TOPOLOGY_PROJECT="BackupsheepCI",
             TEST_OWNERSHIP_VALUE="unused-owner",
         )
@@ -1097,6 +1446,7 @@ raise SystemExit(99)
                     TEST_APP_IMAGE="test-app",
                     TEST_POSTGRES_IMAGE="test-postgres",
                     TEST_EGRESS_IMAGE="test-egress",
+                    TEST_RABBITMQ_IMAGE="test-rabbitmq",
                     TEST_TOPOLOGY_PROJECT="backupsheep-ci",
                     TEST_OWNERSHIP_VALUE="expected-owner",
                 )

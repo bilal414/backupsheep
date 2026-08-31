@@ -33,8 +33,9 @@ For the verified installer:
 - an installation parent owned by that same effective invoking UID and not writable by
   group or other users;
 - outbound HTTPS access to GitHub, registries and package sources used by the image build;
-- a supported CPU architecture: `x86_64` or `aarch64` (the Dockerfile installs the
-  Oracle MySQL 8.4 client for those two architectures);
+- a Docker daemon whose server platform is exactly Linux AMD64 (`linux/amd64`, also
+  called `x86_64`). Other daemon operating systems and architectures are unsupported;
+  the installer refuses them before starting or changing the Compose project;
 - enough working disk for the image, PostgreSQL, RabbitMQ, the largest concurrent
   database/file backup, website incremental caches and any Local Storage archives.
 
@@ -100,7 +101,8 @@ Supported options are:
 | `--allow-root-install` | Explicitly permits effective UID 0 for a root-owned installation using an existing rootful daemon; defaults to `/opt/backupsheep` unless `--install-dir` is supplied |
 | `--project-name NAME` | Pins and persists the Compose project name; every rerun must match that protected witness, and ambient Compose variables are ignored |
 | `--adopt-legacy-project NAME` | One-time recovery for the exact stock four-volume layout left by an old `compose down`; see the guarded workflow below |
-| `--approved-compose-file PATH` | Accepts only the private regular `INSTALL_DIR/docker-compose.override.yml`, rendered after the base file and included in exact ownership history |
+| `--legacy-rabbitmq-node-host HOST` | Persists the exact node host for a stopped blank-generation RabbitMQ volume: `rabbitmq` or one reviewed 12-character lowercase hexadecimal Docker hostname. Local-build and `--skip-start` only; it does not inspect, open or migrate the broker |
+| `--approved-compose-file PATH` | Accepts only the private regular `INSTALL_DIR/docker-compose.override.yml`; the rendered model may differ from base only in the constrained `backup_storage` local bind-volume driver options |
 | `--migrate-database-identities` | One-time conversion of an existing stock database to generation-3 bootstrap, owner and exact per-lane ACL/RLS identities |
 | `--migrate-rabbitmq-identities` | One-time conversion of the shared broker login to generation-2 per-lane credentials/ACLs |
 | `--rotate-celery-signing-keys` | Drained-queue generation-3 task-signing rotation; requires all publishers/consumers stopped and exact broker ownership |
@@ -116,11 +118,20 @@ Supported options are:
 The script does not look up the server's public IP, configure DNS, open a firewall,
 issue a TLS certificate or install a reverse proxy.
 
-### Signed-release consumer mode
+### Signed-release consumer mode (currently dormant)
+
+The checked-in V2 signed-release path is legacy multi-platform scaffolding, not an
+approved publication or installation path for the current Linux AMD64-only release
+scope. Keep `BACKUPSHEEP_SIGNED_RELEASES_ENABLED` unset and do not consume a V2 release.
+It may be enabled only after the workflow, descriptor, manifest, verifier, installer
+selection, and evidence policy are converted together to one AMD64-only trust contract
+and that complete transition passes security review and exact-release tests. The details
+below document the retained dormant design; they do not expand the supported platform.
 
 Local build remains the default and requires no release assets. To consume a published
-official release, obtain both the exact tag and the 40-character commit to which that tag
-points, download `install.sh` from that commit, and add `--release-tag`:
+official release after that atomic conversion, obtain both the exact tag and the
+40-character commit to which that tag points, download `install.sh` from that commit,
+and add `--release-tag`:
 
 ```bash
 RELEASE_TAG='v1.2.3'
@@ -133,11 +144,13 @@ COMMIT='<40-character-commit-for-v1.2.3>'
   --domain backups.example.com
 ```
 
-This mode downloads only three bounded GitHub release assets: the canonical V2 descriptor,
-its Sigstore bundle, and the digest-bound release manifest. It does not install Cosign or
-any host package. Instead it pulls BackupSheep's reviewed first-party verifier, built from
-Cosign 3.1.3, by an exact index digest and binds the selected amd64/arm64 manifest and
-configuration digest. It confirms its non-root user and entrypoint and runs it without the Docker
+The dormant V2 mode downloads only three bounded GitHub release assets: its canonical
+descriptor, its Sigstore bundle, and the digest-bound release manifest. It does not
+install Cosign or any host package. Instead it pulls BackupSheep's reviewed first-party
+verifier, built from Cosign 3.1.3, by an exact index digest and binds the selected legacy
+AMD64/ARM64 manifest and configuration digest. That dual-platform descriptor is retained
+for audit compatibility only and is not an approved current release contract. The verifier
+confirms its non-root user and entrypoint and runs it without the Docker
 socket or network, with all capabilities dropped, `no-new-privileges`, a read-only root
 filesystem, a private bounded tmpfs, and bounded PIDs/CPU/memory.
 
@@ -167,6 +180,8 @@ contacts Docker or changes installation files. No dormant upgrade controller is 
 the application image. Use signed mode only for a fresh project; move to another signed
 release through a separately verified restore into another fresh project while preserving
 the old project. Preserve `.release-evidence` with the complete control-plane recovery set.
+Signed mode also rejects `--adopt-legacy-project`, `--legacy-rabbitmq-node-host`, and every
+wrapper RabbitMQ generation-transition command before they can become a migration path.
 
 ### Explicit rootful-daemon mode
 
@@ -239,9 +254,14 @@ On a new installation the script:
 6. proves that a broker project is fresh or that its one running, healthy broker reports
    RabbitMQ 4.3 when diagnostics run as the named `rabbitmq` account, then records the
    installer-owned data-generation witness. It refuses orphaned, stopped, unhealthy,
-   ambiguous, 3.13 or 4.2 broker state instead of guessing at a volume format;
+   ambiguous, 3.13 or 4.2 broker state instead of guessing at a volume format. The
+   installer's refusal is unchanged by the wrapper's separate, explicit crash recovery,
+   which requires an exact protected host transition ledger; a broker-writable
+   pending/final volume witness alone never authorizes recovery;
 7. validates Compose through explicit `--project-name`, `--env-file` and `-f` arguments;
-8. in default mode builds commit-tagged PostgreSQL, application and namespace-guard images;
+8. in default mode builds commit-tagged PostgreSQL, application, namespace-guard and
+   RabbitMQ 4.3 images; the reviewed RabbitMQ 4.2 and 3.13 migration derivatives build
+   only when their explicit transition is requested;
    in signed-release mode re-attests the five pre-pulled official digests and disables
    every corresponding Compose build; then starts only
    PostgreSQL/RabbitMQ, the volume/broker/staging/database provisioners, migrate/seal/
@@ -294,17 +314,25 @@ volumes after `compose down`: `pgdata`, `rabbitmq_data`, `backup_workdir` and
 that those volumes belong to the current installation. Do not work around this by
 manually editing the persisted project-name witness.
 
-After independently confirming the old Compose project name and recovery backups, run
-the verified installer once with the value-bearing adoption option, preferably with
-startup disabled for the first pass:
+After independently confirming the old Compose project name, exact RabbitMQ node host,
+and recovery backups, remove every old project container and network with the exact old
+deployment model while preserving all volumes. The node host must have been captured from
+the old broker before removal. It is either the fixed `rabbitmq` name or the unique,
+reviewed 12-character lowercase hexadecimal Docker hostname represented by its only
+Mnesia node tree. Multiple or ambiguous node trees require reviewed blue-green recovery.
+
+Run the verified local-build installer once with both value-bearing adoption options and
+startup disabled:
 
 ```bash
+LEGACY_RABBITMQ_NODE_HOST='<captured-rabbitmq-or-12-lowercase-hex-host>'
 ./install.sh \
   --ref "${COMMIT}" \
   --install-dir "$HOME/.local/share/backupsheep" \
   --project-name backupsheep \
   --domain backups.example.com \
   --adopt-legacy-project backupsheep \
+  --legacy-rabbitmq-node-host "${LEGACY_RABBITMQ_NODE_HOST}" \
   --skip-start
 ```
 
@@ -313,15 +341,17 @@ the named project has zero containers and networks, and its complete labeled vol
 is exactly `${project}_{pgdata,rabbitmq_data,backup_workdir,backup_storage}` with the
 standard Compose project/logical labels and no BackupSheep installation-ID labels. It
 also rejects pre-existing `installation_identity` or legacy `ssh_trust` names, inventory or
-inspection errors, missing volumes, extra volumes and label drift.
+inspection errors, missing volumes, extra volumes and label drift. The node-host option is
+valid only with `--skip-start`, and both legacy options are refused by signed-release mode.
 
 Only after those checks does the installer create
 `${project}_installation_identity` with the exact Compose project/logical labels and the
 new stable installation ID. It immediately re-inspects the name and all labels, then
-persists `BACKUPSHEEP_COMPOSE_PROJECT_NAME`. The same generic ownership validator must
+persists `BACKUPSHEEP_COMPOSE_PROJECT_NAME` and
+`BACKUPSHEEP_RABBITMQ_NODE_HOST`. The same generic ownership validator must
 pass afterward. If any later independent gate (notably the RabbitMQ
 generation gate) stops the run, retain the evidence, complete its documented runbook and
-rerun without `--adopt-legacy-project`; adoption is deliberately one-time.
+rerun without either legacy option; adoption is deliberately one-time.
 
 If the legacy containers still exist, no adoption flag is needed. Before any Compose
 mutation, the installer proves every project container's exact installation path,
@@ -332,6 +362,11 @@ the identity sentinel. The wrapper then accepts the immutable blank container ID
 under that matching sentinel so the reviewed Compose and RabbitMQ transition commands can
 recreate them. Any nonblank partial identity, path/model/service drift, noncanonical name,
 foreign sentinel or inspection failure stops without creating a Docker resource.
+This may establish project ownership, but it does not authorize an in-place broker hop.
+Before the wrapper's 3.13 source-adoption command, use the exact old deployment model to
+remove every project container and network while preserving named volumes, capture and
+persist the one exact node host, and satisfy the drained stock-source predicate in the
+[RabbitMQ migration gate](rabbitmq-upgrade.md).
 
 The exact four-volume adoption gate above is only for the older pre-sentinel layout;
 do not use it to relabel a develop-era `ssh_trust` volume. Development layout v2 was
@@ -345,12 +380,36 @@ be imported. Reapprove each exact account/host/port/key in PostgreSQL instead; a
 ambiguous or foreign legacy volume stops installation.
 
 An existing RabbitMQ data volume is a separate fail-closed gate. The installer never
-performs the 3.13 -> 4.2 -> 4.3/Khepri migration. If the stored data-generation witness is
-blank, it accepts only a new project with no broker resources. Existing broker data with
-a blank witness must use the explicit wrapper migration/reconciliation path, which attests
-the pinned image reference and image ID, exact server version, feature flags and Khepri.
-A volume without that witness, a stopped/unhealthy broker, duplicate broker resources, or
-another version requires the [operator-run RabbitMQ migration](rabbitmq-upgrade.md).
+performs the 3.13.7 -> 4.2.9 -> 4.3.5/Khepri migration. A stopped blank-generation volume
+has one narrow installer exception: local-build mode with the exact reviewed
+`--legacy-rabbitmq-node-host HOST --skip-start` pair persists its node identity but does
+not inspect, open, or migrate it. The wrapper then requires the exact stock legacy model:
+only the `/` vhost and `guest [administrator]`, fully drained queues, one cleanly stopped
+single-node Mnesia tree, and no unsafe links, types, owners, permissions, or foreign node
+records. Any custom, clustered, ambiguous, or non-drained source requires reviewed
+blue-green recovery. During reconciliation, the `/` vhost is retained but made
+inaccessible and must remain exactly empty; it is never destructively deleted.
+
+The [operator-run RabbitMQ migration](rabbitmq-upgrade.md) first uses
+`--prepare-rabbitmq-3.13-source` with the exact digest-pinned 3.13.7 source, then explicit
+4.2 and 4.3 transition commands. Every project container and network must be removed
+before 3.13 source adoption. The wrapper's owner-only
+`.backupsheep-rabbitmq-transition-state` can contain only the protected P313/A313,
+P42/`source-clean`/`target-ready`/A42, or P43/`target-ready`/A43 source/target
+progression. P42 authorizes only same-version 3.13 recovery through a clean stop and
+inspection; 4.2 `source-clean` authorizes source detachment and idempotent UID conversion;
+4.2 `target-ready` authorizes only the exact 4.2 target. P43 similarly authorizes only
+same-version 4.2 recovery through a clean stop and inspection, while 4.3 `target-ready`
+authorizes only the exact 4.3 target. Each attested record binds the live target proof.
+A43 may authorize the networkless repair/re-flush of the secondary broker-writable volume
+witness before canonical proof and the `.env`-last commit. A42 with no live broker must
+first recreate and re-prove 4.2 feature/Khepri state before 4.3. Same-version recovery
+admits only an absent PID file or the exact genuine one-byte `rabbit@HOST.pid`, and always
+cleanly stops, inspects and removes that recovery container before a version boundary.
+Missing, conflicting, impossible, changed host evidence fails closed, and the volume
+witness never authorizes recovery by itself. Capture and restore `.env`, the protected
+transition ledger, `rabbitmq_data`, exact image/evidence inputs, and matching secrets as
+one coordinated recovery set.
 
 ### Verify an installer deployment
 
@@ -554,13 +613,37 @@ derives the key used for saved email credentials. See the
 [configuration guide](configuration.md) and complete
 [environment-variable reference](../reference/environment-variables.md).
 
-If Local Storage must live on a capacity-managed bind/NFS filesystem, create and review
-`docker-compose.override.yml` **before the first `up`**. Use the bind-volume example in
-`docker-compose.yml`, resolve an absolute host path, and verify its ownership/capacity.
-Then add the exact approval flag to the command array in step 2. The wrapper refuses to
-auto-load the file. Docker volume driver options are immutable after creation, so a later
-configuration edit does not move existing archive bytes or convert an existing named
-volume.
+If Local Storage must live on a capacity-managed host filesystem (including an NFS
+filesystem already mounted and managed by the host), create and review
+`docker-compose.override.yml` **before the first `up`**. Use exactly the
+`backup_storage` local `type: none`, `o: bind`, absolute `device` example in
+`docker-compose.yml`, and verify that directory's ownership/capacity. The override may
+not add or change a service, network, secret, another volume, image, build, command,
+privilege, mount or port; use the documented `.env` settings such as
+`BACKUPSHEEP_BIND_ADDRESS` and `BACKUPSHEEP_BIND_PORT` instead. The wrapper compares the
+complete rendered model before mutation, then attests the exact Docker volume options.
+Add the exact approval flag to the command array in step 2. The wrapper refuses to
+auto-load the file. Docker volume driver options are immutable after creation, so a
+later configuration edit does not move existing archive bytes or convert an existing
+named volume.
+
+The approved bind requires an explicit
+`DOCKER_HOST=unix:///var/run/docker.sock` or `DOCKER_HOST=unix:///run/docker.sock` on every
+wrapper invocation. Leave `DOCKER_CONTEXT` unset; any value is rejected. The wrapper
+requires the resolved endpoint to be a root-owned, non-symlink Unix socket, records its
+device/inode and complete trusted parent identity, and rechecks both during validation.
+Remote TCP/SSH endpoints, forwarded Unix sockets, rootless Docker sockets, and Docker
+Desktop endpoints must keep the default named `backup_storage` volume. The absolute bind
+target must already exist in canonical form, and every path component must be a real
+directory rather than a symbolic link. On the first mutating wrapper command,
+BackupSheep creates the owner-only version-2
+`.backupsheep-backup-storage-identity` ledger before Docker can create or mount the volume.
+It binds the installation and project to the canonical path, pins the target directory's
+device/inode separately, and stores a SHA-256 of only the trusted parent
+device/inode/owner/mode chain. Target owner/mode is not part of that hash, so the same
+directory inode may transition safely to the fixed storage-service UID `10004` and mode
+`0700`. Every later command revalidates the target metadata, inode, and parent record; a
+remount, directory replacement, path change, missing component, or symlink fails closed.
 
 ### 2. Validate, build and start
 
@@ -572,7 +655,7 @@ BS_COMPOSE=("$PWD/backupsheep-compose")
 # BS_COMPOSE+=(--approved-compose-file "$PWD/docker-compose.override.yml")
 bs_compose() { "${BS_COMPOSE[@]}" "$@"; }
 bs_compose config --quiet
-bs_compose build db app app-egress-guard
+bs_compose build db app app-egress-guard rabbitmq
 # Fresh topology only: no guard/workload container may already exist.
 bs_compose up --detach
 bs_compose ps --all
@@ -621,9 +704,11 @@ gate also covers an automatic container restart after the earlier one-shot prefl
 exited. Database identity provisioning, migration and the preflight command itself are
 the only intentional exceptions.
 
-An existing RabbitMQ 3.13 volume requires the supported 3.13 -> 4.2 -> 4.3 sequence before
-this Compose file can be used. Follow the [RabbitMQ migration gate](rabbitmq-upgrade.md);
-never start the 4.3 image directly against a 3.13 data directory.
+An existing RabbitMQ 3.13 volume requires the local-build-only, exact
+3.13.7 -> 4.2.9 -> 4.3.5 sequence before this Compose file can be used. Follow the
+[RabbitMQ migration gate](rabbitmq-upgrade.md); never start the 4.3 image directly against
+a 3.13 data directory. Signed releases are fresh-only and cannot consume this migration
+path.
 
 If startup fails:
 
@@ -642,20 +727,23 @@ cat .secrets/onboarding_token
 Open `http://localhost:8000/onboarding/` and enter that token when creating the first
 account.
 
-### 4. Migrate existing Local Storage off the Docker-managed disk
+### 4. Move Local Storage through a fresh project and restore
 
 The Local Storage destination writes beneath `/backups`, which is the
 `backup_storage` named volume by default. For important archives, place that volume on
-capacity-managed storage. For an installation that already created the stock volume,
-do not merely add an override: Compose will keep the existing volume's original driver
-options and no bytes will move. Treat this as a host-storage migration. Stop app plus all
-operations writers, resolve the one exact labeled `backup_storage` volume, take a
-recoverable snapshot, copy its complete contents and metadata to the approved target,
-compare file counts/sizes/hashes, and only then replace that exact old volume with the
-reviewed bind-backed definition. Never use broad `down --volumes` or pruning. Re-run the
-wrapper's rendered-model, ownership, storage-only write/read and authenticated restore checks before
-operations resume. The repository intentionally does not automate deletion of the old
-host volume.
+capacity-managed storage. Choose the final bind target before the first mutation. If the
+installation already created the stock named volume, or an approved bind later needs a
+different path, mount, disk, device, or inode, do not edit the override in place and do not
+delete or recreate `.backupsheep-backup-storage-identity` to force acceptance. That ledger
+is the fail-closed evidence that the storage target did not change underneath the project.
+
+Instead, leave the original project and storage intact, take a recoverable snapshot, create
+a separately named fresh project with its final named volume or approved bind, and restore
+through the authenticated application recovery path. Compare the durable storage-point
+inventory, object counts, sizes and content evidence, then complete a real same-lane
+restore before cutover. Retire the old project only after that proof and an explicit
+rollback decision. Never use broad `down --volumes`, pruning, or raw file copying as proof
+of an application-level storage move.
 
 ## Manual process installation (advanced)
 

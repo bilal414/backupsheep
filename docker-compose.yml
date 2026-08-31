@@ -31,7 +31,7 @@
 # Build all reviewed local images,
 # then use the installer for sequenced startup. For a fresh disposable project only,
 # the model-locking wrapper also accepts:
-#     ./backupsheep-compose build db app app-egress-guard
+#     ./backupsheep-compose build db app app-egress-guard rabbitmq
 #     ./backupsheep-compose up --detach
 #
 # Configure .env (see .env_sample). For this stack use the service names below:
@@ -172,7 +172,7 @@ x-app-configuration-environment: &app-configuration-environment
   APP_PROTOCOL: "${APP_PROTOCOL:-http://}"
   APP_NAME: "${APP_NAME:-BackupSheep}"
   BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "${BACKUPSHEEP_DATABASE_IDENTITY_GENERATION:?BACKUPSHEEP_DATABASE_IDENTITY_GENERATION is required}"
-  DB_NAME: "${DB_NAME:-backupsheep}"
+  DB_NAME: "${DB_NAME:?DB_NAME is required}"
   DB_HOST: "${DB_HOST:-db}"
   DB_PORT: "${DB_PORT:-5432}"
   # Non-secret role names are part of the generation-3 catalog witness. Every
@@ -443,12 +443,15 @@ x-app-secret-environment: &app-secret-environment
 # RabbitMQ one-shot proves its already-correct named-volume ownership before startup.
 x-stateful-runtime: &stateful-runtime
   labels: *installation-labels
+  # Every supported stateful image is built or verified explicitly. A missing
+  # local tag must fail instead of falling back to a mutable registry lookup.
+  pull_policy: never
   privileged: false
   read_only: true
   init: false
-  # Do not inject Docker's root-owned init shim here. Both vendor entrypoints
-  # exec their long-running server after dropping privileges, so the server can
-  # be non-root PID 1 and handle its own documented shutdown path.
+  # Do not inject Docker's root-owned init shim here. The reviewed entrypoints
+  # exec their long-running servers directly as fixed non-root PID 1 processes,
+  # which handle their own documented shutdown paths.
   cgroup: private
   ipc: private
   cap_drop:
@@ -506,7 +509,7 @@ services:
       context: .
       dockerfile: Dockerfile.postgres
     environment:
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_DB: "${DB_NAME:?DB_NAME is required}"
       # The official image necessarily initializes POSTGRES_USER as a cluster
       # superuser. Never reuse the long-lived Django runtime identity here.
       POSTGRES_USER: ${DB_BOOTSTRAP_USER:-backupsheep_bootstrap}
@@ -523,7 +526,14 @@ services:
     volumes:
       # postgres:18+ images keep data in a versioned subdir of /var/lib/postgresql
       # and refuse to start when the mount is at the old .../data path.
-      - postgres_data_v1:/var/lib/postgresql
+      # The digest-pinned derived image must seed the fixed-UID PostgreSQL root
+      # on first use. Keep Docker copy-up explicit; runtime attestation permits
+      # this exact NoCopy=false stateful-root exception and no other implicit copy.
+      - type: volume
+        source: postgres_data_v1
+        target: /var/lib/postgresql
+        volume:
+          nocopy: false
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=${POSTGRES_TMPFS_SIZE:-128m},mode=1777
       - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=70,gid=70
@@ -558,13 +568,22 @@ services:
   rabbitmq-volume-init:
     <<: *stateful-runtime
     user: "100:101"
-    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-backupsheep-rabbitmq:local}"
     environment:
       BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
-      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:?BACKUPSHEEP_RABBITMQ_DATA_GENERATION is required}"
+      # A blank legacy witness must remain renderable for the ownership-checked
+      # migration gate. The in-container volume witness accepts only exact 4.3.
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:-unattested}"
+      BACKUPSHEEP_RABBITMQ_NODE_HOST: "${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"
     entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-volume-init", "init"]
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
+      # The digest-pinned official image seeds this fresh root as uid 100:gid 101.
+      # This rootless-compatible copy-up is an exact attested exception.
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        volume:
+          nocopy: false
       - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
@@ -580,18 +599,25 @@ services:
   rabbitmq:
     <<: *stateful-runtime
     user: "100:101"
-    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-backupsheep-rabbitmq:local}"
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq
     # RabbitMQ derives its durable node database path from the node hostname.
     # Container IDs change on recreation, so keep the hostname stable or the same
     # named volume will appear to contain a brand-new, empty broker.
-    hostname: rabbitmq
+    hostname: "${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"
     # RabbitMQ 4.3 has no supported DEFAULT_PASS_FILE input. This reviewed wrapper
     # derives a salted hash into tmpfs and invokes the vendor entrypoint without ever
     # exporting the plaintext bootstrap credential.
     entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-entrypoint"]
     environment:
       BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
-      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:?BACKUPSHEEP_RABBITMQ_DATA_GENERATION is required}"
+      # Direct Compose bypass with a blank/invalid witness fails in volume-init
+      # before the broker entrypoint can open the durable data directory.
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:-unattested}"
+      BACKUPSHEEP_RABBITMQ_NODE_HOST: "${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"
+      RABBITMQ_NODENAME: "rabbit@${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"
     secrets:
       - rabbitmq_bootstrap_password
     # Celery uses durable queues and persistent delivery, but RabbitMQ still needs
@@ -599,7 +625,11 @@ services:
     # `docker compose down && up` can discard queued backups before the database
     # recovery sweep gets a chance to republish them.
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        volume:
+          nocopy: false
       # BackupSheep uses late acknowledgements for durable, externally mutating
       # work. Database/file/storage commands can legitimately run for many hours,
       # so the broker timeout must exceed their longest supported command budget.
@@ -620,21 +650,30 @@ services:
       # This first gate proves node readiness only. Every credential, permission and
       # topology invariant is reconciled and authenticated by rabbitmq-provision before
       # an application process is allowed to start.
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q -n \"$${RABBITMQ_NODENAME}\" ping"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 30s
     networks:
-      - app-broker
-      - cloud-broker
-      - database-broker
-      - files-broker
-      - storage-broker
-      - logs-broker
-      - beat-broker
-      - preflight-broker
-      - provision-broker
+      app-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
+      cloud-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
+      database-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
+      files-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
+      storage-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
+      logs-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
+      beat-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
+      preflight-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
+      provision-broker:
+        aliases: ["${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"]
     depends_on:
       rabbitmq-volume-init:
         condition: service_completed_successfully
@@ -647,10 +686,12 @@ services:
   rabbitmq-provision:
     <<: *stateful-runtime
     user: "100:101"
-    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7}"
+    image: "${BACKUPSHEEP_RABBITMQ_IMAGE:-backupsheep-rabbitmq:local}"
     environment:
       HOME: /var/lib/rabbitmq
       RABBITMQ_LEGACY_USER: "${RABBITMQ_LEGACY_USER:-backupsheep}"
+      BACKUPSHEEP_RABBITMQ_NODE_HOST: "${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"
+      RABBITMQ_NODENAME: "rabbit@${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"
     entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-provision"]
     secrets:
       - rabbitmq_bootstrap_password
@@ -667,6 +708,8 @@ services:
         source: rabbitmq_data
         target: /var/lib/rabbitmq
         read_only: true
+        volume:
+          nocopy: true
       - ./deploy/rabbitmq/provision.sh:/usr/local/bin/backupsheep-rabbitmq-provision:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777

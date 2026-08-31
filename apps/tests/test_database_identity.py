@@ -103,6 +103,41 @@ class DatabaseIdentityConfigurationTests(TestCase):
                 self.environment(), secret_root=self.secret_root
             )
 
+    def test_configuration_rejects_system_and_malformed_database_names(self):
+        for database_name in (
+            "",
+            "postgres",
+            "template0",
+            "template1",
+            "Tenant",
+            "tenant-name",
+            "ténant",
+            "1tenant",
+            " tenant",
+            "tenant ",
+            "a" * 64,
+        ):
+            with self.subTest(database_name=database_name):
+                environment = self.environment()
+                environment["DB_NAME"] = database_name
+                with self.assertRaisesRegex(
+                    ProvisioningError,
+                    "non-system lowercase PostgreSQL database identifier",
+                ):
+                    IdentityConfiguration.from_environment(
+                        environment, secret_root=self.secret_root
+                    )
+
+    def test_configuration_accepts_stock_database_identifier_shape(self):
+        for database_name in ("backupsheep", "_backupsheep", "tenant_1", "a" * 63):
+            with self.subTest(database_name=database_name):
+                environment = self.environment()
+                environment["DB_NAME"] = database_name
+                configuration = IdentityConfiguration.from_environment(
+                    environment, secret_root=self.secret_root
+                )
+                self.assertEqual(configuration.database, database_name)
+
     def test_configuration_rejects_a_redirected_bootstrap_endpoint(self):
         environment = self.environment()
         environment["DB_HOST"] = "attacker.example"

@@ -410,7 +410,7 @@ test -z "$({
     awk -v expected="${TARGET_EGRESS_IMAGE}" \
       '/^backupsheep-egress:/ && $0 != expected { print }'
 })"
-bs_compose build db app app-egress-guard
+bs_compose build db app app-egress-guard rabbitmq
 BUILT_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_IMAGE}")"
 BUILT_POSTGRES_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_POSTGRES_IMAGE}")"
 BUILT_EGRESS_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_EGRESS_IMAGE}")"

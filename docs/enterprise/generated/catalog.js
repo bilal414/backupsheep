@@ -9,9 +9,9 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "unique_paths": 510
     },
     "generatedFrom": "Django root URL resolver on the checked-out branch",
-    "configurationVariables": 296,
+    "configurationVariables": 298,
     "provenance": {
-      "sourceRevision": "4bfc3f3b0c22",
+      "sourceRevision": "4099c3f31e0a",
       "catalogSource": "git-ref",
       "workingTreeApiChanges": false,
       "includesWorkingTreeApiChanges": false,
@@ -14789,19 +14789,37 @@ window.BACKUPSHEEP_DOC_CATALOG = {
     {
       "name": "BACKUPSHEEP_RABBITMQ_IMAGE",
       "category": "Advanced and integration settings",
-      "default": "rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7",
+      "default": "backupsheep-rabbitmq:local",
       "sensitive": false,
       "required": false,
-      "description": "The local-build path uses the reviewed upstream pins until the installer builds the repository's patched RabbitMQ runtime derivative. Signed-release mode replaces this with an authenticated first-party digest reference from descriptor V2.",
+      "description": "Local-build RabbitMQ derivatives are rebuilt from digest-pinned upstream bases with exact security-package versions and tagged to the verified source commit. Signed-release mode replaces the current and upgrade tags with authenticated first-party digest references from descriptor V2.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RABBITMQ_LEGACY_SOURCE_IMAGE",
+      "category": "Advanced and integration settings",
+      "default": "backupsheep-rabbitmq-legacy-source:local",
+      "sensitive": false,
+      "required": false,
+      "description": "Local-build-only RabbitMQ 3.13.7 source used to reopen a historical volume for the reviewed 3.13 -> 4.2 -> 4.3 migration. It is never a steady-state runtime.",
+      "source": ".env_sample"
+    },
+    {
+      "name": "BACKUPSHEEP_RABBITMQ_NODE_HOST",
+      "category": "Advanced and integration settings",
+      "default": "Not set",
+      "sensitive": false,
+      "required": false,
+      "description": "Durable RabbitMQ node host. Fresh installations use the fixed service name. An adopted pre-hardening volume may instead retain its exact 12-character lowercase Docker container ID so RabbitMQ opens the original Mnesia database, never a new one.",
       "source": ".env_sample"
     },
     {
       "name": "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE",
       "category": "Advanced and integration settings",
-      "default": "rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095",
+      "default": "backupsheep-rabbitmq-upgrade:local",
       "sensitive": false,
       "required": false,
-      "description": "Reviewed intermediate RabbitMQ image used only for the supported data upgrade hop. Signed-release mode replaces it with the descriptor's authenticated digest reference.",
+      "description": "Reviewed RabbitMQ 4.2 migration derivative. Local-build mode binds it to the verified source commit; signed releases use the authenticated descriptor digest.",
       "source": ".env_sample"
     },
     {

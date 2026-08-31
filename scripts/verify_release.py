@@ -23,6 +23,7 @@ from prepare_trivy_db import (
     validate_evidence_document as validate_trivy_db_evidence,
     validate_lock_document as validate_trivy_db_lock,
 )
+import prepare_grype_db as grype_db
 import release_transition
 
 from release_subprocess import run_text
@@ -462,9 +463,9 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         raise ReleaseVerificationError("both CycloneDX JSON and SPDX JSON attestations are required")
 
     tools = _mapping(policy["tools"], "policy.tools")
-    if set(tools) != {"actionlint", "cosign", "oras", "syft", "trivy"}:
+    if set(tools) != {"actionlint", "cosign", "grype", "oras", "syft", "trivy"}:
         raise ReleaseVerificationError(
-            "policy.tools must contain exactly actionlint, cosign, oras, syft, and trivy"
+            "policy.tools must contain exactly actionlint, cosign, grype, oras, syft, and trivy"
         )
     for name, raw_tool in tools.items():
         tool = _mapping(raw_tool, f"policy.tools.{name}")
@@ -492,7 +493,10 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         {
             "scanner",
             "scanner_version",
+            "secondary_scanner",
+            "secondary_scanner_version",
             "database",
+            "secondary_database",
             "fail_severities",
             "ignore_unfixed",
             "allowlist",
@@ -503,6 +507,10 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         raise ReleaseVerificationError("Trivy is the required scanner")
     if vulnerability["scanner_version"] != tools["trivy"]["version"]:
         raise ReleaseVerificationError("Trivy policy and pinned tool versions differ")
+    if vulnerability["secondary_scanner"] != "grype":
+        raise ReleaseVerificationError("Grype is the required secondary scanner")
+    if vulnerability["secondary_scanner_version"] != tools["grype"]["version"]:
+        raise ReleaseVerificationError("Grype policy and pinned tool versions differ")
     database = _mapping(vulnerability["database"], "policy.vulnerability_policy.database")
     _exact_keys(
         database,
@@ -512,6 +520,21 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
     if database["lock_path"] != "deploy/trivy-db-lock.json":
         raise ReleaseVerificationError("Trivy database lock path is not canonical")
     _digest(database["lock_sha256"], "policy.vulnerability_policy.database.lock_sha256")
+    secondary_database = _mapping(
+        vulnerability["secondary_database"],
+        "policy.vulnerability_policy.secondary_database",
+    )
+    _exact_keys(
+        secondary_database,
+        {"lock_path", "lock_sha256"},
+        "policy.vulnerability_policy.secondary_database",
+    )
+    if secondary_database["lock_path"] != "deploy/grype-db-lock.json":
+        raise ReleaseVerificationError("Grype database lock path is not canonical")
+    _digest(
+        secondary_database["lock_sha256"],
+        "policy.vulnerability_policy.secondary_database.lock_sha256",
+    )
     if _unique_strings(vulnerability["fail_severities"], "policy.vulnerability_policy.fail_severities") != [
         "HIGH",
         "CRITICAL",
@@ -804,6 +827,227 @@ def _validate_trivy_report(document: Any, expected_reference: str, fail_severiti
         raise ReleaseVerificationError(f"{label} contains release-blocking vulnerabilities: {', '.join(forbidden[:10])}")
 
 
+def _validate_grype_report(
+    document: Any,
+    expected_reference: str,
+    expected_digest: str,
+    expected_version: str,
+    fail_severities: set[str],
+    label: str,
+    expected_database: dict[str, Any],
+    allowed_ignored: set[str] | None = None,
+    expected_vex_document: str | None = None,
+    expected_source_tags: list[str] | None = None,
+    expected_name: str = "",
+) -> dict[str, Any]:
+    """Validate an unsuppressed Grype report over one exact image child."""
+
+    allowed_ignored = allowed_ignored or set()
+    document = _mapping(document, label)
+    expected_document_keys = {"matches", "source", "distro", "descriptor"}
+    if allowed_ignored:
+        expected_document_keys.add("ignoredMatches")
+    _exact_keys(document, expected_document_keys, label)
+    source = _mapping(document["source"], f"{label}.source")
+    if source.get("type") != "image":
+        raise ReleaseVerificationError(f"{label} is not an image scan")
+    target = _mapping(source.get("target"), f"{label}.source.target")
+    if expected_source_tags is not None and target.get("tags") != expected_source_tags:
+        raise ReleaseVerificationError(f"{label} did not scan the exact VEX product tag")
+    if target.get("userInput") != expected_reference:
+        raise ReleaseVerificationError(f"{label} is not bound to {expected_reference}")
+    if target.get("manifestDigest") != expected_digest:
+        raise ReleaseVerificationError(f"{label} is not bound to child digest {expected_digest}")
+    image_id = _digest(target.get("imageID"), f"{label}.source.target.imageID")
+    manifest_payload = target.get("manifest")
+    if not isinstance(manifest_payload, str) or not manifest_payload:
+        raise ReleaseVerificationError(f"{label} has no embedded child manifest")
+    try:
+        manifest_bytes = base64.b64decode(manifest_payload, validate=True)
+        manifest = json.loads(
+            manifest_bytes,
+            object_pairs_hook=_no_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+    except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseVerificationError(f"{label} embedded child manifest is invalid") from exc
+    if "sha256:" + hashlib.sha256(manifest_bytes).hexdigest() != expected_digest:
+        raise ReleaseVerificationError(f"{label} embedded child manifest has the wrong digest")
+    manifest = _mapping(manifest, f"{label}.source.target.manifest")
+    manifest_config = _mapping(
+        manifest.get("config"), f"{label}.source.target.manifest.config"
+    )
+    if _digest(
+        manifest_config.get("digest"),
+        f"{label}.source.target.manifest.config.digest",
+    ) != image_id:
+        raise ReleaseVerificationError(f"{label} image ID is not the child config digest")
+    manifest_layers = [
+        _digest(
+            _mapping(layer, f"{label}.source.target.manifest.layers[]").get("digest"),
+            f"{label}.source.target.manifest.layers[].digest",
+        )
+        for layer in _list(
+            manifest.get("layers"), f"{label}.source.target.manifest.layers"
+        )
+    ]
+    observed_layers = [
+        _digest(
+            _mapping(layer, f"{label}.source.target.layers[]").get("digest"),
+            f"{label}.source.target.layers[].digest",
+        )
+        for layer in _list(target.get("layers"), f"{label}.source.target.layers")
+    ]
+    if not manifest_layers or observed_layers != manifest_layers:
+        raise ReleaseVerificationError(f"{label} layers do not match the embedded child manifest")
+
+    descriptor = _mapping(document["descriptor"], f"{label}.descriptor")
+    if descriptor.get("name") != "grype" or descriptor.get("version") != expected_version:
+        raise ReleaseVerificationError(f"{label} was not generated by the pinned Grype version")
+    database = _mapping(descriptor.get("db"), f"{label}.descriptor.db")
+    status = _mapping(database.get("status"), f"{label}.descriptor.db.status")
+    expected_status = {
+        "schemaVersion": expected_database["database"]["schema_version"],
+        "from": "manual import",
+        "built": expected_database["database"]["built_at"],
+        "valid": True,
+    }
+    if {key: status.get(key) for key in expected_status} != expected_status:
+        raise ReleaseVerificationError(f"{label} was not generated from the exact locked Grype DB")
+    database_path = _string(status.get("path"), f"{label}.descriptor.db.status.path")
+    if PurePosixPath(database_path).parts[-2:] != ("6", "vulnerability.db"):
+        raise ReleaseVerificationError(f"{label} used an unexpected Grype DB cache path")
+    if not _mapping(database.get("providers"), f"{label}.descriptor.db.providers"):
+        raise ReleaseVerificationError(f"{label} has no Grype DB provider evidence")
+    configuration = _mapping(
+        descriptor.get("configuration"), f"{label}.descriptor.configuration"
+    )
+    if configuration.get("name") != expected_name:
+        raise ReleaseVerificationError(f"{label} uses an unauthorized Grype source name")
+    if configuration.get("fail-on-severity") != "high":
+        raise ReleaseVerificationError(f"{label} does not enforce Grype fail-on high")
+    if configuration.get("only-fixed") is not False or configuration.get("only-notfixed") is not False:
+        raise ReleaseVerificationError(f"{label} excludes fixed or unfixed Grype findings")
+    if configuration.get("check-for-app-update") is not False:
+        raise ReleaseVerificationError(f"{label} permitted a Grype application update check")
+    if configuration.get("ignore-wontfix") not in ("", False, None):
+        raise ReleaseVerificationError(f"{label} suppresses wont-fix Grype findings")
+    if configuration.get("exclude") not in ([], None):
+        raise ReleaseVerificationError(f"{label} excludes image paths from Grype")
+    expected_vex_documents = [expected_vex_document] if expected_vex_document else []
+    if bool(allowed_ignored) != bool(expected_vex_document):
+        raise ReleaseVerificationError(f"{label} has an incomplete Grype VEX authorization")
+    if configuration.get("vex-documents") != expected_vex_documents:
+        raise ReleaseVerificationError(f"{label} uses unauthorized Grype VEX documents")
+    if configuration.get("vex-add") not in ([], None):
+        raise ReleaseVerificationError(f"{label} uses inline Grype VEX statements")
+
+    # JSON reports with suppression evidence add ignoredMatches. Exact top-level
+    # keys above reject that form; also reject vulnerability-specific ignore
+    # rules recorded in Grype's effective configuration. Grype's fixed built-in
+    # package inventory exclusions have an empty vulnerability field.
+    for position, raw_ignore in enumerate(
+        _list(configuration.get("ignore") or [], f"{label}.descriptor.configuration.ignore")
+    ):
+        ignore = _mapping(
+            raw_ignore, f"{label}.descriptor.configuration.ignore[{position}]"
+        )
+        if ignore.get("vulnerability") or ignore.get("namespace") or ignore.get("fix-state"):
+            raise ReleaseVerificationError(f"{label} contains a Grype vulnerability suppression")
+        vex_status = ignore.get("vex-status") or ""
+        if vex_status and (
+            not allowed_ignored or vex_status not in {"fixed", "not_affected"}
+        ):
+            raise ReleaseVerificationError(f"{label} contains an unauthorized Grype VEX rule")
+
+    forbidden: list[str] = []
+    for position, raw_match in enumerate(_list(document["matches"], f"{label}.matches")):
+        match = _mapping(raw_match, f"{label}.matches[{position}]")
+        vulnerability = _mapping(
+            match.get("vulnerability"), f"{label}.matches[{position}].vulnerability"
+        )
+        vulnerability_id = _string(
+            vulnerability.get("id"), f"{label}.matches[{position}].vulnerability.id"
+        )
+        severity = _string(
+            vulnerability.get("severity"),
+            f"{label}.matches[{position}].vulnerability.severity",
+        ).upper()
+        artifact = _mapping(match.get("artifact"), f"{label}.matches[{position}].artifact")
+        _string(artifact.get("name"), f"{label}.matches[{position}].artifact.name")
+        _string(artifact.get("version"), f"{label}.matches[{position}].artifact.version")
+        _string(artifact.get("type"), f"{label}.matches[{position}].artifact.type")
+        if severity in fail_severities:
+            forbidden.append(f"{vulnerability_id}:{severity}")
+    if forbidden:
+        raise ReleaseVerificationError(
+            f"{label} contains release-blocking vulnerabilities: {', '.join(forbidden[:10])}"
+        )
+    observed_ignored: set[str] = set()
+    for position, raw_match in enumerate(
+        _list(document.get("ignoredMatches") or [], f"{label}.ignoredMatches")
+    ):
+        match = _mapping(raw_match, f"{label}.ignoredMatches[{position}]")
+        vulnerability = _mapping(
+            match.get("vulnerability"),
+            f"{label}.ignoredMatches[{position}].vulnerability",
+        )
+        vulnerability_id = _string(
+            vulnerability.get("id"),
+            f"{label}.ignoredMatches[{position}].vulnerability.id",
+        )
+        severity = _string(
+            vulnerability.get("severity"),
+            f"{label}.ignoredMatches[{position}].vulnerability.severity",
+        ).upper()
+        artifact = _mapping(
+            match.get("artifact"), f"{label}.ignoredMatches[{position}].artifact"
+        )
+        if (
+            vulnerability_id not in allowed_ignored
+            or vulnerability_id in observed_ignored
+            or severity not in fail_severities
+            or artifact.get("name") != "erlang"
+            or artifact.get("version") != "26.2.5.21"
+            or artifact.get("type") != "binary"
+            or artifact.get("purl") != "pkg:generic/erlang@26.2.5.21"
+            or match.get("appliedIgnoreRules")
+            != [{"namespace": "vex", "vex-status": "not_affected"}]
+        ):
+            raise ReleaseVerificationError(
+                f"{label} contains an unauthorized ignored Grype finding"
+            )
+        observed_ignored.add(vulnerability_id)
+    if observed_ignored != allowed_ignored:
+        raise ReleaseVerificationError(
+            f"{label} does not contain the exact reviewed ignored Grype finding set"
+        )
+    return {"image_id": image_id, "target": target}
+
+
+def _validate_report_database_binding(
+    value: Any, expected: dict[str, Any], label: str
+) -> dict[str, Any]:
+    binding = _mapping(value, label)
+    _exact_keys(
+        binding,
+        {
+            "lock_sha256",
+            "preparation_evidence_sha256",
+            "database_sha256",
+            "database_schema_version",
+            "database_generated_at",
+        },
+        label,
+    )
+    for key in ("lock_sha256", "preparation_evidence_sha256", "database_sha256"):
+        _digest(binding.get(key), f"{label}.{key}")
+    _string(binding.get("database_generated_at"), f"{label}.database_generated_at")
+    if binding != expected:
+        raise ReleaseVerificationError(f"{label} is not bound to the exact reviewed scanner DB")
+    return binding
+
+
 def _records_by_platform(records: Any, platforms: list[str], label: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for position, raw_record in enumerate(_list(records, label)):
@@ -823,10 +1067,19 @@ def _validate_vulnerability_database(
     artifacts_dir: Path,
     release_created_at: str,
 ) -> dict[str, Any]:
-    """Bind every vulnerability report to one reviewed, release-time-fresh DB."""
+    """Bind every vulnerability report to both reviewed, release-time-fresh DBs."""
 
     database = _mapping(value, "manifest.vulnerability_database")
-    _exact_keys(database, {"lock", "preparation_evidence"}, "manifest.vulnerability_database")
+    _exact_keys(
+        database,
+        {
+            "lock",
+            "preparation_evidence",
+            "secondary_lock",
+            "secondary_preparation_evidence",
+        },
+        "manifest.vulnerability_database",
+    )
 
     lock_record = _mapping(database["lock"], "manifest.vulnerability_database.lock")
     _exact_keys(lock_record, {"file", "sha256"}, "manifest.vulnerability_database.lock")
@@ -870,11 +1123,131 @@ def _validate_vulnerability_database(
         )
     except TrivyDBError as exc:
         raise ReleaseVerificationError(f"invalid release Trivy DB evidence: {exc}") from exc
-    return {"lock": lock, "preparation_evidence": evidence}
+
+    secondary_lock_record = _mapping(
+        database["secondary_lock"], "manifest.vulnerability_database.secondary_lock"
+    )
+    _exact_keys(
+        secondary_lock_record,
+        {"file", "sha256"},
+        "manifest.vulnerability_database.secondary_lock",
+    )
+    if secondary_lock_record["file"] != "vulnerability/grype-db-lock.json":
+        raise ReleaseVerificationError("manifest Grype DB lock path is not canonical")
+    expected_secondary_digest = policy["vulnerability_policy"]["secondary_database"][
+        "lock_sha256"
+    ]
+    if secondary_lock_record["sha256"] != expected_secondary_digest:
+        raise ReleaseVerificationError("manifest Grype DB lock digest differs from policy")
+    _, secondary_lock_document = _verify_file(
+        artifacts_dir,
+        secondary_lock_record,
+        "manifest.vulnerability_database.secondary_lock",
+    )
+
+    secondary_evidence_record = _mapping(
+        database["secondary_preparation_evidence"],
+        "manifest.vulnerability_database.secondary_preparation_evidence",
+    )
+    _exact_keys(
+        secondary_evidence_record,
+        {"file", "sha256"},
+        "manifest.vulnerability_database.secondary_preparation_evidence",
+    )
+    if secondary_evidence_record["file"] != "vulnerability/grype-db-evidence.json":
+        raise ReleaseVerificationError("manifest Grype DB evidence path is not canonical")
+    _, secondary_evidence_document = _verify_file(
+        artifacts_dir,
+        secondary_evidence_record,
+        "manifest.vulnerability_database.secondary_preparation_evidence",
+    )
+    try:
+        release_time = datetime.strptime(
+            release_created_at, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        secondary_lock = grype_db._validate_lock(  # noqa: SLF001 - shared trust schema
+            secondary_lock_document, now=release_time
+        )
+        secondary_evidence = _mapping(
+            secondary_evidence_document, "Grype DB preparation evidence"
+        )
+        _exact_keys(
+            secondary_evidence,
+            {
+                "schema_version",
+                "lock_sha256",
+                "grype_version",
+                "prepared_at",
+                "archive_sha256",
+                "archive_size",
+                "database_schema_version",
+                "database_built_at",
+                "database_sha256",
+                "database_size",
+            },
+            "Grype DB preparation evidence",
+        )
+        expected_secondary_evidence = {
+            "schema_version": 1,
+            "lock_sha256": expected_secondary_digest.removeprefix("sha256:"),
+            "grype_version": policy["vulnerability_policy"]["secondary_scanner_version"],
+            "archive_sha256": secondary_lock["archive"]["sha256"],
+            "archive_size": secondary_lock["archive"]["size"],
+            "database_schema_version": secondary_lock["database"]["schema_version"],
+            "database_built_at": secondary_lock["database"]["built_at"],
+            "database_sha256": secondary_lock["database"]["sha256"],
+            "database_size": secondary_lock["database"]["size"],
+        }
+        if {
+            key: value
+            for key, value in secondary_evidence.items()
+            if key != "prepared_at"
+        } != expected_secondary_evidence:
+            raise ReleaseVerificationError("Grype DB preparation evidence differs from the lock")
+        prepared_time = datetime.strptime(
+            _timestamp(
+                secondary_evidence["prepared_at"], "Grype DB preparation evidence.prepared_at"
+            ),
+            "%Y-%m-%dT%H:%M:%SZ",
+        ).replace(tzinfo=timezone.utc)
+        built_time = datetime.strptime(
+            secondary_lock["database"]["built_at"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        if not built_time <= prepared_time <= release_time:
+            raise ReleaseVerificationError("Grype DB evidence preparation time is inconsistent")
+    except grype_db.GrypeDBError as exc:
+        raise ReleaseVerificationError(f"invalid release Grype DB evidence: {exc}") from exc
+    return {
+        "lock": lock,
+        "preparation_evidence": evidence,
+        "secondary_lock": secondary_lock,
+        "secondary_preparation_evidence": secondary_evidence,
+        "report_bindings": {
+            "trivy": {
+                "lock_sha256": lock_record["sha256"],
+                "preparation_evidence_sha256": evidence_record["sha256"],
+                "database_sha256": f"sha256:{evidence['db_sha256']}",
+                "database_schema_version": evidence["database_schema_version"],
+                "database_generated_at": evidence["updated_at"],
+            },
+            "grype": {
+                "lock_sha256": secondary_lock_record["sha256"],
+                "preparation_evidence_sha256": secondary_evidence_record["sha256"],
+                "database_sha256": f"sha256:{secondary_evidence['database_sha256']}",
+                "database_schema_version": secondary_evidence[
+                    "database_schema_version"
+                ],
+                "database_generated_at": secondary_evidence["database_built_at"],
+            },
+        },
+    }
 
 
 def _validate_consumer_evidence(
-    policy: dict[str, Any], value: Any, artifacts_dir: Path
+    policy: dict[str, Any],
+    value: Any,
+    artifacts_dir: Path,
+    vulnerability_database: dict[str, Any],
 ) -> dict[str, Any]:
     """Bind the release to the separately bootstrapped verifier and fresh scans."""
 
@@ -965,6 +1338,7 @@ def _validate_consumer_evidence(
     )
     source_documents: dict[str, Any] = {}
     report_documents: dict[str, Any] = {}
+    secondary_report_documents: dict[str, Any] = {}
     for platform in platforms:
         record = platform_records[platform]
         label = f"manifest.consumer.cosign_image.platforms[{platform}]"
@@ -976,6 +1350,7 @@ def _validate_consumer_evidence(
                 "config_digest",
                 "source_catalog",
                 "vulnerability_report",
+                "secondary_vulnerability_report",
             },
             label,
         )
@@ -1028,6 +1403,7 @@ def _validate_consumer_evidence(
                 "scanner_version",
                 "fail_severities",
                 "ignore_unfixed",
+                "database",
                 "file",
                 "sha256",
             },
@@ -1043,6 +1419,11 @@ def _validate_consumer_evidence(
             raise ReleaseVerificationError(f"{label}.vulnerability_report weakens policy")
         if report_record["file"] != f"consumer/release-verifier-{slug}.trivy.json":
             raise ReleaseVerificationError(f"{label}.vulnerability_report path is not canonical")
+        _validate_report_database_binding(
+            report_record["database"],
+            vulnerability_database["report_bindings"]["trivy"],
+            f"{label}.vulnerability_report.database",
+        )
         _, report = _verify_file(
             artifacts_dir, report_record, f"{label}.vulnerability_report"
         )
@@ -1058,14 +1439,75 @@ def _validate_consumer_evidence(
         )
         if report_metadata.get("ImageID") != config_digest:
             raise ReleaseVerificationError(f"{label}.vulnerability_report is not config-digest bound")
+
+        secondary_report_record = _mapping(
+            record["secondary_vulnerability_report"],
+            f"{label}.secondary_vulnerability_report",
+        )
+        _exact_keys(
+            secondary_report_record,
+            {
+                "scanner",
+                "scanner_version",
+                "fail_severities",
+                "ignore_unfixed",
+                "database",
+                "file",
+                "sha256",
+            },
+            f"{label}.secondary_vulnerability_report",
+        )
+        if (
+            secondary_report_record["scanner"] != vulnerability["secondary_scanner"]
+            or secondary_report_record["scanner_version"]
+            != vulnerability["secondary_scanner_version"]
+            or secondary_report_record["fail_severities"]
+            != vulnerability["fail_severities"]
+            or _boolean(
+                secondary_report_record["ignore_unfixed"],
+                f"{label}.secondary_vulnerability_report.ignore_unfixed",
+            )
+        ):
+            raise ReleaseVerificationError(
+                f"{label}.secondary_vulnerability_report weakens policy"
+            )
+        if secondary_report_record["file"] != f"consumer/release-verifier-{slug}.grype.json":
+            raise ReleaseVerificationError(
+                f"{label}.secondary_vulnerability_report path is not canonical"
+            )
+        _validate_report_database_binding(
+            secondary_report_record["database"],
+            vulnerability_database["report_bindings"]["grype"],
+            f"{label}.secondary_vulnerability_report.database",
+        )
+        _, secondary_report = _verify_file(
+            artifacts_dir,
+            secondary_report_record,
+            f"{label}.secondary_vulnerability_report",
+        )
+        grype_binding = _validate_grype_report(
+            secondary_report,
+            reference,
+            child_digest,
+            vulnerability["secondary_scanner_version"],
+            set(vulnerability["fail_severities"]),
+            f"{label}.secondary_vulnerability_report.document",
+            vulnerability_database["secondary_lock"],
+        )
+        if grype_binding["image_id"] != config_digest:
+            raise ReleaseVerificationError(
+                f"{label}.secondary_vulnerability_report is not config-digest bound"
+            )
         source_documents[platform] = catalog
         report_documents[platform] = report
+        secondary_report_documents[platform] = secondary_report
 
     return {
         "policy": consumer_policy,
         "manifest": consumer,
         "source_catalogs": source_documents,
         "vulnerability_reports": report_documents,
+        "secondary_vulnerability_reports": secondary_report_documents,
     }
 
 
@@ -1140,17 +1582,23 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
     images = _mapping(manifest["images"], "manifest.images")
     if tuple(images) != tuple(policy["images"]):
         raise ReleaseVerificationError("manifest image set and order do not match policy")
+    vulnerability_database = _validate_vulnerability_database(
+        policy,
+        manifest["vulnerability_database"],
+        artifacts_dir,
+        release["created_at"],
+    )
     verified: dict[str, Any] = {
         "policy": policy,
         "manifest": manifest,
         "transition": verified_transition,
-        "vulnerability_database": _validate_vulnerability_database(
+        "vulnerability_database": vulnerability_database,
+        "consumer": _validate_consumer_evidence(
             policy,
-            manifest["vulnerability_database"],
+            manifest["consumer"],
             artifacts_dir,
-            release["created_at"],
+            vulnerability_database,
         ),
-        "consumer": _validate_consumer_evidence(policy, manifest["consumer"], artifacts_dir),
         "attestation_predicates": {},
     }
     platforms = policy["platforms"]
@@ -1174,6 +1622,7 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
                 "source_catalogs",
                 "sboms",
                 "vulnerability_reports",
+                "secondary_vulnerability_reports",
             },
             label,
         )
@@ -1293,7 +1742,16 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
             record_label = f"{label}.vulnerability_reports[{platform}]"
             _exact_keys(
                 record,
-                {"platform", "scanner", "scanner_version", "fail_severities", "ignore_unfixed", "file", "sha256"},
+                {
+                    "platform",
+                    "scanner",
+                    "scanner_version",
+                    "fail_severities",
+                    "ignore_unfixed",
+                    "database",
+                    "file",
+                    "sha256",
+                },
                 record_label,
             )
             vulnerability = policy["vulnerability_policy"]
@@ -1303,12 +1761,71 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
                 raise ReleaseVerificationError(f"{record_label} weakens the failure severity policy")
             if _boolean(record["ignore_unfixed"], f"{record_label}.ignore_unfixed"):
                 raise ReleaseVerificationError(f"{record_label} ignored unfixed vulnerabilities")
+            _validate_report_database_binding(
+                record["database"],
+                vulnerability_database["report_bindings"]["trivy"],
+                f"{record_label}.database",
+            )
             _, report = _verify_file(artifacts_dir, record, record_label)
             _validate_trivy_report(
                 report,
                 f"{quarantine}@{platform_map[platform]}",
                 set(vulnerability["fail_severities"]),
                 f"{record_label}.report",
+            )
+
+        secondary_report_records = _records_by_platform(
+            image["secondary_vulnerability_reports"],
+            platforms,
+            f"{label}.secondary_vulnerability_reports",
+        )
+        for platform, record in secondary_report_records.items():
+            record_label = f"{label}.secondary_vulnerability_reports[{platform}]"
+            _exact_keys(
+                record,
+                {
+                    "platform",
+                    "scanner",
+                    "scanner_version",
+                    "fail_severities",
+                    "ignore_unfixed",
+                    "database",
+                    "file",
+                    "sha256",
+                },
+                record_label,
+            )
+            vulnerability = policy["vulnerability_policy"]
+            if (
+                record["scanner"] != vulnerability["secondary_scanner"]
+                or record["scanner_version"]
+                != vulnerability["secondary_scanner_version"]
+            ):
+                raise ReleaseVerificationError(
+                    f"{record_label} uses an unauthorized scanner"
+                )
+            if record["fail_severities"] != vulnerability["fail_severities"]:
+                raise ReleaseVerificationError(
+                    f"{record_label} weakens the failure severity policy"
+                )
+            if _boolean(record["ignore_unfixed"], f"{record_label}.ignore_unfixed"):
+                raise ReleaseVerificationError(
+                    f"{record_label} ignored unfixed vulnerabilities"
+                )
+            _validate_report_database_binding(
+                record["database"],
+                vulnerability_database["report_bindings"]["grype"],
+                f"{record_label}.database",
+            )
+            _, report = _verify_file(artifacts_dir, record, record_label)
+            _validate_grype_report(
+                report,
+                f"{quarantine}@{platform_map[platform]}",
+                platform_map[platform],
+                vulnerability["secondary_scanner_version"],
+                set(vulnerability["fail_severities"]),
+                f"{record_label}.report",
+                vulnerability_database["secondary_lock"],
             )
 
         verified["attestation_predicates"][image_name] = {

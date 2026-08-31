@@ -1683,6 +1683,16 @@ class ExtractBackupZipTests(RestoreBackendBase):
                 self.assertIn("conflicting archive paths", str(context.exception))
 
     def test_preserves_hidden_empty_case_and_unicode_distinct_members(self):
+        case_probe = Path(self.tmp) / ".backupsheep-case-probe"
+        case_probe.write_text("probe", encoding="utf-8")
+        try:
+            if (Path(self.tmp) / ".BACKUPSHEEP-CASE-PROBE").exists():
+                self.skipTest(
+                    "The test temporary filesystem is case-insensitive."
+                )
+        finally:
+            case_probe.unlink()
+
         zip_path = os.path.join(self.tmp, "distinct.zip")
         composed = "caf\u00e9.txt"
         decomposed = "cafe\u0301.txt"

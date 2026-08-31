@@ -42,6 +42,11 @@ EXPECTED_RABBITMQ_SECURITY_PACKAGES = {
     "libcrypto3": "3.5.8-r0",
     "libssl3": "3.5.8-r0",
 }
+EXPECTED_LEGACY_RABBITMQ_SECURITY_PACKAGES = {
+    "gpgv": "2.4.4-2ubuntu17.4",
+    "libssl3t64": "3.0.13-0ubuntu3.15",
+    "openssl": "3.0.13-0ubuntu3.15",
+}
 EXPECTED_VERIFIER_GO_PACKAGES = {
     "golang.org/x/mod": "v0.40.0",
     "golang.org/x/text": "v0.41.0",
@@ -56,6 +61,7 @@ EXPECTED_OS_PACKAGE_TYPES = {
     "egress": ("apk", "alpine"),
     "rabbitmq": ("apk", "alpine"),
     "rabbitmq-upgrade": ("apk", "alpine"),
+    "rabbitmq-legacy-source": ("deb", "ubuntu"),
     "release-verifier": (None, None),
 }
 EXPECTED_SYFT_VERSION = "1.51.0"
@@ -293,6 +299,20 @@ def validate_rabbitmq_security_packages(
         die(
             f"{scanner} RabbitMQ OpenSSL package identities are not the exact "
             f"reviewed versions: {observed}"
+        )
+
+
+def validate_legacy_rabbitmq_security_packages(
+    packages: dict[str, str], scanner: str
+) -> None:
+    observed = {
+        name: packages.get(name)
+        for name in EXPECTED_LEGACY_RABBITMQ_SECURITY_PACKAGES
+    }
+    if observed != EXPECTED_LEGACY_RABBITMQ_SECURITY_PACKAGES:
+        die(
+            f"{scanner} legacy RabbitMQ security package identities are not "
+            f"the exact reviewed versions: {observed}"
         )
 
 
@@ -664,6 +684,10 @@ def validate_syft(
             die(f"egress SBOM is missing policy-runtime packages: {sorted(missing)}")
     elif image_kind in {"rabbitmq", "rabbitmq-upgrade"}:
         validate_rabbitmq_security_packages(os_package_versions, "Syft")
+    elif image_kind == "rabbitmq-legacy-source":
+        validate_legacy_rabbitmq_security_packages(
+            os_package_versions, "Syft"
+        )
     elif image_kind == "release-verifier":
         validate_verifier_go_packages(
             package_versions, "Syft", verifier_main_module_count
@@ -753,6 +777,17 @@ def validate_trivy(
                     die("Trivy release-verifier main module does not use its reviewed placeholder")
                 package_versions.setdefault(name, set()).add(version)
                 if result_class == "os-pkgs":
+                    # Trivy 0.74 splits Debian-family package revisions into
+                    # Version and Release while Syft reports the canonical dpkg
+                    # version as one string. Bind security-package checks to the
+                    # reconstructed dpkg identity, never only the upstream part.
+                    release = package.get("Release")
+                    if release is not None:
+                        if not isinstance(release, str) or not release:
+                            die("Trivy OS package release is malformed")
+                        suffix = f"-{release}"
+                        if not version.endswith(suffix):
+                            version = f"{version}{suffix}"
                     os_package_count += 1
                     os_package_names.add(name)
                     os_package_versions[name] = version
@@ -796,6 +831,10 @@ def validate_trivy(
             )
     elif image_kind in {"rabbitmq", "rabbitmq-upgrade"}:
         validate_rabbitmq_security_packages(os_package_versions, "Trivy")
+    elif image_kind == "rabbitmq-legacy-source":
+        validate_legacy_rabbitmq_security_packages(
+            os_package_versions, "Trivy"
+        )
     elif image_kind == "release-verifier":
         validate_verifier_go_packages(
             package_versions, "Trivy", verifier_main_module_count
@@ -861,6 +900,7 @@ def main() -> None:
             "egress",
             "rabbitmq",
             "rabbitmq-upgrade",
+            "rabbitmq-legacy-source",
             "release-verifier",
         ),
         required=True,

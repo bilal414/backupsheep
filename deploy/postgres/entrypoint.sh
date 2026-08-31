@@ -15,6 +15,19 @@ installation_id="${BACKUPSHEEP_INSTALLATION_ID:-}"
 storage_state="${BACKUPSHEEP_POSTGRES_STORAGE_GENERATION:-}"
 storage_witness="${BACKUPSHEEP_POSTGRES_STORAGE_WITNESS:-}"
 storage_intent="${BACKUPSHEEP_POSTGRES_STORAGE_INTENT:-}"
+database_name="${POSTGRES_DB:-}"
+
+# The stock deployment owns exactly one non-system, unquoted PostgreSQL
+# identifier.  Enforce that contract in the image itself so invoking Compose
+# directly cannot route initialization into postgres or a template database.
+case "$database_name" in
+    ''|postgres|template0|template1|[0123456789]*|\
+    *[!abcdefghijklmnopqrstuvwxyz0123456789_]*)
+        die 'POSTGRES_DB must be a non-system lowercase PostgreSQL database identifier'
+        ;;
+esac
+[ "${#database_name}" -le 63 ] \
+    || die 'POSTGRES_DB must be a non-system lowercase PostgreSQL database identifier'
 
 case "$installation_id" in *[!0-9a-f]*|'') die 'installation identity is missing or malformed' ;; esac
 [ "${#installation_id}" -eq 64 ] || die 'installation identity length is invalid'

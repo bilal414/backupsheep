@@ -22,6 +22,8 @@ from verify_release import (
     _digest,
     _load_json,
     _mapping,
+    _sha256_path,
+    _validate_grype_report,
     _validate_policy,
 )
 
@@ -52,8 +54,18 @@ def normalize(
     platform: str,
     syft_path: Path,
     trivy_path: Path,
+    grype_path: Path,
 ) -> None:
     policy = _validate_policy(policy)
+    repository_root = Path(__file__).resolve().parents[1]
+    grype_policy = policy["vulnerability_policy"]["secondary_database"]
+    grype_lock_path = repository_root / grype_policy["lock_path"]
+    if _sha256_path(grype_lock_path) != grype_policy["lock_sha256"]:
+        raise ReleaseVerificationError("the Grype DB lock differs from release policy")
+    grype_lock = _mapping(
+        _load_json(grype_lock_path, maximum_bytes=MAX_CONTROL_FILE_BYTES),
+        "Grype DB lock",
+    )
     if platform not in policy["platforms"]:
         raise ReleaseVerificationError("the scan image or platform is not authorized")
     expected_config_digest: str | None = None
@@ -115,10 +127,44 @@ def normalize(
     ] != compressed_layers:
         raise ReleaseVerificationError("Trivy layers do not match the retained child manifest")
 
+    grype = _mapping(
+        _load_json(grype_path, maximum_bytes=MAX_EVIDENCE_FILE_BYTES), "Grype report"
+    )
+    grype_source = _mapping(grype.get("source"), "Grype source")
+    if grype_source.get("type") != "image":
+        raise ReleaseVerificationError("Grype did not scan an image")
+    grype_target = _mapping(grype_source.get("target"), "Grype source target")
+    if grype_target.get("manifestDigest") != child_digest:
+        raise ReleaseVerificationError("Grype did not scan the retained child manifest")
+    if grype_target.get("imageID") != config_digest:
+        raise ReleaseVerificationError("Grype image ID does not match the child config")
+    grype_manifest_bytes, _ = _decoded_json(
+        grype_target.get("manifest"), "Grype embedded manifest"
+    )
+    if grype_manifest_bytes != manifest_bytes:
+        raise ReleaseVerificationError("Grype embedded manifest differs from Syft")
+    grype_layers = grype_target.get("layers")
+    if not isinstance(grype_layers, list) or [
+        _digest(_mapping(layer, "Grype layer").get("digest"), "Grype layer digest")
+        for layer in grype_layers
+    ] != compressed_layers:
+        raise ReleaseVerificationError("Grype layers do not match the retained child manifest")
+
     metadata["userInput"] = reference
     trivy["ArtifactName"] = reference
+    grype_target["userInput"] = reference
+    _validate_grype_report(
+        grype,
+        reference,
+        child_digest,
+        policy["vulnerability_policy"]["secondary_scanner_version"],
+        set(policy["vulnerability_policy"]["fail_severities"]),
+        "Grype report",
+        grype_lock,
+    )
     _write_json(syft_path, syft)
     _write_json(trivy_path, trivy)
+    _write_json(grype_path, grype)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -133,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     parser.add_argument("--syft", type=Path, required=True)
     parser.add_argument("--trivy", type=Path, required=True)
+    parser.add_argument("--grype", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
         policy = _load_json(arguments.policy, maximum_bytes=MAX_CONTROL_FILE_BYTES)
@@ -143,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
             platform=arguments.platform,
             syft_path=arguments.syft,
             trivy_path=arguments.trivy,
+            grype_path=arguments.grype,
         )
         return 0
     except (OSError, ReleaseVerificationError, json.JSONDecodeError) as exc:
