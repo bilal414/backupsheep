@@ -27,6 +27,9 @@ the fixed, signed `20260831T131500Z` Ubuntu archive snapshot. Both source defini
 are AMD64-only, replace every inherited APT source, reject partial index updates, and
 verify that every loaded package index came from the exact snapshot URI. The final
 images retain neither an APT source nor the build-only CA bootstrap.
+Transient HTTPS acquisition failures are retried at most five times with a 30-second
+inactivity timeout, only against that same immutable snapshot. The retry configuration
+is build-only and is removed with the temporary source and CA configuration.
 
 A frozen snapshot prevents repository drift; it does not provide automatic patching.
 For every release, review current Ubuntu Security Notices, advance the snapshot and

@@ -263,9 +263,15 @@ class RuntimeImageHardeningTests(TestCase):
             "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
             "RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt",
             "Acquire::https::CaInfo",
+            'Acquire::Retries "5"',
+            'Acquire::https::Timeout "30"',
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, stage)
+        self.assertIn(
+            "rm -f \\\n        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries",
+            stage,
+        )
         self.assertIn('com.backupsheep.ubuntu.snapshot="20260831T131500Z"', self.runtime)
         self.assertNotIn("archive.ubuntu.com", stage)
         self.assertNotIn("security.ubuntu.com", stage)

@@ -60,6 +60,10 @@ RUN --mount=from=openssl-runtime,source=/etc/ssl/certs/ca-certificates.crt,targe
     printf '%s\n' \
         'Acquire::https::CaInfo "/tmp/backupsheep-build-ca-certificates.crt";' \
         > /etc/apt/apt.conf.d/99backupsheep-build-ca; \
+    printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::https::Timeout "30";' \
+        > /etc/apt/apt.conf.d/98backupsheep-snapshot-retries; \
     rm -rf /var/lib/apt/lists/*; \
     rm -rf /opt/openssl; \
     mv /opt/openssl-3.5.8 /opt/openssl; \
@@ -82,6 +86,7 @@ RUN --mount=from=openssl-runtime,source=/etc/ssl/certs/ca-certificates.crt,targe
         'openssl=3.0.13-0ubuntu3.15'; \
     rm -rf /var/lib/apt/lists/*; \
     rm -f \
+        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries \
         /etc/apt/apt.conf.d/99backupsheep-build-ca \
         /etc/apt/sources.list.d/backupsheep-ubuntu-snapshot.sources; \
     test ! -e /etc/apt/sources.list; \

@@ -210,6 +210,8 @@ class DeploymentHardeningContractTests(TestCase):
             "Components: main",
             "Architectures: amd64",
             "APT::Update::Error-Mode=any",
+            'Acquire::Retries "5"',
+            'Acquire::https::Timeout "30"',
             "apt-get indextargets --format '$(URI)'",
             "Ubuntu metadata escaped the reviewed snapshot:",
             "9481fcd95f41b221f02f14d896535fe500bec539bc563c4cdca1acee483a8bdd",
@@ -232,6 +234,10 @@ class DeploymentHardeningContractTests(TestCase):
             "USER 999:999",
         ):
             self.assertIn(expected, legacy)
+        self.assertIn(
+            "rm -f \\\n        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries",
+            legacy,
+        )
         self.assertNotIn("apt-get upgrade", legacy)
         self.assertNotIn("dist-upgrade", legacy)
         self.assertNotIn("archive.ubuntu.com", legacy)

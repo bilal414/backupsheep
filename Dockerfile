@@ -385,6 +385,10 @@ RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt,target
     printf '%s\n' \
         'Acquire::https::CaInfo "/tmp/backupsheep-build-ca-certificates.crt";' \
         > /etc/apt/apt.conf.d/99backupsheep-build-ca; \
+    printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::https::Timeout "30";' \
+        > /etc/apt/apt.conf.d/98backupsheep-snapshot-retries; \
     rm -rf /var/lib/apt/lists/*; \
     install -d -m 0755 /runtime-debs/partial /extract-debs \
         /mariadb-dump-package/DEBIAN \
@@ -495,6 +499,7 @@ RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt,target
     rm -rf /runtime-debs/partial /runtime-debs/lock \
         /extract-debs /mariadb-dump-package /var/lib/apt/lists/*; \
     rm -f \
+        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries \
         /etc/apt/apt.conf.d/99backupsheep-build-ca \
         /etc/apt/sources.list.d/backupsheep-ubuntu-snapshot.sources
 
