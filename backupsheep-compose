@@ -4572,11 +4572,11 @@ attest_local_rabbitmq_derivative() {
     case "$role" in
         current)
             expected_metadata='100:101|4.3.5-alpine3.23-openssl3.5.8-v2|sha256:290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240||||3.5.8|3.5.8-r0||none'
-            runtime_check='test "$(rabbitmqctl version)" = 4.3.5; test "$(apk info -v libcrypto3)" = libcrypto3-3.5.8-r0; test "$(apk info -v libssl3)" = libssl3-3.5.8-r0'
+            runtime_check='test "$(rabbitmqctl version)" = 4.3.5; apk info -v 2>/dev/null | grep -Fxq libcrypto3-3.5.8-r0; apk info -v 2>/dev/null | grep -Fxq libssl3-3.5.8-r0'
             ;;
         upgrade)
             expected_metadata='100:101|4.2.9-alpine3.23-openssl3.5.8-v2|sha256:b2e69a138ea46106d0336bf8741187cac59031b778517d9ed2c9740f139dfa5a||||3.5.8|3.5.8-r0||none'
-            runtime_check='test "$(rabbitmqctl version)" = 4.2.9; test "$(apk info -v libcrypto3)" = libcrypto3-3.5.8-r0; test "$(apk info -v libssl3)" = libssl3-3.5.8-r0'
+            runtime_check='test "$(rabbitmqctl version)" = 4.2.9; apk info -v 2>/dev/null | grep -Fxq libcrypto3-3.5.8-r0; apk info -v 2>/dev/null | grep -Fxq libssl3-3.5.8-r0'
             ;;
         legacy-source)
             expected_metadata='999:999|3.13.7-otp26.2.5.21-openssl3.5.8-v3|sha256:87178a0ee3e2f52980ba356d38646ed1056705ff2d5ff281f8965456eaa0c1e3|sha256:f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f469995a728c298b|sha256:f9007e3e435761bd7f88aafa4bfab20fd4107baa88e3ff45e935ef2aa3e892d5|26.2.5.21|3.5.8|3.0.13-0ubuntu3.15|2.4.4-2ubuntu17.4|none'
