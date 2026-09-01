@@ -6066,23 +6066,28 @@ wait_for_database_seal() {
     local container_id=""
     local status=""
     local exit_code=""
+    local all_complete=false
 
     log "Waiting for the generation-3 database grants to seal"
     while [[ "$elapsed" -lt 300 ]]; do
+        all_complete=true
         for service_name in rabbitmq-provision db-provision migrate db-seal; do
             container_id="$(compose ps --all -q "$service_name" 2>/dev/null || true)"
-            [[ -n "$container_id" ]] || continue
+            if [[ -z "$container_id" ]]; then
+                all_complete=false
+                continue
+            fi
             status="$("$DOCKER_BIN" inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
             exit_code="$("$DOCKER_BIN" inspect --format '{{.State.ExitCode}}' "$container_id" 2>/dev/null || true)"
             if [[ "$status" == "exited" && "$exit_code" != "0" ]]; then
                 show_failure_guidance
                 die "Database transition service ${service_name} failed (exit code: ${exit_code})."
             fi
-            if [[ "$service_name" == "db-seal" && "$status" == "exited" \
-                && "$exit_code" == "0" ]]; then
-                return
+            if [[ "$status" != "exited" || "$exit_code" != "0" ]]; then
+                all_complete=false
             fi
         done
+        [[ "$all_complete" == true ]] && return
         sleep 3
         elapsed=$((elapsed + 3))
     done
@@ -6334,7 +6339,7 @@ start_core() {
     validate_compose_model
 
     log "Running the security preflight against the sealed database"
-    if ! compose up --detach --no-build --pull never preflight \
+    if ! compose up --detach --no-build --pull never --no-deps preflight \
         || ! compose wait preflight >/dev/null; then
         show_failure_guidance
         die "Core security preflight failed after the database identity seal."
