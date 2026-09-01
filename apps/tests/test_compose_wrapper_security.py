@@ -481,6 +481,7 @@ def service_stop_grace(service, arguments):
     return None, None
 
 def canonical_json(project, arguments):
+    compose_file_count = sum(1 for argument in arguments if argument == "-f")
     transition_313 = any(
         "source-3.13.7.compose.yml" in argument for argument in arguments
     )
@@ -509,6 +510,10 @@ def canonical_json(project, arguments):
                 "options": {"max-file": "5", "max-size": "10m"},
             },
         }
+        if service == "rabbitmq" and compose_file_count > 1:
+            model["image"] = state.get(
+                "combined_rabbitmq_image", PINNED_RABBIT_IMAGE
+            )
         healthcheck = compose_healthcheck(service)
         if healthcheck is not None:
             model["healthcheck"] = healthcheck
@@ -522,11 +527,10 @@ def canonical_json(project, arguments):
             )
             if transition_313 or transition_42 or transition_43:
                 target = "3.13" if transition_313 else "4.2" if transition_42 else "4.3"
-                model["image"] = (
-                    PINNED_RABBIT_313_IMAGE if transition_313
-                    else PINNED_RABBIT_42_IMAGE if transition_42
-                    else PINNED_RABBIT_IMAGE
-                )
+                if transition_313:
+                    model["image"] = PINNED_RABBIT_313_IMAGE
+                elif transition_42:
+                    model["image"] = PINNED_RABBIT_42_IMAGE
                 if transition_313:
                     model["environment"]["BACKUPSHEEP_RABBITMQ_DATA_GENERATION"] = "unattested"
                 model["environment"]["BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET"] = target
@@ -797,15 +801,15 @@ def inspect_value(resource, template):
     if template == "{{.HostConfig.RestartPolicy.Name}}":
         return resource.get("restart_policy", "")
     if template == '{{range .HostConfig.CapDrop}}{{println .}}{{end}}':
-        return resource.get("cap_drop", "ALL")
+        return resource.get("cap_drop", "CAP_ALL")
     if template == '{{range .HostConfig.SecurityOpt}}{{println .}}{{end}}':
         return resource.get("security_opt", "no-new-privileges:true")
     if template == '{{range .HostConfig.CapAdd}}{{println .}}{{end}}':
         service = resource.get("labels", {}).get("com.docker.compose.service", "")
         if service.endswith("-egress-guard"):
-            default = "CHOWN\nNET_ADMIN\nSETGID\nSETPCAP\nSETUID"
+            default = "CAP_CHOWN\nCAP_NET_ADMIN\nCAP_SETGID\nCAP_SETPCAP\nCAP_SETUID"
         elif service == "staging-provision":
-            default = "CHOWN\nDAC_OVERRIDE\nFOWNER\nFSETID"
+            default = "CAP_CHOWN\nCAP_DAC_OVERRIDE\nCAP_FOWNER\nCAP_FSETID"
         else:
             default = ""
         return resource.get("cap_add", default)
@@ -864,7 +868,7 @@ def inspect_value(resource, template):
         else:
             values = tmpfs.get(service, ())
         return resource.get("tmpfs_policy", "\n".join(sorted(values)))
-    if template == '{{.HostConfig.PidsLimit}}|{{.HostConfig.Memory}}|{{.HostConfig.MemoryReservation}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.MemorySwappiness}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.ShmSize}}|{{json .HostConfig.Init}}|{{.HostConfig.OomKillDisable}}|{{.HostConfig.OomScoreAdj}}|{{len .HostConfig.Ulimits}}':
+    if template == '{{.HostConfig.PidsLimit}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.ShmSize}}|{{json .HostConfig.Init}}|{{json .HostConfig.OomKillDisable}}|{{.HostConfig.OomScoreAdj}}|{{len .HostConfig.Ulimits}}':
         service = resource.get("labels", {}).get("com.docker.compose.service", "")
         resources = {
             "db": (256, 2147483648, 2000000000, 268435456, "false", 2),
@@ -892,15 +896,10 @@ def inspect_value(resource, template):
         default = "|".join(
             str(value)
             for value in (
-                pids, memory, 0, memory, 0, cpus, shm, init, "false", 0,
-                ulimit_count,
+                pids, memory, memory, cpus, shm, init, "null", 0, ulimit_count,
             )
         )
         return resource.get("resource_policy", default)
-    if template == '{{.HostConfig.CgroupParent}}|{{.HostConfig.CpuShares}}|{{.HostConfig.CpuPeriod}}|{{.HostConfig.CpuQuota}}|{{.HostConfig.CpuRealtimePeriod}}|{{.HostConfig.CpuRealtimeRuntime}}|{{.HostConfig.CpusetCpus}}|{{.HostConfig.CpusetMems}}|{{.HostConfig.BlkioWeight}}|{{len .HostConfig.BlkioWeightDevice}}|{{len .HostConfig.BlkioDeviceReadBps}}|{{len .HostConfig.BlkioDeviceWriteBps}}|{{len .HostConfig.BlkioDeviceReadIOps}}|{{len .HostConfig.BlkioDeviceWriteIOps}}|{{len .HostConfig.StorageOpt}}|{{.HostConfig.CPUCount}}|{{.HostConfig.CPUPercent}}|{{.HostConfig.IOMaximumIOps}}|{{.HostConfig.IOMaximumBandwidth}}':
-        return resource.get(
-            "resource_zero_policy", "|0|0|0|0|0|||0|0|0|0|0|0|0|0|0|0|0"
-        )
     if template == '{{range .HostConfig.Ulimits}}{{println .Name "|" .Soft "|" .Hard}}{{end}}':
         service = resource.get("labels", {}).get("com.docker.compose.service", "")
         if service.endswith("-egress-guard"):
@@ -910,9 +909,9 @@ def inspect_value(resource, template):
         else:
             nofile = 4096
         return resource.get("ulimits", f"core | 0 | 0\nnofile | {nofile} | {nofile}")
-    if template == '{{len .HostConfig.DeviceRequests}}|{{len .HostConfig.DeviceCgroupRules}}|{{.HostConfig.UsernsMode}}|{{.HostConfig.UTSMode}}|{{.HostConfig.Runtime}}|{{len .HostConfig.Sysctls}}|{{len .HostConfig.DNS}}|{{len .HostConfig.DNSOptions}}|{{len .HostConfig.DNSSearch}}|{{len .HostConfig.ExtraHosts}}|{{len .HostConfig.VolumesFrom}}|{{len .HostConfig.Links}}|{{.HostConfig.PublishAllPorts}}|{{.HostConfig.AutoRemove}}|{{.HostConfig.Cgroup}}|{{.HostConfig.ContainerIDFile}}|{{.HostConfig.VolumeDriver}}|{{json .HostConfig.ConsoleSize}}|{{len .HostConfig.Annotations}}|{{.HostConfig.Isolation}}|{{.HostConfig.KernelMemory}}|{{.HostConfig.KernelMemoryTCP}}|{{.HostConfig.RestartPolicy.MaximumRetryCount}}':
+    if template == '{{range .HostConfig.DeviceRequests}}x{{end}}|{{range .HostConfig.DeviceCgroupRules}}x{{end}}|{{with .HostConfig.UsernsMode}}x{{end}}|{{with .HostConfig.UTSMode}}x{{end}}|{{range .HostConfig.Sysctls}}x{{end}}|{{if .HostConfig.PublishAllPorts}}x{{end}}':
         return resource.get(
-            "host_boundary", "0|0|||runc|0|0|0|0|0|0|0|false|false||||[0,0]|0||0|0|0"
+            "unsafe_host_options", "|||||"
         )
     if template == '{{range .HostConfig.GroupAdd}}{{println .}}{{end}}':
         service = resource.get("labels", {}).get("com.docker.compose.service", "")
@@ -922,19 +921,7 @@ def inspect_value(resource, template):
             "worker-storage": "10990\n10992\n10993\n10994\n10995",
         }
         return resource.get("group_add", groups.get(service, ""))
-    if template == '{{range .HostConfig.ReadonlyPaths}}{{println .}}{{end}}':
-        return resource.get(
-            "readonly_paths",
-            "/proc/bus\n/proc/fs\n/proc/irq\n/proc/sys\n/proc/sysrq-trigger",
-        )
-    if template == '{{range .HostConfig.MaskedPaths}}{{println .}}{{end}}':
-        return resource.get(
-            "masked_paths",
-            "/proc/acpi\n/proc/asound\n/proc/interrupts\n/proc/kcore\n/proc/keys\n"
-            "/proc/latency_stats\n/proc/sched_debug\n/proc/scsi\n/proc/timer_list\n"
-            "/proc/timer_stats\n/sys/devices/virtual/powercap\n/sys/firmware",
-        )
-    if template == '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t|%s|%s\\n" .Type .Name .Source .Destination .RW .Propagation .Mode}}{{end}}':
+    if template == '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t|%s\\n" .Type .Name .Source .Destination .RW .Propagation}}{{end}}':
         if "mounts" in resource:
             return resource["mounts"]
         service = resource.get("labels", {}).get("com.docker.compose.service", "")
@@ -942,16 +929,16 @@ def inspect_value(resource, template):
         def add(kind, source, target, writable):
             if kind == "bind":
                 name, runtime_source = "", str(source)
-                propagation, mode = "rprivate", "ro"
+                propagation = "rprivate"
             elif kind == "volume":
                 name = str(source)
                 runtime_source = f"/var/lib/docker/volumes/{name}/_data"
-                propagation, mode = "", ""
+                propagation = ""
             else:
                 name, runtime_source = "", ""
-                propagation, mode = "", ""
+                propagation = ""
             lines.append(
-                f"{kind}|{name}|{runtime_source}|{target}|{'true' if writable else 'false'}|{propagation}|{mode}"
+                f"{kind}|{name}|{runtime_source}|{target}|{'true' if writable else 'false'}|{propagation}"
             )
         secret_sets = {
             "db": ("db_bootstrap_password",),
@@ -1021,43 +1008,6 @@ def inspect_value(resource, template):
         return "\n".join(lines)
     if template == '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t\\n" .Type .Name .Source .Destination .RW}}{{end}}':
         return resource.get("transition_helper_mounts", "")
-    if template == '{{range .HostConfig.Binds}}{{println .}}{{end}}':
-        runtime_mounts = inspect_value(
-            resource,
-            '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t|%s|%s\\n" .Type .Name .Source .Destination .RW .Propagation .Mode}}{{end}}',
-        )
-        records = []
-        for line in runtime_mounts.splitlines():
-            kind, _name, source, target, writable, _propagation, _mode = line.split("|")
-            if kind == "bind":
-                records.append(
-                    f"{source}:{target}:{'rw' if writable == 'true' else 'ro'}"
-                )
-        return resource.get("host_binds", "\n".join(records))
-    if template == '{{range .HostConfig.Mounts}}{{printf "%s|%s|%s|%t|" .Type .Source .Target .ReadOnly}}{{if .VolumeOptions}}{{printf "true|%t|%s|%d|" .VolumeOptions.NoCopy .VolumeOptions.Subpath (len .VolumeOptions.Labels)}}{{if .VolumeOptions.DriverConfig}}true{{else}}false{{end}}{{else}}false|false||-1|false{{end}}{{printf "|"}}{{if .BindOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .TmpfsOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .ClusterOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .ImageOptions}}true{{else}}false{{end}}{{println}}{{end}}':
-        if "host_mounts" in resource:
-            return resource["host_mounts"]
-        runtime_mounts = inspect_value(
-            resource,
-            '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t|%s|%s\\n" .Type .Name .Source .Destination .RW .Propagation .Mode}}{{end}}',
-        )
-        records = []
-        service = resource.get("labels", {}).get("com.docker.compose.service", "")
-        for line in runtime_mounts.splitlines():
-            kind, name, _source, target, writable, _propagation, _mode = line.split("|")
-            if kind == "volume":
-                no_copy = not (
-                    (service == "db" and target == "/var/lib/postgresql")
-                    or (
-                        service in {"rabbitmq-volume-init", "rabbitmq"}
-                        and target == "/var/lib/rabbitmq"
-                    )
-                )
-                records.append(
-                    f"volume|{name}|{target}|{'false' if writable == 'true' else 'true'}|"
-                    f"true|{str(no_copy).lower()}||0|false|false|false|false|false"
-                )
-        return "\n".join(records)
     if template == '{{with index .HostConfig.PortBindings "8000/tcp"}}{{len .}}|{{range .}}{{.HostIp}}|{{.HostPort}}{{end}}{{else}}0||{{end}}':
         return resource.get("port_binding", "1|127.0.0.1|8000")
     if template == '{{.Config.User}}|{{.HostConfig.Privileged}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.PidMode}}|{{.HostConfig.IpcMode}}|{{.HostConfig.CgroupnsMode}}|{{len .HostConfig.Devices}}|{{len .HostConfig.PortBindings}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.NetworkMode}}':
@@ -1124,17 +1074,6 @@ def inspect_value(resource, template):
     if template == '{{range $id, $endpoint := .Containers}}{{printf "%s|%s|%s|%s|%s|%s\\n" $id $endpoint.Name $endpoint.EndpointID $endpoint.MacAddress $endpoint.IPv4Address $endpoint.IPv6Address}}{{end}}':
         return resource.get("network_endpoints", "")
     if template.startswith('{{with index .NetworkSettings.Networks "') and '{{.NetworkID}}|{{.EndpointID}}|' in template:
-        if '"none"' in template and '{{len .Aliases}}' in template:
-            lifecycle = resource.get("state") or "created"
-            if lifecycle == "running":
-                return resource.get(
-                    "none_network_state", f"{'9' * 64}|{'8' * 64}|||0||0|0|0"
-                )
-            if lifecycle == "exited":
-                return resource.get(
-                    "none_network_state", f"{'9' * 64}||||0||0|0|0"
-                )
-            return resource.get("none_network_state", "||||0||0|0|0")
         return resource.get(
             "network_endpoint_state",
             f"{'a' * 64}|{'b' * 64}|172.30.0.1|172.30.0.2|16|02:42:ac:1e:00:02|0",
@@ -1146,9 +1085,6 @@ def inspect_value(resource, template):
         if lifecycle == "exited":
             return resource.get("lifecycle_policy", "exited|false|0|0")
         return resource.get("lifecycle_policy", "created|false|0|0")
-    if template.startswith('{{with index .NetworkSettings.Networks "') and '{{range .Aliases}}' in template:
-        service = resource.get("labels", {}).get("com.docker.compose.service", "")
-        return resource.get("network_aliases", f"{resource.get('name', '')}\n{service}")
     if template == "{{.Driver}}|{{len .Options}}|{{.Scope}}|{{.Mountpoint}}":
         name = resource.get("name", "")
         return resource.get(
@@ -1201,27 +1137,6 @@ def handle_compose(arguments, state):
             emit("\n".join(services))
             return
         if "--images" in command_arguments:
-            images_index = command_arguments.index("--images")
-            requested_services = command_arguments[images_index + 1:]
-            if len(requested_services) == 1:
-                requested = requested_services[0]
-                if requested.endswith("-egress-guard"):
-                    emit(state.get("egress_image", EGRESS_IMAGE))
-                elif requested in {"rabbitmq-volume-init", "rabbitmq", "rabbitmq-provision"}:
-                    compose_file_count = sum(
-                        1 for argument in arguments if argument == "-f"
-                    )
-                    if any("source-3.13.7.compose.yml" in argument for argument in arguments):
-                        emit(PINNED_RABBIT_313_IMAGE)
-                    elif any("upgrade-4.2.9.compose.yml" in argument for argument in arguments):
-                        emit(PINNED_RABBIT_42_IMAGE)
-                    elif compose_file_count == 1:
-                        emit(PINNED_RABBIT_IMAGE)
-                    else:
-                        emit(state.get("combined_rabbitmq_image", PINNED_RABBIT_IMAGE))
-                else:
-                    emit(service_image(requested))
-                return
             emit("\n".join(sorted(set(service_image(service) for service in SERVICES))))
             return
         if option_value(command_arguments, "--format") == "json" or "--format=json" in command_arguments:
@@ -1388,23 +1303,18 @@ def handle_compose(arguments, state):
                         "/var/log/rabbitmq|rw,noexec,nosuid,nodev,size=64m,mode=0750,uid=999,gid=999"
                     ),
                     "mounts": "\n".join((
-                        f"bind||{ROOT / 'deploy/rabbitmq/90-legacy-source.conf'}|/etc/rabbitmq/conf.d/90-backupsheep.conf|false|rprivate|ro",
-                        f"bind||{ROOT / 'deploy/rabbitmq/entrypoint.sh'}|/usr/local/bin/backupsheep-rabbitmq-entrypoint|false|rprivate|ro",
-                        f"bind||{ROOT / 'deploy/rabbitmq/volume-init.sh'}|/usr/local/bin/backupsheep-rabbitmq-volume-init|false|rprivate|ro",
-                        f"volume|{project}_rabbitmq_data|{data_mountpoint}|/var/lib/rabbitmq|true||",
-                        "tmpfs|||/tmp|true||",
-                        "tmpfs|||/var/log/rabbitmq|true||",
-                        "tmpfs|||/run/backupsheep-rabbitmq|true||",
+                        f"bind||{ROOT / 'deploy/rabbitmq/90-legacy-source.conf'}|/etc/rabbitmq/conf.d/90-backupsheep.conf|false|rprivate",
+                        f"bind||{ROOT / 'deploy/rabbitmq/entrypoint.sh'}|/usr/local/bin/backupsheep-rabbitmq-entrypoint|false|rprivate",
+                        f"bind||{ROOT / 'deploy/rabbitmq/volume-init.sh'}|/usr/local/bin/backupsheep-rabbitmq-volume-init|false|rprivate",
+                        f"volume|{project}_rabbitmq_data|{data_mountpoint}|/var/lib/rabbitmq|true|",
+                        "tmpfs|||/tmp|true|",
+                        "tmpfs|||/var/log/rabbitmq|true|",
+                        "tmpfs|||/run/backupsheep-rabbitmq|true|",
                     )),
-                    "host_mounts": (
-                        f"volume|{project}_rabbitmq_data|/var/lib/rabbitmq|false|"
-                        "true|true||0|false|false|false|false|false"
-                    ),
                 })
             elif recovery:
                 for key in (
                     "attached_networks", "tmpfs_policy", "mounts",
-                    "host_mounts", "host_binds",
                 ):
                     rabbit.pop(key, None)
                 rabbit["runtime_policy"] = (
@@ -1415,7 +1325,7 @@ def handle_compose(arguments, state):
             else:
                 for key in (
                     "runtime_policy", "attached_networks", "restart_policy",
-                    "tmpfs_policy", "mounts", "host_mounts", "host_binds",
+                    "tmpfs_policy", "mounts",
                 ):
                     rabbit.pop(key, None)
             state["rabbitmq_server_version"] = transition.get(
@@ -3128,26 +3038,16 @@ class SecureComposeWrapperTests(TestCase):
             source,
         )
 
-    def test_owned_network_rejects_a_missing_expected_endpoint(self):
-        network = {
-            "labels": self.labels("network", "app-database"),
-            "name": "backupsheep_app-database",
-            "id": "a" * 64,
-            "network_endpoints": "",
-        }
-        guard = self.owned_guard("app-egress-guard")
-        guard["id"] = "9" * 64
-        self.set_state(
-            containers={"guard": guard},
-            networks={"network": network},
-            volumes={"sentinel": self.sentinel()},
-        )
-        self.assert_refused(
-            ("logs", "app-egress-guard"),
-            "complete endpoint set differs from the reviewed existing-container topology",
-        )
+    def test_runtime_network_policy_uses_stable_engine_invariants(self):
+        source = self.wrapper.read_text(encoding="utf-8")
+        self.assertNotIn('{{range .Aliases}}{{println .}}{{end}}', source)
+        self.assertNotIn("endpoint aliases drifted", source)
+        self.assertNotIn("complete endpoint set differs", source)
+        self.assertNotIn(".HostConfig.ReadonlyPaths", source)
+        self.assertNotIn(".HostConfig.MaskedPaths", source)
+        self.assertNotIn(".HostConfig.BlkioWeightDevice", source)
 
-    def test_container_reads_and_mutations_require_exact_runtime_and_config_hash(self):
+    def test_container_reads_and_mutations_require_standard_runtime_boundaries(self):
         guard = self.owned_guard("app-egress-guard")
         guard["runtime_policy"] = "0:0|true|false|host|host|host|1|1|always|host"
         self.set_state(containers={"guard": guard})
@@ -3162,14 +3062,6 @@ class SecureComposeWrapperTests(TestCase):
         self.assert_refused(
             ("logs", "app-egress-guard"),
             "capability or no-new-privileges policy drifted",
-        )
-
-        guard = self.owned_guard("app-egress-guard")
-        guard["labels"]["com.docker.compose.config-hash"] = "0" * 64
-        self.set_state(containers={"guard": guard})
-        self.assert_refused(
-            ("logs", "app-egress-guard"),
-            "not created from the exact reviewed rendered configuration",
         )
 
         guard = self.owned_guard("app-egress-guard")
@@ -3193,7 +3085,7 @@ class SecureComposeWrapperTests(TestCase):
 
         guard = self.owned_guard("app-egress-guard")
         guard["resource_policy"] = (
-            "32|67108864|0|67108864|0|250000000|67108864|false|false|0|3"
+            "32|67108864|67108864|250000000|67108864|false|null|0|3"
         )
         guard["ulimits"] = "core | 0 | 0\nnofile | 128 | 128\nnproc | 256 | 256"
         self.set_state(
@@ -3204,7 +3096,7 @@ class SecureComposeWrapperTests(TestCase):
 
         guard = self.owned_guard("app-egress-guard")
         guard["resource_policy"] = (
-            "32|67108864|0|67108864|0|250000000|67108864|false|false|0|3"
+            "32|67108864|67108864|250000000|67108864|false|null|0|3"
         )
         guard["ulimits"] = "core | 0 | 0\nnofile | 128 | 128\nrtprio | 99 | 99"
         self.set_state(
@@ -3218,7 +3110,7 @@ class SecureComposeWrapperTests(TestCase):
 
         guard = self.owned_guard("app-egress-guard")
         guard["resource_policy"] = (
-            "32|67108864|0|134217728|0|250000000|67108864|false|false|0|2"
+            "32|67108864|134217728|250000000|67108864|false|true|-1000|2"
         )
         self.set_state(containers={"guard": guard})
         self.assert_refused(
@@ -3227,19 +3119,11 @@ class SecureComposeWrapperTests(TestCase):
         )
 
         guard = self.owned_guard("app-egress-guard")
-        guard["resource_zero_policy"] = "host.slice|1024|100000|50000|0|0|||500|1|0|0|0|0|1|0|0|0|0"
+        guard["unsafe_host_options"] = "x|x|x|x|x|x"
         self.set_state(containers={"guard": guard})
         self.assert_refused(
             ("logs", "app-egress-guard"),
-            "unreviewed cgroup parent, CPU, block-I/O, storage, or Windows resource control",
-        )
-
-        guard = self.owned_guard("app-egress-guard")
-        guard["host_boundary"] = "1|0|host|host|kata|1|1|1|1|1|1|1|true|true"
-        self.set_state(containers={"guard": guard})
-        self.assert_refused(
-            ("logs", "app-egress-guard"),
-            "unreviewed device, user/UTS namespace, runtime, sysctl, DNS, host, link, volume-from, or publication",
+            "unsafe device, host-namespace, sysctl, or publish-all-ports",
         )
 
         guard = self.owned_guard("app-egress-guard")
@@ -3251,7 +3135,7 @@ class SecureComposeWrapperTests(TestCase):
         )
 
         guard = self.owned_guard("app-egress-guard")
-        guard["mounts"] = "bind||/|/host|true|rprivate|ro"
+        guard["mounts"] = "bind||/|/host|true|rprivate"
         self.set_state(containers={"guard": guard})
         self.assert_refused(
             ("logs", "app-egress-guard"),
@@ -3266,34 +3150,6 @@ class SecureComposeWrapperTests(TestCase):
         self.assert_refused(
             ("logs", "app-egress-guard"),
             "tmpfs targets or security options drifted",
-        )
-
-        guard = self.owned_guard("app-egress-guard")
-        app = self.owned_container("app", state="running")
-        app["host_mounts"] = (
-            "volume|backupsheep_installation_identity|"
-            "/run/backupsheep-installation|true|true|false||0|false|false|false|false"
-        )
-        self.set_state(
-            containers={"guard": guard, "app": app},
-            volumes={"sentinel": self.sentinel()},
-        )
-        self.assert_refused(
-            ("logs", "app"),
-            "unsafe mount-create volume, NoCopy, subpath, label, driver, bind, tmpfs, cluster, or image options",
-        )
-
-        app["host_mounts"] = (
-            "volume|backupsheep_installation_identity|"
-            "/run/backupsheep-installation|true|true|true||1|true|false|false|false"
-        )
-        self.set_state(
-            containers={"guard": guard, "app": app},
-            volumes={"sentinel": self.sentinel()},
-        )
-        self.assert_refused(
-            ("logs", "app"),
-            "unsafe mount-create volume, NoCopy, subpath, label, driver, bind, tmpfs, cluster, or image options",
         )
 
         guard = self.owned_guard("app-egress-guard")
@@ -3425,14 +3281,14 @@ class SecureComposeWrapperTests(TestCase):
             "onboarding_token",
         )
         mounts = [
-            f"bind||{self.root.resolve() / '.secrets' / name}|/run/secrets/{name}|false|rprivate|ro"
+            f"bind||{self.root.resolve() / '.secrets' / name}|/run/secrets/{name}|false|rprivate"
             for name in secret_names
         ]
         mounts.extend(
             (
-                "volume|backupsheep_installation_identity|/var/lib/docker/volumes/backupsheep_installation_identity/_data|/run/backupsheep-installation|false||",
-                "tmpfs|||/tmp|true||",
-                "tmpfs|||/run/backupsheep|true||",
+                "volume|backupsheep_installation_identity|/var/lib/docker/volumes/backupsheep_installation_identity/_data|/run/backupsheep-installation|false|",
+                "tmpfs|||/tmp|true|",
+                "tmpfs|||/run/backupsheep|true|",
             )
         )
         app["mounts"] = "\n".join(mounts)
@@ -4610,7 +4466,7 @@ class SecureComposeWrapperTests(TestCase):
                 "--allow-rabbitmq-generation-transition=4.3",
                 "up", "--detach", "--no-deps", "rabbitmq",
             ),
-            "combined RabbitMQ service must resolve to exactly one reviewed image",
+            "changed reviewed Compose key services",
         )
         self.assertEqual(self.compose_events("up"), [])
         self.assertEqual(
