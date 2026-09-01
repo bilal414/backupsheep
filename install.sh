@@ -1447,7 +1447,13 @@ clone_exact_commit() {
     fetched_commit="$(git_safe -C "$STAGING_DIR" rev-parse --verify 'FETCH_HEAD^{commit}')"
     [[ "$fetched_commit" == "$INSTALL_REF" ]] \
         || die "The fetched commit (${fetched_commit}) does not match requested commit ${INSTALL_REF}."
-    git_safe -C "$STAGING_DIR" checkout --quiet --detach "$INSTALL_REF"
+    (
+        # The install root remains owner-only, but Docker bind-mounted tracked
+        # files must retain the repository's standard 0644/0755 modes so the
+        # non-root container users can read them.
+        umask 022
+        git_safe -C "$STAGING_DIR" checkout --quiet --detach "$INSTALL_REF"
+    )
 
     assert_install_parent_identity
     atomic_move_new "$STAGING_DIR" "$INSTALL_DIR" \

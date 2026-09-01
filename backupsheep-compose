@@ -3850,7 +3850,7 @@ validate_network_runtime_policy() {
     [[ "$state" == "bridge|${expected_internal}|false|false|${expected_option_count}|${expected_icc}|default|0" ]] \
         || die "Docker network ${logical_name} has an unsafe driver, namespace, attachment, option, or IPAM policy."
     ipam="$("${docker_command[@]}" network inspect --format \
-        '{{len .IPAM.Config}}|{{range .IPAM.Config}}{{.Subnet}}|{{.IPRange}}|{{.Gateway}}|{{len .AuxiliaryAddresses}}{{end}}' \
+        '{{len .IPAM.Config}}|{{range .IPAM.Config}}{{index . "Subnet"}}|{{with index . "IPRange"}}{{.}}{{end}}|{{index . "Gateway"}}|{{with index . "AuxiliaryAddresses"}}{{len .}}{{else}}0{{end}}{{end}}' \
         "$resource_id")" || die "could not inspect Docker network IPAM configuration."
     IFS='|' read -r ipam_count subnet ip_range gateway aux_count remainder <<< "$ipam"
     [[ "$ipam_count" == 1 && -z "$ip_range" && "$aux_count" == 0 && -z "$remainder" \

@@ -1119,7 +1119,7 @@ def inspect_value(resource, template):
             "runtime_policy",
             f"bridge|{'false' if is_egress else 'true'}|false|false|{'1|false' if is_egress else '0|'}|default|0",
         )
-    if template == '{{len .IPAM.Config}}|{{range .IPAM.Config}}{{.Subnet}}|{{.IPRange}}|{{.Gateway}}|{{len .AuxiliaryAddresses}}{{end}}':
+    if template == '{{len .IPAM.Config}}|{{range .IPAM.Config}}{{index . "Subnet"}}|{{with index . "IPRange"}}{{.}}{{end}}|{{index . "Gateway"}}|{{with index . "AuxiliaryAddresses"}}{{len .}}{{else}}0{{end}}{{end}}':
         return resource.get("ipam_policy", "1|172.30.0.0/16||172.30.0.1|0")
     if template == '{{range $id, $endpoint := .Containers}}{{printf "%s|%s|%s|%s|%s|%s\\n" $id $endpoint.Name $endpoint.EndpointID $endpoint.MacAddress $endpoint.IPv4Address $endpoint.IPv6Address}}{{end}}':
         return resource.get("network_endpoints", "")
