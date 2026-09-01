@@ -978,6 +978,10 @@ clone_exact_commit
             self.installer,
         )
         self.assertIn("compose --profile operations down --timeout 300", self.installer)
+        self.assertIn(
+            "compose up --detach --no-build --pull never --no-deps preflight",
+            self.installer,
+        )
         stop_operations = self.installer.split("stop_operations() {", 1)[1].split(
             "\n}", 1
         )[0]
@@ -985,6 +989,7 @@ clone_exact_commit
             stop_operations.index("refuse_egress_oneoffs_before_topology_removal"),
             stop_operations.index("compose --profile operations down --timeout 300"),
         )
+
         self.assertIn(
             "compose up --detach --no-build --pull never --no-deps --force-recreate",
             self.installer,
@@ -1011,6 +1016,61 @@ clone_exact_commit
         self.assertIn("/proc/1/task/1/children", self.installer)
         self.assertNotIn("celery -A backupsheep inspect ping", self.installer)
         self.assertIn("/run/backupsheep/celery-ready", self.installer)
+
+    def test_database_seal_waits_for_every_setup_one_shot(self):
+        command = r'''
+source "$1"
+DOCKER_BIN=mock_docker
+RUNNING_SERVICE="$2"
+compose() {
+    [[ "$1" == ps && "$2" == --all && "$3" == -q ]]
+    printf '%s\n' "$4"
+}
+mock_docker() {
+    local template="$3" service="$4"
+    if [[ "$template" == '{{.State.Status}}' ]]; then
+        if [[ "$service" == "$RUNNING_SERVICE" ]]; then
+            printf 'running\n'
+        else
+            printf 'exited\n'
+        fi
+    elif [[ "$template" == '{{.State.ExitCode}}' ]]; then
+        printf '0\n'
+    else
+        return 1
+    fi
+}
+sleep() { :; }
+show_failure_guidance() { :; }
+wait_for_database_seal
+'''
+        incomplete = subprocess.run(
+            [
+                "bash", "-c", command, "database-seal-wait-test",
+                str(INSTALLER), "rabbitmq-provision",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertNotEqual(incomplete.returncode, 0)
+        self.assertIn(
+            "Generation-3 database grants did not seal within five minutes",
+            incomplete.stderr,
+        )
+
+        complete = subprocess.run(
+            [
+                "bash", "-c", command, "database-seal-wait-test",
+                str(INSTALLER), "none",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(complete.returncode, 0, complete.stderr)
 
     def test_installer_refuses_stranded_egress_oneoff_before_down(self):
         command = r'''

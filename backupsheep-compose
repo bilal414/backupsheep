@@ -3870,6 +3870,11 @@ validate_network_runtime_policy() {
         "$resource_id")" || die "could not inspect Docker network endpoint membership."
     while IFS='|' read -r endpoint_container endpoint_name endpoint_id endpoint_mac endpoint_ipv4 endpoint_ipv6; do
         [[ -n "$endpoint_container$endpoint_name$endpoint_id$endpoint_mac$endpoint_ipv4$endpoint_ipv6" ]] || continue
+        # Docker 29's typed network-inspect template renders an absent IPv6
+        # netip.Prefix as this sentinel; the same Engine JSON field is empty.
+        if [[ "$endpoint_ipv6" == "invalid Prefix" ]]; then
+            endpoint_ipv6=""
+        fi
         endpoint_count=$((endpoint_count + 1)); (( endpoint_count <= 256 )) \
             || die "Docker network ${logical_name} has too many endpoints."
         [[ "$endpoint_container" =~ ^[0-9a-f]{64}$ && "$endpoint_id" =~ ^[0-9a-f]{64}$ \

@@ -3100,7 +3100,7 @@ class SecureComposeWrapperTests(TestCase):
             "id": "a" * 64,
             "network_endpoints": (
                 f"{endpoint_id}|foreign-endpoint|{'b' * 64}|02:42:ac:1e:00:02|"
-                "172.30.0.2/16|"
+                "172.30.0.2/16|invalid Prefix"
             ),
         }
         foreign = {
