@@ -10,7 +10,10 @@ from django.utils.dateparse import parse_datetime
 from sentry_sdk import capture_exception
 
 from apps._tasks.diagnostics import capture_execution_diagnostic
-from apps._tasks.artifact_encryption import local_restore_phase_task_id
+from apps._tasks.artifact_encryption import (
+    ArtifactPipelineError,
+    local_restore_phase_task_id,
+)
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.restore_lease import (
     DurableRestoreLease,
@@ -438,9 +441,15 @@ def _schedule_local_restore_handoff_cleanup(restore):
         )
         or {}
     )
-    if restore.status not in {restore.Status.COMPLETE, restore.Status.FAILED} or state.get(
-        "status"
-    ) not in {"ready", "authenticated"}:
+    if restore.status not in {restore.Status.COMPLETE, restore.Status.FAILED}:
+        return
+    handoff_status = state.get("status")
+    if restore.status == restore.Status.COMPLETE and handoff_status == "ready":
+        raise ArtifactPipelineError(
+            "A completed restore has no durable authenticated-ciphertext witness; "
+            "the local restore handoff is retained for manual review."
+        )
+    if handoff_status not in {"ready", "authenticated"}:
         return
     from apps._tasks.integration.storage.tasks import (
         cleanup_local_restore_ciphertext,

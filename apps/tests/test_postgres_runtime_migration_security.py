@@ -1838,6 +1838,7 @@ read_env_value() {
 compose() {
     [[ "$1" == ps && "$2" == --all && "$3" == --quiet && "$4" == db ]] || return 90
     printf '%s\n' database-container
+    return "$COMPOSE_STATUS"
 }
 mock_docker() {
     if [[ "$1:$2:$3" == image:inspect:--format ]]; then
@@ -1861,20 +1862,23 @@ mock_docker() {
 set_env_value() { printf 'SET:%s=%s\n' "$1" "$2" >> "$EVENT_LOG"; }
 complete_postgres_storage_generation
 '''
-        for database_generation, migration_required, succeeds in (
-            ("3", "false", True),
-            ("3-pending-upgrade", "false", False),
-            ("3", "true", False),
+        for database_generation, migration_required, compose_status, succeeds in (
+            ("3", "false", "0", True),
+            ("3-pending-upgrade", "false", "0", False),
+            ("3", "true", "0", False),
+            ("3", "false", "73", False),
         ):
             with self.subTest(
                 database_generation=database_generation,
                 migration_required=migration_required,
+                compose_status=compose_status,
             ), tempfile.TemporaryDirectory(prefix="postgres-promotion-") as temp_dir:
                 event_log = Path(temp_dir) / "events"
                 env = os.environ.copy()
                 env.update(
                     DATABASE_GENERATION=database_generation,
                     MIGRATION_REQUIRED=migration_required,
+                    COMPOSE_STATUS=compose_status,
                     TARGET_IMAGE=TARGET_IMAGE_ID,
                     EVENT_LOG=str(event_log),
                 )

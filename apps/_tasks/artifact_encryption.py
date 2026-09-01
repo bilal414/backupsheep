@@ -146,6 +146,91 @@ def _handoff_matches(value, expected, *, statuses) -> bool:
     )
 
 
+def _handoff_timestamp(value, key: str) -> tuple[str, datetime]:
+    raw = value.get(key) if isinstance(value, dict) else None
+    if not isinstance(raw, str) or not raw or raw != raw.strip():
+        raise ArtifactPipelineError(
+            f"The restore handoff {key} witness is missing or malformed."
+        )
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (OverflowError, ValueError):
+        raise ArtifactPipelineError(
+            f"The restore handoff {key} witness is missing or malformed."
+        ) from None
+    if timezone.is_naive(parsed):
+        raise ArtifactPipelineError(
+            f"The restore handoff {key} witness is not timezone-aware."
+        )
+    return raw, parsed
+
+
+def _terminal_restore_status(restore) -> str:
+    if restore.status == restore.Status.COMPLETE:
+        return "complete"
+    if restore.status == restore.Status.FAILED:
+        return "failed"
+    raise ArtifactPipelineError("The restore is not in a terminal state.")
+
+
+def _validate_cleanup_handoff_record(value, expected, terminal_status: str) -> None:
+    if terminal_status not in {"complete", "failed"}:
+        raise ArtifactPipelineError(
+            "The completed restore handoff has an invalid terminal restore state."
+        )
+    if not _handoff_matches(value, expected, statuses={"cleanup_complete"}):
+        raise ArtifactPipelineError(
+            "The completed restore handoff evidence conflicts with its ledger."
+        )
+    if value.get("terminal_restore_status") != terminal_status:
+        raise ArtifactPipelineError(
+            "The completed restore handoff names a different terminal restore state."
+        )
+    ready_at, ready_time = _handoff_timestamp(value, "ready_at")
+    completed_at, completed_time = _handoff_timestamp(value, "completed_at")
+    authenticated_at = value.get("authenticated_at")
+    authenticated_time = None
+    if authenticated_at is not None:
+        authenticated_at, authenticated_time = _handoff_timestamp(
+            value, "authenticated_at"
+        )
+    if terminal_status == "complete" and authenticated_time is None:
+        raise ArtifactPipelineError(
+            "A completed restore handoff has no authenticated-ciphertext witness."
+        )
+    if authenticated_time is not None and authenticated_time < ready_time:
+        raise ArtifactPipelineError(
+            "The restore handoff authentication predates ciphertext readiness."
+        )
+    if completed_time < (authenticated_time or ready_time):
+        raise ArtifactPipelineError(
+            "The restore handoff cleanup predates its security witness."
+        )
+    if completed_time > timezone.now():
+        raise ArtifactPipelineError(
+            "The restore handoff cleanup witness is in the future."
+        )
+    allowed = {
+        *expected,
+        "status",
+        "ready_at",
+        "completed_at",
+        "terminal_restore_status",
+    }
+    if authenticated_time is not None:
+        allowed.add("authenticated_at")
+    if set(value) != allowed:
+        raise ArtifactPipelineError(
+            "The completed restore handoff contains unreviewed evidence fields."
+        )
+    # Keep the raw values live in this validation path so a future refactor
+    # cannot accidentally validate parsed timestamps but copy different bytes.
+    if value["ready_at"] != ready_at or value["completed_at"] != completed_at:
+        raise ArtifactPipelineError("The restore handoff timestamp witness changed.")
+    if authenticated_time is not None and value["authenticated_at"] != authenticated_at:
+        raise ArtifactPipelineError("The restore handoff timestamp witness changed.")
+
+
 def _mode() -> str:
     value = str(
         getattr(settings, "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE", "legacy-only")
@@ -1309,6 +1394,8 @@ def materialize_local_restore_ciphertext_handoff(restore, *, task_id: str) -> bo
 def cleanup_terminal_restore_ciphertext_handoff(restore) -> bool:
     """Remove a storage-owned reverse handoff after a terminal restore."""
 
+    source_evidence = None
+    terminal_status = ""
     with transaction.atomic():
         locked = restore.__class__.objects.select_for_update().get(pk=restore.pk)
         if locked.status not in {locked.Status.COMPLETE, locked.Status.FAILED}:
@@ -1328,15 +1415,54 @@ def cleanup_terminal_restore_ciphertext_handoff(restore) -> bool:
         expected = restore_ciphertext_handoff_identity(locked, plan)
         metadata = dict(locked.execution_metadata or {})
         current = metadata.get(_RESTORE_HANDOFF_METADATA_KEY)
+        terminal_status = _terminal_restore_status(locked)
         if _handoff_matches(current, expected, statuses={"cleanup_complete"}):
+            _validate_cleanup_handoff_record(
+                current,
+                expected,
+                terminal_status,
+            )
             return False
-        if not _handoff_matches(
-            current,
-            expected,
-            statuses={"ready", "authenticated"},
-        ):
+        allowed_statuses = (
+            {"authenticated"}
+            if locked.status == locked.Status.COMPLETE
+            else {"ready", "authenticated"}
+        )
+        if not _handoff_matches(current, expected, statuses=allowed_statuses):
             raise ArtifactPipelineError(
                 "The terminal restore handoff witness is incomplete."
+            )
+        observed_at = timezone.now()
+        ready_at, ready_time = _handoff_timestamp(current, "ready_at")
+        if ready_time > observed_at:
+            raise ArtifactPipelineError(
+                "The restore handoff readiness witness is in the future."
+            )
+        source_evidence = {
+            **expected,
+            "status": current["status"],
+            "ready_at": ready_at,
+        }
+        if current["status"] == "authenticated":
+            authenticated_at, authenticated_time = _handoff_timestamp(
+                current, "authenticated_at"
+            )
+            if authenticated_time < ready_time:
+                raise ArtifactPipelineError(
+                    "The restore handoff authentication predates ciphertext readiness."
+                )
+            if authenticated_time > observed_at:
+                raise ArtifactPipelineError(
+                    "The restore handoff authentication witness is in the future."
+                )
+            source_evidence["authenticated_at"] = authenticated_at
+        elif "authenticated_at" in current:
+            raise ArtifactPipelineError(
+                "A ready restore handoff contains an uncommitted authentication witness."
+            )
+        if current != source_evidence:
+            raise ArtifactPipelineError(
+                "The terminal restore handoff contains unreviewed evidence fields."
             )
 
     from backupsheep.staging import cleanup_restore_ciphertext_fence
@@ -1364,19 +1490,52 @@ def cleanup_terminal_restore_ciphertext_handoff(restore) -> bool:
         )
         metadata = dict(locked.execution_metadata or {})
         current = metadata.get(_RESTORE_HANDOFF_METADATA_KEY)
-        if current_expected != expected or not _handoff_matches(
-            current,
-            expected,
-            statuses={"ready", "authenticated", "cleanup_complete"},
+        if (
+            current_expected != expected
+            or _terminal_restore_status(locked) != terminal_status
         ):
             raise ArtifactPipelineError(
                 "The restore handoff identity changed during cleanup."
             )
-        metadata[_RESTORE_HANDOFF_METADATA_KEY] = {
+        if _handoff_matches(current, expected, statuses={"cleanup_complete"}):
+            _validate_cleanup_handoff_record(
+                current,
+                expected,
+                terminal_status,
+            )
+            return bool(removed)
+        if current != source_evidence:
+            raise ArtifactPipelineError(
+                "The restore handoff security witness changed during cleanup."
+            )
+        completed_at = timezone.now()
+        _, ready_time = _handoff_timestamp(source_evidence, "ready_at")
+        authenticated_time = None
+        if "authenticated_at" in source_evidence:
+            _, authenticated_time = _handoff_timestamp(
+                source_evidence, "authenticated_at"
+            )
+        if completed_at < (authenticated_time or ready_time):
+            raise ArtifactPipelineError(
+                "The restore handoff cleanup clock predates its security witness."
+            )
+        completed_evidence = {
             **expected,
             "status": "cleanup_complete",
-            "completed_at": timezone.now().isoformat(),
+            "ready_at": source_evidence["ready_at"],
+            "completed_at": completed_at.isoformat(),
+            "terminal_restore_status": terminal_status,
         }
+        if "authenticated_at" in source_evidence:
+            completed_evidence["authenticated_at"] = source_evidence[
+                "authenticated_at"
+            ]
+        _validate_cleanup_handoff_record(
+            completed_evidence,
+            expected,
+            terminal_status,
+        )
+        metadata[_RESTORE_HANDOFF_METADATA_KEY] = completed_evidence
         locked.execution_metadata = metadata
         locked.save(update_fields=["execution_metadata", "modified"])
     return bool(removed)

@@ -27,6 +27,13 @@ the fixed, signed `20260831T131500Z` Ubuntu archive snapshot. Both source defini
 are AMD64-only, replace every inherited APT source, reject partial index updates, and
 verify that every loaded package index came from the exact snapshot URI. The final
 images retain neither an APT source nor the build-only CA bootstrap.
+Each APT request uses at most three transport retries with a 30-second inactivity timeout,
+only against that same immutable snapshot. Every snapshot-backed update, download, and
+upgrade operation makes at most four whole attempts with 15-, 30-, and 60-second backoff.
+Completed signed indexes and exact-version package downloads can be reused between attempts.
+Exhausting either bound aborts the build; there is no fallback mirror, mutable repository,
+unauthenticated package, or TLS exception. The retry configuration is build-only and is
+removed with the temporary source and CA configuration.
 
 A frozen snapshot prevents repository drift; it does not provide automatic patching.
 For every release, review current Ubuntu Security Notices, advance the snapshot and

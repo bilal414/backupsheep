@@ -210,6 +210,17 @@ class DeploymentHardeningContractTests(TestCase):
             "Components: main",
             "Architectures: amd64",
             "APT::Update::Error-Mode=any",
+            "snapshot_apt_retry()",
+            'while [ "$snapshot_attempt" -le 4 ]; do',
+            '1) sleep 15',
+            '2) sleep 30',
+            '3) sleep 60',
+            '4) return "$snapshot_status"',
+            'if [ "$snapshot_status" -ge 126 ]; then',
+            "snapshot_apt_retry apt-get -o APT::Update::Error-Mode=any update",
+            "snapshot_apt_retry apt-get install --yes --no-install-recommends --only-upgrade",
+            'Acquire::Retries "3"',
+            'Acquire::https::Timeout "30"',
             "apt-get indextargets --format '$(URI)'",
             "Ubuntu metadata escaped the reviewed snapshot:",
             "9481fcd95f41b221f02f14d896535fe500bec539bc563c4cdca1acee483a8bdd",
@@ -232,6 +243,13 @@ class DeploymentHardeningContractTests(TestCase):
             "USER 999:999",
         ):
             self.assertIn(expected, legacy)
+        self.assertEqual(legacy.count("snapshot_apt_retry "), 2)
+        self.assertIn("else \\\n                snapshot_status=$?;", legacy)
+        self.assertNotIn("|| true", legacy)
+        self.assertIn(
+            "rm -f \\\n        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries",
+            legacy,
+        )
         self.assertNotIn("apt-get upgrade", legacy)
         self.assertNotIn("dist-upgrade", legacy)
         self.assertNotIn("archive.ubuntu.com", legacy)
@@ -1580,6 +1598,18 @@ raise SystemExit(99)
         self.assertIn("question.qtype != 1U && question.qtype != 28U", dns_proxy)
         self.assertIn("two-byte immutable-name index", dns_proxy)
         self.assertIn("SO_PEERCRED", dns_proxy)
+        self.assertIn(
+            "encode_question(&question, response, response_length,",
+            dns_proxy,
+        )
+        self.assertLess(
+            dns_proxy.index(
+                "encode_question(&question, response, response_length,"
+            ),
+            dns_proxy.index(
+                "memcpy(response, request, 2U); /* restore only the workload's local ID */"
+            ),
+        )
         self.assertIn("DNS_FORWARDER_UID 10022U", dns_forwarder)
         self.assertIn("received == 2", dns_forwarder)
         self.assertIn("peer.uid != DNS_PROXY_UID", dns_forwarder)

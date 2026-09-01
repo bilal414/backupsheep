@@ -1879,6 +1879,9 @@ reconcile_linked_artifact_publication_residue() {
 reconcile_installer_temp_residues() {
     local path="" base="" entry="" count=0 size="" mode="" links=""
     local runtime_count=0
+    local secret_completion_marker="__BACKUPSHEEP_FIND_COMPLETE_$$_${RANDOM}__"
+    local secret_inventory_complete=false
+    local -a secret_inventory=()
 
     # These files are created owner-only by the wrapper/release consumer, but a
     # SIGKILL bypasses their EXIT traps. Their fixed names are never authority:
@@ -1925,6 +1928,16 @@ reconcile_installer_temp_residues() {
             && "$(file_mode "${INSTALL_DIR}/.secrets")" == "700" ]] \
             || die "Cannot reconcile an unsafe secret residue directory."
         while IFS= read -r -d '' entry; do
+            if [[ "$entry" == "$secret_completion_marker" ]]; then
+                secret_inventory_complete=true
+                continue
+            fi
+            secret_inventory+=("$entry")
+        done < <(find "${INSTALL_DIR}/.secrets" -mindepth 1 -maxdepth 1 -type f -print0 \
+            && printf '%s\0' "$secret_completion_marker")
+        [[ "$secret_inventory_complete" == true ]] \
+            || die "Could not completely inventory installer secret residues."
+        for entry in "${secret_inventory[@]}"; do
             base="$(basename -- "$entry")"
             case "$base" in
                 .managed-key-check.*|.celery-key-check.*|.artifact-provider-rollback.*|\
@@ -1978,7 +1991,7 @@ reconcile_installer_temp_residues() {
             size="$(file_size "$entry")"; [[ "$size" =~ ^[0-9]+$ ]] && (( 10#$size <= 1048576 )) \
                 || die "Installer secret residue is too large."
             rm -f -- "$entry" || die "Could not reconcile installer secret residue."
-        done < <(find "${INSTALL_DIR}/.secrets" -mindepth 1 -maxdepth 1 -type f -print0)
+        done
     fi
     sync || die "Could not durably reconcile installer residues."
 }
@@ -3382,7 +3395,7 @@ finalize_celery_signing_rotation() {
     local temporary=""
 
     security_generation="$(read_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION)"
-    [[ "$security_generation" == 3-pending-rotation ]] || return
+    [[ "$security_generation" == 3-pending-rotation ]] || return 0
     [[ "$ROTATE_CELERY_SIGNING_KEYS" == true ]] \
         || die "Celery key rotation is pending; rerun with --rotate-celery-signing-keys."
     signing_generation="$(read_env_value BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION)"
@@ -3659,6 +3672,8 @@ validate_release_evidence_files() {
     local path=""
     local entry=""
     local count=0
+    local completion_marker="__BACKUPSHEEP_FIND_COMPLETE_$$_${RANDOM}__"
+    local inventory_complete=false
 
     [[ -d "$evidence_dir" && ! -L "$evidence_dir" \
         && "$(file_uid "$evidence_dir")" == "$EUID" \
@@ -3679,12 +3694,19 @@ validate_release_evidence_files() {
             || die "Signed-release evidence ${name} must be an owner-only regular file without hard links."
     done
     while IFS= read -r -d '' entry; do
+        if [[ "$entry" == "$completion_marker" ]]; then
+            inventory_complete=true
+            continue
+        fi
         count=$((count + 1))
         case "$(basename -- "$entry")" in
             backupsheep-release-descriptor-v2.txt|backupsheep-release-descriptor-v2.sigstore.json|release-manifest.json|sigstore-trusted-root.json|signature-verification.json|local-images.txt) ;;
             *) die "Signed-release evidence contains an unexpected entry." ;;
         esac
-    done < <(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print0)
+    done < <(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print0 \
+        && printf '%s\0' "$completion_marker")
+    [[ "$inventory_complete" == true ]] \
+        || die "Signed-release evidence could not be inventoried completely."
     [[ "$count" -eq 6 ]] || die "Signed-release evidence must contain exactly six control files."
 }
 
@@ -6238,6 +6260,7 @@ complete_postgres_storage_generation() {
     local target_image_id=""
     local container_image_id=""
     local witness_mode=""
+    local compose_listing=""
 
     state="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION)"
     database_generation="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
@@ -6255,11 +6278,13 @@ complete_postgres_storage_generation() {
     esac
     [[ "$database_generation" == "3" ]] \
         || die "PostgreSQL storage cannot be promoted before generation-3 database identities are sealed."
+    compose_listing="$(compose ps --all --quiet db)" \
+        || die "Could not inventory the PostgreSQL container before witness promotion."
     while IFS= read -r listed_container_id; do
         [[ -n "$listed_container_id" ]] || continue
         container_id="$listed_container_id"
         container_count=$((container_count + 1))
-    done < <(compose ps --all --quiet db)
+    done <<< "$compose_listing"
     [[ "$container_count" -eq 1 && -n "$container_id" ]] \
         || die "PostgreSQL witness promotion requires exactly one database container."
     target_image_ref="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"

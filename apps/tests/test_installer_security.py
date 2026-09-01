@@ -1308,6 +1308,79 @@ publish_fresh_evidence "$STAGING_DIR" "$EVIDENCE_DIR"
         )
         self.assertIn("validate_inherited_installer_lock", wrapper)
 
+    def test_mutation_authorizing_find_inventories_require_completion_witnesses(self):
+        wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
+        self.assertIn(
+            "the inherited installer mutation lock could not be inventoried completely",
+            wrapper,
+        )
+        self.assertIn(
+            "signed-release evidence could not be inventoried completely",
+            wrapper,
+        )
+        self.assertGreaterEqual(
+            wrapper.count("__BACKUPSHEEP_FIND_COMPLETE_$$_${RANDOM}__"),
+            2,
+        )
+        self.assertIn(
+            "Could not completely inventory installer secret residues",
+            self.installer,
+        )
+        self.assertIn(
+            "Signed-release evidence could not be inventoried completely",
+            self.installer,
+        )
+        self.assertGreaterEqual(
+            self.installer.count("__BACKUPSHEEP_FIND_COMPLETE_$$_${RANDOM}__"),
+            2,
+        )
+
+    def test_incomplete_secret_inventory_cannot_delete_a_partial_result(self):
+        command = r'''
+source "$1"
+INSTALL_DIR="$2"
+SECRETS_DIR="$2/.secrets"
+residue="$SECRETS_DIR/.managed-key-check.ABC12345"
+find() {
+    printf '%s\0' "$residue"
+    return 73
+}
+reconcile_installer_temp_residues
+'''
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-incomplete-secret-inventory-"
+        ) as root:
+            install_dir = Path(root)
+            install_dir.chmod(0o700)
+            secret_dir = install_dir / ".secrets"
+            secret_dir.mkdir(mode=0o700)
+            residue = secret_dir / ".managed-key-check.ABC12345"
+            residue.write_text("ephemeral secret\n", encoding="utf-8")
+            residue.chmod(0o600)
+
+            refused = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    command,
+                    "incomplete-secret-inventory-test",
+                    str(INSTALLER),
+                    str(install_dir),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn(
+                "Could not completely inventory installer secret residues",
+                refused.stderr,
+            )
+            self.assertTrue(residue.is_file())
+            self.assertEqual(residue.read_text(encoding="utf-8"), "ephemeral secret\n")
+
     def test_signed_operations_failure_quiesces_complete_guarded_topology(self):
         helper = self.installer.split(
             "\nquiesce_failed_operations_start() {", 1
@@ -3304,6 +3377,14 @@ fi
         )
         self.assertEqual(candidate_registry["version"], 2)
         self.assertEqual(candidate_registry["generation"], 2)
+
+    def test_noop_celery_signing_rotation_returns_success_to_fail_fast_installer(self):
+        result = self.run_installer_functions(
+            "finalize_celery_signing_rotation\n"
+            "printf 'installer-continued\\n'"
+        )
+
+        self.assertEqual(result.stdout, "installer-continued\n")
 
     def test_artifact_lane_keyrings_require_distinct_ids_and_material(self):
         secret_dir = self.temp_dir / ".secrets"

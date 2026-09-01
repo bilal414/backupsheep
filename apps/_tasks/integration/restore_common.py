@@ -51,6 +51,7 @@ from apps._tasks.integration.backup._archive import (
 )
 from apps._tasks.artifact_encryption import (
     ArtifactPipelineError,
+    _handoff_timestamp,
     local_restore_phase_task_id,
     restore_ciphertext_handoff_identity,
     restore_encryption_plan,
@@ -3264,10 +3265,51 @@ def _mark_local_restore_ciphertext_authenticated(restore, encryption_plan):
         "status"
     ) not in {"ready", "authenticated"}:
         raise RestoreError("the local restore handoff witness changed during decryption.")
+    try:
+        allowed_fields = set(expected) | {"status", "ready_at"}
+        if state["status"] == "authenticated":
+            allowed_fields.add("authenticated_at")
+        if set(state) != allowed_fields:
+            raise ArtifactPipelineError(
+                "The local restore handoff contains unreviewed evidence fields."
+            )
+        observed_at = timezone.now()
+        ready_at, ready_time = _handoff_timestamp(state, "ready_at")
+        authenticated_at = state.get("authenticated_at")
+        if state["status"] == "authenticated":
+            authenticated_at, authenticated_time = _handoff_timestamp(
+                state, "authenticated_at"
+            )
+            if authenticated_time < ready_time:
+                raise ArtifactPipelineError(
+                    "The restore handoff authentication predates ciphertext readiness."
+                )
+            if authenticated_time > observed_at:
+                raise ArtifactPipelineError(
+                    "The restore handoff authentication is in the future."
+                )
+        else:
+            if authenticated_at is not None:
+                raise ArtifactPipelineError(
+                    "A ready restore handoff contains an uncommitted authentication witness."
+                )
+            authenticated_at = observed_at.isoformat()
+            _, authenticated_time = _handoff_timestamp(
+                {"authenticated_at": authenticated_at}, "authenticated_at"
+            )
+            if authenticated_time < ready_time:
+                raise ArtifactPipelineError(
+                    "The restore handoff authentication clock predates ciphertext readiness."
+                )
+    except ArtifactPipelineError:
+        raise RestoreError(
+            "the local restore handoff timestamp witness is invalid."
+        ) from None
     metadata["local_restore_ciphertext_handoff"] = {
         **expected,
         "status": "authenticated",
-        "authenticated_at": timezone.now().isoformat(),
+        "ready_at": ready_at,
+        "authenticated_at": authenticated_at,
     }
     restore.execution_metadata = metadata
     restore.save(update_fields=["execution_metadata", "modified"])

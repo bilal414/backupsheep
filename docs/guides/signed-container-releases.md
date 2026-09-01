@@ -188,9 +188,9 @@ automatic acceptance of whatever `:2` points to:
    fresh lock is merged, the scan is intentionally red once its exact `NextUpdate` is
    reached.
 
-The lock refreshed on 2026-08-30 uses manifest
-`sha256:b50899ac59bda25cea33ba1305154a041f916cc5aeb9e1e0b4efe56caebdbd52`
-and expires at `2026-08-31T19:01:43.110911954Z`. It is evidence for that bounded
+The lock refreshed on 2026-08-31 uses manifest
+`sha256:40a5adc4c4002068486e0914ec8f13e800faf4aaa457ee1c9accddd654373886`
+and expires at `2026-09-01T19:02:31.217570999Z`. It is evidence for that bounded
 window, not a permanent vulnerability result.
 
 Every exact platform child must have:
