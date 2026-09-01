@@ -824,6 +824,24 @@ raise SystemExit(99)
         self.assertIn("raw `docker compose`", guide)
         self.assertIn("3.13.x to 4.2.x", guide)
 
+    def test_local_rabbitmq_attestation_reads_the_installed_apk_versions(self):
+        wrapper = (ROOT / "backupsheep-compose").read_text(encoding="utf-8")
+
+        self.assertNotIn('apk info -v libcrypto3', wrapper)
+        self.assertNotIn('apk info -v libssl3', wrapper)
+        self.assertEqual(
+            wrapper.count(
+                "apk info -v 2>/dev/null | grep -Fxq libcrypto3-3.5.8-r0"
+            ),
+            2,
+        )
+        self.assertEqual(
+            wrapper.count(
+                "apk info -v 2>/dev/null | grep -Fxq libssl3-3.5.8-r0"
+            ),
+            2,
+        )
+
     def test_compose_bounds_logs_and_isolates_backend(self):
         self.assertEqual(self.compose.count("logging: *default-logging"), 17)
         self.assertIn("max-size: \"${DOCKER_LOG_MAX_SIZE:-10m}\"", self.compose)
