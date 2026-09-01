@@ -3836,6 +3836,7 @@ validate_network_runtime_policy() {
     local endpoint_service="" endpoint_working_dir="" physical_name="" network_id="" endpoint_state=""
     local container_name="" aliases="" expected_aliases="" links="" container_network_id=""
     local container_endpoint_id="" container_gateway="" container_ip="" container_prefix="" container_mac=""
+    local container_gateway_unavailable=false
     local actual_endpoint_ids="" expected_endpoint_ids="" existing_container="" existing_service="" existing_full_id=""
     case "$logical_name" in
         app-egress|cloud-egress|database-egress|files-egress|storage-egress|logs-egress)
@@ -3905,9 +3906,18 @@ validate_network_runtime_policy() {
             "{{with index .NetworkSettings.Networks \"${physical_name}\"}}{{.NetworkID}}|{{.EndpointID}}|{{.Gateway}}|{{.IPAddress}}|{{.IPPrefixLen}}|{{.MacAddress}}|{{len .Links}}{{else}}||||||-1{{end}}" \
             "$endpoint_container")" || die "could not inspect container-side Docker network endpoint."
         IFS='|' read -r container_network_id container_endpoint_id container_gateway container_ip container_prefix container_mac links <<< "$endpoint_state"
+        container_gateway_unavailable=false
+        # Docker 29 omits this duplicate per-container field and its typed
+        # template renders the absent netip.Addr as an exact sentinel. The
+        # network-level IPAM gateway above remains mandatory and validated.
+        if [[ "$container_gateway" == "invalid IP" ]]; then
+            container_gateway=""
+            container_gateway_unavailable=true
+        fi
         [[ "$container_network_id" == "$network_id" && "$container_endpoint_id" == "$endpoint_id" \
             && "${container_ip}/${container_prefix}" == "$endpoint_ipv4" \
-            && "$container_gateway" == "$gateway" && "$container_mac" == "$endpoint_mac" \
+            && ( "$container_gateway" == "$gateway" || "$container_gateway_unavailable" == true ) \
+            && "$container_mac" == "$endpoint_mac" \
             && "$links" == 0 ]] \
             || die "Docker network ${logical_name} endpoint state disagrees across Engine views."
         aliases="$("${docker_command[@]}" inspect --format \
