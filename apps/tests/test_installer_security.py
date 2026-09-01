@@ -613,6 +613,93 @@ semver_at_least 2.34.0-rc.1 2.33.1
         shutil.which("git"),
         "requires the host Git executable intentionally absent from the runtime image",
     )
+    def test_clone_keeps_install_root_private_and_tracked_files_container_readable(self):
+        with tempfile.TemporaryDirectory(
+            prefix="backupsheep-installer-clone-modes-"
+        ) as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir(mode=0o700)
+            subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "security@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Security Test"],
+                check=True,
+            )
+            tracked_dir = repository / "deploy" / "rabbitmq"
+            tracked_dir.mkdir(parents=True)
+            script = tracked_dir / "entrypoint.sh"
+            config = tracked_dir / "90-backupsheep.conf"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+            config.write_text("reviewed = true\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "commit", "--quiet", "-m", "fixture"],
+                check=True,
+            )
+            commit = subprocess.check_output(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            parent = root / "install-parent"
+            parent.mkdir(mode=0o700)
+            install = parent / "backupsheep"
+            command = r'''
+source "$1"
+INSTALL_DIR="$2"
+INSTALL_REF="$3"
+TEST_REPOSITORY="$4"
+GIT_BIN="$(command -v git)"
+git_safe() {
+    if [[ "$3" == remote && "$4" == add && "$5" == origin ]]; then
+        "$GIT_BIN" "$1" "$2" "$3" "$4" "$5" "$TEST_REPOSITORY"
+    else
+        "$GIT_BIN" "$@"
+    fi
+}
+run_installer_command() { shift 2; "$@"; }
+assert_install_parent_identity() { :; }
+atomic_move_new() { mv -- "$1" "$2"; }
+validate_installation_ancestor_chain() { :; }
+directory_inode_identity() { printf '1:2'; }
+installation_ancestor_snapshot() { printf 'fixture'; }
+validate_checkout() { :; }
+log() { :; }
+clone_exact_commit
+'''
+            result = subprocess.run(
+                [
+                    "bash", "-c", command, "installer-clone-mode-test",
+                    str(INSTALLER), str(install), commit, str(repository),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(stat.S_IMODE(install.stat().st_mode), 0o700)
+            self.assertEqual(
+                stat.S_IMODE((install / "deploy" / "rabbitmq").stat().st_mode),
+                0o755,
+            )
+            self.assertEqual(
+                stat.S_IMODE((install / "deploy" / "rabbitmq" / "entrypoint.sh").stat().st_mode),
+                0o755,
+            )
+            self.assertEqual(
+                stat.S_IMODE((install / "deploy" / "rabbitmq" / "90-backupsheep.conf").stat().st_mode),
+                0o644,
+            )
+
+    @skipUnless(
+        shutil.which("git"),
+        "requires the host Git executable intentionally absent from the runtime image",
+    )
     def test_checkout_rejects_content_filters_before_the_filter_can_execute(self):
         cleanliness = self.installer.split(
             "validate_checkout_cleanliness() {", 1
