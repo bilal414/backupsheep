@@ -515,6 +515,10 @@ jobs:
 
   application-security-regression:
     name: Full application/security regression gate
+    # Keep pull requests on the conventional security gates above. This deeper,
+    # multi-image migration and recovery suite remains a post-merge, scheduled,
+    # manual, and release assurance check.
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
