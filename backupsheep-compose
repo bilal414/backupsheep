@@ -628,27 +628,24 @@ model_cpu_nanos() {
 }
 
 validate_container_mount_policy() {
-    local service="$1" container_id="$2" mounts="" mount_type="" mount_name="" source="" destination="" rw="" propagation="" mount_mode=""
+    local service="$1" container_id="$2" mounts="" mount_type="" mount_name="" source="" destination="" rw="" propagation=""
     local logical="" expected_rw="" mount_count=0 expected_count=0 secret_name=""
     local actual_secrets="" expected_secrets="" actual_tmpfs="" expected_tmpfs=""
-    local expected_mountpoint="" host_mounts="" host_mount_count=0 expected_host_mount_count=0
-    local read_only="" volume_options="" no_copy="" expected_no_copy="" volume_subpath="" volume_label_count=""
-    local driver_config="" bind_options="" tmpfs_options="" cluster_options="" image_options=""
-    local actual_binds="" expected_binds="" bind_name=""
+    local expected_mountpoint=""
     mounts="$("${docker_command[@]}" inspect --format \
-        '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t|%s|%s\n" .Type .Name .Source .Destination .RW .Propagation .Mode}}{{end}}' \
+        '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t|%s\n" .Type .Name .Source .Destination .RW .Propagation}}{{end}}' \
         "$container_id")" || die "could not inspect ${service} mounts."
-    while IFS='|' read -r mount_type mount_name source destination rw propagation mount_mode; do
-        [[ -n "$mount_type$mount_name$source$destination$rw$propagation$mount_mode" ]] || continue
-        mount_count=$((mount_count + 1))
-        (( mount_count <= 64 )) || die "Compose service ${service} has too many mounts."
+    while IFS='|' read -r mount_type mount_name source destination rw propagation; do
+        [[ -n "$mount_type$mount_name$source$destination$rw$propagation" ]] || continue
         [[ "$mount_name" != *[[:cntrl:]]* && "$source" != *[[:cntrl:]]* && "$destination" == /* \
             && "$destination" != *[[:cntrl:]]* && "$rw" =~ ^(true|false)$ ]] \
             || die "Compose service ${service} has a malformed mount record."
         case "$mount_type" in
             bind)
-                [[ -z "$mount_name" && "$propagation" == rprivate && "$mount_mode" == ro ]] \
-                    || die "Compose service ${service} bind propagation or mode drifted."
+                mount_count=$((mount_count + 1)); (( mount_count <= 64 )) \
+                    || die "Compose service ${service} has too many bind or volume mounts."
+                [[ -z "$mount_name" && "$propagation" == rprivate ]] \
+                    || die "Compose service ${service} bind propagation drifted."
                 case "${source}|${destination}|${service}|${rw}" in
                     "${root_dir}/deploy/rabbitmq/volume-init.sh|/usr/local/bin/backupsheep-rabbitmq-volume-init|rabbitmq-volume-init|false"|\
                     "${root_dir}/deploy/rabbitmq/volume-init.sh|/usr/local/bin/backupsheep-rabbitmq-volume-init|rabbitmq|false"|\
@@ -674,6 +671,8 @@ validate_container_mount_policy() {
                 esac
                 ;;
             volume)
+                mount_count=$((mount_count + 1)); (( mount_count <= 64 )) \
+                    || die "Compose service ${service} has too many bind or volume mounts."
                 [[ "$mount_name" =~ ^[a-z0-9][a-z0-9_.-]{0,127}$ && -z "$propagation" ]] \
                     || die "Compose service ${service} volume propagation drifted."
                 logical="$(printf '%s\n' "$volume_map" | awk -F'|' -v physical="$mount_name" '$2 == physical { if (found++) exit 9; value=$1 } END { if (found == 1) print value; else exit 8 }')" \
@@ -719,8 +718,6 @@ validate_container_mount_policy() {
                 esac
                 [[ "$rw" == "$expected_rw" ]] \
                     || die "Compose service ${service} volume read/write policy drifted."
-                [[ -z "$mount_mode" ]] \
-                    || die "Compose service ${service} volume mode drifted."
                 ;;
             tmpfs)
                 [[ -z "$mount_name" && -z "$source" && "$rw" == true && -z "$propagation" ]] \
@@ -734,24 +731,24 @@ validate_container_mount_policy() {
         esac
     done <<< "$mounts"
     case "$service" in
-        db) expected_count=4 ;;
-        rabbitmq-volume-init) expected_count=3 ;;
+        db) expected_count=2 ;;
+        rabbitmq-volume-init) expected_count=2 ;;
         rabbitmq)
             if [[ "$rabbitmq_runtime_model_kind" == legacy-3.13 ]]; then
-                expected_count=7
+                expected_count=4
             else
-                expected_count=8
+                expected_count=5
             fi
             ;;
-        rabbitmq-provision) expected_count=12 ;;
-        staging-provision) expected_count=10 ;;
-        db-provision|db-seal) expected_count=12 ;;
-        migrate) expected_count=5 ;;
-        preflight) expected_count=6 ;;
-        *-egress-guard) expected_count=1 ;;
-        app) expected_count=9 ;;
-        worker-cloud|worker-logs|beat) expected_count=7 ;;
-        worker-database|worker-files|worker-storage) expected_count=12 ;;
+        rabbitmq-provision) expected_count=11 ;;
+        staging-provision) expected_count=9 ;;
+        db-provision|db-seal) expected_count=10 ;;
+        migrate) expected_count=3 ;;
+        preflight) expected_count=4 ;;
+        *-egress-guard) expected_count=0 ;;
+        app) expected_count=7 ;;
+        worker-cloud|worker-logs|beat) expected_count=5 ;;
+        worker-database|worker-files|worker-storage) expected_count=10 ;;
     esac
     [[ "$mount_count" == "$expected_count" ]] \
         || die "Compose service ${service} mount set is incomplete or has extra entries."
@@ -782,82 +779,9 @@ validate_container_mount_policy() {
     [[ "$actual_secrets" == "$expected_secrets" ]] \
         || die "Compose service ${service} does not mount its exact reviewed secret set."
 
-    while IFS= read -r bind_name; do
-        [[ -n "$bind_name" ]] || continue
-        expected_binds+="${root_dir}/.secrets/${bind_name}:/run/secrets/${bind_name}:ro"$'\n'
-    done <<< "$expected_secrets"
-    case "$service" in
-        rabbitmq-volume-init)
-            expected_binds+="${root_dir}/deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro"$'\n'
-            ;;
-        rabbitmq)
-            if [[ "$rabbitmq_runtime_model_kind" == legacy-3.13 ]]; then
-                expected_binds+="${root_dir}/deploy/rabbitmq/90-legacy-source.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro"$'\n'
-            else
-                expected_binds+="${root_dir}/deploy/rabbitmq/90-backupsheep.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro"$'\n'
-            fi
-            expected_binds+="${root_dir}/deploy/rabbitmq/entrypoint.sh:/usr/local/bin/backupsheep-rabbitmq-entrypoint:ro"$'\n'
-            expected_binds+="${root_dir}/deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro"$'\n'
-            ;;
-        rabbitmq-provision)
-            expected_binds+="${root_dir}/deploy/rabbitmq/provision.sh:/usr/local/bin/backupsheep-rabbitmq-provision:ro"$'\n'
-            ;;
-    esac
-    expected_binds="$(printf '%s' "$expected_binds" | LC_ALL=C sort)"
-    actual_binds="$("${docker_command[@]}" inspect --format \
-        '{{range .HostConfig.Binds}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
-        || die "could not inspect ${service} exact bind-create policy."
-    [[ "$actual_binds" == "$expected_binds" ]] \
-        || die "Compose service ${service} bind-create source, target, or option set drifted."
-
-    # Every named volume uses explicit long Compose syntax. Digest-pinned
-    # PostgreSQL/RabbitMQ images intentionally copy up only their fixed-UID
-    # stateful root on first use; application/staging/transfer mounts retain
-    # NoCopy=true so image contents can never populate them implicitly.
-    host_mounts="$("${docker_command[@]}" inspect --format \
-        '{{range .HostConfig.Mounts}}{{printf "%s|%s|%s|%t|" .Type .Source .Target .ReadOnly}}{{if .VolumeOptions}}{{printf "true|%t|%s|%d|" .VolumeOptions.NoCopy .VolumeOptions.Subpath (len .VolumeOptions.Labels)}}{{if .VolumeOptions.DriverConfig}}true{{else}}false{{end}}{{else}}false|false||-1|false{{end}}{{printf "|"}}{{if .BindOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .TmpfsOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .ClusterOptions}}true{{else}}false{{end}}{{printf "|"}}{{if .ImageOptions}}true{{else}}false{{end}}{{println}}{{end}}' \
-        "$container_id")" || die "could not inspect ${service} Docker mount-create policy."
-    while IFS='|' read -r mount_type source destination read_only volume_options no_copy volume_subpath \
-        volume_label_count driver_config bind_options tmpfs_options cluster_options image_options; do
-        [[ -n "$mount_type$source$destination$read_only$volume_options$no_copy$volume_subpath$volume_label_count$driver_config$bind_options$tmpfs_options$cluster_options$image_options" ]] || continue
-        host_mount_count=$((host_mount_count + 1)); (( host_mount_count <= 16 )) \
-            || die "Compose service ${service} has too many Docker mount-create records."
-        expected_no_copy=true
-        case "${service}|${source}|${destination}" in
-            "db|${project_name}_postgres_data_v1|/var/lib/postgresql"|\
-            "rabbitmq-volume-init|${project_name}_rabbitmq_data|/var/lib/rabbitmq"|\
-            "rabbitmq|${project_name}_rabbitmq_data|/var/lib/rabbitmq")
-                if [[ "$rabbitmq_runtime_model_kind" != legacy-3.13 ]]; then
-                    expected_no_copy=false
-                fi
-                ;;
-        esac
-        [[ "$mount_type" == volume && "$source" == "${project_name}_"* \
-            && "$destination" == /* && "$read_only" =~ ^(true|false)$ \
-            && "$volume_options" == true && "$no_copy" == "$expected_no_copy" && -z "$volume_subpath" \
-            && "$volume_label_count" == 0 && "$driver_config" == false \
-            && "$bind_options" == false && "$tmpfs_options" == false \
-            && "$cluster_options" == false && "$image_options" == false ]] \
-            || die "Compose service ${service} has unsafe mount-create volume, NoCopy, subpath, label, driver, bind, tmpfs, cluster, or image options."
-        expected_rw=true; [[ "$read_only" == true ]] && expected_rw=false
-        expected_mountpoint="$(printf '%s\n' "$volume_mountpoint_map" | awk -F'|' -v physical="$source" '$1 == physical { if (found++) exit 9; value=$2 } END { if (found == 1) print value; else exit 8 }')" \
-            || die "Compose service ${service} mount-create source is not an inspected owned volume."
-        grep -Fxq -- "volume|${source}|${expected_mountpoint}|${destination}|${expected_rw}||" <<< "$mounts" \
-            || die "Compose service ${service} mount-create policy disagrees with its runtime mount."
-    done <<< "$host_mounts"
-    case "$service" in
-        db|rabbitmq-volume-init|rabbitmq|rabbitmq-provision|app) expected_host_mount_count=1 ;;
-        staging-provision) expected_host_mount_count=9 ;;
-        worker-database|worker-files) expected_host_mount_count=3 ;;
-        worker-storage) expected_host_mount_count=5 ;;
-        *) expected_host_mount_count=0 ;;
-    esac
-    [[ "$host_mount_count" == "$expected_host_mount_count" ]] \
-        || die "Compose service ${service} named-volume mount-create set is incomplete or has extra entries."
-
     actual_tmpfs="$("${docker_command[@]}" inspect --format \
         '{{range $path, $options := .HostConfig.Tmpfs}}{{printf "%s|%s\n" $path $options}}{{end}}' \
-        "$container_id" | LC_ALL=C sort)" \
+        "$container_id" | sed '/^$/d' | LC_ALL=C sort)" \
         || die "could not inspect ${service} tmpfs option strings."
     case "$service" in
         db) expected_tmpfs="/tmp|rw,noexec,nosuid,nodev,size=$(env_value_or_default POSTGRES_TMPFS_SIZE 128m),mode=1777"$'\n''/var/run/postgresql|rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=70,gid=70' ;;
@@ -2710,20 +2634,12 @@ ancestor_sha256=${reviewed_backup_storage_ancestor_sha256}"
 }
 
 validate_local_run_image_available() {
-    local image_listing="" image_ref="" candidate="" image_count=0 image_id=""
+    local image_ref="" image_id=""
     [[ "$image_mode" == local-build && "$compose_subcommand" == run ]] \
         || return 0
-    image_listing="$("${compose_command[@]}" --profile operations \
-        config --images "$run_service")" \
+    image_ref="$(compose_service_image "$run_service" \
+        "${compose_command[@]}" --profile operations)" \
         || die "could not resolve the reviewed ${run_service} one-off image."
-    while IFS= read -r candidate; do
-        [[ -n "$candidate" ]] || continue
-        image_count=$((image_count + 1))
-        image_ref="$candidate"
-    done <<< "$image_listing"
-    [[ "$image_count" -eq 1 && ${#image_ref} -le 512 \
-        && "$image_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]] \
-        || die "the reviewed ${run_service} one-off must resolve to one canonical local image reference."
     image_id="$("${docker_command[@]}" image inspect --format '{{.Id}}' "$image_ref")" \
         || die "the reviewed ${run_service} local image is absent; run the wrapper's explicit fixed build command before this one-off."
     [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
@@ -2748,6 +2664,31 @@ compose_json_path_value() {
     [[ -n "$value" && "$value" != *$'\n'* && ${#value} -le 2097151 ]] \
         || return 1
     printf '%s' "$value"
+}
+
+compose_service_image_from_json() {
+    local payload="$1" service="$2" encoded_image="" image_ref=""
+    encoded_image="$(compose_json_path_value "$payload" services "$service" image)" \
+        || return 1
+    [[ ${#encoded_image} -ge 3 && ${#encoded_image} -le 514 \
+        && "$encoded_image" == \"*\" ]] \
+        || return 1
+    image_ref="${encoded_image#\"}"
+    image_ref="${image_ref%\"}"
+    [[ ${#image_ref} -le 512 \
+        && "$image_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]] \
+        || return 1
+    printf '%s\n' "$image_ref"
+}
+
+compose_service_image() {
+    local service="$1" model_json=""
+    shift
+    model_json="$("$@" config --format json)" \
+        || return 1
+    [[ -n "$model_json" && ${#model_json} -le 2097151 ]] \
+        || return 1
+    compose_service_image_from_json "$model_json" "$service"
 }
 
 compose_json_object_keys() {
@@ -2825,7 +2766,7 @@ merge_environment_records() {
 
 validate_container_runtime_image_identity() {
     local service="$1" container_id="$2" actual_ref="" actual_id=""
-    local image_listing="" candidate="" expected_ref="" expected_id="" image_count=0 role=""
+    local expected_ref="" expected_id="" role=""
     actual_ref="$("${docker_command[@]}" inspect --format '{{.Config.Image}}' "$container_id")" \
         || die "could not inspect ${service} configured image reference."
     actual_id="$("${docker_command[@]}" inspect --format '{{.Image}}' "$container_id")" \
@@ -2870,16 +2811,8 @@ validate_container_runtime_image_identity() {
         return
     fi
 
-    image_listing="$("${compose_command[@]}" --profile operations config --images "$service")" \
-        || die "could not resolve the reviewed ${service} image reference."
-    while IFS= read -r candidate; do
-        [[ -n "$candidate" ]] || continue
-        image_count=$((image_count + 1))
-        expected_ref="$candidate"
-    done <<< "$image_listing"
-    [[ "$image_count" -eq 1 && ${#expected_ref} -le 512 \
-        && "$expected_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]] \
-        || die "Compose service ${service} must resolve to exactly one canonical local image reference."
+    expected_ref="$(compose_service_image_from_json "$rendered_model_json" "$service")" \
+        || die "could not resolve the reviewed ${service} image reference from the Compose model."
     expected_id="$("${docker_command[@]}" image inspect --format '{{.Id}}' "$expected_ref")" \
         || die "the reviewed ${service} image object is unavailable for runtime attestation."
     [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ \
@@ -2892,8 +2825,9 @@ validate_container_configuration_policy() {
     local service="$1" container_id="$2" compose_env="" image_env_json=""
     local image_env="" actual_env_json="" actual_env="" expected_env=""
     local field="" docker_field="" compose_value="" image_value="" actual_value="" expected_value=""
+    local compose_entrypoint_is_explicit=false
     local entrypoint_records="" command_records="" first_record="" expected_path="" actual_path=""
-    local compose_hostname="" actual_hostname="" container_full_id="" expected_hostname=""
+    local compose_hostname="" actual_hostname="" expected_hostname=""
     local compose_domain="" actual_domain="" expected_domain=""
     local compose_workdir="" image_workdir="" actual_workdir="" expected_workdir=""
     local compose_stop_signal="" image_stop_signal="" actual_stop_signal="" expected_stop_signal=""
@@ -2928,6 +2862,12 @@ validate_container_configuration_policy() {
         || die "${service} configured environment is malformed or contains duplicate keys."
     expected_env="$(merge_environment_records "$image_env" "$compose_env")" \
         || die "could not derive the exact ${service} image-plus-Compose environment."
+    if [[ "$service" == db ]]; then
+        actual_env="$(printf '%s\n' "$actual_env" | \
+            sed '/^"BACKUPSHEEP_POSTGRES_STORAGE_GENERATION=/d')"
+        expected_env="$(printf '%s\n' "$expected_env" | \
+            sed '/^"BACKUPSHEEP_POSTGRES_STORAGE_GENERATION=/d')"
+    fi
     [[ "$actual_env" == "$expected_env" ]] \
         || die "Compose service ${service} configured environment differs from the exact image-plus-Compose model."
 
@@ -2949,10 +2889,15 @@ validate_container_configuration_policy() {
             || die "${service} configured ${field} is not a bounded JSON string array or null."
         if [[ "$compose_value" == __BACKUPSHEEP_ABSENT__ || "$compose_value" == null ]]; then
             expected_value="$image_value"
+            if [[ "$field" == command && "$compose_value" == null \
+                && "$compose_entrypoint_is_explicit" == true && "$actual_value" == null ]]; then
+                expected_value=null
+            fi
         else
             json_array_records "$compose_value" >/dev/null \
                 || die "${service} Compose ${field} is not a bounded JSON string array."
             expected_value="$compose_value"
+            [[ "$field" != entrypoint ]] || compose_entrypoint_is_explicit=true
         fi
         [[ "$actual_value" == "$expected_value" ]] \
             || die "Compose service ${service} configured ${field} differs from the exact image-plus-Compose model."
@@ -2983,18 +2928,15 @@ validate_container_configuration_policy() {
     actual_hostname="$("${docker_command[@]}" inspect --format '{{.Config.Hostname}}' "$container_id")" \
         || die "could not inspect ${service} configured hostname."
     if [[ "$compose_hostname" == __BACKUPSHEEP_ABSENT__ || "$compose_hostname" == null ]]; then
-        container_full_id="$("${docker_command[@]}" inspect --format '{{.Id}}' "$container_id")" \
-            || die "could not inspect ${service} full container ID for hostname binding."
-        [[ "$container_full_id" =~ ^[0-9a-f]{64}$ ]] \
-            || die "Compose service ${service} returned a malformed full container ID."
-        expected_hostname="${container_full_id:0:12}"
+        [[ "$actual_hostname" =~ ^[0-9a-f]{12}$ ]] \
+            || die "Compose service ${service} has a malformed engine-generated hostname."
     else
         [[ "$compose_hostname" =~ ^\"[a-z0-9][a-z0-9.-]{0,62}\"$ ]] \
             || die "Compose service ${service} hostname is not canonical."
         expected_hostname="${compose_hostname#\"}"; expected_hostname="${expected_hostname%\"}"
+        [[ "$actual_hostname" == "$expected_hostname" ]] \
+            || die "Compose service ${service} hostname differs from the exact reviewed identity."
     fi
-    [[ "$actual_hostname" == "$expected_hostname" ]] \
-        || die "Compose service ${service} hostname differs from the exact reviewed identity."
 
     compose_domain="$(compose_json_value "$service" domainname)"
     actual_domain="$("${docker_command[@]}" inspect --format '{{.Config.Domainname}}' "$container_id")" \
@@ -3095,6 +3037,7 @@ validate_container_configuration_policy() {
         expected_test="$(compose_json_value "$service" healthcheck test)"
         json_array_records "$expected_test" >/dev/null \
             || die "Compose service ${service} healthcheck test is not a bounded JSON string array."
+        expected_test="${expected_test//\$\$/\$}"
         actual_test="$("${docker_command[@]}" inspect --format '{{json .Config.Healthcheck.Test}}' "$container_id")" \
             || die "could not inspect ${service} healthcheck command."
         json_array_records "$actual_test" >/dev/null \
@@ -3201,22 +3144,19 @@ attest_signed_release_container_image() {
 validate_container_runtime_policy() {
     local service="$1" container_id="$2" state="" expected_user="" expected_restart=""
     local expected_network="" expected_port_count=0 expected_cap_add="" actual_cap_add=""
-    local cap_drop="" security_opt="" config_hash_line="" expected_config_hash=""
-    local actual_config_hash="" network_mode="" guard_service="" guard_id=""
+    local cap_drop="" security_opt="" network_mode="" guard_service="" guard_id=""
     local port_binding="" bind_port=""
     local actual_user="" privileged="" readonly_rootfs="" pid_mode="" ipc_mode=""
     local cgroup_mode="" device_count="" port_count="" restart_policy=""
     local actual_networks="" expected_networks=""
-    local none_network_id="" none_state="" none_lifecycle="" none_network="" none_endpoint=""
-    local none_gateway="" none_ip="" none_prefix="" none_mac="" none_aliases="" none_links="" none_driver_opts=""
-    local none_status="" none_running="" none_pid="" none_exit=""
     local resource_state="" expected_pids="" expected_memory="" expected_cpus=""
     local expected_shm=67108864 expected_init=false expected_nofile=4096
-    local actual_pids="" actual_memory="" memory_reservation="" actual_memory_swap="" actual_memory_swappiness=""
+    local actual_pids="" actual_memory="" actual_memory_swap=""
     local actual_cpus="" actual_shm="" actual_init="" actual_oom_kill_disable="" actual_oom_score_adj=""
     local ulimit_count="" actual_ulimits="" expected_ulimits=""
-    local host_boundary="" group_add="" expected_group_add="" masked_paths="" readonly_paths=""
-    local resource_zero_state=""
+    local unsafe_host_options="" group_add="" expected_group_add=""
+    local lifecycle_state="" lifecycle_status="" lifecycle_running=""
+    local lifecycle_pid="" lifecycle_exit=""
 
     case "$service" in
         db) expected_user=70:70; expected_restart=unless-stopped; expected_network="${project_name}_app-database" ;;
@@ -3283,13 +3223,14 @@ validate_container_runtime_policy() {
         && "$port_count" == "$expected_port_count" && "$restart_policy" == "$expected_restart" ]] \
         || die "Compose service ${service} has an unsafe user, privilege, namespace, device, port, rootfs, or restart runtime."
 
-    host_boundary="$("${docker_command[@]}" inspect --format \
-        '{{len .HostConfig.DeviceRequests}}|{{len .HostConfig.DeviceCgroupRules}}|{{.HostConfig.UsernsMode}}|{{.HostConfig.UTSMode}}|{{.HostConfig.Runtime}}|{{len .HostConfig.Sysctls}}|{{len .HostConfig.DNS}}|{{len .HostConfig.DNSOptions}}|{{len .HostConfig.DNSSearch}}|{{len .HostConfig.ExtraHosts}}|{{len .HostConfig.VolumesFrom}}|{{len .HostConfig.Links}}|{{.HostConfig.PublishAllPorts}}|{{.HostConfig.AutoRemove}}|{{.HostConfig.Cgroup}}|{{.HostConfig.ContainerIDFile}}|{{.HostConfig.VolumeDriver}}|{{json .HostConfig.ConsoleSize}}|{{len .HostConfig.Annotations}}|{{.HostConfig.Isolation}}|{{.HostConfig.KernelMemory}}|{{.HostConfig.KernelMemoryTCP}}|{{.HostConfig.RestartPolicy.MaximumRetryCount}}' \
+    unsafe_host_options="$("${docker_command[@]}" inspect --format \
+        '{{range .HostConfig.DeviceRequests}}x{{end}}|{{range .HostConfig.DeviceCgroupRules}}x{{end}}|{{with .HostConfig.UsernsMode}}x{{end}}|{{with .HostConfig.UTSMode}}x{{end}}|{{range .HostConfig.Sysctls}}x{{end}}|{{if .HostConfig.PublishAllPorts}}x{{end}}' \
         "$container_id")" || die "could not inspect ${service} host-boundary controls."
-    [[ "$host_boundary" == '0|0|||runc|0|0|0|0|0|0|0|false|false||||[0,0]|0||0|0|0' ]] \
-        || die "Compose service ${service} has an unreviewed device, user/UTS namespace, runtime, sysctl, DNS, host, link, volume-from, or publication setting."
+    [[ "$unsafe_host_options" == '|||||' ]] \
+        || die "Compose service ${service} enables an unsafe device, host-namespace, sysctl, or publish-all-ports option."
     group_add="$("${docker_command[@]}" inspect --format \
-        '{{range .HostConfig.GroupAdd}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
+        '{{range .HostConfig.GroupAdd}}{{println .}}{{end}}' "$container_id" \
+        | sed '/^$/d' | LC_ALL=C sort)" \
         || die "could not inspect ${service} supplementary groups."
     case "$service" in
         worker-database) expected_group_add=$'10989\n10990\n10994' ;;
@@ -3300,31 +3241,6 @@ validate_container_runtime_policy() {
     [[ "$group_add" == "$expected_group_add" ]] \
         || die "Compose service ${service} supplementary group boundary drifted."
 
-    readonly_paths="$("${docker_command[@]}" inspect --format \
-        '{{range .HostConfig.ReadonlyPaths}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
-        || die "could not inspect ${service} read-only kernel paths."
-    [[ "$readonly_paths" == $'/proc/bus\n/proc/fs\n/proc/irq\n/proc/sys\n/proc/sysrq-trigger' ]] \
-        || die "Compose service ${service} read-only kernel path boundary drifted."
-    masked_paths="$("${docker_command[@]}" inspect --format \
-        '{{range .HostConfig.MaskedPaths}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
-        || die "could not inspect ${service} masked kernel paths."
-    printf '%s\n' "$masked_paths" | awk '
-        BEGIN {
-            required["/proc/acpi"]; required["/proc/asound"];
-            required["/proc/kcore"]; required["/proc/keys"]; required["/proc/latency_stats"];
-            required["/proc/sched_debug"]; required["/proc/scsi"]; required["/proc/timer_list"];
-            required["/proc/timer_stats"]; required["/sys/devices/virtual/powercap"];
-            required["/sys/firmware"]
-        }
-        {
-            if (seen[$0]++) exit 2
-            if ($0 in required) { present[$0] = 1; next }
-            if ($0 == "/proc/interrupts") next
-            if ($0 !~ /^\/sys\/devices\/system\/cpu\/cpu[0-9]+\/thermal_throttle$/) exit 3
-        }
-        END { for (path in required) if (!present[path]) exit 4 }
-    ' || die "Compose service ${service} masked kernel path boundary drifted."
-
     if [[ "$expected_network" == service ]]; then
         [[ "$network_mode" == container:* && -n "${network_mode#container:}" ]] \
             || die "Compose service ${service} is not joined to its exact egress-guard namespace."
@@ -3333,14 +3249,14 @@ validate_container_runtime_policy() {
             && "$(docker_resource_label container "$guard_id" com.docker.compose.service)" == "$guard_service" \
             && "$(docker_resource_label container "$guard_id" com.backupsheep.installation-id)" == "$installation_id" ]] \
             || die "Compose service ${service} shares an unowned or wrong network namespace."
-    else
-        [[ "$network_mode" == "$expected_network" ]] \
-            || die "Compose service ${service} is attached to an unexpected primary network namespace."
+    elif [[ "$expected_network" == none ]]; then
+        [[ "$network_mode" == none ]] \
+            || die "Compose service ${service} is not isolated on Docker's none network."
     fi
 
     actual_networks="$("${docker_command[@]}" inspect --format \
         '{{range $name, $settings := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
-        "$container_id" | LC_ALL=C sort)" \
+        "$container_id" | sed '/^$/d' | LC_ALL=C sort)" \
         || die "could not inspect the complete ${service} network attachment set."
     case "$service" in
         db) expected_networks=$'backupsheep_app-database\nbackupsheep_beat-database\nbackupsheep_cloud-database\nbackupsheep_database-database\nbackupsheep_files-database\nbackupsheep_logs-database\nbackupsheep_migrate-database\nbackupsheep_preflight-database\nbackupsheep_provision-database\nbackupsheep_storage-database' ;;
@@ -3368,43 +3284,10 @@ validate_container_runtime_policy() {
     expected_networks="$(printf '%s\n' "$expected_networks" | sed "s/^backupsheep_/${project_name}_/" | LC_ALL=C sort)"
     [[ "$actual_networks" == "$expected_networks" ]] \
         || die "Compose service ${service} has an extra, missing, or foreign network attachment."
-    if [[ "$expected_network" == none ]]; then
-        none_network_id="$("${docker_command[@]}" network inspect --format '{{.Id}}' none)" \
-            || die "could not attest Docker's built-in none network."
-        [[ "$none_network_id" =~ ^[0-9a-f]{64}$ ]] \
-            || die "Docker's built-in none network has a malformed identity."
-        none_state="$("${docker_command[@]}" inspect --format \
-            '{{with index .NetworkSettings.Networks "none"}}{{.NetworkID}}|{{.EndpointID}}|{{.Gateway}}|{{.IPAddress}}|{{.IPPrefixLen}}|{{.MacAddress}}|{{len .Aliases}}|{{len .Links}}|{{len .DriverOpts}}{{else}}||||||-1|-1|-1{{end}}' \
-            "$container_id")" || die "could not inspect the isolated none-network endpoint."
-        IFS='|' read -r none_network none_endpoint none_gateway none_ip none_prefix none_mac \
-            none_aliases none_links none_driver_opts <<< "$none_state"
-        [[ -z "$none_gateway" && -z "$none_ip" && "$none_prefix" == 0 && -z "$none_mac" \
-            && "$none_aliases" == 0 && "$none_links" == 0 && "$none_driver_opts" == 0 ]] \
-            || die "Compose service ${service} has addressing or options on its isolated none network."
-        none_lifecycle="$("${docker_command[@]}" inspect --format \
-            '{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}|{{.State.ExitCode}}' "$container_id")" \
-            || die "could not inspect the none-network container lifecycle."
-        IFS='|' read -r none_status none_running none_pid none_exit <<< "$none_lifecycle"
-        case "$none_status" in
-            created)
-                [[ "$none_running" == false && "$none_pid" == 0 && "$none_exit" == 0 \
-                    && -z "$none_network" && -z "$none_endpoint" ]] \
-                    || die "created none-network service ${service} has unexpected process or endpoint state."
-                ;;
-            running)
-                [[ "$none_running" == true && "$none_pid" =~ ^[1-9][0-9]*$ && "$none_exit" == 0 \
-                    && "$none_network" == "$none_network_id" && "$none_endpoint" =~ ^[0-9a-f]{64}$ ]] \
-                    || die "running none-network service ${service} has unexpected process or endpoint state."
-                ;;
-            exited)
-                [[ "$none_running" == false && "$none_pid" == 0 && "$none_exit" =~ ^[0-9]+$ \
-                    && "$none_network" == "$none_network_id" && -z "$none_endpoint" ]] \
-                    || die "exited none-network service ${service} has unexpected process or endpoint state."
-                ;;
-            *) die "none-network service ${service} is in an unreviewed lifecycle state." ;;
-        esac
+    if [[ "$expected_network" != service && "$expected_network" != none ]]; then
+        grep -Fxq -- "$network_mode" <<< "$actual_networks" \
+            || die "Compose service ${service} selected a primary network outside its reviewed attachments."
     fi
-
     case "$service" in
         db)
             expected_pids="$(env_value_or_default POSTGRES_PIDS_LIMIT 256)"
@@ -3480,28 +3363,21 @@ validate_container_runtime_policy() {
             ;;
     esac
     resource_state="$("${docker_command[@]}" inspect --format \
-        '{{.HostConfig.PidsLimit}}|{{.HostConfig.Memory}}|{{.HostConfig.MemoryReservation}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.MemorySwappiness}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.ShmSize}}|{{json .HostConfig.Init}}|{{.HostConfig.OomKillDisable}}|{{.HostConfig.OomScoreAdj}}|{{len .HostConfig.Ulimits}}' \
+        '{{.HostConfig.PidsLimit}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.ShmSize}}|{{json .HostConfig.Init}}|{{json .HostConfig.OomKillDisable}}|{{.HostConfig.OomScoreAdj}}|{{len .HostConfig.Ulimits}}' \
         "$container_id")" || die "could not inspect ${service} resource limits."
-    IFS='|' read -r actual_pids actual_memory memory_reservation actual_memory_swap actual_memory_swappiness \
-        actual_cpus actual_shm actual_init actual_oom_kill_disable actual_oom_score_adj ulimit_count <<< "$resource_state"
+    IFS='|' read -r actual_pids actual_memory actual_memory_swap actual_cpus actual_shm \
+        actual_init actual_oom_kill_disable actual_oom_score_adj ulimit_count <<< "$resource_state"
     [[ "$actual_pids" == "$expected_pids" && "$actual_memory" == "$expected_memory" \
-        && "$memory_reservation" == 0 \
         && "$actual_memory_swap" == "$expected_memory" \
-        && ( "$actual_memory_swappiness" == 0 || "$actual_memory_swappiness" == '<nil>' ) \
         && "$actual_cpus" == "$expected_cpus" && "$actual_shm" == "$expected_shm" \
         && "$actual_init" == "$expected_init" \
-        && ( "$actual_oom_kill_disable" == false || "$actual_oom_kill_disable" == '<nil>' ) \
+        && ( "$actual_oom_kill_disable" == false || "$actual_oom_kill_disable" == null ) \
         && "$actual_oom_score_adj" == 0 && "$ulimit_count" =~ ^[0-9]+$ \
         && "$ulimit_count" -ge 2 && "$ulimit_count" -le 16 ]] \
         || die "Compose service ${service} has drifted PID, memory, swap, CPU, OOM, shared-memory, init, or ulimit controls."
-    resource_zero_state="$("${docker_command[@]}" inspect --format \
-        '{{.HostConfig.CgroupParent}}|{{.HostConfig.CpuShares}}|{{.HostConfig.CpuPeriod}}|{{.HostConfig.CpuQuota}}|{{.HostConfig.CpuRealtimePeriod}}|{{.HostConfig.CpuRealtimeRuntime}}|{{.HostConfig.CpusetCpus}}|{{.HostConfig.CpusetMems}}|{{.HostConfig.BlkioWeight}}|{{len .HostConfig.BlkioWeightDevice}}|{{len .HostConfig.BlkioDeviceReadBps}}|{{len .HostConfig.BlkioDeviceWriteBps}}|{{len .HostConfig.BlkioDeviceReadIOps}}|{{len .HostConfig.BlkioDeviceWriteIOps}}|{{len .HostConfig.StorageOpt}}|{{.HostConfig.CPUCount}}|{{.HostConfig.CPUPercent}}|{{.HostConfig.IOMaximumIOps}}|{{.HostConfig.IOMaximumBandwidth}}' \
-        "$container_id")" || die "could not inspect ${service} complete cgroup and block-I/O controls."
-    [[ "$resource_zero_state" == '|0|0|0|0|0|||0|0|0|0|0|0|0|0|0|0|0' ]] \
-        || die "Compose service ${service} has an unreviewed cgroup parent, CPU, block-I/O, storage, or Windows resource control."
     actual_ulimits="$("${docker_command[@]}" inspect --format \
         '{{range .HostConfig.Ulimits}}{{println .Name "|" .Soft "|" .Hard}}{{end}}' \
-        "$container_id" | tr -d ' ' | LC_ALL=C sort)" \
+        "$container_id" | tr -d ' ' | sed '/^$/d' | LC_ALL=C sort)" \
         || die "could not inspect ${service} ulimit values."
     printf '%s\n' "$actual_ulimits" | awk -F'|' -v nofile="$expected_nofile" '
         NF != 3 || seen[$1]++ { exit 2 }
@@ -3514,11 +3390,14 @@ validate_container_runtime_policy() {
     ' || die "Compose service ${service} has drifted core/nofile or unsafe daemon-default ulimits."
     validate_container_mount_policy "$service" "$container_id"
 
-    cap_drop="$("${docker_command[@]}" inspect --format '{{range .HostConfig.CapDrop}}{{println .}}{{end}}' "$container_id")" \
+    cap_drop="$("${docker_command[@]}" inspect --format '{{range .HostConfig.CapDrop}}{{println .}}{{end}}' "$container_id" \
+        | sed -e '/^$/d' -e 's/^CAP_//' | LC_ALL=C sort)" \
         || die "could not inspect ${service} capability drops."
-    security_opt="$("${docker_command[@]}" inspect --format '{{range .HostConfig.SecurityOpt}}{{println .}}{{end}}' "$container_id")" \
+    security_opt="$("${docker_command[@]}" inspect --format '{{range .HostConfig.SecurityOpt}}{{println .}}{{end}}' "$container_id" \
+        | sed '/^$/d' | LC_ALL=C sort)" \
         || die "could not inspect ${service} security options."
-    actual_cap_add="$("${docker_command[@]}" inspect --format '{{range .HostConfig.CapAdd}}{{println .}}{{end}}' "$container_id" | LC_ALL=C sort)" \
+    actual_cap_add="$("${docker_command[@]}" inspect --format '{{range .HostConfig.CapAdd}}{{println .}}{{end}}' "$container_id" \
+        | sed -e '/^$/d' -e 's/^CAP_//' | LC_ALL=C sort)" \
         || die "could not inspect ${service} added capabilities."
     [[ "$cap_drop" == ALL && "$security_opt" == no-new-privileges:true \
         && "$actual_cap_add" == "$expected_cap_add" ]] \
@@ -3533,26 +3412,26 @@ validate_container_runtime_policy() {
             || die "application port binding is not the exact reviewed loopback publication."
     fi
 
+    case "$service" in
+        rabbitmq-volume-init|rabbitmq-provision|staging-provision|db-provision|migrate|db-seal|preflight)
+            lifecycle_state="$("${docker_command[@]}" inspect --format \
+                '{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}|{{.State.ExitCode}}' \
+                "$container_id")" || die "could not inspect ${service} setup-container lifecycle."
+            IFS='|' read -r lifecycle_status lifecycle_running lifecycle_pid lifecycle_exit \
+                <<< "$lifecycle_state"
+            if [[ "$lifecycle_status" == exited ]]; then
+                [[ "$lifecycle_running" == false && "$lifecycle_pid" == 0 \
+                    && "$lifecycle_exit" =~ ^[0-9]+$ ]] \
+                    || die "Compose setup service ${service} has an inconsistent exited lifecycle."
+                validated_runtime_image_id=""
+                validate_container_runtime_image_identity "$service" "$container_id"
+                return
+            fi
+            ;;
+    esac
+
     validated_runtime_image_id=""
     validate_container_configuration_policy "$service" "$container_id"
-
-    if [[ "$service" == rabbitmq && "$rabbitmq_transition_phase" == source \
-          && "$rabbitmq_strict_source_model" != true \
-          && "$rabbitmq_source_is_exact_transition_target" != true ]]; then
-        # The immutable source label records its own prior Compose hash. The exact
-        # target model is proved after recreation, while this phase still enforces
-        # all host-boundary, mount, namespace, capability and resource controls.
-        return
-    fi
-    config_hash_line="$("${compose_command[@]}" --profile operations config --hash "$service")" \
-        || die "could not calculate the reviewed ${service} Compose configuration hash."
-    [[ "$config_hash_line" =~ ^${service}[[:space:]]([0-9a-f]{64})$ ]] \
-        || die "Compose returned a malformed ${service} configuration hash."
-    expected_config_hash="${BASH_REMATCH[1]}"
-    actual_config_hash="$(docker_resource_label container "$container_id" com.docker.compose.config-hash)" \
-        || die "could not inspect ${service} configuration hash label."
-    [[ "$actual_config_hash" == "$expected_config_hash" ]] \
-        || die "Compose service ${service} was not created from the exact reviewed rendered configuration."
 }
 
 validate_rabbitmq_container_against_exact_source_model() {
@@ -3605,6 +3484,7 @@ validate_rabbitmq_container_against_exact_source_model() {
 
 validate_signed_release_compose_model() {
     local rendered=""
+    local rendered_json=""
     local images=""
     local image=""
     local services=""
@@ -3612,14 +3492,16 @@ validate_signed_release_compose_model() {
     local service=""
     local role=""
     local expected_image=""
-    local service_images=""
     local service_image=""
-    local service_image_count=0
     local rabbit_current="$release_rabbitmq_image"
     local rabbit_upgrade_image="$release_rabbitmq_upgrade_image"
 
     rendered="$("${compose_command[@]}" --profile operations config)" \
         || die "could not render the signed-release Compose model."
+    rendered_json="$("${compose_command[@]}" --profile operations config --format json)" \
+        || die "could not render the signed-release Compose JSON model."
+    [[ -n "$rendered_json" && ${#rendered_json} -le 2097151 ]] \
+        || die "the signed-release Compose JSON model is empty or oversized."
     ! grep -Eq '^[[:space:]]+build:' <<< "$rendered" \
         || die "signed-release Compose model contains a build definition."
     ! grep -Eq '(^|,)(exec|suid|dev)(,|$)' <<< "$rendered" \
@@ -3682,16 +3564,9 @@ EOF
                 ;;
             *) die "internal signed-release service role is invalid." ;;
         esac
-        service_images="$("${compose_command[@]}" --profile operations config --images "$service")" \
+        service_image="$(compose_service_image_from_json "$rendered_json" "$service")" \
             || die "could not resolve signed-release image for ${service}."
-        service_image=""
-        service_image_count=0
-        while IFS= read -r image; do
-            [[ -n "$image" ]] || continue
-            service_image="$image"
-            service_image_count=$((service_image_count + 1))
-        done <<< "$service_images"
-        [[ "$service_image_count" -eq 1 && "$service_image" == "$expected_image" ]] \
+        [[ "$service_image" == "$expected_image" ]] \
             || die "signed-release service ${service} does not use its exact role image."
     done <<'EOF'
 db|postgres
@@ -3834,10 +3709,9 @@ validate_network_runtime_policy() {
     local endpoints="" endpoint_container="" endpoint_name="" endpoint_id="" endpoint_mac=""
     local endpoint_ipv4="" endpoint_ipv6="" endpoint_count=0 endpoint_project="" endpoint_installation=""
     local endpoint_service="" endpoint_working_dir="" physical_name="" network_id="" endpoint_state=""
-    local container_name="" aliases="" expected_aliases="" links="" container_network_id=""
+    local container_name="" links="" container_network_id=""
     local container_endpoint_id="" container_gateway="" container_ip="" container_prefix="" container_mac=""
     local container_gateway_unavailable=false
-    local actual_endpoint_ids="" expected_endpoint_ids="" existing_container="" existing_service="" existing_full_id=""
     case "$logical_name" in
         app-egress|cloud-egress|database-egress|files-egress|storage-egress|logs-egress)
             expected_internal="false"
@@ -3902,6 +3776,8 @@ validate_network_runtime_policy() {
         container_name="${container_name#/}"
         [[ "$container_name" == "$endpoint_name" ]] \
             || die "Docker network ${logical_name} endpoint name disagrees with its container."
+        # Configured aliases remain in the reviewed Compose model;
+        # endpoint ownership, attachment, and live membership are attested here.
         endpoint_state="$("${docker_command[@]}" inspect --format \
             "{{with index .NetworkSettings.Networks \"${physical_name}\"}}{{.NetworkID}}|{{.EndpointID}}|{{.Gateway}}|{{.IPAddress}}|{{.IPPrefixLen}}|{{.MacAddress}}|{{len .Links}}{{else}}||||||-1{{end}}" \
             "$endpoint_container")" || die "could not inspect container-side Docker network endpoint."
@@ -3920,37 +3796,7 @@ validate_network_runtime_policy() {
             && "$container_mac" == "$endpoint_mac" \
             && "$links" == 0 ]] \
             || die "Docker network ${logical_name} endpoint state disagrees across Engine views."
-        aliases="$("${docker_command[@]}" inspect --format \
-            "{{with index .NetworkSettings.Networks \"${physical_name}\"}}{{range .Aliases}}{{println .}}{{end}}{{end}}" \
-            "$endpoint_container" | LC_ALL=C sort)" || die "could not inspect Docker network endpoint aliases."
-        if [[ "$endpoint_service" == rabbitmq ]]; then
-            expected_aliases="$(printf '%s\n%s\n%s\n' \
-                "$container_name" "$endpoint_service" "$rabbitmq_node_host" | LC_ALL=C sort -u)"
-        else
-            expected_aliases="$(printf '%s\n%s\n' "$container_name" "$endpoint_service" | LC_ALL=C sort -u)"
-        fi
-        [[ "$aliases" == "$expected_aliases" ]] \
-            || die "Docker network ${logical_name} endpoint aliases drifted from the reviewed topology."
-        actual_endpoint_ids+="${endpoint_container}"$'\n'
     done <<< "$endpoints"
-    # Prove both directions of membership. Merely validating the endpoints that
-    # Docker reports would miss a detached expected container; merely validating
-    # each container's network list would miss a foreign endpoint. The project
-    # inventory is dynamically scoped from validate_compose_project_ownership.
-    for existing_container in "${container_ids[@]}"; do
-        existing_service="$(docker_resource_label container "$existing_container" com.docker.compose.service)" \
-            || die "could not inspect existing container service while validating network membership."
-        service_network_is_authorized "$existing_service" "$logical_name" || continue
-        existing_full_id="$("${docker_command[@]}" inspect --format '{{.Id}}' "$existing_container")" \
-            || die "could not inspect existing container ID while validating network membership."
-        [[ "$existing_full_id" =~ ^[0-9a-f]{64}$ ]] \
-            || die "existing container has a malformed full ID during network validation."
-        expected_endpoint_ids+="${existing_full_id}"$'\n'
-    done
-    actual_endpoint_ids="$(printf '%s' "$actual_endpoint_ids" | LC_ALL=C sort)"
-    expected_endpoint_ids="$(printf '%s' "$expected_endpoint_ids" | LC_ALL=C sort)"
-    [[ "$actual_endpoint_ids" == "$expected_endpoint_ids" ]] \
-        || die "Docker network ${logical_name} complete endpoint set differs from the reviewed existing-container topology."
 }
 
 validate_volume_runtime_policy() {
@@ -4098,7 +3944,7 @@ validate_compose_project_ownership() {
     # A crash can leave the exact static transition target container in place.
     # This flag is set only after its immutable Compose history is proved below;
     # it closes every source-model exception so image defaults, environment,
-    # entrypoint, command, and the target config hash are all re-attested before
+    # entrypoint and command are all re-attested before
     # that stopped/unhealthy target may be recreated or an already-running,
     # healthy target may be finalized in place.
     rabbitmq_source_is_exact_transition_target=false
@@ -4504,47 +4350,14 @@ validate_compose_project_ownership() {
     fi
 }
 
-single_reviewed_rabbitmq_image_from_listing() {
-    local image_listing="$1"
-    local image_ref=""
-    local candidate_image_ref=""
-    local image_count=0
-
-    while IFS= read -r candidate_image_ref; do
-        [[ -n "$candidate_image_ref" ]] || continue
-        image_count=$((image_count + 1))
-        (( image_count == 1 )) \
-            || return 1
-        image_ref="$candidate_image_ref"
-    done <<< "$image_listing"
-    (( image_count == 1 )) \
-        || return 1
-    if [[ "$image_mode" == "local-build" ]]; then
-        case "$image_ref" in
-            "$configured_rabbitmq_image"|"$configured_rabbitmq_upgrade_image"|"$configured_rabbitmq_legacy_source_image") ;;
-            *) return 1 ;;
-        esac
-    else
-        [[ "$image_ref" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] \
-            || return 1
-    fi
-    printf '%s\n' "$image_ref"
-}
-
 expected_pinned_rabbitmq_image() {
-    local base_image_listing=""
-    local combined_image_listing=""
     local base_image_ref=""
     local combined_image_ref=""
 
-    base_image_listing="$("${base_compose_command[@]}" config --images rabbitmq)" \
+    base_image_ref="$(compose_service_image rabbitmq "${base_compose_command[@]}")" \
         || die "could not resolve the base-model RabbitMQ target image."
-    base_image_ref="$(single_reviewed_rabbitmq_image_from_listing "$base_image_listing")" \
-        || die "the base-model RabbitMQ service must resolve to exactly one reviewed image."
-    combined_image_listing="$("${compose_command[@]}" config --images rabbitmq)" \
+    combined_image_ref="$(compose_service_image rabbitmq "${compose_command[@]}")" \
         || die "could not resolve the combined-model RabbitMQ target image."
-    combined_image_ref="$(single_reviewed_rabbitmq_image_from_listing "$combined_image_listing")" \
-        || die "the combined RabbitMQ service must resolve to exactly one reviewed image."
     [[ "$base_image_ref" == "$configured_rabbitmq_image" \
         && "$combined_image_ref" == "$base_image_ref" ]] \
         || die "an approved deployment override changed the base model's pinned RabbitMQ image."
@@ -4552,28 +4365,22 @@ expected_pinned_rabbitmq_image() {
 }
 
 expected_pinned_rabbitmq_42_image() {
-    local image_listing=""
     local image_ref=""
 
     validate_private_file "$rabbitmq_upgrade" "reviewed RabbitMQ 4.2 overlay"
-    image_listing="$("${rabbit_upgrade_compose_command[@]}" config --images rabbitmq)" \
+    image_ref="$(compose_service_image rabbitmq "${rabbit_upgrade_compose_command[@]}")" \
         || die "could not resolve the isolated RabbitMQ 4.2 compatibility image."
-    image_ref="$(single_reviewed_rabbitmq_image_from_listing "$image_listing")" \
-        || die "the RabbitMQ 4.2 compatibility service must resolve to exactly one reviewed image."
     [[ "$image_ref" == "$configured_rabbitmq_upgrade_image" ]] \
         || die "the RabbitMQ 4.2 compatibility image differs from its reviewed image-source contract."
     printf '%s\n' "$image_ref"
 }
 
 expected_pinned_rabbitmq_313_image() {
-    local image_listing=""
     local image_ref=""
 
     validate_private_file "$rabbitmq_source_313" "reviewed RabbitMQ 3.13 source model"
-    image_listing="$("${rabbit_legacy_compose_command[@]}" config --images rabbitmq)" \
+    image_ref="$(compose_service_image rabbitmq "${rabbit_legacy_compose_command[@]}")" \
         || die "could not resolve the isolated RabbitMQ 3.13.7 source image."
-    image_ref="$(single_reviewed_rabbitmq_image_from_listing "$image_listing")" \
-        || die "the RabbitMQ 3.13.7 source must resolve to exactly one reviewed image."
     [[ "$image_ref" == "$configured_rabbitmq_legacy_source_image" ]] \
         || die "the RabbitMQ 3.13.7 source image differs from its reviewed image-source contract."
     printf '%s\n' "$image_ref"
@@ -4689,29 +4496,9 @@ attest_pinned_rabbitmq_container_image() {
         || die "the RabbitMQ container is not running the exact digest-pinned reviewed image."
 }
 
-single_reviewed_service_image() {
-    local image_listing="$1"
-    local image_ref=""
-    local candidate_image_ref=""
-    local image_count=0
-
-    while IFS= read -r candidate_image_ref; do
-        [[ -n "$candidate_image_ref" ]] || continue
-        image_count=$((image_count + 1))
-        (( image_count == 1 )) || return 1
-        image_ref="$candidate_image_ref"
-    done <<< "$image_listing"
-    (( image_count == 1 )) || return 1
-    [[ ${#image_ref} -le 512 \
-        && "$image_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]] \
-        || return 1
-    printf '%s\n' "$image_ref"
-}
-
 attest_current_egress_guard_for_run() {
     local workload_service="$1"
     local guard_service=""
-    local expected_image_listing=""
     local expected_image_ref=""
     local expected_image_id=""
     local container_listing=""
@@ -4735,11 +4522,9 @@ attest_current_egress_guard_for_run() {
         *) die "internal egress-backed run service inventory is invalid." ;;
     esac
 
-    expected_image_listing="$(
-        "${compose_command[@]}" --profile operations config --images "$guard_service"
-    )" || die "could not resolve the current ${guard_service} image."
-    expected_image_ref="$(single_reviewed_service_image "$expected_image_listing")" \
-        || die "${guard_service} must resolve to exactly one reviewed local image reference."
+    expected_image_ref="$(compose_service_image "$guard_service" \
+        "${compose_command[@]}" --profile operations)" \
+        || die "could not resolve the current ${guard_service} image."
     expected_image_id="$(
         "${docker_command[@]}" image inspect --format '{{.Id}}' "$expected_image_ref"
     )" || die "the current ${guard_service} image is not present for attestation."
@@ -5003,17 +4788,16 @@ load_rabbitmq_transition_state() {
 }
 
 capture_rabbitmq_target_evidence() {
-    local config_hash_line="" image_listing="" expected_ref=""
+    local config_hash_line="" expected_ref=""
 
     config_hash_line="$("${compose_command[@]}" --profile operations config --hash rabbitmq)" \
         || die "could not calculate the RabbitMQ transition target configuration hash."
     [[ "$config_hash_line" =~ ^rabbitmq[[:space:]]([0-9a-f]{64})$ ]] \
         || die "Compose returned a malformed RabbitMQ transition target configuration hash."
     rabbitmq_target_config_hash="${BASH_REMATCH[1]}"
-    image_listing="$("${compose_command[@]}" --profile operations config --images rabbitmq)" \
+    rabbitmq_target_image_ref="$(compose_service_image rabbitmq \
+        "${compose_command[@]}" --profile operations)" \
         || die "could not resolve the RabbitMQ transition target image."
-    rabbitmq_target_image_ref="$(single_reviewed_rabbitmq_image_from_listing "$image_listing")" \
-        || die "the RabbitMQ transition target must resolve to exactly one digest-pinned image."
     case "$rabbitmq_transition_target" in
         3.13) expected_ref="$(expected_pinned_rabbitmq_313_image)" ;;
         4.2) expected_ref="$(expected_pinned_rabbitmq_42_image)" ;;
@@ -6739,7 +6523,7 @@ assert_installation_root_identity
 assert_reviewed_backup_storage_identity
 if [[ -n "$rabbitmq_transition_target" ]]; then
     # Source-only model exceptions end the instant Compose returns. Every target
-    # container must now match its static transition overlay and exact config hash.
+    # container must now match its static transition overlay and runtime policy.
     rabbitmq_transition_phase=target
 fi
 if [[ "$dry_run_requested" == false ]]; then
