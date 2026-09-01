@@ -3119,6 +3119,15 @@ class SecureComposeWrapperTests(TestCase):
         )
         self.assert_refused(("up",), "foreign or wrong-installation endpoint")
 
+    def test_docker_29_absent_container_gateway_sentinel_is_not_runtime_drift(self):
+        source = self.wrapper.read_text(encoding="utf-8")
+        self.assertIn('container_gateway" == "invalid IP"', source)
+        self.assertIn("container_gateway_unavailable=true", source)
+        self.assertIn(
+            '"$container_gateway" == "$gateway" || "$container_gateway_unavailable" == true',
+            source,
+        )
+
     def test_owned_network_rejects_a_missing_expected_endpoint(self):
         network = {
             "labels": self.labels("network", "app-database"),
