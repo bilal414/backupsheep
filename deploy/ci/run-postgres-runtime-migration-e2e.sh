@@ -335,8 +335,12 @@ open_source_editor() {
     source_editor_socket="$socket"
     for _attempt in $(seq 1 90); do
         if run_docker exec "$container" /bin/sh -ceu '
+            [ "$(cat /proc/1/comm)" = postgres ]
             password="$(cat /run/secrets/source_password)"
-            PGPASSWORD="$password" pg_isready -q -h /var/run/postgresql -U "$1" -d "$2"
+            result="$(PGPASSWORD="$password" psql --no-psqlrc --no-password \
+                -h /var/run/postgresql -U "$1" -d "$2" -At \
+                -v ON_ERROR_STOP=1 -c "SELECT 1")"
+            [ "$result" = 1 ]
         ' source-ready "$bootstrap_role" "$database_name"; then
             ready=true
             break
@@ -618,8 +622,12 @@ verify_target() {
         -c unix_socket_directories=/var/run/postgresql >/dev/null
     for _attempt in $(seq 1 90); do
         if run_docker exec "$container" /bin/sh -ceu '
+            [ "$(cat /proc/1/comm)" = postgres ]
             password="$(cat /run/secrets/source_password)"
-            PGPASSWORD="$password" pg_isready -q -h /var/run/postgresql -U "$1" -d "$2"
+            result="$(PGPASSWORD="$password" psql --no-psqlrc --no-password \
+                -h /var/run/postgresql -U "$1" -d "$2" -At \
+                -v ON_ERROR_STOP=1 -c "SELECT 1")"
+            [ "$result" = 1 ]
         ' target-ready "$bootstrap_role" "$database_name"; then
             ready=true
             break

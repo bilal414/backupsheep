@@ -37,6 +37,12 @@ class PostgresRuntimeMigrationE2EContractTests(TestCase):
         self.assertNotIn("AWS_KMS", self.runner)
         self.assertNotIn("aws_kms", self.runner)
 
+    def test_readiness_proves_the_named_database_accepts_authenticated_queries(self):
+        self.assertEqual(self.runner.count('-c "SELECT 1"'), 2)
+        self.assertEqual(self.runner.count('[ "$(cat /proc/1/comm)" = postgres ]'), 2)
+        self.assertNotIn("pg_isready", self.runner)
+        self.assertIn('[ "$result" = 1 ]', self.runner)
+
     def test_retired_source_fixture_is_exact_digest_uid_and_test_only(self):
         self.assertTrue(
             self.source_image.startswith(
