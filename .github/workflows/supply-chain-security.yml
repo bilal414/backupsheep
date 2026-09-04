@@ -668,7 +668,7 @@ jobs:
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \
-            "$TEST_RELEASE_VERIFIER_IMAGE" version | grep -Fq 'v3.1.3-backupsheep.1'
+            "$TEST_RELEASE_VERIFIER_IMAGE" version | grep -Fq 'v3.1.3-backupsheep.2'
 
       - name: Install hash-verified Syft, Trivy, Grype, and ORAS
         shell: bash

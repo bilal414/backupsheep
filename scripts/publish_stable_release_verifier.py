@@ -37,9 +37,9 @@ EXPECTED_QUARANTINE_REPOSITORY = (
     "ghcr.io/bilal414/backupsheep-release-verifier-quarantine"
 )
 EXPECTED_OFFICIAL_REPOSITORY = "ghcr.io/bilal414/backupsheep-release-verifier"
-EXPECTED_STABLE_TAG = "v3.1.3-backupsheep.1"
+EXPECTED_STABLE_TAG = "v3.1.3-backupsheep.2"
 EXPECTED_ROOT_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
-EXPECTED_BUILD_TIMESTAMP = "2026-08-29T00:00:00Z"
+EXPECTED_BUILD_TIMESTAMP = "2026-09-04T00:00:00Z"
 
 
 class PublicationError(RuntimeError):
