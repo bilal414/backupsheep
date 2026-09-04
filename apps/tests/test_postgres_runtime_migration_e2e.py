@@ -41,7 +41,7 @@ class PostgresRuntimeMigrationE2EContractTests(TestCase):
         self.assertEqual(self.runner.count('-c "SELECT 1"'), 2)
         self.assertEqual(self.runner.count('[ "$(cat /proc/1/comm)" = postgres ]'), 2)
         self.assertNotIn("pg_isready", self.runner)
-        self.assertIn('[ "$result" = 1 ]', self.runner)
+        self.assertEqual(self.runner.count('[ "$result" = 1 ]'), 2)
 
     def test_retired_source_fixture_is_exact_digest_uid_and_test_only(self):
         self.assertTrue(
