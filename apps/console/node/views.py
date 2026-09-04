@@ -9,15 +9,19 @@ from django.http import StreamingHttpResponse
 from django.views.generic import DetailView, TemplateView
 
 from apps.api.v1.utils.api_helpers import visible_nodes
-from apps.api.v1.utils.api_permissions import member_has_perm, permitted_nodes
+from apps.api.v1.utils.api_permissions import (
+    member_has_perm,
+    member_has_perm_for_node,
+    permitted_nodes,
+)
 from apps.console.account.models import get_backup_models
 from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
 from backupsheep.source_recovery_policy import (
-    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
     source_backup_creation_available,
+    source_recovery_unavailable_message,
 )
 
 
@@ -565,34 +569,94 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         member = self.request.user.member
-        p_no = self.request.GET.get("p_no", 1)
-        p_size = self.request.GET.get("p_size", 10)
-        list_all_backups = self.request.GET.get("list_all_backups", False)
-
-        if list_all_backups in ("true", "True"):
-            list_all_backups = True
-        page = Paginator(
-            self.get_object().list_backups(list_all_backups).order_by("-created"),
-            p_size,
-        ).page(p_no)
-
-        storage_list = (
-            CoreStorage.objects.filter(account=member.get_current_account())
-            .exclude(status=CoreStorage.Status.PAUSED)
-            .order_by("type__position")
+        node = self.object
+        page_number = self.request.GET.get("p_no", 1)
+        page_size = _allowed_int(
+            self.request.GET.get("p_size"), SOURCE_PAGE_SIZES, default=10
         )
+        list_all_backups = self.request.GET.get("list_all_backups", "").lower() == "true"
+
+        backup_queryset = node.list_backups(list_all_backups).order_by("-created")
+        paginator = Paginator(backup_queryset, page_size)
+        page = paginator.get_page(page_number)
+
+        can_manage_source = member_has_perm_for_node(
+            self.request, "node_changes", node
+        )
+        can_manage_schedules = member_has_perm_for_node(
+            self.request, "schedule_changes", node
+        )
+        can_run_backups = member_has_perm_for_node(
+            self.request, "backup_create", node
+        )
+        can_restore_backups = member_has_perm_for_node(
+            self.request, "backup_restore", node
+        )
+        can_download_backups = member_has_perm_for_node(
+            self.request, "backup_download", node
+        )
+        can_delete_backups = member_has_perm_for_node(
+            self.request, "backup_delete", node
+        )
+        can_validate_storage = member_has_perm(
+            self.request, "storage_changes"
+        )
+
+        # Destination names are operational metadata. Only expose them to
+        # members who can use them in a backup or protection policy.
+        storage_list = CoreStorage.objects.none()
+        if can_run_backups or can_restore_backups or can_manage_schedules:
+            storage_list = CoreStorage.objects.filter(
+                account=member.get_current_account(),
+                status=CoreStorage.Status.ACTIVE,
+            ).order_by("type__position", "name", "id")
+
+        schedules = (
+            node.schedules.exclude(status=CoreSchedule.Status.DELETE_REQUESTED)
+            .prefetch_related("storage_points", "celery_periodic_task")
+            .order_by("-created", "-id")
+        )
+        active_schedule_count = schedules.filter(
+            status=CoreSchedule.Status.ACTIVE
+        ).count()
 
         context[
             "heading"
-        ] = f"{self.get_object().get_type_display()} | {self.get_object().get_integration_alt_name()} | {self.get_object().name}"
+        ] = f"{node.get_type_display()} | {node.get_integration_alt_name()} | {node.name}"
+        context["content_owns_h1"] = True
         context["active_url"] = "nodes"
         context["page"] = page
-        context["elided_page_range"] = page.paginator.get_elided_page_range(p_no)
+        context["elided_page_range"] = page.paginator.get_elided_page_range(
+            page.number
+        )
+        context["page_sizes"] = SOURCE_PAGE_SIZES
+        context["page_size"] = page_size
         context["storage_list"] = storage_list
         context["timezones"] = pytz.all_timezones
         context["list_all_backups"] = list_all_backups
-        context["backup_count"] = self.get_object().list_backups(list_all_backups).count()
-        node = self.get_object()
+        context["backup_count"] = paginator.count
+        latest_operation = backup_queryset.first()
+        context["latest_operation"] = latest_operation
+        context["latest_operation_tone"] = (
+            _operation_tone(latest_operation.status)
+            if latest_operation
+            else "neutral"
+        )
+        context["last_complete_backup"] = backup_queryset.filter(
+            status=UtilBackup.Status.COMPLETE
+        ).first()
+        context["schedule_list"] = schedules
+        context["schedule_count"] = schedules.count()
+        context["active_schedule_count"] = active_schedule_count
+        context["can_manage_source"] = can_manage_source
+        context["can_manage_schedules"] = can_manage_schedules
+        context["can_run_backups"] = can_run_backups
+        context["can_restore_backups"] = can_restore_backups
+        context["can_download_backups"] = can_download_backups
+        context["can_delete_backups"] = can_delete_backups
+        context["can_validate_storage"] = can_validate_storage
+        context["source_state_tone"] = _source_state_tone(node)
+        context["connection_state_tone"] = _connection_state_tone(node.connection)
         context["is_vultr_managed_database"] = (
             node.connection.integration.code == "vultr"
             and hasattr(node, "vultr_database")
@@ -603,9 +667,14 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
             )
         )
         context["source_recovery_unavailable_message"] = (
-            SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+            source_recovery_unavailable_message(
+                node.connection.integration.code
+            )
         )
         return context
 
     def get_queryset(self, **kwargs):
-        return visible_nodes(self.request.user.member)
+        return visible_nodes(self.request.user.member).select_related(
+            "connection__integration",
+            "connection__location",
+        )

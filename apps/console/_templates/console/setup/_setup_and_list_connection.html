@@ -1,197 +1,151 @@
 <div x-data="setupSelectConnection()">
-    {% if source_protection_available %}
-    <button @click="openConnectionModal(null, null, null,'{{ integration.code }}')" type="button"
-            class="group relative block w-full rounded-xl border-2 border-dashed border-slate-300 bg-white px-6 py-10 text-center transition hover:border-indigo-400 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-
-        <img class="mx-auto max-h-16" src="{{ STATIC_URL }}{{ integration.image }}"
-             alt="{{ integration.name }} Backups">
-
-        <span class="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
-            <svg class="h-5 w-5 text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
-            Setup {{ integration.name }} Integration
-        </span>
+    <section class="rounded-lg border border-rule-200 bg-paper" aria-labelledby="connection-boundary-heading">
+        <div class="flex flex-col gap-5 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+            <div class="flex min-w-0 items-start gap-3">
+                <span class="grid h-10 w-10 flex-none place-items-center rounded-md bg-evidence-50 text-evidence-600 ring-1 ring-inset ring-evidence-200">
+                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/></svg>
+                </span>
+                <div class="min-w-0">
+                    <h2 id="connection-boundary-heading" class="text-base font-semibold text-ink-950">Provider account boundary</h2>
+                    <p class="mt-1 max-w-2xl text-sm leading-6 text-ink-650">Each connection keeps one provider identity, one BackupSheep execution lane, and its attached sources together.</p>
+                </div>
+            </div>
+            {% if source_protection_available and can_manage_integrations %}
+                <button @click="openConnectionModal(null, null, null,'{{ integration.code }}')" type="button"
+                        class="inline-flex min-h-11 flex-none items-center justify-center gap-2 rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+                    Connect account
+                </button>
+            {% elif not can_manage_integrations %}
+                <span class="inline-flex min-h-10 flex-none items-center rounded-full bg-wool-50 px-3 text-xs font-semibold text-ink-650 ring-1 ring-inset ring-rule-200">Read-only access</span>
+            {% endif %}
+        </div>
         {% if "ovh" in integration.code %}
-            <p class="mx-auto mt-3 max-w-xl text-xs font-medium text-amber-700">
-                Note: For OVH, please select <strong>validity</strong> period <strong>unlimited</strong>. Otherwise, backups
-                will fail after the validity period.
-            </p>
+            <div class="border-t border-attention-200 bg-attention-50 px-5 py-3 text-xs leading-5 text-attention-700 sm:px-6"><span class="font-semibold">OVH credential policy:</span> choose an unlimited validity period so scheduled protection does not expire unexpectedly.</div>
         {% endif %}
-
-    </button>
-    {% else %}
-        <section class="rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900" role="status">
-            <h2 class="font-semibold">New protection is unavailable</h2>
-            <p class="mt-1 leading-6">{{ source_recovery_unavailable_message }}</p>
-        </section>
-    {% endif %}
+        {% if not source_protection_available %}
+            <div class="border-t border-attention-200 bg-attention-50 px-5 py-3 text-sm text-attention-700 sm:px-6" role="status"><span class="font-semibold">New protection is unavailable.</span> {{ source_recovery_unavailable_message }}</div>
+        {% endif %}
+    </section>
 
     {% if connections_count > 0 %}
-        <div class="mt-12 flex flex-wrap items-center justify-between gap-3">
+        <div class="mt-6 flex flex-wrap items-end justify-between gap-3">
             <div class="min-w-0">
-                <h3 class="text-base font-semibold text-slate-900">
-                    {{ integration.name }} Integrations
+                <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-700">Connection register</p>
+                <h3 class="mt-1 text-lg font-semibold text-ink-950">
+                    {{ integration.name }} accounts
                 </h3>
-                <p class="mt-1 text-sm text-slate-500">Existing connections for this provider.</p>
+                <p class="mt-1 text-sm text-ink-650">{{ connections_count }} account{{ connections_count|pluralize }} in this workspace boundary.</p>
             </div>
             {% if i_name %}
                 <a href="{% url 'console:setup:integration_open' integration_code=integration.code|lower %}"
-                   class="flex-none text-sm font-medium text-indigo-600 transition hover:text-indigo-700">Reset filter</a>
+                   class="flex-none text-sm font-semibold text-evidence-600 transition hover:text-evidence-700">Reset filter</a>
             {% endif %}
         </div>
-        <div class="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-            <table id="section-nodes" class="min-w-full divide-y divide-slate-200 text-sm">
+        <div class="enterprise-record-table-wrap mt-4 overflow-x-auto rounded-lg border border-rule-200 bg-paper">
+            <table id="section-nodes" class="enterprise-record-table min-w-full divide-y divide-rule-100 text-sm">
                 <thead>
-                    <tr class="bg-slate-50">
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Name</th>
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Backup Server</th>
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Nodes</th>
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Create Node</th>
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Actions</th>
+                    <tr class="bg-wool-50">
+                        <th scope="col" class="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Account identity</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Connection state</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Execution lane</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Coverage</th>
+                        <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wider text-ink-500">Operations</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-slate-100">
+                <tbody class="divide-y divide-rule-100">
                     {% for connection in page.object_list %}
-                        <tr class="align-top transition hover:bg-slate-50">
-                            <td class="px-4 py-3">
-                                <p class="font-medium text-slate-900">{{ connection.name }}</p>
-                                <p class="mt-0.5 text-xs text-slate-500">{{ connection.modified }}</p>
+                        <tr class="align-top transition hover:bg-wool-50">
+                            <td data-label="Account identity" class="px-5 py-4">
+                                <p class="font-semibold text-ink-950">{{ connection.name }}</p>
+                                {% if connection.provider_identity %}<p class="mt-1 truncate text-xs text-ink-650">Provider identity · {{ connection.provider_identity }}</p>{% endif %}
+                                <p class="mt-1 text-xs text-ink-650">Owner · {{ connection.operator_name }}</p>
+                                <time class="mt-1 block font-mono text-xs tabular-nums text-ink-500" datetime="{{ connection.modified|date:'c' }}">Configuration updated {{ connection.modified|date:'M j, Y H:i T' }}</time>
                             </td>
-                            <td class="whitespace-nowrap px-4 py-3">
+                            <td data-label="Connection state" class="whitespace-nowrap px-4 py-4">
                                 {% if connection.status == 1 %}
-                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>{{ connection.get_status_display }}</span>
+                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-evidence-50 px-2.5 py-1 text-xs font-semibold text-evidence-700 ring-1 ring-inset ring-evidence-200"><span class="h-1.5 w-1.5 rounded-full bg-evidence-600"></span>{{ connection.get_status_display }}</span>
                                 {% elif connection.status == 6 %}
-                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20"><span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>{{ connection.get_status_display }}</span>
+                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-incident-50 px-2.5 py-1 text-xs font-semibold text-incident-700 ring-1 ring-inset ring-incident-200"><span class="h-1.5 w-1.5 rounded-full bg-incident-600"></span>{{ connection.get_status_display }}</span>
                                 {% elif connection.status == 4 %}
-                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20"><span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>{{ connection.get_status_display }}</span>
+                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-attention-50 px-2.5 py-1 text-xs font-semibold text-attention-700 ring-1 ring-inset ring-attention-200"><span class="h-1.5 w-1.5 rounded-full bg-attention-600"></span>{{ connection.get_status_display }}</span>
                                 {% elif connection.status == 5 %}
-                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20"><span class="h-1.5 w-1.5 rounded-full bg-red-500"></span>{{ connection.get_status_display }}</span>
+                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-incident-50 px-2.5 py-1 text-xs font-semibold text-incident-700 ring-1 ring-inset ring-incident-200"><span class="h-1.5 w-1.5 rounded-full bg-incident-600"></span>{{ connection.get_status_display }}</span>
                                 {% else %}
-                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10"><span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>{{ connection.get_status_display }}</span>
+                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-attention-50 px-2.5 py-1 text-xs font-semibold text-attention-700 ring-1 ring-inset ring-attention-200"><span class="h-1.5 w-1.5 rounded-full bg-attention-600"></span>{{ connection.get_status_display }}</span>
                                 {% endif %}
+                                <p class="mt-2 max-w-40 whitespace-normal text-xs leading-5 text-ink-650">Operational eligibility, not recovery proof.</p>
+                                <p class="mt-1 max-w-40 whitespace-normal font-mono text-[11px] leading-5 text-ink-500">Provider access evidence · Not recorded</p>
                             </td>
-                            <td class="whitespace-nowrap px-4 py-3">
-                                <p class="text-xs font-medium text-slate-700">{{ connection.location.location }}</p>
-                                <p class="mt-0.5 text-xs text-slate-500">IPv4: {{ connection.location.ip_address }}</p>
-                                <p class="mt-0.5 text-xs text-slate-500">IPv6: {{ connection.location.ip_address_v6 }}</p>
+                            <td data-label="Execution lane" class="px-4 py-4">
+                                <p class="text-sm font-semibold text-ink-800">{% if connection.location %}{{ connection.location.location }}{% else %}Not assigned{% endif %}</p>
+                                {% if connection.location.ip_address %}<p class="mt-1 font-mono text-xs tabular-nums text-ink-650">IPv4 · {{ connection.location.ip_address }}</p>{% endif %}
+                                {% if connection.location.ip_address_v6 %}<p class="mt-1 break-all font-mono text-xs tabular-nums text-ink-650">IPv6 · {{ connection.location.ip_address_v6 }}</p>{% endif %}
                             </td>
-                            <td class="whitespace-nowrap px-4 py-3 text-slate-700">{{ connection.total_nodes }}</td>
-                            <td class="whitespace-nowrap px-4 py-3">
-                                <div class="flex flex-wrap items-center gap-1.5">
-                                    {% if not source_protection_available %}
-                                        <span class="text-xs text-slate-500">Unavailable</span>
-                                    {% else %}
-                                    {% if integration.code == "website" %}
-                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                           class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                            Create Website Node
-                                        </a>
-                                    {% elif integration.code == "database" %}
-                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                           class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                            Create Database Node
-                                        </a>
-                                    {% elif integration.type == "saas" %}
-                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                           class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                            Create {{ integration.name }} Node
-                                        </a>
-                                    {% else %}
-                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
-                                           class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                            Create Server Node
-                                        </a>
-                                        {% if integration.code != "aws_rds" and integration.code != "hetzner" %}
-                                            <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
-                                               class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                Create Volume Node
-                                            </a>
+                            <td data-label="Coverage" class="px-4 py-4">
+                                <p class="font-mono text-lg font-semibold tabular-nums text-ink-950">{{ connection.total_nodes_count }}</p>
+                                <p class="mt-1 text-xs text-ink-650">attached source{{ connection.total_nodes_count|pluralize }}</p>
+                                {% if not source_protection_available %}<p class="mt-2 text-xs font-semibold text-attention-700">New protection unavailable</p>{% endif %}
+                            </td>
+                            <td data-label="Operations" class="px-5 py-4">
+                                <div class="flex flex-wrap items-center justify-end gap-2">
+                                    {% if connection.status == 5 %}
+                                        {% if can_manage_integrations %}
+                                            <button @click="resumeConnection('{{ connection.id }}')" type="button" class="inline-flex min-h-10 items-center rounded-md border border-attention-200 bg-attention-50 px-3 py-2 text-xs font-semibold text-attention-700 transition hover:bg-attention-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-attention-600">Undo delete request</button>
+                                        {% else %}
+                                            <span class="text-xs font-semibold text-incident-700">Deletion requested</span>
                                         {% endif %}
-                                        {% if integration.code == "vultr" %}
-                                            <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'vultr_database' %}"
-                                               class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                Create Managed Database Node
-                                            </a>
+                                    {% else %}
+                                        {% if source_protection_available and can_create_sources and connection.source_registration_allowed %}
+                                            <details class="relative">
+                                                <summary class="inline-flex min-h-10 cursor-pointer list-none items-center gap-2 rounded-md bg-evidence-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                                                    Add source
+                                                    <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 9l-7.5 7.5L4.5 9"/></svg>
+                                                </summary>
+                                                <div class="absolute right-0 z-20 mt-2 w-60 overflow-hidden rounded-md border border-rule-200 bg-paper p-1.5 shadow-lifted">
+                                                    {% if integration.code == "website" %}
+                                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}" class="block rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Create Website Node</a>
+                                                    {% elif integration.code == "database" %}
+                                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}" class="block rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Create Database Node</a>
+                                                    {% elif integration.type == "saas" %}
+                                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}" class="block rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Create {{ integration.name }} Node</a>
+                                                    {% else %}
+                                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}" class="block rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Create Server Node</a>
+                                                        {% if integration.code != "aws_rds" and integration.code != "hetzner" %}<a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}" class="block rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Create Volume Node</a>{% endif %}
+                                                        {% if integration.code == "vultr" %}<a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'vultr_database' %}" class="block rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Create Managed Database Node</a>{% endif %}
+                                                    {% endif %}
+                                                </div>
+                                            </details>
                                         {% endif %}
-                                    {% endif %}
+
+                                        {% if can_manage_integrations %}
+                                            <button @click="validateConnection('{{ connection.id }}', '{{ connection.location.id }}')" :disabled="validatingConnectionId === '{{ connection.id }}'" :aria-busy="validatingConnectionId === '{{ connection.id }}'" type="button" class="inline-flex min-h-10 items-center rounded-md border border-evidence-200 bg-evidence-50 px-3 py-2 text-xs font-semibold text-evidence-700 transition hover:bg-evidence-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-60"><span x-show="validatingConnectionId !== '{{ connection.id }}'">Validate access</span><span x-show="validatingConnectionId === '{{ connection.id }}'">Validating…</span></button>
+                                        {% endif %}
+
+                                        <details class="relative">
+                                            <summary class="inline-flex min-h-10 cursor-pointer list-none items-center gap-2 rounded-md border border-rule-200 bg-paper px-3 py-2 text-xs font-semibold text-ink-800 transition hover:bg-wool-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600" aria-label="More operations for {{ connection.name }}">More<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 9l-7.5 7.5L4.5 9"/></svg></summary>
+                                            <div class="absolute right-0 z-20 mt-2 w-52 overflow-hidden rounded-md border border-rule-200 bg-paper p-1.5 shadow-lifted">
+                                                {% if can_manage_integrations %}<button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'modify')" type="button" class="block w-full rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Edit connection</button>{% endif %}
+                                                <a target="_blank" rel="noopener noreferrer" href="{% url 'console:log:index' %}?integration={{ connection.id }}" class="block rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Open activity log</a>
+                                                {% if can_manage_integrations and integration.code != "google_cloud" %}<button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'copy')" type="button" class="block w-full rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Duplicate connection</button>{% endif %}
+                                                {% if can_manage_integrations and connection.status == 1 %}<button @click="pauseConnection('{{ connection.id }}')" type="button" class="block w-full rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Pause connection</button>{% elif can_manage_integrations and connection.status == 4 %}<button @click="resumeConnection('{{ connection.id }}')" type="button" class="block w-full rounded px-3 py-2 text-left text-xs font-semibold text-ink-800 hover:bg-wool-50">Resume connection</button>{% endif %}
+                                                {% if can_manage_integrations %}<div class="my-1 border-t border-rule-100"></div><button @click="openDeleteConnectionModal('{{ connection.id }}', '{{ connection.name|escapejs }}', '{{ connection.total_nodes_count }}')" type="button" class="block w-full rounded px-3 py-2 text-left text-xs font-semibold text-incident-700 hover:bg-incident-50">{% if connection.total_nodes_count %}Review deletion block{% else %}Delete connection{% endif %}</button>{% endif %}
+                                            </div>
+                                        </details>
                                     {% endif %}
                                 </div>
-                            </td>
-                            <td class="whitespace-nowrap px-4 py-3">
-                                {% if not source_protection_available %}
-                                    <div class="flex flex-wrap items-center gap-1.5">
-                                        <a target="_blank" href="{% url 'console:log:index' %}?integration={{ connection.id }}"
-                                           class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Logs</a>
-                                        {% if connection.status == 1 %}
-                                            <button @click="pauseConnection('{{ connection.id }}')" type="button"
-                                                    class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Pause</button>
-                                        {% endif %}
-                                        <button @click="deleteConnection('{{ connection.id }}')" type="button"
-                                                class="inline-flex items-center rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Delete</button>
-                                    </div>
-                                {% elif connection.status == 5 %}
-                                    <button @click="resumeConnection('{{ connection.id }}')" type="button"
-                                            class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                        Undo
-                                    </button>
-                                {% else %}
-                                    <div class="flex flex-wrap items-center gap-1.5">
-                                        <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'modify')"
-                                                type="button"
-                                                class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                            Modify
-                                        </button>
-                                        <button @click="validateConnection('{{ connection.id }}', '{{ connection.location.id }}')"
-                                                :disabled="validatingConnectionId === '{{ connection.id }}'"
-                                                :aria-busy="validatingConnectionId === '{{ connection.id }}'"
-                                                type="button"
-                                                class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                                            <span x-show="validatingConnectionId !== '{{ connection.id }}'">Validate</span>
-                                            <span x-show="validatingConnectionId === '{{ connection.id }}'">Validating…</span>
-                                        </button>
-                                        <a target="_blank"
-                                           href="{% url 'console:log:index' %}?integration={{ connection.id }}"
-                                           class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                            Logs
-                                        </a>
-                                        {% if integration.code != "google_cloud" %}
-                                            <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'copy')"
-                                                    type="button"
-                                                    class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                Copy
-                                            </button>
-                                        {% endif %}
-                                        {% if connection.status == 1 %}
-                                            <button @click="pauseConnection('{{ connection.id }}')"
-                                                    type="button"
-                                                    class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                Pause
-                                            </button>
-                                        {% elif connection.status == 4 %}
-                                            <button @click="resumeConnection('{{ connection.id }}')"
-                                                    type="button"
-                                                    class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                Resume
-                                            </button>
-                                        {% endif %}
-                                        <button @click="deleteConnection('{{ connection.id }}')"
-                                                type="button"
-                                                class="inline-flex items-center rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">
-                                            Delete
-                                        </button>
-                                    </div>
-                                {% endif %}
                             </td>
                         </tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
-        <nav class="mt-4 flex items-center justify-between border-t border-slate-200 px-4 sm:px-0" aria-label="Pagination">
+        {% if page.paginator.num_pages > 1 %}
+        <nav class="mt-4 flex items-center justify-between border-t border-rule-200 px-4 sm:px-0" aria-label="Connection register pages">
             <div class="-mt-px flex w-0 flex-1">
                 {% if page.has_previous %}
                     <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page.previous_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                       class="inline-flex items-center border-t-2 border-transparent pr-1 pt-4 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">
+                       class="inline-flex items-center border-t-2 border-transparent pr-1 pt-4 text-sm font-medium text-ink-500 transition hover:border-rule-200 hover:text-evidence-700">
                         <svg class="mr-2 h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
                         Previous
                     </a>
@@ -205,7 +159,7 @@
                         </span>
                     {% else %}
                         <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page_no }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                           class="inline-flex items-center border-t-2 px-4 pt-4 text-sm font-medium transition {% if page.number ==  page_no %}border-indigo-600 text-indigo-600{% else %}border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700{% endif %}">
+                           class="inline-flex items-center border-t-2 px-4 pt-4 text-sm font-medium transition {% if page.number ==  page_no %}border-evidence-600 text-evidence-700{% else %}border-transparent text-ink-500 hover:border-rule-200 hover:text-evidence-700{% endif %}">
                             {{ page_no }}
                         </a>
                     {% endif %}
@@ -214,144 +168,46 @@
             <div class="-mt-px flex w-0 flex-1 justify-end">
                 {% if page.has_next %}
                     <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page.next_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                       class="inline-flex items-center border-t-2 border-transparent pl-1 pt-4 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">
+                       class="inline-flex items-center border-t-2 border-transparent pl-1 pt-4 text-sm font-medium text-ink-500 transition hover:border-rule-200 hover:text-evidence-700">
                         Next
                         <svg class="ml-2 h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/></svg>
                     </a>
                 {% endif %}
             </div>
         </nav>
+        {% endif %}
 
     {% elif source_protection_available %}
-        <section class="mt-10 rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="first-integration-heading">
-            <div class="px-5 py-8 sm:px-8">
+        <section class="mt-6 overflow-hidden rounded-lg border border-rule-200 bg-paper" aria-labelledby="first-integration-heading">
+            <div class="grid gap-8 px-5 py-7 sm:px-7 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,0.8fr)] lg:items-center">
                 <div class="max-w-2xl">
-                    <h2 id="first-integration-heading" class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Setup your
-                        first {{ integration.name }} Integration!</h2>
-                    {% if integration.code == "database" %}
-                        <p class="mt-2 text-sm text-slate-500">
-                            We support backup automation of MySQL, MariaDB and PostgreSQL <span
-                                class="font-medium text-indigo-600">databases</span> and <span
-                                class="font-medium text-indigo-600">tables</span>.
-                        </p>
-                    {% elif integration.code == "website" %}
-                        <p class="mt-2 text-sm text-slate-500">
-                            We support backup automation of SFTP, FTP and FTPS <span
-                                class="font-medium text-indigo-600">web/file servers</span>.
-                        </p>
-                    {% elif integration.code == "basecamp" %}
-                        <p class="mt-2 text-sm text-slate-500">
-                            We support backup automation of <span
-                                class="font-medium text-indigo-600">any data available through {{ integration.name }} public APIs.</span>
-                        </p>
+                    <span class="grid h-11 w-11 place-items-center rounded-md bg-evidence-50 text-evidence-600 ring-1 ring-inset ring-evidence-200">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/></svg>
+                    </span>
+                    <p class="mt-5 text-xs font-semibold uppercase tracking-[0.14em] text-evidence-700">No account connected</p>
+                    <h2 id="first-integration-heading" class="mt-1 text-xl font-semibold tracking-tight text-ink-950 sm:text-2xl">Establish the first {{ integration.name }} account boundary</h2>
+                    <p class="mt-2 text-sm leading-6 text-ink-650">Use a dedicated, least-privilege credential. BackupSheep will validate provider access before the account can be used, but that check does not create a backup or prove recovery.</p>
+                    {% if can_manage_integrations %}
+                        <button @click="openConnectionModal(null, null, null,'{{ integration.code }}')" type="button" class="mt-5 inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                            Connect {{ integration.name }} account
+                        </button>
                     {% else %}
-                        <p class="mt-2 text-sm text-slate-500">
-                            We support backup automation of {{ integration.name }} <span
-                                class="font-medium text-indigo-600">servers</span> and <span
-                                class="font-medium text-indigo-600">volumes</span>.
-                        </p>
+                        <p class="mt-5 inline-flex min-h-10 items-center rounded-full bg-wool-50 px-3 text-xs font-semibold text-ink-650 ring-1 ring-inset ring-rule-200">An integration manager must create the first connection.</p>
                     {% endif %}
                 </div>
-                <div class="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
-                    <div>
-                        <span class="grid h-10 w-10 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/>
-                            </svg>
-                        </span>
-                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
-                            1. Setup {{ integration.name }} Integration
-                        </h3>
-                        <p class="mt-1.5 text-sm text-slate-500">
-                            {% if integration.code == "database" %}
-                                Connect {{ integration.name }} using standard database logins or using public/private
-                                keys method.
-                            {% elif integration.code == "website" %}
-                                Connect {{ integration.name }} using standard web server logins or using public/private
-                                keys method.
-                            {% else %}
-                                Connect {{ integration.name }} account to automate snapshots of cloud servers and volumes
-                                using APIs.
-                            {% endif %}
-                        </p>
-                    </div>
-
-                    <div>
-                        <span class="grid h-10 w-10 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/>
-                            </svg>
-                        </span>
-                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
-                            2. Link {{ integration.name }} Node
-                        </h3>
-                        <p class="mt-1.5 text-sm text-slate-500">
-                            {% if integration.code == "database" %}
-                                Create nodes with single or multiple databases or specific tables from the same database.
-                            {% elif integration.code == "website" %}
-                                Create website nodes with multiple directories and folders. You can also rule to exclude
-                                specific files.
-                            {% else %}
-                                Choose which {{ integration.name }} servers and volumes you want to link to automate
-                                snapshots.
-                            {% endif %}
-                        </p>
-                    </div>
-
-                    <div>
-                        <span class="grid h-10 w-10 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5"/>
-                            </svg>
-                        </span>
-                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
-                            3. Setup Schedule
-                        </h3>
-                        <p class="mt-1.5 text-sm text-slate-500">
-                            {% if integration.code == "database" %}
-                                Automate backups of {{ integration.name }} nodes using schedule(s), and you can also
-                                create on-demand backups.
-                            {% elif integration.code == "website" %}
-                                Automate backups of {{ integration.name }} nodes using schedule(s), and you can also
-                                create on-demand backups.
-                            {% else %}
-                                Automate backups of {{ integration.name }} nodes using schedule(s). Save $$ in
-                                {{ integration.name }} backup fees.
-                            {% endif %}
-                        </p>
-                    </div>
-
-                    <div>
-                        <span class="grid h-10 w-10 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"/>
-                            </svg>
-                        </span>
-                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
-                            4. Setup Storage (optional)
-                        </h3>
-                        <p class="mt-1.5 text-sm text-slate-500">
-                            {% if integration.code == "website" %}
-                                Store backups on Free Storage included in your plan, or you can bring your storage
-                                as well.
-                            {% elif integration.code == "database" %}
-                                Store backups on Free Storage included in your plan, or you can bring your storage
-                                as well.
-                            {% else %}
-                                {{ integration.name }} backups are stored within your account as snapshots. You only pay
-                                {{ integration.name }} for storage.
-                            {% endif %}
-                        </p>
-                    </div>
-                </div>
+                <ol class="divide-y divide-rule-100 rounded-md border border-rule-200 bg-wool-50" aria-label="Assurance sequence">
+                    <li class="flex gap-3 px-4 py-4"><span class="grid h-7 w-7 flex-none place-items-center rounded-full bg-evidence-600 font-mono text-xs font-semibold text-white">1</span><div><p class="text-sm font-semibold text-ink-950">Connect the account</p><p class="mt-1 text-xs leading-5 text-ink-650">Record provider identity and the execution lane without exposing the stored secret.</p></div></li>
+                    <li class="flex gap-3 px-4 py-4"><span class="grid h-7 w-7 flex-none place-items-center rounded-full border border-evidence-200 bg-evidence-50 font-mono text-xs font-semibold text-evidence-700">2</span><div><p class="text-sm font-semibold text-ink-950">Validate bounded access</p><p class="mt-1 text-xs leading-5 text-ink-650">Confirm credentials and provider reachability. No backup or restore is tested here.</p></div></li>
+                    <li class="flex gap-3 px-4 py-4"><span class="grid h-7 w-7 flex-none place-items-center rounded-full border border-rule-200 bg-paper font-mono text-xs font-semibold text-ink-650">3</span><div><p class="text-sm font-semibold text-ink-950">Attach a source</p><p class="mt-1 text-xs leading-5 text-ink-650">Then configure protection and use completed backup and restore records as recovery evidence.</p></div></li>
+                </ol>
             </div>
         </section>
     {% endif %}
 
     <!-- Connection modal -->
-    <div x-cloak x-show="openConnection" class="fixed inset-0 z-50 overflow-y-auto"
-         aria-labelledby="modal-title" role="dialog" aria-modal="true">
-        <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
+    <div x-cloak x-show="openConnection" @keydown.escape.window="if (openConnection && !loading) closeConnectionModal()" class="fixed inset-0 z-50 overflow-y-auto"
+         aria-labelledby="connection-dialog-title" aria-describedby="connection-dialog-description" role="dialog" aria-modal="true">
+        <div class="flex min-h-full items-end justify-center p-0 text-center sm:items-center sm:p-6">
             <div x-show="openConnection"
                  x-transition:enter="ease-out duration-300"
                  x-transition:enter-start="opacity-0"
@@ -359,7 +215,7 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100"
                  x-transition:leave-end="opacity-0"
-                 class="fixed inset-0 bg-slate-900/50" aria-hidden="true"></div>
+                 class="fixed inset-0 bg-ink-950/55" aria-hidden="true"></div>
 
             <div x-show="openConnection"
                  x-transition:enter="ease-out duration-300"
@@ -368,9 +224,11 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                  x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-xl sm:max-h-[calc(100vh-3rem)] sm:max-w-lg">
+                 x-ref="connectionDialog" tabindex="-1" @keydown.tab="trapDialog($event, $refs.connectionDialog)"
+                 class="relative flex min-h-full max-h-screen w-full flex-col overflow-hidden rounded-none border border-rule-200 bg-paper text-left shadow-lifted sm:min-h-0 sm:max-h-[calc(100vh-3rem)] sm:max-w-xl sm:rounded-lg">
                 <div class="flex-1 overflow-y-auto px-5 py-6 sm:px-6">
-                    <div class="mx-auto grid h-11 w-11 place-items-center rounded-full bg-indigo-50 text-indigo-600">
+                    <button x-show="!loading" type="button" @click="closeConnectionModal()" class="absolute right-4 top-4 grid h-10 w-10 place-items-center rounded-md text-ink-500 transition hover:bg-wool-50 hover:text-ink-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600" aria-label="Close connection dialog"><svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg></button>
+                    <div class="grid h-11 w-11 place-items-center rounded-md bg-evidence-50 text-evidence-600 ring-1 ring-inset ring-evidence-200">
                         <svg x-show="loading" class="h-5 w-5 animate-spin"
                              xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
@@ -382,23 +240,23 @@
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/>
                         </svg>
                     </div>
-                    <div x-show="!loading" class="mt-3 text-center">
-                        <h3 class="text-base font-semibold text-slate-900" id="modal-title">
-                            {{ integration.name|title }} Integration
-                        </h3>
+                    <div x-show="!loading" class="mt-4 pr-10">
+                        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-evidence-700">{{ integration.name }} control plane</p>
+                        <h3 class="mt-1 text-xl font-semibold tracking-tight text-ink-950" id="connection-dialog-title" x-text="connectionDialogTitle()"></h3>
+                        <p id="connection-dialog-description" class="mt-2 text-sm leading-6 text-ink-650" x-text="connectionDialogDescription()"></p>
                     </div>
-                    <div x-show="loading" class="mt-3 text-center">
-                        <h3 class="text-base font-semibold text-slate-900" id="modal-title">
-                            Loading...
+                    <div x-show="loading" class="mt-4">
+                        <h3 class="text-base font-semibold text-ink-950">
+                            Loading connection record…
                         </h3>
-                        <p class="mt-1 text-sm text-slate-500">
-                            Don't refresh page.
+                        <p class="mt-1 text-sm text-ink-650">
+                            Keep this dialog open while BackupSheep prepares the account boundary.
                         </p>
                     </div>
                     <div x-show="!loading" class="mt-6 grid grid-cols-1 gap-x-4 gap-y-5 sm:grid-cols-6">
                         <div x-show="connectionFailure" x-cloak
                              class="sm:col-span-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950"
-                             role="alert" aria-live="polite">
+                             role="alert" aria-live="assertive" tabindex="-1" x-ref="connectionErrorSummary">
                             <div class="flex flex-wrap items-center gap-2">
                                 <p class="font-semibold" x-text="connectionFailureTitle(connectionFailure)"></p>
                                 <span class="rounded-full bg-amber-100 px-2 py-0.5 font-mono text-[11px] font-semibold text-amber-800"
@@ -453,30 +311,38 @@
                             </div>
                         </div>
                         <div class="sm:col-span-6">
-                            <label for="name" class="block text-sm font-medium text-slate-700">
+                            <label for="connection-name" class="block text-sm font-semibold text-ink-800">
                                 Name
                             </label>
-                            <input x-model="connection.name" type="text" name="name" id="name" autocomplete="name"
+                            <input x-model="connection.name" x-ref="connectionName" type="text" name="name" id="connection-name" autocomplete="off"
+                                   :aria-invalid="Boolean(connectionErrors?.name)" aria-describedby="name-error"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors?.name" class="mt-1.5 text-xs font-medium text-red-600" id="name-error"
                                x-text="connectionErrors?.name"></p>
                         </div>
 
                         <div class="sm:col-span-6">
-                            <label for="location" class="block text-sm font-medium text-slate-700">
-                                Backup Server
+                            <label id="connection-location-label" class="block text-sm font-semibold text-ink-800">
+                                Execution lane
                             </label>
                             <p class="mt-1 text-xs text-slate-500">
                                 This server will execute, compress and upload your backups. <span
                                     x-show="connection.location"><br/>You must whitelist IP <strong
-                                    x-text="connection.location?.ip_address"></strong> and IPv6(if supported) <strong
+                                    x-text="connection.location?.ip_address"></strong> and IPv6 (if supported) <strong
                                     x-text="connection.location?.ip_address_v6"></strong></span>
                             </p>
                             <div class="relative mt-1.5">
                                 <button @click="toggleEndpointDropdown()"
+                                        @keydown.arrow-down.prevent="moveListbox('endpointActiveIndex', endpoints, 1, 'openEndpoint')"
+                                        @keydown.arrow-up.prevent="moveListbox('endpointActiveIndex', endpoints, -1, 'openEndpoint')"
+                                        @keydown.enter.prevent="commitListbox('endpointActiveIndex', endpoints, 'openEndpoint', (item) => { connection.location = item; openEndpoint = false; })"
+                                        @keydown.space.prevent="commitListbox('endpointActiveIndex', endpoints, 'openEndpoint', (item) => { connection.location = item; openEndpoint = false; })"
+                                        @keydown.escape="if (openEndpoint) { $event.preventDefault(); $event.stopPropagation(); openEndpoint = false; }"
                                         type="button"
+                                        :disabled="connection.id && Number(connection.nodes_total || 0) > 0"
+                                        :aria-invalid="Boolean(connectionErrors?.location)" aria-describedby="location-error"
                                         class="relative w-full rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                        aria-haspopup="listbox" :aria-expanded="openEndpoint.toString()" aria-labelledby="connection-location-label">
                                     <span class="block truncate"
                                           x-text="connection.location?.location||'--Choose Backup Server--'"></span>
                                     <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
@@ -498,7 +364,7 @@
                                         class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1.5 text-sm shadow-lg focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
-                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+                                        aria-labelledby="connection-location-label" :aria-activedescendant="endpointActiveIndex === null ? null : `connection-location-option-${endpointActiveIndex}`">
                                     <template x-for="(endpoint, index) in endpoints">
                                         <li
                                                 @click="connection.location = endpoint;toggleEndpointDropdown()"
@@ -506,7 +372,7 @@
                                                 @mouseleave="endpointActiveIndex = null"
                                                 :class="{ 'text-white bg-indigo-600': endpointActiveIndex === index, 'text-slate-700': !(endpointActiveIndex === index) }"
                                                 class="relative cursor-pointer select-none py-2 pl-9 pr-4"
-                                                id="listbox-option-0" role="option">
+                                                :id="`connection-location-option-${index}`" role="option" :aria-selected="connection.location?.id === endpoint?.id">
                                                 <span class="block truncate font-normal">
                                                     <span
                                                         x-text="endpoint.location"></span>
@@ -532,6 +398,18 @@
                             </div>
                             <p x-show="connectionErrors?.location" class="mt-1.5 text-xs font-medium text-red-600" id="location-error"
                                x-text="connectionErrors?.location"></p>
+                            <p x-show="connection.id && Number(connection.nodes_total || 0) > 0" class="mt-1.5 text-xs font-medium text-attention-700">Execution lane changes are locked while sources are attached. Detach the sources before moving this connection.</p>
+                        </div>
+
+                        <div class="sm:col-span-6 rounded-md border border-evidence-200 bg-evidence-50 px-4 py-3" role="note">
+                            <div class="flex items-start gap-3">
+                                <svg class="mt-0.5 h-5 w-5 flex-none text-evidence-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 00-9 0v3.75m-.75 0h10.5A2.25 2.25 0 0119.5 12.75v6A2.25 2.25 0 0117.25 21H6.75a2.25 2.25 0 01-2.25-2.25v-6a2.25 2.25 0 012.25-2.25z"/></svg>
+                                <div class="min-w-0">
+                                    <p class="text-sm font-semibold text-evidence-700" x-text="connection.id ? 'Stored credential protection' : 'Credential validation' "></p>
+                                    <p class="mt-1 text-xs leading-5 text-ink-650" x-show="connection.id">Existing secret values are never returned to this browser. Leave secret fields blank to keep the current credential; enter a value only when rotating it.</p>
+                                    <p class="mt-1 text-xs leading-5 text-ink-650" x-show="!connection.id">BackupSheep validates provider access before activating this connection. Use a dedicated credential with only the permissions required for backup operations.</p>
+                                </div>
+                            </div>
                         </div>
 
 
@@ -577,22 +455,24 @@
                                id="tenancy-error" x-text="connectionErrors.auth?.tenancy"></p>
                         </div>
                         <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
-                            <label for="region" class="block text-sm font-medium text-slate-700">
+                            <label for="oracle-region" class="block text-sm font-medium text-slate-700">
                                 Region
                             </label>
-                            <input  x-model="selectedAuth.region" type="text" name="region" id="region"
+                            <input  x-model="selectedAuth.region" type="text" name="region" id="oracle-region"
                                    autocomplete="region"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.region" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="region-error" x-text="connectionErrors.auth?.region"></p>
+                               id="oracle-region-error" x-text="connectionErrors.auth?.region"></p>
                         </div>
 
                         <div class="sm:col-span-6"  x-show="integrationCode === 'oracle'">
-                            <label for="private_key" class="block text-sm font-medium text-slate-700">
+                            <label for="oracle-private-key" class="block text-sm font-medium text-slate-700">
                                 Private Key
                             </label>
-                            <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key" rows="3"
-                                      class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
+                            <textarea x-model="selectedAuth.private_key" id="oracle-private-key" name="private_key" rows="3" autocomplete="off" spellcheck="false"
+                                      :placeholder="connection.id ? 'Leave blank to keep the configured private key' : 'Paste the OCI private key'"
+                                      class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
+                            <p x-show="connection.id && selectedAuth.private_key_configured" class="mt-1.5 text-xs text-ink-650">A private key is configured and is not displayed.</p>
                             <p x-show="connectionErrors?.private_key" class="mt-1.5 text-xs font-medium text-red-600" id="private_key-error"
                                x-text="connectionErrors?.private_key"></p>
                         </div>
@@ -600,20 +480,27 @@
                             <label for="service_key" class="block text-sm font-medium text-slate-700">
                                 Service Key JSON
                             </label>
-                            <textarea x-model="selectedAuth.service_key" id="service_key" name="service_key" rows="3"
-                                      class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
+                            <textarea x-model="selectedAuth.service_key" id="service_key" name="service_key" rows="3" autocomplete="off" spellcheck="false"
+                                      :placeholder="connection.id ? 'Leave blank to keep the configured service account key' : 'Paste service account JSON'"
+                                      class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
+                            <p x-show="connection.id && selectedAuth.service_key_configured" class="mt-1.5 text-xs text-ink-650">A service account key is configured and is not displayed.</p>
                             <p x-show="connectionErrors?.auth?.service_key" class="mt-1.5 text-xs font-medium text-red-600" id="service_key-error"
                                x-text="connectionErrors?.auth?.service_key"></p>
                         </div>
                         <div class="sm:col-span-6" x-show="selectAWSRegions">
-                            <label for="region" class="block text-sm font-medium text-slate-700">
+                            <label id="aws-region-label" class="block text-sm font-medium text-slate-700">
                                 <span x-text="connection.integration?.name"></span> Region
                             </label>
                             <div class="relative mt-1.5">
                                 <button @click="toggleAWSRegionDropdown()"
+                                        @keydown.arrow-down.prevent="moveListbox('awsRegionActiveIndex', awsRegions, 1, 'openAWSRegion')"
+                                        @keydown.arrow-up.prevent="moveListbox('awsRegionActiveIndex', awsRegions, -1, 'openAWSRegion')"
+                                        @keydown.enter.prevent="commitListbox('awsRegionActiveIndex', awsRegions, 'openAWSRegion', (item) => { selectedAuth.region = item; openAWSRegion = false; })"
+                                        @keydown.space.prevent="commitListbox('awsRegionActiveIndex', awsRegions, 'openAWSRegion', (item) => { selectedAuth.region = item; openAWSRegion = false; })"
+                                        @keydown.escape="if (openAWSRegion) { $event.preventDefault(); $event.stopPropagation(); openAWSRegion = false; }"
                                         type="button"
                                         class="relative w-full rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                        aria-haspopup="listbox" :aria-expanded="openAWSRegion.toString()" aria-labelledby="aws-region-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.region?.name||'--Choose AWS Region--'"></span>
                                     <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
@@ -635,7 +522,7 @@
                                         class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1.5 text-sm shadow-lg focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
-                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+                                        aria-labelledby="aws-region-label" :aria-activedescendant="awsRegionActiveIndex === null ? null : `aws-region-option-${awsRegionActiveIndex}`">
 
                                     <template x-for="(region, index) in awsRegions">
                                         <li
@@ -644,7 +531,7 @@
                                                 @mouseleave="awsRegionActiveIndex = null"
                                                 :class="{ 'text-white bg-indigo-600': awsRegionActiveIndex === index, 'text-slate-700': !(awsRegionActiveIndex === index) }"
                                                 class="relative cursor-pointer select-none py-2 pl-9 pr-4"
-                                                id="listbox-option-0" role="option">
+                                                :id="`aws-region-option-${index}`" role="option" :aria-selected="selectedAuth.region?.id === region?.id">
                                                 <span class="block truncate font-normal">
                                                     <span x-text="region.name"></span>
                                                 </span>
@@ -661,7 +548,7 @@
                                     </template>
                                 </ul>
                             </div>
-                            <p x-show="connectionErrors?.region" class="mt-1.5 text-xs font-medium text-red-600" id="region-error"
+                            <p x-show="connectionErrors?.region" class="mt-1.5 text-xs font-medium text-red-600" id="aws-region-error"
                                x-text="connectionErrors?.region"></p>
                         </div>
 
@@ -671,8 +558,9 @@
                                 Access Key
                             </label>
                             <input x-model="selectedAuth.access_key" type="text" name="access_key" id="access_key"
-                                   autocomplete="access_key"
+                                   autocomplete="off" :placeholder="connection.id ? 'Leave blank to keep the configured key pair' : 'Enter access key ID'"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p x-show="connection.id && selectedAuth.access_key_configured" class="mt-1.5 text-xs text-ink-650">An access key is configured. Replace the access and secret keys together, or leave both blank.</p>
                             <p x-show="connectionErrors.auth?.access_key" class="mt-1.5 text-xs font-medium text-red-600"
                                id="access_key-error" x-text="connectionErrors.auth?.access_key"></p>
                         </div>
@@ -682,9 +570,10 @@
                             <label for="secret_key" class="block text-sm font-medium text-slate-700">
                                 Secret Key
                             </label>
-                            <input x-model="selectedAuth.secret_key" type="text" name="secret_key" id="secret_key"
-                                   autocomplete="secret_key"
+                            <input x-model="selectedAuth.secret_key" type="password" name="secret_key" id="secret_key"
+                                   autocomplete="new-password" :placeholder="connection.id ? 'Leave blank to keep the configured key pair' : 'Enter secret access key'"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p x-show="connection.id && selectedAuth.secret_key_configured" class="mt-1.5 text-xs text-ink-650">The stored secret is configured and is not displayed.</p>
                             <p x-show="connectionErrors.auth?.secret_key" class="mt-1.5 text-xs font-medium text-red-600"
                                id="secret_key-error" x-text="connectionErrors.auth?.secret_key"></p>
                         </div>
@@ -742,17 +631,19 @@
                                 API Key (
                                 <a x-show="integrationCode === 'digitalocean'"
                                    href="https://docs.digitalocean.com/reference/api/create-personal-access-token/"
-                                   target="_blank" class="font-medium text-indigo-600 transition hover:text-indigo-700">create api key</a>
+                                   target="_blank" rel="noopener noreferrer" class="font-medium text-indigo-600 transition hover:text-indigo-700">create api key</a>
                                 <a x-show="integrationCode === 'hetzner'"
-                                   href="https://docs.hetzner.cloud/#getting-started" target="_blank" class="font-medium text-indigo-600 transition hover:text-indigo-700">create api key</a>
+                                   href="https://docs.hetzner.cloud/#getting-started" target="_blank" rel="noopener noreferrer" class="font-medium text-indigo-600 transition hover:text-indigo-700">create api key</a>
                                 <a x-show="integrationCode === 'vultr'"
-                                   href="https://www.vultr.com/api/#section/Authentication/API%20Key" target="_blank" class="font-medium text-indigo-600 transition hover:text-indigo-700">create
+                                   href="https://www.vultr.com/api/#section/Authentication/API%20Key" target="_blank" rel="noopener noreferrer" class="font-medium text-indigo-600 transition hover:text-indigo-700">create
                                     api key</a>
                                 )
                             </label>
-                            <input x-model="selectedAuth.api_key" type="text" name="api_key" id="api_key"
-                                   autocomplete="api_key"
+                            <input x-model="selectedAuth.api_key" type="password" name="api_key" id="api_key"
+                                   autocomplete="new-password" aria-describedby="api-key-help"
+                                   :placeholder="connection.id ? 'Leave blank to keep the configured API key' : 'Enter provider API key'"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p id="api-key-help" class="mt-1.5 text-xs text-ink-650" x-text="connection.id && selectedAuth.api_key_configured ? 'An API key is configured. BackupSheep never displays it; leave this field blank to keep it unchanged.' : 'Use a dedicated provider credential with the narrowest backup permissions available.'"></p>
                             <p x-show="connectionErrors.auth?.api_key" class="mt-1.5 text-xs font-medium text-red-600"
                                id="api_key-error" x-text="connectionErrors.auth?.api_key"></p>
                         </div>
@@ -768,14 +659,19 @@
                                id="database_name-error" x-text="connectionErrors.auth?.database_name"></p>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="region" class="block text-sm font-medium text-slate-700">
+                            <label id="database-type-label" class="block text-sm font-medium text-slate-700">
                                 Database Type
                             </label>
                             <div class="relative mt-1.5">
                                 <button @click="toggleDatabaseTypeDropdown()"
+                                        @keydown.arrow-down.prevent="moveListbox('databaseTypeActiveIndex', databaseTypes, 1, 'openDatabaseType')"
+                                        @keydown.arrow-up.prevent="moveListbox('databaseTypeActiveIndex', databaseTypes, -1, 'openDatabaseType')"
+                                        @keydown.enter.prevent="commitListbox('databaseTypeActiveIndex', databaseTypes, 'openDatabaseType', (item) => selectDatabaseType(item))"
+                                        @keydown.space.prevent="commitListbox('databaseTypeActiveIndex', databaseTypes, 'openDatabaseType', (item) => selectDatabaseType(item))"
+                                        @keydown.escape="if (openDatabaseType) { $event.preventDefault(); $event.stopPropagation(); openDatabaseType = false; }"
                                         type="button"
                                         class="relative w-full rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                        aria-haspopup="listbox" :aria-expanded="openDatabaseType.toString()" aria-labelledby="database-type-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.type?.name||'--Database Type--'"></span>
                                     <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
@@ -797,7 +693,7 @@
                                         class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1.5 text-sm shadow-lg focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
-                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+                                        aria-labelledby="database-type-label" :aria-activedescendant="databaseTypeActiveIndex === null ? null : `database-type-option-${databaseTypeActiveIndex}`">
 
                                     <template x-for="(type, index) in databaseTypes">
                                         <li
@@ -806,7 +702,7 @@
                                                 @mouseleave="databaseTypeActiveIndex = null"
                                                 :class="{ 'text-white bg-indigo-600': databaseTypeActiveIndex === index, 'text-slate-700': !(databaseTypeActiveIndex === index) }"
                                                 class="relative cursor-pointer select-none py-2 pl-9 pr-4"
-                                                id="listbox-option-0" role="option">
+                                                :id="`database-type-option-${index}`" role="option" :aria-selected="selectedAuth.type?.code === type?.code">
                                                 <span class="block truncate font-normal">
                                                     <span x-text="type.name"></span>
                                                 </span>
@@ -828,14 +724,19 @@
                         </div>
 
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="region" class="block text-sm font-medium text-slate-700">
+                            <label id="database-version-label" class="block text-sm font-medium text-slate-700">
                                 Database Version
                             </label>
                             <div class="relative mt-1.5">
                                 <button @click="toggleDatabaseVersionDropdown()"
+                                        @keydown.arrow-down.prevent="moveListbox('databaseVersionActiveIndex', availableDatabaseVersions(), 1, 'openDatabaseVersion')"
+                                        @keydown.arrow-up.prevent="moveListbox('databaseVersionActiveIndex', availableDatabaseVersions(), -1, 'openDatabaseVersion')"
+                                        @keydown.enter.prevent="commitListbox('databaseVersionActiveIndex', availableDatabaseVersions(), 'openDatabaseVersion', (item) => selectDatabaseVersion(item))"
+                                        @keydown.space.prevent="commitListbox('databaseVersionActiveIndex', availableDatabaseVersions(), 'openDatabaseVersion', (item) => selectDatabaseVersion(item))"
+                                        @keydown.escape="if (openDatabaseVersion) { $event.preventDefault(); $event.stopPropagation(); openDatabaseVersion = false; }"
                                         type="button"
                                         class="relative w-full rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                        aria-haspopup="listbox" :aria-expanded="openDatabaseVersion.toString()" aria-labelledby="database-version-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.version?.name||'--Database Version--'"></span>
                                     <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
@@ -857,9 +758,9 @@
                                         class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1.5 text-sm shadow-lg focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
-                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+                                        aria-labelledby="database-version-label" :aria-activedescendant="databaseVersionActiveIndex === null ? null : `database-version-option-${databaseVersionActiveIndex}`">
 
-                                    <template x-for="(version, index) in databaseVersions">
+                                    <template x-for="(version, index) in availableDatabaseVersions()">
                                         <li
                                                 @click="selectDatabaseVersion(version)"
                                                 x-show="version?.name?.includes(selectedAuth.type?.name)"
@@ -867,7 +768,7 @@
                                                 @mouseleave="databaseVersionActiveIndex = null"
                                                 :class="{ 'text-white bg-indigo-600': databaseVersionActiveIndex === index, 'text-slate-700': !(databaseVersionActiveIndex === index) }"
                                                 class="relative cursor-pointer select-none py-2 pl-9 pr-4"
-                                                id="listbox-option-0" role="option">
+                                                :id="`database-version-option-${index}`" role="option" :aria-selected="selectedAuth.version?.code === version?.code">
                                                 <span class="block truncate font-normal">
                                                     <span x-text="version.name"></span>
                                                 </span>
@@ -885,25 +786,25 @@
                                 </ul>
                             </div>
                             <p x-show="connectionErrors?.auth?.version" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="region-error" x-text="connectionErrors?.auth?.version"></p>
+                               id="database-version-error" x-text="connectionErrors?.auth?.version"></p>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="port" class="block text-sm font-medium text-slate-700">
+                            <label for="database-port" class="block text-sm font-medium text-slate-700">
                                 Database Port
                             </label>
-                            <input x-model="selectedAuth.port" type="text" name="port" id="port" autocomplete="port"
+                            <input x-model="selectedAuth.port" type="text" name="port" id="database-port" autocomplete="port"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.port" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="port-error" x-text="connectionErrors.auth?.port"></p>
+                               id="database-port-error" x-text="connectionErrors.auth?.port"></p>
                         </div>
                         <div class="sm:col-span-6" x-show="integrationCode === 'database'">
-                            <label for="host" class="block text-sm font-medium text-slate-700">
+                            <label for="database-host" class="block text-sm font-medium text-slate-700">
                                 Database Hostname or IPv4 or IPv6
                             </label>
-                            <input x-model="selectedAuth.host"  x-on:change.debounce="awsRDSReplicaWarning()" type="text" name="host" id="host" autocomplete="host"
+                            <input x-model="selectedAuth.host"  x-on:change.debounce="awsRDSReplicaWarning()" type="text" name="host" id="database-host" autocomplete="host"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.host" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="host-error" x-text="connectionErrors.auth?.host"></p>
+                               id="database-host-error" x-text="connectionErrors.auth?.host"></p>
                         </div>
                         <div class="sm:col-span-6" x-show="integrationCode === 'database' && awsRDSReplicaWarning() === true">
                             <div class="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="alert">
@@ -912,43 +813,44 @@
                                 </svg>
                                 <p class="min-w-0 flex-1 leading-6">
                                     <strong> We recommend using master RDS server hostname to create backup</strong>. Using AWS RDS Read Replica server to create database backup may cause error "canceling statement due to conflict with recovery" and your
-                                    backup may fail. <a target="_blank" href="https://aws.amazon.com/premiumsupport/knowledge-center/rds-postgresql-error-conflict-recovery/#:~:text=This%20error%20might%20occur%20due,happening%20on%20the%20read%20replica" class="font-semibold underline transition hover:text-amber-900"><strong>Learn More</strong></a>.
+                                    backup may fail. <a target="_blank" rel="noopener noreferrer" href="https://aws.amazon.com/premiumsupport/knowledge-center/rds-postgresql-error-conflict-recovery/#:~:text=This%20error%20might%20occur%20due,happening%20on%20the%20read%20replica" class="font-semibold underline transition hover:text-amber-900"><strong>Learn More</strong></a>.
                                 </p>
                             </div>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="username" class="block text-sm font-medium text-slate-700">
+                            <label for="database-username" class="block text-sm font-medium text-slate-700">
                                 Database User
                             </label>
-                            <input x-model="selectedAuth.username" type="text" name="username" id="username"
+                            <input x-model="selectedAuth.username" type="text" name="username" id="database-username"
                                    autocomplete="username"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.username" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="port-error" x-text="connectionErrors.auth?.username"></p>
+                               id="database-username-error" x-text="connectionErrors.auth?.username"></p>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="password" class="block text-sm font-medium text-slate-700">
+                            <label for="database-password" class="block text-sm font-medium text-slate-700">
                                 Database Password
                             </label>
-                            <input x-model="selectedAuth.password" type="password" name="password" id="password"
-                                   autocomplete="new-password"
+                            <input x-model="selectedAuth.password" type="password" name="password" id="database-password"
+                                   autocomplete="new-password" :placeholder="connection.id ? 'Leave blank to keep the configured password' : 'Enter database password'"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p x-show="connection.id && selectedAuth.password_configured" class="mt-1.5 text-xs text-ink-650">A database password is configured and is not displayed.</p>
                             <p x-show="connectionErrors.auth?.password" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="port-error" x-text="connectionErrors.auth?.password"></p>
+                               id="database-password-error" x-text="connectionErrors.auth?.password"></p>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
                             <div class="flex items-center justify-between gap-4">
                                 <span class="flex grow flex-col">
-                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Use database SSL/TLS?</span>
-                                    <span class="text-xs text-slate-500" id="availability-description">New MySQL 8.4 connections start with TLS required. Turn this off only when the database explicitly supports a safe plaintext connection.</span>
+                                    <span class="text-sm font-medium text-slate-700" id="database-tls-label">Use database SSL/TLS?</span>
+                                    <span class="text-xs text-slate-500" id="database-tls-description">New MySQL 8.4 connections start with TLS required. Turn this off only when the database explicitly supports a safe plaintext connection.</span>
                                 </span>
                                 <button type="button"
                                         @click="toggleUseSSL()"
                                         :class="{ 'bg-indigo-600': selectedAuth.use_ssl, 'bg-slate-200': !(selectedAuth.use_ssl) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="selectedAuth.use_ssl" aria-labelledby="availability-label"
-                                        aria-describedby="availability-description">
+                                        role="switch" :aria-checked="selectedAuth.use_ssl" aria-labelledby="database-tls-label"
+                                        aria-describedby="database-tls-description">
                                         <span :class="{ 'translate-x-5': selectedAuth.use_ssl, 'translate-x-0': !(selectedAuth.use_ssl) }"
                                               aria-hidden="true"
                                               class="pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
@@ -960,16 +862,16 @@
                              x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
                             <div class="flex items-center justify-between gap-4">
                                 <span class="flex grow flex-col">
-                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Include Database Objects?</span>
-                                    <span class="text-xs text-slate-500" id="availability-description">Include stored procedures, functions, triggers, and scheduled event definitions in backups.
+                                    <span class="text-sm font-medium text-slate-700" id="database-objects-label">Include Database Objects?</span>
+                                    <span class="text-xs text-slate-500" id="database-objects-description">Include stored procedures, functions, triggers, and scheduled event definitions in backups.
                                         The database user must have permission to read these objects, including the EVENT privilege for MySQL and MariaDB.</span>
                                 </span>
                                 <button type="button"
                                         @click="toggleIncludeStoredProcedure()"
                                         :class="{ 'bg-indigo-600': selectedAuth.include_stored_procedure, 'bg-slate-200': !(selectedAuth.include_stored_procedure) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="selectedAuth.include_stored_procedure" aria-labelledby="availability-label"
-                                        aria-describedby="availability-description">
+                                        role="switch" :aria-checked="selectedAuth.include_stored_procedure" aria-labelledby="database-objects-label"
+                                        aria-describedby="database-objects-description">
                                         <span :class="{ 'translate-x-5': selectedAuth.include_stored_procedure, 'translate-x-0': !(selectedAuth.include_stored_procedure) }"
                                               aria-hidden="true"
                                               class="pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
@@ -980,56 +882,62 @@
 
                         <!-- Website-->
                         <div class="sm:col-span-3" x-show="integrationCode === 'website'">
-                            <label for="host" class="block text-sm font-medium text-slate-700">
+                            <label for="website-host" class="block text-sm font-medium text-slate-700">
                                 Hostname or IPv4 or IPv6
                             </label>
-                            <input x-model="selectedAuth.host" type="text" name="host" id="host" autocomplete="host"
+                            <input x-model="selectedAuth.host" type="text" name="host" id="website-host" autocomplete="host"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.host" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="host-error" x-text="connectionErrors.auth?.host"></p>
+                               id="website-host-error" x-text="connectionErrors.auth?.host"></p>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'website'">
-                            <label for="port" class="block text-sm font-medium text-slate-700">
+                            <label for="website-port" class="block text-sm font-medium text-slate-700">
                                 Port
                             </label>
-                            <input x-model="selectedAuth.port" type="text" name="port" id="port" autocomplete="port"
+                            <input x-model="selectedAuth.port" type="text" name="port" id="website-port" autocomplete="port"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.port" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="port-error" x-text="connectionErrors.auth?.port"></p>
+                               id="website-port-error" x-text="connectionErrors.auth?.port"></p>
                         </div>
 
                         <div class="sm:col-span-3" x-show="integrationCode === 'website'">
-                            <label for="username" class="block text-sm font-medium text-slate-700">
+                            <label for="website-username" class="block text-sm font-medium text-slate-700">
                                 Username
                             </label>
-                            <input x-model="selectedAuth.username" type="text" name="username" id="username"
+                            <input x-model="selectedAuth.username" type="text" name="username" id="website-username"
                                    autocomplete="username"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.username" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="username-error" x-text="connectionErrors.auth?.username"></p>
+                               id="website-username-error" x-text="connectionErrors.auth?.username"></p>
                         </div>
                         <div class="sm:col-span-3"
                              x-show="integrationCode === 'website' && (!selectedAuth.use_public_key||selectedAuth.use_private_key)">
-                            <label for="password" class="block text-sm font-medium text-slate-700">
+                            <label for="website-password" class="block text-sm font-medium text-slate-700">
                                 <span x-show="selectedAuth.use_private_key===false||!selectedAuth.use_private_key">Password</span>
                                 <span x-show="selectedAuth.use_private_key===true">SSH Key Passphrase (optional)</span>
                             </label>
-                            <input x-model="selectedAuth.password" type="password" name="password" id="password"
-                                   autocomplete="new-password"
+                            <input x-model="selectedAuth.password" type="password" name="password" id="website-password"
+                                   autocomplete="new-password" :placeholder="connection.id ? 'Leave blank to keep the configured secret' : 'Enter password or passphrase'"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p x-show="connection.id && selectedAuth.password_configured" class="mt-1.5 text-xs text-ink-650">A password or passphrase is configured and is not displayed.</p>
                             <p x-show="connectionErrors.auth?.password" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="password-error" x-text="connectionErrors.auth?.password"></p>
+                               id="website-password-error" x-text="connectionErrors.auth?.password"></p>
                         </div>
 
                         <div class="sm:col-span-3" x-show="integrationCode === 'website'">
-                            <label for="protocol" class="block text-sm font-medium text-slate-700">
+                            <label id="protocol-label" class="block text-sm font-medium text-slate-700">
                                 Protocol
                             </label>
                             <div class="relative mt-1.5">
                                 <button @click="toggleProtocolDropdown()"
+                                        @keydown.arrow-down.prevent="moveListbox('protocolActiveIndex', websiteProtocols, 1, 'openProtocol')"
+                                        @keydown.arrow-up.prevent="moveListbox('protocolActiveIndex', websiteProtocols, -1, 'openProtocol')"
+                                        @keydown.enter.prevent="commitListbox('protocolActiveIndex', websiteProtocols, 'openProtocol', (item) => { selectedAuth.protocol = item; openProtocol = false; })"
+                                        @keydown.space.prevent="commitListbox('protocolActiveIndex', websiteProtocols, 'openProtocol', (item) => { selectedAuth.protocol = item; openProtocol = false; })"
+                                        @keydown.escape="if (openProtocol) { $event.preventDefault(); $event.stopPropagation(); openProtocol = false; }"
                                         type="button"
                                         class="relative w-full rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                        aria-haspopup="listbox" :aria-expanded="Boolean(openProtocol).toString()" aria-labelledby="protocol-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.protocol?.name||'--Server Protocol--'"></span>
                                     <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
@@ -1051,7 +959,7 @@
                                         class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1.5 text-sm shadow-lg focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
-                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+                                        aria-labelledby="protocol-label" :aria-activedescendant="protocolActiveIndex === null ? null : `protocol-option-${protocolActiveIndex}`">
 
                                     <template x-for="(protocol, index) in websiteProtocols">
                                         <li
@@ -1060,7 +968,7 @@
                                                 @mouseleave="protocolActiveIndex = null"
                                                 :class="{ 'text-white bg-indigo-600': protocolActiveIndex === index, 'text-slate-700': !(protocolActiveIndex === index) }"
                                                 class="relative cursor-pointer select-none py-2 pl-9 pr-4"
-                                                id="listbox-option-0" role="option">
+                                                :id="`protocol-option-${index}`" role="option" :aria-selected="selectedAuth.protocol?.code === protocol?.code">
                                                 <span class="block truncate font-normal">
                                                     <span x-text="protocol.name"></span>
                                                 </span>
@@ -1078,11 +986,11 @@
                                 </ul>
                             </div>
                             <p x-show="connectionErrors.auth?.protocol" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="region-error" x-text="connectionErrors.auth?.protocol"></p>
+                               id="website-protocol-error" x-text="connectionErrors.auth?.protocol"></p>
                         </div>
                         <div class="sm:col-span-3"
                              x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
-                            <label for="protocol" class="block text-sm font-medium text-slate-700">
+                            <label id="ftps-explicit-label" class="block text-sm font-medium text-slate-700">
                                 Use Explicit SSL
                             </label>
                             <div class="relative mt-2.5">
@@ -1090,15 +998,14 @@
                                         @click="selectedAuth.ftps_use_explicit_ssl = !selectedAuth.ftps_use_explicit_ssl; selectedAuth.use_private_key=false;"
                                         :class="{ 'bg-indigo-600': selectedAuth.ftps_use_explicit_ssl, 'bg-slate-200': !(selectedAuth.ftps_use_explicit_ssl) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="selectedAuth.ftps_use_explicit_ssl" aria-labelledby="availability-label"
-                                        aria-describedby="availability-description">
+                                        role="switch" :aria-checked="selectedAuth.ftps_use_explicit_ssl" aria-labelledby="ftps-explicit-label">
                                             <span :class="{ 'translate-x-5': selectedAuth.ftps_use_explicit_ssl, 'translate-x-0': !(selectedAuth.ftps_use_explicit_ssl) }"
                                                   aria-hidden="true"
                                                   class="pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                                 </button>
                             </div>
                             <p x-show="connectionErrors.auth?.protocol" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="region-error" x-text="connectionErrors.auth?.protocol"></p>
+                               id="ftps-explicit-error" x-text="connectionErrors.auth?.protocol"></p>
                         </div>
                         <div class="sm:col-span-3"
                              x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
@@ -1142,15 +1049,15 @@
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="flex items-center justify-between gap-4">
                                 <span class="flex grow flex-col">
-                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Use Our Public Key?</span>
-                                    <span class="text-xs text-slate-500" id="availability-description">Use the public-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
+                                    <span class="text-sm font-medium text-slate-700" id="managed-public-key-label">Use Our Public Key?</span>
+                                    <span class="text-xs text-slate-500" id="managed-public-key-description">Use the public-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
                                 </span>
                                 <button type="button"
                                         @click="selectedAuth.use_public_key = !selectedAuth.use_public_key; selectedAuth.use_private_key=false; selectedAuth.private_key=null; selectedAuth.ssh_password=null; if (integrationCode === 'website') selectedAuth.password=null;"
                                         :class="{ 'bg-indigo-600': selectedAuth.use_public_key, 'bg-slate-200': !(selectedAuth.use_public_key) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="selectedAuth.use_public_key" aria-labelledby="availability-label"
-                                        aria-describedby="availability-description">
+                                        role="switch" :aria-checked="selectedAuth.use_public_key" aria-labelledby="managed-public-key-label"
+                                        aria-describedby="managed-public-key-description">
                                         <span :class="{ 'translate-x-5': selectedAuth.use_public_key, 'translate-x-0': !(selectedAuth.use_public_key) }"
                                               aria-hidden="true"
                                               class="pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
@@ -1176,27 +1083,27 @@
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="flex items-center justify-between gap-4">
                                 <span class="flex grow flex-col">
-                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Use Your Private Key?</span>
+                                    <span class="text-sm font-medium text-slate-700" id="private-key-label">Use Your Private Key?</span>
                                     <span class="text-xs text-slate-500"
-                                          id="availability-description">Use the private-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
+                                          id="private-key-description">Use the private-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
                                 </span>
                                 <button type="button"
                                         @click="selectedAuth.use_private_key = !selectedAuth.use_private_key; selectedAuth.use_public_key=false; if (integrationCode === 'website') selectedAuth.password=null; if (integrationCode === 'database') selectedAuth.ssh_password=null;"
                                         :class="{ 'bg-indigo-600': selectedAuth.use_private_key, 'bg-slate-200': !(selectedAuth.use_private_key) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
                                         role="switch" :aria-checked="selectedAuth.use_private_key" aria-label="Use your private key"
-                                        aria-describedby="availability-description">
+                                        aria-describedby="private-key-description">
                                         <span :class="{ 'translate-x-5': selectedAuth.use_private_key, 'translate-x-0': !(selectedAuth.use_private_key) }"
                                               aria-hidden="true"
                                               class="pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                                 </button>
                             </div>
-                            <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key" autocomplete="off" spellcheck="false"
+                            <textarea x-model="selectedAuth.private_key" id="ssh-private-key" name="private_key" autocomplete="off" spellcheck="false"
                                       rows="3"
                                       x-show="(selectedAuth.use_private_key===true)"
                                       class="mt-3 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
                             <p x-show="connectionErrors.auth?.private_key && selectedAuth.use_private_key===true"
-                               class="mt-1.5 text-xs font-medium text-red-600" id="notes-error"
+                               class="mt-1.5 text-xs font-medium text-red-600" id="ssh-private-key-error"
                                x-text="connectionErrors.auth?.private_key"></p>
                         </div>
                         <div class="sm:col-span-6" x-cloak
@@ -1216,16 +1123,16 @@
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="flex items-center justify-between gap-4">
                                 <span class="flex grow flex-col">
-                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Use legacy SHA-1 Key Verification?</span>
+                                    <span class="text-sm font-medium text-slate-700" id="legacy-sha1-label">Use legacy SHA-1 Key Verification?</span>
                                     <span class="text-xs text-slate-500"
-                                          id="availability-description">If your systems do not support SHA-2 variants of RSA key verification algorithms.</span>
+                                          id="legacy-sha1-description">If your systems do not support SHA-2 variants of RSA key verification algorithms.</span>
                                 </span>
                                 <button type="button"
                                         @click="selectedAuth.flag_use_sha1_key_verification = !selectedAuth.flag_use_sha1_key_verification;"
                                         :class="{ 'bg-indigo-600': selectedAuth.flag_use_sha1_key_verification, 'bg-slate-200': !(selectedAuth.flag_use_sha1_key_verification) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
                                         role="switch" :aria-checked="selectedAuth.flag_use_sha1_key_verification" aria-label="Use legacy SHA-1 key verification"
-                                        aria-describedby="availability-description">
+                                        aria-describedby="legacy-sha1-description">
                                         <span :class="{ 'translate-x-5': selectedAuth.flag_use_sha1_key_verification, 'translate-x-0': !(selectedAuth.flag_use_sha1_key_verification) }"
                                               aria-hidden="true"
                                               class="pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
@@ -1286,7 +1193,7 @@
                                    autocomplete="new-password"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.ssh_password" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="ssh_port-error" x-text="connectionErrors.auth?.ssh_password"></p>
+                               id="ssh-password-error" x-text="connectionErrors.auth?.ssh_password"></p>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
@@ -1297,15 +1204,15 @@
                              x-show="integrationCode === 'database' && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
                             <div class="flex items-center justify-between gap-4">
                                 <span class="flex grow flex-col">
-                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Multi-Database User?</span>
-                                    <span class="text-xs text-slate-500" id="availability-description">If you use the same user for multiple databases, it's good to enable this option.</span>
+                                    <span class="text-sm font-medium text-slate-700" id="multi-database-label">Multi-Database User?</span>
+                                    <span class="text-xs text-slate-500" id="multi-database-description">If you use the same user for multiple databases, it's good to enable this option.</span>
                                 </span>
                                 <button type="button"
                                         @click="selectedAuth.all_databases = !selectedAuth.all_databases;"
                                         :class="{ 'bg-indigo-600': selectedAuth.all_databases, 'bg-slate-200': !(selectedAuth.all_databases) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="selectedAuth.all_databases" aria-labelledby="availability-label"
-                                        aria-describedby="availability-description">
+                                        role="switch" :aria-checked="selectedAuth.all_databases" aria-labelledby="multi-database-label"
+                                        aria-describedby="multi-database-description">
                                         <span :class="{ 'translate-x-5': selectedAuth.all_databases, 'translate-x-0': !(selectedAuth.all_databases) }"
                                               aria-hidden="true"
                                               class="pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
@@ -1323,7 +1230,7 @@
                                             must be equal or higher than database server
                                             version</p>
                                         <p class="mt-1">
-                                            <a target="_blank"
+                                            <a target="_blank" rel="noopener noreferrer"
                                                href="https://support.backupsheep.com/docs/requirements-for-database-backup-using-ssh"
                                                class="font-semibold text-sky-800 underline transition hover:text-sky-900">Details</a>
                                         </p>
@@ -1342,7 +1249,7 @@
                                             version must be equal or higher than database server
                                             version</p>
                                         <p class="mt-1">
-                                            <a target="_blank"
+                                            <a target="_blank" rel="noopener noreferrer"
                                                href="https://support.backupsheep.com/databases/database-backup-using-ssh-server#mysql-mysql-mysqldump-and-server-version"
                                                class="font-semibold text-sky-800 underline transition hover:text-sky-900">Details</a>
                                         </p>
@@ -1364,17 +1271,17 @@
                     </div>
                 </div>
 
-                <div class="flex flex-col-reverse gap-2 border-t border-slate-200 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+                <div class="flex flex-col-reverse gap-2 border-t border-rule-200 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
                     <button @click="closeConnectionModal()" type="button" :disabled="loading"
                             class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
                         Cancel
                     </button>
                     <button @click="saveConnection()" type="button"
-                            :disabled="loading || discoveryLoading"
+                            :disabled="loading || discoveryLoading || connectionMutationOutcomeUnknown"
                             :aria-busy="loading"
-                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                        <span x-show="!loading && !connection.id">Add Integration</span>
-                        <span x-show="!loading && connection.id">Modify Integration</span>
+                            class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 disabled:cursor-not-allowed disabled:opacity-60">
+                        <span x-show="!loading && !connectionMutationOutcomeUnknown" x-text="connectionSubmitLabel()"></span>
+                        <span x-show="!loading && connectionMutationOutcomeUnknown">Reload before retrying</span>
                         <span x-show="loading">Saving and validating…</span>
                     </button>
                 </div>
@@ -1384,9 +1291,9 @@
 
 
     <!-- Delete connection modal -->
-    <div x-cloak x-show="openDeleteConnection" class="fixed inset-0 z-50 overflow-y-auto"
-         aria-labelledby="modal-title" role="dialog" aria-modal="true">
-        <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
+    <div x-cloak x-show="openDeleteConnection" @keydown.escape.window="if (openDeleteConnection && !loading) closeDeleteConnectionModal()" class="fixed inset-0 z-50 overflow-y-auto"
+         aria-labelledby="delete-connection-title" aria-describedby="delete-connection-description" role="dialog" aria-modal="true">
+        <div class="flex min-h-full items-end justify-center p-0 text-center sm:items-center sm:p-6">
             <div x-show="openDeleteConnection"
                  x-transition:enter="ease-out duration-300"
                  x-transition:enter-start="opacity-0"
@@ -1394,7 +1301,7 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100"
                  x-transition:leave-end="opacity-0"
-                 class="fixed inset-0 bg-slate-900/50" aria-hidden="true"></div>
+                 class="fixed inset-0 bg-ink-950/55" aria-hidden="true"></div>
 
             <div x-show="openDeleteConnection"
                  x-transition:enter="ease-out duration-300"
@@ -1403,9 +1310,11 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                  x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-xl sm:max-h-[calc(100vh-3rem)] sm:max-w-lg">
+                 x-ref="deleteDialog" tabindex="-1" @keydown.tab="trapDialog($event, $refs.deleteDialog)"
+                 class="relative flex min-h-full max-h-screen w-full flex-col overflow-hidden rounded-none border border-rule-200 bg-paper text-left shadow-lifted sm:min-h-0 sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:rounded-lg">
                 <div class="flex-1 overflow-y-auto px-5 py-6 sm:px-6">
-                    <div class="mx-auto grid h-11 w-11 place-items-center rounded-full bg-red-50 text-red-600">
+                    <button x-show="!loading" type="button" @click="closeDeleteConnectionModal()" class="absolute right-4 top-4 grid h-10 w-10 place-items-center rounded-md text-ink-500 transition hover:bg-wool-50 hover:text-ink-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600" aria-label="Close deletion dialog"><svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg></button>
+                    <div class="grid h-11 w-11 place-items-center rounded-md bg-incident-50 text-incident-600 ring-1 ring-inset ring-incident-200">
                         <svg x-show="loading" class="h-5 w-5 animate-spin"
                              xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
@@ -1417,42 +1326,29 @@
                             <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"/>
                         </svg>
                     </div>
-                    <div x-show="!loading" class="mt-3 text-center">
-                        <h3 class="text-base font-semibold text-slate-900" id="modal-title">
-                            Please Confirm
-                        </h3>
-                        <p class="mt-2 text-sm text-slate-500">
-                            This action will delete all nodes created with this connection (<strong
-                                x-text="connection.name"></strong>) and their backups as well. You can't undo this
-                            action. Proceed carefully.
-                        </p>
+                    <div x-show="!loading" class="mt-4 pr-10">
+                        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-incident-700">Connection lifecycle</p>
+                        <h3 class="mt-1 text-xl font-semibold tracking-tight text-ink-950" id="delete-connection-title" x-text="connectionNodeCount > 0 ? 'Deletion blocked' : 'Delete connection?'"></h3>
+                        <div id="delete-connection-description" class="mt-3 text-sm leading-6 text-ink-650">
+                            <p class="font-semibold text-ink-800"><span x-text="connection.name"></span></p>
+                            <p x-show="connectionNodeCount > 0" class="mt-2">This connection cannot be deleted while sources are attached. Detach or delete <strong x-text="connectionNodeCount"></strong> source<span x-show="connectionNodeCount !== 1">s</span> first, or pause the connection instead.</p>
+                            <p x-show="connectionNodeCount === 0" class="mt-2">Removing this record deletes the BackupSheep connection configuration and its stored credential. Provider resources and provider-native snapshots are not deleted.</p>
+                        </div>
+                        <div x-show="connectionNodeCount > 0" class="mt-4 rounded-md border border-attention-200 bg-attention-50 px-4 py-3 text-xs leading-5 text-attention-700" role="status"><span class="font-semibold">Preflight failed:</span> the API also rejects deletion until coverage reaches zero.</div>
                     </div>
-                    <div x-show="loading" class="mt-3 text-center">
-                        <h3 class="text-base font-semibold text-slate-900" id="modal-title">
-                            Loading...
-                        </h3>
-                        <p class="mt-1 text-sm text-slate-500">
-                            Don't refresh page.
-                        </p>
-                    </div>
-                    <div x-show="!loading" class="mt-5 text-left">
-                        <label for="about" class="block text-sm font-medium text-slate-700">
-                            Notes
-                        </label>
-                        <textarea x-model="notes" id="about" name="about" rows="3"
-                                  class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
-                        <p class="mt-1.5 text-xs text-slate-500">Optional notes about this action.</p>
+                    <div x-show="loading" class="mt-4">
+                        <h3 class="text-base font-semibold text-ink-950">Deleting connection…</h3>
+                        <p class="mt-1 text-sm text-ink-650">Keep this dialog open until the request completes.</p>
                     </div>
                 </div>
 
-                <div x-show="!loading" class="flex flex-col-reverse gap-2 border-t border-slate-200 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+                <div x-show="!loading" class="flex flex-col-reverse gap-2 border-t border-rule-200 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
                     <button @click="closeDeleteConnectionModal()" type="button"
-                            class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                        Cancel
+                            class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-rule-200 bg-paper px-4 py-2 text-sm font-semibold text-ink-800 transition hover:bg-wool-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600" x-text="connectionNodeCount > 0 ? 'Close' : 'Cancel'">
                     </button>
-                    <button @click="deleteConnection(connection.id)" type="button"
-                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">
-                        Delete Connection
+                    <button x-show="connectionNodeCount === 0" @click="deleteConnection(connection.id)" type="button"
+                            class="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-incident-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-incident-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-incident-600">
+                        Delete connection
                     </button>
                 </div>
             </div>
@@ -1478,6 +1374,9 @@
             protocolActiveIndex: null,
             openDeleteConnection: null,
             openProtocol: null,
+            modalMode: 'create',
+            lastFocusedElement: null,
+            connectionNodeCount: 0,
             connection: {},
             endpoints: [],
             awsRegions: [],
@@ -1485,6 +1384,7 @@
             discoveryLoading: false,
             validatingConnectionId: null,
             connectionFailure: null,
+            connectionMutationOutcomeUnknown: false,
             hostKeyReview: null,
             hostKeyApprovalLoading: false,
             hostKeyRevocationLoading: false,
@@ -1645,8 +1545,48 @@
                 }
             ],
             integrationCode: "{{integration.code}}",
+            providerName: "{{ integration.name|escapejs }}",
             openUrl(url) {
                 window.location.href = url;
+            },
+            connectionDialogTitle() {
+                if (this.modalMode === 'copy') return `Duplicate ${this.providerName} connection`;
+                if (this.modalMode === 'edit') return `Edit ${this.providerName} connection`;
+                return `Connect ${this.providerName} account`;
+            },
+            connectionDialogDescription() {
+                if (this.modalMode === 'copy') {
+                    return 'Review the duplicated settings and supply a new credential. Stored secrets are never copied into the browser.';
+                }
+                if (this.modalMode === 'edit') {
+                    return 'Update account metadata or deliberately rotate a credential. Blank secret fields keep their stored values.';
+                }
+                return 'Create a provider account boundary and validate bounded access before attaching sources.';
+            },
+            connectionSubmitLabel() {
+                if (this.modalMode === 'copy') return 'Create copy and validate';
+                if (this.modalMode === 'edit') return 'Save and validate';
+                return 'Connect and validate';
+            },
+            focusDialog(dialog, preferred = null) {
+                this.$nextTick(() => {
+                    const target = preferred || dialog;
+                    if (target && typeof target.focus === 'function') target.focus();
+                });
+            },
+            trapDialog(event, dialog) {
+                if (!dialog) return;
+                const controls = Array.from(dialog.querySelectorAll(
+                    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+                )).filter((element) => element.offsetParent !== null);
+                if (!controls.length) return;
+                const currentIndex = controls.indexOf(document.activeElement);
+                let nextIndex = event.shiftKey ? currentIndex - 1 : currentIndex + 1;
+                if (currentIndex === -1) nextIndex = event.shiftKey ? controls.length - 1 : 0;
+                if (nextIndex < 0) nextIndex = controls.length - 1;
+                if (nextIndex >= controls.length) nextIndex = 0;
+                event.preventDefault();
+                controls[nextIndex].focus();
             },
             defaultConnectionFailure(code = 'CONNECTION_VALIDATION_FAILED') {
                 const failures = {
@@ -1654,6 +1594,11 @@
                         detail: 'The request took too long and was stopped by your browser.',
                         remediation: 'Confirm the destination is reachable from the BackupSheep worker, then retry.',
                         retryable: true,
+                    },
+                    REQUEST_OUTCOME_UNKNOWN: {
+                        detail: 'The browser stopped waiting before BackupSheep confirmed the result. The operation may have completed.',
+                        remediation: 'Refresh the connection register and activity log before retrying so the same change is not submitted twice.',
+                        retryable: false,
                     },
                     NETWORK_FAILURE: {
                         detail: 'The browser could not reach BackupSheep to complete this request.',
@@ -1677,6 +1622,21 @@
                     },
                 };
                 return {code, stage: 'browser', ...(failures[code] || failures.CONNECTION_VALIDATION_FAILED)};
+            },
+            unknownConnectionMutationError(payload = {}) {
+                const failure = this.defaultConnectionFailure('REQUEST_OUTCOME_UNKNOWN');
+                const error = new Error(failure.detail);
+                error.connectionFailure = failure;
+                error.payload = payload && typeof payload === 'object' && !Array.isArray(payload)
+                    ? payload
+                    : {};
+                return error;
+            },
+            requireConnectionMutationReceipt(payload) {
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !payload.id) {
+                    throw this.unknownConnectionMutationError();
+                }
+                return payload;
             },
             extractConnectionFailure(payload, responseStatus = null) {
                 const authPayload = payload?.['auth_' + this.integrationCode];
@@ -1706,6 +1666,7 @@
             connectionFailureTitle(failure) {
                 const titles = {
                     REQUEST_TIMEOUT: 'Request timed out',
+                    REQUEST_OUTCOME_UNKNOWN: 'Outcome not confirmed',
                     TCP_TIMEOUT: 'Destination timed out',
                     DNS_FAILURE: 'DNS lookup failed',
                     AUTH_FAILED: 'Authentication failed',
@@ -1733,6 +1694,9 @@
                     heading: heading || this.connectionFailureTitle(failure),
                     details: this.connectionFailureDetails(failure),
                 });
+                if (this.openConnection) {
+                    this.focusDialog(this.$refs.connectionDialog, this.$refs.connectionErrorSummary);
+                }
             },
             applyConnectionErrors(payload) {
                 const authKey = 'auth_' + this.integrationCode;
@@ -1769,9 +1733,16 @@
                     return payload;
                 } catch (error) {
                     if (error?.connectionFailure) throw error;
-                    const failure = error?.name === 'AbortError'
-                        ? this.defaultConnectionFailure('REQUEST_TIMEOUT')
-                        : this.defaultConnectionFailure('NETWORK_FAILURE');
+                    const method = String(options?.method || 'GET').toUpperCase();
+                    const readOnlyRequest = method === 'GET' || method === 'HEAD';
+                    let failure;
+                    if (!readOnlyRequest) {
+                        failure = this.defaultConnectionFailure('REQUEST_OUTCOME_UNKNOWN');
+                    } else if (error?.name === 'AbortError') {
+                        failure = this.defaultConnectionFailure('REQUEST_TIMEOUT');
+                    } else {
+                        failure = this.defaultConnectionFailure('NETWORK_FAILURE');
+                    }
                     const safeError = new Error(failure.detail);
                     safeError.connectionFailure = failure;
                     safeError.payload = {};
@@ -1809,17 +1780,17 @@
                         throw error;
                     }
                     await new Promise((resolve) => window.setTimeout(resolve, 750));
-                    state = await this.requestJSON(operationUrl, {
+                    const nextState = await this.requestJSON(operationUrl, {
                         headers: {'Accept': 'application/json'},
                         method: 'GET',
                         cache: 'no-store',
                     }, 20000);
+                    if (!nextState || typeof nextState !== 'object' || Array.isArray(nextState)) {
+                        throw this.unknownConnectionMutationError();
+                    }
+                    state = nextState;
                 }
-                const failure = this.defaultConnectionFailure('REQUEST_TIMEOUT');
-                const error = new Error(failure.detail);
-                error.connectionFailure = failure;
-                error.payload = state;
-                throw error;
+                throw this.unknownConnectionMutationError(state);
             },
             sshHostKeyTarget() {
                 if (this.integrationCode === 'website') {
@@ -1938,6 +1909,8 @@
 
             async openConnectionModal(connection_id, location_id, action_type, integration_code) {
                 if (this.loading) return;
+                this.lastFocusedElement = document.activeElement;
+                this.modalMode = action_type === 'copy' ? 'copy' : (connection_id ? 'edit' : 'create');
                 this.connectionFailure = null;
                 this.hostKeyReview = null;
                 this.connectionErrors = {
@@ -2009,6 +1982,8 @@
                              * Open Modal
                              */
                             this.openConnection = true;
+                            document.body.classList.add('overflow-hidden');
+                            this.focusDialog(this.$refs.connectionDialog, this.$refs.connectionName);
                         } catch (error) {
                             this.notifyConnectionFailure(error, 'Unable to load the integration');
                         } finally {
@@ -2026,6 +2001,8 @@
                             this.connection = {};
                             this.notes = null;
                             this.openConnection = true;
+                            document.body.classList.add('overflow-hidden');
+                            this.focusDialog(this.$refs.connectionDialog, this.$refs.connectionName);
 
                             await this.getEndpoints();
 
@@ -2041,7 +2018,7 @@
 
             },
             async saveConnection() {
-                if (this.loading || this.discoveryLoading) return;
+                if (this.loading || this.discoveryLoading || this.connectionMutationOutcomeUnknown) return;
                 this.loading = true;
                 this.connectionFailure = null;
                 this.hostKeyReview = null;
@@ -2122,6 +2099,7 @@
                         method: method,
                         body: JSON.stringify(data)
                     });
+                    json = this.requireConnectionMutationReceipt(json);
                     if (json["id"]) {
                         // A direct validation failure is reported as a successful,
                         // explicit PENDING save. Retain the identifier so retrying
@@ -2155,12 +2133,15 @@
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
-                        heading: 'Success!',
-                        details: json.detail || 'Integration saved and validated.'
+                        heading: 'Connection saved',
+                        details: 'Provider credentials and account access were validated. No backup or recovery was tested.'
                     });
                     this.closeConnectionModal();
                     location.reload();
                 } catch (error) {
+                    if (error?.connectionFailure?.code === 'REQUEST_OUTCOME_UNKNOWN') {
+                        this.connectionMutationOutcomeUnknown = true;
+                    }
                     this.applyConnectionErrors(error?.payload || {});
                     this.notifyConnectionFailure(
                         error,
@@ -2176,6 +2157,7 @@
 
             },
             async pauseConnection(connection_id) {
+                if (this.loading) return;
                 this.loading = true;
                 const url = "/api/v1/connections/" + connection_id + "/pause/";
                 const data = {
@@ -2223,8 +2205,8 @@
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
-                        heading: 'Success!',
-                        details: json.detail || json.message || 'Validation passed. Integration is good for backups.'
+                        heading: 'Provider access validated',
+                        details: 'Provider credentials and account access were validated. No backup or recovery was tested.'
                     });
                 } catch (error) {
                     this.notifyConnectionFailure(error);
@@ -2260,6 +2242,7 @@
             },
 
             async resumeConnection(connection_id) {
+                if (this.loading) return;
                 this.loading = true;
                 const url = "/api/v1/connections/" + connection_id + "/resume/";
                 const data = {
@@ -2289,25 +2272,21 @@
             },
 
             async deleteConnection(connection_id) {
+                if (this.loading || this.connectionNodeCount > 0) return;
                 this.loading = true;
                 const url = "/api/v1/connections/" + connection_id + "/";
-                const data = {
-                    notes: this.notes,
-                };
                 try {
                     const json = await this.requestJSON(url, {
                         headers: {
                             'Accept': 'application/json',
-                            'Content-Type': 'application/json'
                         },
                         method: 'DELETE',
-                        body: JSON.stringify(data)
                     });
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
-                        heading: 'Success!',
-                        details: json.detail || 'Integration deleted.'
+                        heading: 'Connection deleted',
+                        details: json.detail || 'The BackupSheep connection was deleted. Provider resources were not changed.'
                     });
                     location.reload();
                 } catch (error) {
@@ -2358,6 +2337,36 @@
                     this.discoveryLoading = false;
                 }
             },
+            availableDatabaseVersions() {
+                const databaseType = this.selectedAuth.type?.name;
+                if (!databaseType) return [];
+                return this.databaseVersions.filter((version) => version.name.includes(databaseType));
+            },
+            moveListbox(indexProperty, items, delta, openProperty) {
+                if (!Array.isArray(items) || !items.length) return;
+                this[openProperty] = true;
+                if (!Number.isInteger(this[indexProperty])) {
+                    this[indexProperty] = delta < 0 ? items.length - 1 : 0;
+                    return;
+                }
+                this[indexProperty] = (this[indexProperty] + delta + items.length) % items.length;
+            },
+            commitListbox(indexProperty, items, openProperty, callback) {
+                if (!Array.isArray(items) || !items.length) return;
+                if (!this[openProperty]) {
+                    this[openProperty] = true;
+                    if (!Number.isInteger(this[indexProperty])) {
+                        this[indexProperty] = 0;
+                    }
+                    return;
+                }
+                const activeIndex = Number.isInteger(this[indexProperty])
+                    ? this[indexProperty]
+                    : 0;
+                callback(items[activeIndex]);
+                this[indexProperty] = null;
+            },
+
             toggleEndpointDropdown() {
                 this.openEndpoint = !this.openEndpoint;
                 this.endpointActiveIndex = null;
@@ -2400,6 +2409,7 @@
                 this.selectedAuth.use_ssl = !this.selectedAuth.use_ssl;
             },
             closeConnectionModal() {
+                const trigger = this.lastFocusedElement;
                 this.openEndpoint = false;
                 this.endpointActiveIndex = null;
                 this.openConnection = false;
@@ -2410,36 +2420,61 @@
                 this.discoveryLoading = false;
                 this.connection = {};
                 this.selectedAuth = {};
+                this.modalMode = 'create';
+                document.body.classList.remove('overflow-hidden');
                 this.connectionErrors = {
                     name: null,
                     notes: null,
                     location: null,
                     region: null,
                     auth: {},
-                }
+                };
+                this.$nextTick(() => {
+                    if (trigger && typeof trigger.focus === 'function' && document.contains(trigger)) trigger.focus();
+                });
             },
-            openDeleteConnectionModal(connectionID, connectionName) {
+            openDeleteConnectionModal(connectionID, connectionName, nodeCount = 0) {
+                this.lastFocusedElement = document.activeElement;
                 this.connection = {
                     id: connectionID,
                     name: connectionName,
                 };
+                this.connectionNodeCount = Number(nodeCount) || 0;
                 this.loading = false;
                 this.openDeleteConnection = true;
                 this.notes = null;
+                document.body.classList.add('overflow-hidden');
+                this.focusDialog(this.$refs.deleteDialog);
             },
             closeDeleteConnectionModal() {
+                const trigger = this.lastFocusedElement;
                 this.loading = false;
                 this.notes = null;
                 this.openDeleteConnection = false;
-            },
-            copyToClipboard(string) {
-                navigator.clipboard.writeText(string);
-                Alpine.store('notifications').items.push({
-                    show: true,
-                    success: true,
-                    heading: 'Copied!',
-                    details: string
+                this.connectionNodeCount = 0;
+                document.body.classList.remove('overflow-hidden');
+                this.$nextTick(() => {
+                    if (trigger && typeof trigger.focus === 'function' && document.contains(trigger)) trigger.focus();
                 });
+            },
+            async copyToClipboard(string) {
+                if (!string) return;
+                try {
+                    await navigator.clipboard.writeText(string);
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Copied',
+                        details: 'Value copied to clipboard.'
+                    });
+                } catch (error) {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Copy failed',
+                        details: 'The browser could not write to the clipboard.'
+                    });
+                }
             },
             awsRDSReplicaWarning() {
                 if (this.selectedAuth?.host) {

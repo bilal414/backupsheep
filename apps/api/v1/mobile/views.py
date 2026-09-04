@@ -27,6 +27,7 @@ class MobileBootstrapView(APIView):
         "notify_via_slack",
         "notify_via_telegram",
         "backup_create",
+        "backup_restore",
         "backup_download",
         "backup_delete",
         "schedule_changes",

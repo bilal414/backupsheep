@@ -1857,6 +1857,294 @@ raise SystemExit(99)
         self.assertNotIn("--user 0:0", guide)
         self.assertNotIn("chown -R 10001:10001 /code/_storage /backups", guide)
 
+    def test_disaster_recovery_runbook_uses_fail_closed_database_commands(self):
+        guide = (ROOT / "docs" / "guides" / "disaster-recovery.md").read_text(
+            encoding="utf-8"
+        )
+        backup = guide.split(
+            "### 1. Stage, validate and atomically publish one recovery set", 1
+        )[1].split(
+            "### 2. Protect Local Storage", 1
+        )[0]
+        restore = guide.split(
+            "### 3. Provision lane roles, then restore PostgreSQL", 1
+        )[1].split("### 4. Start the application", 1)[0]
+
+        for command in (backup, restore):
+            with self.subTest(command=command[:40]):
+                self.assertIn("/run/secrets/db_bootstrap_password", command)
+                self.assertIn("PGPASSWORD=", command)
+                self.assertIn("--host=127.0.0.1", command)
+                self.assertIn("--no-password", command)
+                self.assertIn("--no-owner", command)
+                self.assertIn("--no-acl", command)
+                self.assertIn("--no-security-labels", command)
+
+        self.assertIn('RECOVERY_STAGING="${RECOVERY_PARENT}/.${RECOVERY_NAME}.staging"', backup)
+        self.assertIn('RECOVERY_LOCK="${RECOVERY_PARENT}/.${RECOVERY_NAME}.publish-lock"', backup)
+        self.assertIn('[[ ! -e "${RECOVERY_SET}" && ! -L "${RECOVERY_SET}" ]]', backup)
+        self.assertIn(
+            '[[ ! -e "${RECOVERY_STAGING}" && ! -L "${RECOVERY_STAGING}" ]]',
+            backup,
+        )
+        self.assertIn('mkdir -m 700 -- "${RECOVERY_STAGING}"', backup)
+        self.assertIn("--no-clobber --no-target-directory", backup)
+        publish = backup.index("mv --no-clobber --no-target-directory")
+        self.assertLess(backup.rindex("pg_restore --list"), publish)
+        self.assertIn('"${RECOVERY_STAGING}" "${RECOVERY_SET}"', backup[publish:])
+        self.assertIn('file_identity "${RECOVERY_SET}"', backup)
+        self.assertIn('== "${STAGING_IDENTITY}"', backup)
+        self.assertNotIn("mktemp", backup)
+        self.assertNotIn("rm -", backup)
+        self.assertIn("--exit-on-error", restore)
+        self.assertIn("--single-transaction", restore)
+        self.assertLess(restore.index("db-provision"), restore.index("pg_restore"))
+        self.assertIn("'exited|0'", restore)
+
+    def test_disaster_recovery_copy_and_mount_inventory_are_bounded(self):
+        guide = (ROOT / "docs" / "guides" / "disaster-recovery.md").read_text(
+            encoding="utf-8"
+        )
+        copy = guide.split(
+            "### 1. Stage, validate and atomically publish one recovery set", 1
+        )[1].split(
+            "### 2. Protect Local Storage", 1
+        )[0]
+        mounts = guide.split("### 2. Protect Local Storage", 1)[1].split(
+            "## Restore to a replacement host", 1
+        )[0]
+
+        self.assertIn("set -euo pipefail", copy)
+        self.assertIn('[[ ! -f "$1" || -L "$1" ]]', copy)
+        self.assertIn("stat -c '%h'", copy)
+        self.assertIn("stat -f '%l'", copy)
+        self.assertIn("hidden_sources=(", copy)
+        self.assertIn("Refusing unreviewed hidden deployment-secret entries", copy)
+        self.assertIn("require_regular_file \"${source}\"", copy)
+        self.assertIn("artifact_local_file_database_keyring", copy)
+        self.assertIn("artifact_local_file_files_keyring", copy)
+        self.assertIn("secret_sources_after=(.secrets/*)", copy)
+        self.assertIn("copied_secrets=(", copy)
+        self.assertIn("cmp -s --", copy)
+        self.assertIn("git rev-parse --verify 'HEAD^{commit}'", copy)
+        self.assertIn('staged_entries=("${RECOVERY_STAGING}"/*)', copy)
+
+        self.assertIn("ps --all --quiet", mounts)
+        self.assertIn("while IFS= read -r container", mounts)
+        self.assertIn(".Source", mounts)
+        self.assertIn(".RW", mounts)
+        self.assertIn("docker volume inspect", mounts)
+        self.assertNotIn('container="$(bs_compose', mounts)
+        self.assertLess(
+            mounts.index("Stop `app` and Beat together"),
+            mounts.index("first Celery drain inspection"),
+        )
+        self.assertLess(
+            mounts.index("first Celery drain inspection"),
+            mounts.index("Stop all five exact workers"),
+        )
+        self.assertLess(
+            mounts.index("Stop all five exact workers"),
+            mounts.index("Inside that stable cut"),
+        )
+        self.assertIn("rabbitmqctl -q -p backupsheep list_queues", mounts)
+        self.assertIn("exactly one numeric row for each", mounts)
+        self.assertIn("zero consumers and zero\n   unacknowledged messages", mounts)
+        self.assertIn("secret-safe, read-only PostgreSQL/report", mounts)
+        self.assertIn("without opening a broker publisher or consumer", mounts)
+
+    def test_upgrade_stable_cut_closes_ingress_before_drain_and_rechecks_state(self):
+        guide = (ROOT / "docs" / "guides" / "upgrades.md").read_text(
+            encoding="utf-8"
+        )
+        before_change = guide.split("## Before the change", 1)[1].split(
+            "## One-time legacy SSH trust", 1
+        )[0]
+
+        intake_stop = before_change.index(
+            "bs_compose --profile operations stop app beat"
+        )
+        intake_quiesced = before_change.index(
+            'test -z "${RUNNING_INTAKE_SERVICES}"', intake_stop
+        )
+        first_inspection = before_change.index("celery -A backupsheep inspect active")
+        reserved_inspection = before_change.index(
+            "celery -A backupsheep inspect reserved"
+        )
+        scheduled_inspection = before_change.index(
+            "celery -A backupsheep inspect scheduled"
+        )
+        worker_stop = before_change.index(
+            "worker-cloud worker-database worker-files worker-storage worker-logs",
+            first_inspection,
+        )
+        no_running = before_change.index(
+            'test -z "${RUNNING_APPLICATION_SERVICES}"', worker_stop
+        )
+        durable_recheck = before_change.index(
+            "stable-cut durable-row recheck", worker_stop
+        )
+        broker_recheck = before_change.index(
+            "rabbitmqctl -q -p backupsheep list_queues", durable_recheck
+        )
+        recovery_publish = before_change.index(
+            "stage, validate and atomically publish", broker_recheck
+        )
+
+        drain_reconciled = before_change.index(
+            "terminal or explicitly reconciled", first_inspection
+        )
+
+        self.assertLess(intake_stop, intake_quiesced)
+        self.assertLess(intake_quiesced, first_inspection)
+        self.assertLess(first_inspection, reserved_inspection)
+        self.assertLess(reserved_inspection, scheduled_inspection)
+        self.assertLess(scheduled_inspection, drain_reconciled)
+        self.assertLess(drain_reconciled, worker_stop)
+        self.assertLess(scheduled_inspection, worker_stop)
+        self.assertLess(first_inspection, worker_stop)
+        self.assertLess(worker_stop, no_running)
+        self.assertLess(no_running, durable_recheck)
+        self.assertLess(durable_recheck, broker_recheck)
+        self.assertLess(broker_recheck, recovery_publish)
+        self.assertIn('grep -E \'^(app|beat)$\'', before_change)
+        self.assertGreaterEqual(
+            before_change.count(
+                "RUNNING_SERVICES=\"$(\n"
+                "     bs_compose --profile operations ps --status running --services\n"
+                "   )\" || exit 1"
+            ),
+            2,
+        )
+        self.assertNotIn(
+            "ps --status running --services\n   } | grep", before_change
+        )
+        self.assertIn("name messages_ready messages_unacknowledged consumers", before_change)
+        self.assertIn("failed || count != 6", before_change)
+        self.assertIn("consumers != 0 || unacked != 0", before_change)
+        self.assertIn("--silent", before_change)
+        self.assertIn("secret-safe, read-only\n   PostgreSQL/report command", before_change)
+        self.assertIn("without opening a broker\n   publisher or consumer", before_change)
+        self.assertNotIn("rabbitmqctl -q list_queues", before_change)
+
+    def test_operational_queue_diagnostics_target_the_application_vhost(self):
+        for relative_path in (
+            "docs/guides/operations.md",
+            "docs/guides/observability.md",
+        ):
+            with self.subTest(relative_path=relative_path):
+                guide = (ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertIn(
+                    "rabbitmqctl -q -p backupsheep list_queues", guide
+                )
+                self.assertIn(
+                    "name messages_ready messages_unacknowledged consumers durable --silent",
+                    guide,
+                )
+                self.assertNotIn(
+                    "rabbitmqctl list_queues name messages_ready", guide
+                )
+
+        operations = (ROOT / "docs" / "guides" / "operations.md").read_text(
+            encoding="utf-8"
+        )
+        planned = operations.split("## Planned maintenance", 1)[1].split(
+            "## What survives a crash", 1
+        )[0]
+        self.assertIn("upgrade stable-cut sequence", planned)
+        self.assertIn("quiescing the app\nwith Beat before the first drain", planned)
+        self.assertNotIn("application change", planned)
+
+    def test_observability_inventory_resolves_scaled_mount_sources(self):
+        guide = (ROOT / "docs" / "guides" / "observability.md").read_text(
+            encoding="utf-8"
+        )
+        capacity = guide.split("## Capacity monitoring", 1)[1].split(
+            "## Suggested alert thresholds", 1
+        )[0]
+
+        self.assertIn("`postgres_data_v1`", capacity)
+        self.assertNotIn("`pgdata`", capacity)
+        self.assertIn("BACKUPSHEEP_COMPOSE_PROJECT_NAME", capacity)
+        self.assertIn("ps --all --quiet", capacity)
+        self.assertIn("while IFS= read -r container", capacity)
+        self.assertIn("com.docker.compose.project", capacity)
+        self.assertIn(".Source", capacity)
+        self.assertIn(".Destination", capacity)
+        self.assertIn(".RW", capacity)
+        self.assertIn("docker volume inspect", capacity)
+        self.assertIn(".Mountpoint", capacity)
+        self.assertNotIn('container="$(./backupsheep-compose', capacity)
+
+    def test_artifact_rotation_runbook_uses_guarded_container_oneoffs(self):
+        guide = (ROOT / "docs" / "guides" / "installation.md").read_text(
+            encoding="utf-8"
+        )
+        rotation = guide.split("### Artifact keyring custody and rotation", 1)[1].split(
+            "For non-Docker installations", 1
+        )[0]
+
+        self.assertNotIn("python scripts/manage_artifact_keyring.py inspect", rotation)
+        self.assertIn("LocalFileKeyProvider", rotation)
+        self.assertIn('GUARD="${LANE}-egress-guard"', rotation)
+        self.assertGreaterEqual(
+            rotation.count(
+                "up --detach --no-build --no-deps \\\n"
+                '  --force-recreate "${GUARD}" "${WORKER}"'
+            ),
+            2,
+        )
+        self.assertGreaterEqual(rotation.count('stop "${WORKER}"'), 2)
+        run_options = re.findall(
+            r"backupsheep-compose --profile operations run (?P<options>[^\n]+)",
+            rotation,
+        )
+        self.assertEqual(len(run_options), 3)
+        for options in run_options:
+            with self.subTest(options=options):
+                self.assertIn('--rm --no-deps "${WORKER}"', options)
+        self.assertIn('"${INSTALLER[@]}" "${INSTALL_ARGS[@]}"', rotation)
+        self.assertIn('--rotate-artifact-keyring "${LANE}"', rotation)
+
+    def test_production_capacity_names_the_active_postgres_volume(self):
+        guide = (ROOT / "docs" / "guides" / "production.md").read_text(
+            encoding="utf-8"
+        )
+        capacity = guide.split("## Persistent data and capacity", 1)[1]
+        self.assertIn("| `postgres_data_v1` |", capacity)
+        self.assertNotRegex(capacity, r"(?m)^\| `pgdata` \|")
+
+    def test_hardened_upgrade_uses_atomic_exact_ref_installer_then_explicit_operations(self):
+        guide = (ROOT / "docs" / "guides" / "upgrades.md").read_text(
+            encoding="utf-8"
+        )
+        hardened = guide.split(
+            "For an installation already at staging layout v3", 1
+        )[1].split("## Configuration changes between versions", 1)[0]
+
+        self.assertIn("atomically binds all six local image references", hardened)
+        self.assertIn('--local-build\n  --ref "${TARGET_COMMIT}"', hardened)
+        self.assertIn('--project-name "${CURRENT_PROJECT}"', hardened)
+        self.assertIn(
+            'INSTALLER=("$PWD/install.sh" --allow-root-install)', hardened
+        )
+        self.assertIn(
+            'INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")',
+            hardened,
+        )
+        self.assertIn("Deliberately omit --enable-operations", hardened)
+        self.assertIn('"${INSTALLER[@]}" "${INSTALL_ARGS[@]}"', hardened)
+        self.assertNotIn('./install.sh "${INSTALL_ARGS[@]}"', guide)
+        self.assertNotIn("ENV_TEMPORARY=", hardened)
+        self.assertNotIn("bs_compose run --rm migrate", hardened)
+        self.assertIn("## Verify the core deployment", hardened)
+        self.assertIn("## Resume provider operations explicitly", hardened)
+        self.assertIn(
+            "cloud-egress-guard database-egress-guard files-egress-guard",
+            hardened,
+        )
+        self.assertIn("There is\nno operations-only installer mode", hardened)
+
     def test_unsupported_one_click_paas_templates_are_not_shipped_or_advertised(self):
         retired_paths = (
             "app.json",

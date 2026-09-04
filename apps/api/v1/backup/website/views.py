@@ -6,13 +6,13 @@ import boto3
 import pytz
 from botocore.config import Config
 from django.conf import settings
-from django.db import transaction
 from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 from django.utils.timezone import get_current_timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
@@ -34,6 +34,16 @@ from apps._tasks.exceptions import (
 )
 from apps.api.v1.backup.website.filters import CoreWebsiteBackupFilter
 from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
+from apps.api.v1.backup.logical_restore_requests import (
+    LogicalRestoreActiveExists,
+    LogicalRestoreRequestConflict,
+    LogicalRestoreRequestInvalid,
+    LogicalRestoreStoragePointInvalid,
+    create_or_replay_logical_restore,
+    logical_restore_request_identity,
+    logical_restore_request_metadata,
+    logical_restore_storage_point_id,
+)
 from apps.api.v1.backup.website.permissions import (
     CoreWebsiteBackupViewPermissions,
 )
@@ -104,14 +114,31 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             # wrapper; hidden backups must not become misleading 503s.
             backup = self.get_object()
             try:
-                if backup.stored_website_backups.filter(
-                        id=storage_point_id
-                ).exists():
-                    storage_point = backup.stored_website_backups.get(
-                        id=storage_point_id
+                storage_point = (
+                    backup.stored_website_backups.filter(
+                        id=storage_point_id,
+                        backup__status=CoreWebsiteBackup.Status.COMPLETE,
+                        status=(
+                            CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE
+                        ),
+                        storage_file_id__isnull=False,
                     )
-
-                    download_url = storage_point.generate_download_url()
+                    .exclude(storage_file_id="")
+                    .first()
+                )
+                if storage_point is not None:
+                    if not storage_point.direct_download_permitted():
+                        return Response(
+                            {
+                                "code": "direct_download_not_permitted",
+                                "detail": (
+                                    "Direct browser download is unavailable for this protected artifact. "
+                                    "Use an authenticated restore or controlled export workflow."
+                                ),
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    download_url = storage_point.generate_browser_download_target()
                     _log_activity(
                         request,
                         CoreLog.Type.BACKUP,
@@ -128,8 +155,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                         },
                     )
                     return Response({"url": download_url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
-                else:
-                    raise DownloadStoragePointNotFound()
+                raise DownloadStoragePointNotFound()
             except Exception as e:
                 capture_exception(e)
                 raise DownloadStoragePointError(
@@ -326,14 +352,29 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
 
         if request.data.get("confirm") is not True:
             raise RestoreConfirmationRequired()
+
+        delete = request.data.get("delete", False)
+        if not isinstance(delete, bool):
+            raise ValidationError(
+                {"delete": ["Must be a JSON boolean."]}
+            )
         if backup.status != CoreWebsiteBackup.Status.COMPLETE:
             raise RestoreBackupNotFound()
 
         stored_backups = backup.stored_website_backups.filter(
             status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
             storage_file_id__isnull=False,
-        )
-        storage_point_id = request.data.get("storage_point_id")
+        ).exclude(storage_file_id="")
+        try:
+            storage_point_id = logical_restore_storage_point_id(request.data)
+        except LogicalRestoreStoragePointInvalid:
+            raise ValidationError(
+                {
+                    "storage_point_id": [
+                        "Must be a positive JSON integer."
+                    ]
+                }
+            )
         if storage_point_id is not None:
             stored_backup = stored_backups.filter(id=storage_point_id).first()
             if stored_backup is None:
@@ -343,30 +384,84 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                 raise RestoreStoragePointRequired()
             stored_backup = stored_backups.first()
 
-        with transaction.atomic():
-            restore = CoreWebsiteRestore.objects.create(
-                backup=backup,
-                storage_point=stored_backup,
-                name=f"Restore of {backup.uuid}",
-                params={"delete": bool(request.data.get("delete"))},
-            )
-            task_id = f"website-restore-{restore.correlation_id.hex}"
-            restore.celery_task_id = task_id
-            restore.save(update_fields=["celery_task_id", "modified"])
-
         try:
-            restore_website_backup.apply_async(
-                task_id=task_id,
-                kwargs={
-                    "node_id": backup.website.node.id,
-                    "backup_id": backup.id,
-                    "restore_id": restore.id,
+            request_identity = logical_restore_request_identity(
+                request.data,
+                restore_kind="website",
+                backup_id=backup.id,
+            )
+            params = {"delete": delete}
+            request_fingerprint, api_request_metadata = (
+                logical_restore_request_metadata(
+                    request_identity,
+                    restore_kind="website",
+                    backup_id=backup.id,
+                    storage_point_id=stored_backup.id,
+                    options=params,
+                )
+            )
+        except LogicalRestoreRequestInvalid:
+            raise ValidationError(
+                {
+                    "request_id": [
+                        "Must be a canonical RFC 4122 version 4 UUID."
+                    ]
                 }
             )
-        except Exception:
-            # Broker/client exceptions can include connection details. Keep the
-            # durable restore row for recovery, but return only the stable API error.
-            raise RestoreCreateError()
+
+        task_id = f"website-restore-{request_identity.correlation_id.hex}"
+        try:
+            restore, created = create_or_replay_logical_restore(
+                restore_model=CoreWebsiteRestore,
+                backup=backup,
+                storage_point=stored_backup,
+                correlation_id=request_identity.correlation_id,
+                request_fingerprint=request_fingerprint,
+                request_metadata=api_request_metadata,
+                create_fields={
+                    "name": f"Restore of {backup.uuid}",
+                    "params": params,
+                    "execution_metadata": {
+                        "api_request": api_request_metadata,
+                    },
+                    "celery_task_id": task_id,
+                },
+            )
+        except LogicalRestoreRequestConflict:
+            return Response(
+                {
+                    "detail": (
+                        "This request_id belongs to a different restore request."
+                    ),
+                    "code": "restore_idempotency_conflict",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        except LogicalRestoreActiveExists:
+            return Response(
+                {
+                    "detail": (
+                        "A restore is already active for this source."
+                    ),
+                    "code": "active_restore_exists",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        if created:
+            try:
+                restore_website_backup.apply_async(
+                    task_id=task_id,
+                    kwargs={
+                        "node_id": backup.website.node.id,
+                        "backup_id": backup.id,
+                        "restore_id": restore.id,
+                    }
+                )
+            except Exception:
+                # Broker/client exceptions can include connection details. Keep the
+                # durable restore row for recovery, but return only the stable API error.
+                raise RestoreCreateError()
 
         return Response(
             CoreWebsiteRestoreSerializer(restore).data,
@@ -376,7 +471,24 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def restores(self, request, pk=None):
         backup = self.get_object()
-        restores = backup.restores.order_by("-created")
+        if request.query_params.get("scope") == "source":
+            # Restore creation is serialized for the protected website, not
+            # just one recovery point. Expose that same durable lane so the UI
+            # can show an operation started from another backup before it
+            # offers a conflicting request.
+            restores = CoreWebsiteRestore.objects.filter(
+                Q(backup=backup)
+                | Q(
+                    backup__website_id=backup.website_id,
+                    status__in=(
+                        CoreWebsiteRestore.Status.PENDING,
+                        CoreWebsiteRestore.Status.IN_PROGRESS,
+                    ),
+                )
+            )
+        else:
+            restores = backup.restores.all()
+        restores = restores.select_related("backup").order_by("-created")
         return Response(CoreWebsiteRestoreSerializer(restores, many=True).data)
 
     @action(detail=False)

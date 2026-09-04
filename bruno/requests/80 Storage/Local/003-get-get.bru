@@ -1,11 +1,11 @@
 meta {
-  name: GET /api/v1/storage/local/file/{{storedBackupId}}/
+  name: GET /api/v1/storage/local/file/{{backupFamily}}/{{storedBackupId}}/
   type: http
   seq: 3
 }
 
 get {
-  url: {{baseUrl}}/api/v1/storage/local/file/{{storedBackupId}}/
+  url: {{baseUrl}}/api/v1/storage/local/file/{{backupFamily}}/{{storedBackupId}}/
   body: none
   auth: none
 }
@@ -21,9 +21,9 @@ tests {
 }
 
 docs {
-  Operation ID: `get-api-v1-storage-local-file-storedbackupid`
+  Operation ID: `get-api-v1-storage-local-file-backupfamily-storedbackupid`
 
-  Requires `Authorization: Token <key>`. Read-only download or signed-download-URL request.
+  Requires `Authorization: Token <key>`. Read-only request.
 
   Django action: `apps.api.v1.storage.local.views.LocalStorageFileDownloadView.get`
   Source: `apps/api/v1/storage/local/views.py`

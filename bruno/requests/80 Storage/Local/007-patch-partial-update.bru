@@ -1,17 +1,24 @@
 meta {
-  name: DELETE /api/v1/storage/local/{{resourceId}}/
+  name: PATCH /api/v1/storage/local/{{resourceId}}/
   type: http
-  seq: 4
+  seq: 7
 }
 
-delete {
+patch {
   url: {{baseUrl}}/api/v1/storage/local/{{resourceId}}/
-  body: none
+  body: json
   auth: none
 }
 
 headers {
   Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "name": "Updated example resource"
+  }
 }
 
 script:pre-request {
@@ -27,10 +34,10 @@ tests {
 }
 
 docs {
-  Operation ID: `delete-api-v1-storage-local-resourceid`
+  Operation ID: `patch-api-v1-storage-local-resourceid`
 
   Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
 
-  Django action: `apps.api.v1.storage.local.views.CoreStorageLocalView.destroy`
+  Django action: `apps.api.v1.storage.local.views.CoreStorageLocalView.partial_update`
   Source: `apps/api/v1/storage/local/views.py`
 }

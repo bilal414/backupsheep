@@ -1,11 +1,11 @@
 meta {
-  name: POST /api/v1/storage/local/{{resourceId}}/validate/
+  name: POST /api/v1/invites/{{resourceId}}/reject/
   type: http
-  seq: 8
+  seq: 9
 }
 
 post {
-  url: {{baseUrl}}/api/v1/storage/local/{{resourceId}}/validate/
+  url: {{baseUrl}}/api/v1/invites/{{resourceId}}/reject/
   body: json
   auth: none
 }
@@ -32,10 +32,10 @@ tests {
 }
 
 docs {
-  Operation ID: `post-api-v1-storage-local-resourceid-validate`
+  Operation ID: `post-api-v1-invites-resourceid-reject`
 
   Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
 
-  Django action: `apps.api.v1.storage.local.views.CoreStorageLocalView.validate`
-  Source: `apps/api/v1/storage/local/views.py`
+  Django action: `apps.api.v1.invite.views.CoreInviteView.reject`
+  Source: `apps/api/v1/invite/views.py`
 }

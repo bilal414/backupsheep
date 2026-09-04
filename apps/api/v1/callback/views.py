@@ -62,8 +62,8 @@ from apps.api.v1.connection.ovh_oauth import (
     ovh_member_has_integration_permission,
 )
 from backupsheep.source_recovery_policy import (
-    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
     source_backup_creation_available,
+    source_recovery_unavailable_message,
 )
 
 
@@ -600,7 +600,7 @@ class APICallbackBasecamp(APIView):
             messages.add_message(
                 request,
                 messages.ERROR,
-                SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
+                source_recovery_unavailable_message("basecamp"),
             )
             return redirect(
                 "console:setup:integration_open", integration_code="basecamp"

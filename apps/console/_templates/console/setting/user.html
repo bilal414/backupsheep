@@ -1,48 +1,29 @@
-{% extends "console/_master.html" %}
+{% extends "console/setting/_base.html" %}
 {% block title %}Settings - Users{% endblock %}
 {% block meta_title %}Settings - Users{% endblock %}
 {% block meta_description %}Settings - Users{% endblock %}
 {% block meta_keywords %}Settings - Users{% endblock %}
-{% block page_class %}page_console console-page{% endblock %}
-
-{% block content %}
+{% block settings_page_title %}Members{% endblock %}
+{% block settings_page_description %}Review membership status, access groups, and delivery preferences for {{ account.get_name }}.{% endblock %}
+{% block settings_content %}
     <div class="space-y-6" x-data="settingsUser()">
-        <!-- Page header -->
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Users</h2>
-                <p class="mt-1 text-sm text-slate-500">Users you invited to access your account.</p>
-            </div>
+        {% if settings_can_manage_workspace %}
             <div class="flex flex-none items-center gap-2">
                 <a href="{% url 'console:settings:invite' %}" class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                     <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
                     </svg>
-                    Invite User
+                    Invite member
                 </a>
             </div>
-        </div>
-
-        <!-- Settings navigation -->
-        <div class="border-b border-slate-200">
-            <nav class="-mb-px flex gap-6 overflow-x-auto" aria-label="Settings">
-                <a href="{% url 'console:settings:profile' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Profile</a>
-                <a href="{% url 'console:settings:account' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Account</a>
-                <a href="{% url 'console:settings:multifactor' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Multi-Factor Auth</a>
-                <a href="{% url 'console:settings:password' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Password</a>
-                <a href="{% url 'console:settings:group' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Groups</a>
-                <a href="{% url 'console:settings:user' %}" aria-current="page" class="whitespace-nowrap border-b-2 border-indigo-600 px-1 pb-3 text-sm font-medium text-indigo-600 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Users</a>
-                <a href="{% url 'console:settings:invite' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Invites</a>
-                <a href="{% url 'console:settings:notification' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Notifications</a>
-            </nav>
-        </div>
+        {% endif %}
 
         <!-- Info banner -->
         <div class="flex items-start gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800" role="alert">
             <svg class="mt-0.5 h-5 w-5 flex-none text-sky-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/>
             </svg>
-            <p class="min-w-0 flex-1 font-medium leading-6">You can invite new users to your account using the invites page.</p>
+            <p class="min-w-0 flex-1 font-medium leading-6">{% if settings_can_manage_workspace %}Membership changes take effect for this workspace only.{% else %}You can review membership and access scope. Only the workspace owner can edit or remove members.{% endif %}</p>
         </div>
 
         <!-- Users table -->
@@ -52,23 +33,25 @@
                     <tr class="bg-slate-50">
                         <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Name</th>
                         <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Email</th>
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Groups (Type)</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status / role</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Access groups</th>
                         <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">
                     {% for membership in account.memberships.all %}
                         <tr class="transition hover:bg-slate-50">
-                            <td class="px-4 py-3">
+                            <td data-label="Name" class="px-4 py-3">
                                 <div class="flex items-center gap-2">
                                     <span class="font-medium text-slate-900">{{ membership.member.full_name }}</span>
-                                    {% if membership.member.get_current_account != account %}
-                                        <span class="inline-flex flex-none items-center rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20">Invited</span>
-                                    {% endif %}
                                 </div>
                             </td>
-                            <td class="whitespace-nowrap px-4 py-3 text-slate-700">{{ membership.member.user.email }}</td>
-                            <td class="px-4 py-3 text-slate-700">
+                            <td data-label="Email" class="whitespace-nowrap px-4 py-3 text-slate-700">{{ membership.member.user.email }}</td>
+                            <td data-label="Status / role" class="whitespace-nowrap px-4 py-3 text-slate-700">
+                                <span class="font-medium">{{ membership.get_status_display }}</span>
+                                <span class="block text-xs text-slate-500">{% if membership.primary %}Owner{% else %}Member{% endif %}</span>
+                            </td>
+                            <td data-label="Access groups" class="px-4 py-3 text-slate-700">
                                 <ul class="space-y-0.5">
                                     {% for group in membership.member.user.groups.all %}
                                         {% if group.enrollment.get.account == account %}
@@ -77,11 +60,11 @@
                                     {% endfor %}
                                 </ul>
                             </td>
-                            <td class="whitespace-nowrap px-4 py-3 text-right">
-                                {% if membership.member.id != member.id %}
+                            <td data-label="Actions" class="whitespace-nowrap px-4 py-3 text-right">
+                                {% if settings_can_manage_workspace and membership.member.id != member.id %}
                                     <div class="flex items-center justify-end gap-2">
                                         <button @click="editMembership('{{ membership.member.id }}')" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Edit</button>
-                                        <button @click="removeMembership('{{ membership.id }}')" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Remove</button>
+                                        <button @click="openRemoveDialog('{{ membership.id }}', '{{ membership.member.full_name|escapejs }}', '{{ membership.member.email|escapejs }}', $el)" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Remove</button>
                                     </div>
                                 {% endif %}
                             </td>
@@ -91,13 +74,14 @@
             </table>
         </div>
 
+        {% if settings_can_manage_workspace %}
         {# Edit panel: groups + notify flags for the selected membership. #}
         <div x-cloak x-show="membership" id="edit-membership" class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="edit-membership-heading">
             <div class="border-b border-slate-200 px-5 py-4">
                 <h2 id="edit-membership-heading" class="text-sm font-semibold text-slate-900">
                     Edit User - <span x-text="membership?.full_name"></span>
                 </h2>
-                <p class="mt-0.5 text-xs text-slate-500">Change the groups and notification flags for <span x-text="membership?.email"></span>.</p>
+                <p class="mt-0.5 text-xs text-slate-500">Change this member's workspace groups and recipient preferences for <span x-text="membership?.email"></span>. Account event gates still apply.</p>
             </div>
             <div class="space-y-6 p-5">
                 <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
@@ -158,181 +142,172 @@
                 <p x-cloak x-show="membershipErrors.detail" class="text-xs font-medium text-red-600" x-text="membershipErrors.detail"></p>
             </div>
             <div class="flex items-center justify-end gap-2 border-t border-slate-200 px-5 py-3">
-                <button @click="closeMembershipEditor()" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Cancel</button>
-                <button @click="saveMembership()" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Save User</button>
+                <span class="mr-auto text-xs text-slate-500" role="status" aria-live="polite" x-text="operationStatus"></span>
+                <button @click="closeMembershipEditor()" :disabled="savingMembership" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Cancel</button>
+                <button @click="saveMembership()" :disabled="savingMembership" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60"><span x-text="savingMembership ? 'Saving…' : 'Save member'"></span></button>
             </div>
         </div>
+
+        <div x-cloak x-show="removeDialog.open" @keydown.escape.window="closeRemoveDialog()" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="remove-member-title" aria-describedby="remove-member-description">
+            <div class="flex min-h-full items-center justify-center p-4">
+                <button type="button" class="fixed inset-0 cursor-default bg-slate-900/40" aria-label="Close remove member dialog" @click="closeRemoveDialog()"></button>
+                <div x-ref="removeDialogPanel" @keydown.tab="trapRemoveDialogFocus($event)" class="relative w-full max-w-md rounded-xl border border-slate-200 bg-white">
+                    <div class="px-5 py-4">
+                        <h2 id="remove-member-title" class="text-base font-semibold text-slate-900">Remove <span x-text="removeDialog.name"></span>?</h2>
+                        <p id="remove-member-description" class="mt-2 text-sm leading-6 text-slate-600"><span class="font-medium" x-text="removeDialog.email"></span> will immediately lose access to <span class="font-medium">{{ account.get_name }}</span>. Existing backups and workspace data are not deleted.</p>
+                    </div>
+                    <div class="flex items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                        <button type="button" x-ref="removeCancel" @click="closeRemoveDialog()" :disabled="removingMembership" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Cancel</button>
+                        <button type="button" @click="confirmRemoveMembership()" :disabled="removingMembership" class="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-60"><span x-text="removingMembership ? 'Removing…' : 'Remove member'"></span></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
     </div>
 {% endblock %}
 
 {% block extra_scripts %}
     <script>
         document.addEventListener('alpine:init', () => {
-            Alpine.magic('clipboard', () => subject => {
-                Alpine.store('notifications').items.push({
-                    show: true,
-                    success: true,
-                    heading: 'Copied!',
-                    details: subject
-                });
-                navigator.clipboard.writeText(subject)
-            });
             Alpine.data('settingsUser', () => ({
                 membership: null,
                 membershipGroups: [],
                 membershipErrors: {},
-                init() {
+                editingBusy: false,
+                savingMembership: false,
+                removingMembership: false,
+                operationStatus: '',
+                removeDialog: {open: false, id: null, name: '', email: '', returnFocus: null},
+                init() {},
+                firstError(value) {
+                    if (Array.isArray(value)) return value[0] || '';
+                    if (value && typeof value === 'object') return Object.values(value).flat()[0] || '';
+                    return value || '';
+                },
+                notify(heading, details, success = false) {
+                    Alpine.store('notifications').items.push({show: true, [success ? 'success' : 'error']: true, heading, details});
+                },
+                async mutation(url, method, data) {
+                    let response;
+                    try {
+                        response = await fetch(url, {
+                            headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+                            method,
+                            body: data === undefined ? undefined : JSON.stringify(data),
+                        });
+                    } catch (error) {
+                        const unknown = new Error('The server response was not received.');
+                        unknown.outcomeUnknown = true;
+                        throw unknown;
+                    }
+                    let json = {};
+                    try { json = await response.json(); } catch (error) { json = {}; }
+                    if (!response.ok) {
+                        if (response.status >= 500) {
+                            const unknown = new Error('The server response was incomplete.');
+                            unknown.outcomeUnknown = true;
+                            throw unknown;
+                        }
+                        this.membershipErrors = json;
+                        throw new Error(this.firstError(json.detail || json.non_field_errors || Object.values(json)[0]) || 'The request was rejected.');
+                    }
+                    return json;
+                },
+                showMutationError(error, definiteHeading) {
+                    if (error.outcomeUnknown) {
+                        this.notify('Change outcome not confirmed', 'The change may have completed. Reload this page before retrying.');
+                    } else {
+                        this.notify(definiteHeading, error.message);
+                    }
                 },
                 async editMembership(membership_id) {
-                    // Load the account's memberships and open the editor for this one.
-                    Alpine.store('showLoading').toggle("Fetching user details.");
-
-                    let url = "/api/v1/members/";
-                    let method = "GET";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.membershipErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        let found = json.find((item) => item.id === parseInt(membership_id));
+                    if (this.editingBusy) return;
+                    this.editingBusy = true;
+                    this.operationStatus = 'Loading member details…';
+                    try {
+                        const response = await fetch('/api/v1/members/', {headers: {'Accept': 'application/json'}});
+                        if (!response.ok) throw new Error('Member details could not be loaded.');
+                        const json = await response.json();
+                        const found = json.find((item) => item.id === parseInt(membership_id));
                         if (!found) {
-                            throw new Error("Unable to load this membership. Please contact support.");
+                            throw new Error('This member is no longer available in the current workspace.');
                         }
                         this.membershipErrors = {};
                         this.membership = found;
-                        // Checkbox binding uses string values; the API returns int ids.
                         this.membershipGroups = (found.groups || []).map((group) => String(group.id));
-                        const element = document.getElementById("edit-membership");
-                        element.scrollIntoView();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                        this.operationStatus = '';
+                        this.$nextTick(() => document.getElementById('edit-membership')?.scrollIntoView({behavior: 'smooth', block: 'start'}));
+                    } catch (error) {
+                        this.notify('Member details unavailable', error.message);
+                        this.operationStatus = '';
+                    } finally {
+                        this.editingBusy = false;
+                    }
                 },
                 async saveMembership() {
-                    Alpine.store('showLoading').toggle("Saving user details.");
-
-                    let url = "/api/v1/members/" + this.membership.member_id + "/update_membership/";
-                    let method = "POST";
-
-                    let data = {
+                    if (!this.membership || this.savingMembership) return;
+                    this.savingMembership = true;
+                    this.membershipErrors = {};
+                    this.operationStatus = 'Saving…';
+                    const data = {
                         groups: this.membershipGroups,
                         notify_on_success: this.membership.notify_on_success,
                         notify_on_fail: this.membership.notify_on_fail,
                     };
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.membershipErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail || 'User updated.'
-                        });
+                    try {
+                        await this.mutation('/api/v1/members/' + this.membership.member_id + '/update_membership/', 'POST', data);
+                        this.notify('Member updated', 'Workspace groups and recipient preferences were saved.', true);
                         window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                    } catch (error) {
+                        this.operationStatus = '';
+                        this.showMutationError(error, 'Member not updated');
+                    } finally {
+                        this.savingMembership = false;
+                    }
                 },
                 closeMembershipEditor() {
                     this.membership = null;
                     this.membershipGroups = [];
                     this.membershipErrors = {};
                 },
-                async removeMembership(membership_id) {
-                    Alpine.store('showLoading').toggle("Removing user from account.");
-
-                    let url = "/api/v1/accounts/{{ account.id }}/remove_membership/";
-                    let method = "POST";
-
-                    let data = {"membership_id": membership_id}
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.membershipErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
+                openRemoveDialog(id, name, email, trigger) {
+                    this.removeDialog = {open: true, id, name, email, returnFocus: trigger};
+                    this.$nextTick(() => this.$refs.removeCancel?.focus());
+                },
+                closeRemoveDialog() {
+                    if (!this.removeDialog.open || this.removingMembership) return;
+                    const trigger = this.removeDialog.returnFocus;
+                    this.removeDialog.open = false;
+                    this.$nextTick(() => trigger?.focus());
+                },
+                trapRemoveDialogFocus(event) {
+                    const focusable = Array.from(this.$refs.removeDialogPanel?.querySelectorAll('button:not([disabled]), [href], input:not([disabled])') || []);
+                    if (!focusable.length) return;
+                    const first = focusable[0];
+                    const last = focusable[focusable.length - 1];
+                    if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                },
+                async confirmRemoveMembership() {
+                    if (this.removingMembership || !this.removeDialog.id) return;
+                    this.removingMembership = true;
+                    try {
+                        await this.mutation('/api/v1/accounts/{{ account.id }}/remove_membership/', 'POST', {membership_id: this.removeDialog.id});
+                        this.notify('Member removed', this.removeDialog.email + ' no longer has access to this workspace.', true);
                         window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                    } catch (error) {
+                        this.removeDialog.open = false;
+                        this.showMutationError(error, 'Member not removed');
+                        this.$nextTick(() => this.removeDialog.returnFocus?.focus());
+                    } finally {
+                        this.removingMembership = false;
+                    }
                 },
             }));
         });

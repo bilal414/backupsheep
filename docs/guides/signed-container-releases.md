@@ -188,10 +188,13 @@ automatic acceptance of whatever `:2` points to:
    fresh lock is merged, the scan is intentionally red once its exact `NextUpdate` is
    reached.
 
-The lock refreshed on 2026-08-31 uses manifest
-`sha256:40a5adc4c4002068486e0914ec8f13e800faf4aaa457ee1c9accddd654373886`
-and expires at `2026-09-01T19:02:31.217570999Z`. It is evidence for that bounded
-window, not a permanent vulnerability result.
+The Trivy lock refreshed on 2026-09-04 uses manifest
+`sha256:ce40580a917b4f8ebfc5c8c9bc31dba4e2c06ce85a6c6bda4e6e18b5faf5ff40`
+and expires at `2026-09-05T01:11:59.298521783Z`. The Grype lock uses official
+archive checksum
+`3574269f1e15cc771bd8ea11a31f2e198c5e4cc546ae7d3187919c8f4822cb7a`
+and expires at `2026-09-08T06:30:55Z`. These locks are evidence for those bounded
+windows, not permanent vulnerability results.
 
 Every exact platform child must have:
 

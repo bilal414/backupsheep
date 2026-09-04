@@ -14,7 +14,7 @@ from django.db import connection, transaction
 from django.db.migrations import SeparateDatabaseAndState
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.utils import timezone
-from django_celery_beat.models import IntervalSchedule, PeriodicTask
+from django_celery_beat.models import IntervalSchedule, PeriodicTask, PeriodicTasks
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -31,6 +31,7 @@ from backupsheep.celery_task_manifest import TASK_POLICIES
 from backupsheep.database_lane_policy import LANE_TABLE_POLICY, RETIRED_TABLES
 from backupsheep.source_recovery_policy import (
     RETIRED_SOURCE_FAMILIES,
+    RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
     source_backup_creation_available,
 )
 from utils.middleware import OnboardingMiddleware
@@ -301,6 +302,7 @@ class WordPressRemovalTests(BaseTestCase):
             "/api/v1/connections/wordpress/endpoints/",
             "/api/v1/saas/wordpress/generate_key/",
             "/api/v1/backups/wordpress/highcharts/",
+            "/api/v1/storage/local/file/wordpress/1/",
         ):
             with self.subTest(path=path):
                 response = self.client.get(path)
@@ -402,6 +404,10 @@ class WordPressRemovalTests(BaseTestCase):
             request.last_error_code,
             "SOURCE_RECOVERY_UNAVAILABLE",
         )
+        self.assertEqual(
+            request.last_error_message,
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
         send_task.assert_not_called()
 
     def test_retirement_migration_pauses_existing_dispatch_rows(self):
@@ -468,6 +474,247 @@ class WordPressRemovalTests(BaseTestCase):
         for lane, policy in LANE_TABLE_POLICY.items():
             with self.subTest(lane=lane):
                 self.assertTrue(RETIRED_TABLES.isdisjoint(policy))
+
+
+class WordPressPeriodicTaskRepairTests(BaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.wordpress_integration = CoreIntegration.objects.create(
+            code="wordpress",
+            name="Historical source",
+            type=CoreIntegration.Type.SAAS,
+            enabled=True,
+        )
+        self._sequence = 0
+
+    def _node(self, integration_code):
+        self._sequence += 1
+        if integration_code == "wordpress":
+            integration = self.wordpress_integration
+            node_type = CoreNode.Type.SAAS
+        else:
+            integration = CoreIntegration.objects.get(code=integration_code)
+            node_type = CoreNode.Type.WEBSITE
+        connection_row = CoreConnection.objects.create(
+            account=self.account,
+            integration=integration,
+            location=factories.make_location(
+                f"wordpress-repair-{self._sequence}"
+            ),
+            name=f"repair-connection-{self._sequence}",
+            added_by=self.member,
+        )
+        return CoreNode.objects.create(
+            connection=connection_row,
+            type=node_type,
+            name=f"repair-node-{self._sequence}",
+            added_by=self.member,
+        )
+
+    def _mixed_task(self, *, status=CoreSchedule.Status.ACTIVE, one_off=False):
+        surviving_node = self._node("website")
+        if one_off:
+            surviving_schedule = CoreSchedule.objects.create(
+                node=surviving_node,
+                name="surviving one-off",
+                timezone="UTC",
+                type=CoreSchedule.Type.ONETIME,
+                at_datetime=timezone.now() + timezone.timedelta(hours=1),
+                status=status,
+                added_by=self.member,
+            )
+        else:
+            surviving_schedule = factories.make_schedule(
+                surviving_node,
+                self.member,
+                status=status,
+            )
+        surviving_schedule.schedule_create()
+        periodic_task = PeriodicTask.objects.get(
+            pk=surviving_schedule.celery_periodic_task_id
+        )
+
+        retired_schedule = factories.make_schedule(
+            self._node("wordpress"),
+            self.member,
+        )
+        retired_schedule.celery_periodic_task = periodic_task
+        retired_schedule.save(update_fields=["celery_periodic_task"])
+        return retired_schedule, surviving_schedule, periodic_task
+
+    @staticmethod
+    def _run_retirement():
+        migration = import_module(
+            "apps._migrations.0047_retire_wordpress_integration"
+        )
+        migration.retire_wordpress_runtime_rows(django_apps, None)
+
+    @staticmethod
+    def _run_repair():
+        migration = import_module(
+            "apps._migrations.0052_repair_retired_wordpress_periodic_tasks"
+        )
+        schema_editor = SimpleNamespace(connection=connection)
+        migration.repair_retired_wordpress_periodic_tasks(
+            django_apps,
+            schema_editor,
+        )
+
+    def test_active_recurring_survivor_is_detached_and_paused(self):
+        retired, surviving, periodic_task = self._mixed_task()
+        self._run_retirement()
+        periodic_task.refresh_from_db()
+        self.assertFalse(periodic_task.enabled)
+        marker_before = PeriodicTasks.objects.get(ident=1).last_update
+
+        self._run_repair()
+
+        retired.refresh_from_db()
+        surviving.refresh_from_db()
+        periodic_task.refresh_from_db()
+        self.assertEqual(retired.status, CoreSchedule.Status.PAUSED)
+        self.assertIsNone(retired.celery_periodic_task_id)
+        self.assertEqual(surviving.status, CoreSchedule.Status.PAUSED)
+        self.assertEqual(surviving.celery_periodic_task_id, periodic_task.pk)
+        self.assertFalse(periodic_task.enabled)
+        self.assertGreater(
+            PeriodicTasks.objects.get(ident=1).last_update,
+            marker_before,
+        )
+
+    def test_pre_disabled_active_survivor_is_never_auto_resumed(self):
+        retired, surviving, periodic_task = self._mixed_task()
+        periodic_task.enabled = False
+        periodic_task.save()
+        self._run_retirement()
+
+        self._run_repair()
+
+        retired.refresh_from_db()
+        surviving.refresh_from_db()
+        periodic_task.refresh_from_db()
+        self.assertIsNone(retired.celery_periodic_task_id)
+        self.assertEqual(surviving.status, CoreSchedule.Status.PAUSED)
+        self.assertEqual(surviving.celery_periodic_task_id, periodic_task.pk)
+        self.assertFalse(periodic_task.enabled)
+
+    def test_shared_task_reenabled_after_retirement_is_forced_disabled(self):
+        retired, surviving, periodic_task = self._mixed_task()
+        self._run_retirement()
+        PeriodicTask.objects.filter(pk=periodic_task.pk).update(enabled=True)
+
+        self._run_repair()
+
+        retired.refresh_from_db()
+        surviving.refresh_from_db()
+        periodic_task.refresh_from_db()
+        self.assertIsNone(retired.celery_periodic_task_id)
+        self.assertEqual(surviving.status, CoreSchedule.Status.PAUSED)
+        self.assertEqual(surviving.celery_periodic_task_id, periodic_task.pk)
+        self.assertFalse(periodic_task.enabled)
+
+    def test_retired_only_task_still_invalidates_beat_marker(self):
+        retired_schedule = factories.make_schedule(
+            self._node("wordpress"),
+            self.member,
+        )
+        retired_schedule.schedule_create()
+        periodic_task = PeriodicTask.objects.get(
+            pk=retired_schedule.celery_periodic_task_id
+        )
+        self._run_retirement()
+        marker_before = PeriodicTasks.objects.get(ident=1).last_update
+
+        self._run_repair()
+
+        retired_schedule.refresh_from_db()
+        periodic_task.refresh_from_db()
+        self.assertEqual(
+            retired_schedule.celery_periodic_task_id,
+            periodic_task.pk,
+        )
+        self.assertFalse(periodic_task.enabled)
+        self.assertGreater(
+            PeriodicTasks.objects.get(ident=1).last_update,
+            marker_before,
+        )
+
+    def test_paused_recurring_survivor_remains_disabled(self):
+        retired, surviving, periodic_task = self._mixed_task(
+            status=CoreSchedule.Status.PAUSED
+        )
+        self._run_retirement()
+
+        self._run_repair()
+
+        retired.refresh_from_db()
+        surviving.refresh_from_db()
+        periodic_task.refresh_from_db()
+        self.assertIsNone(retired.celery_periodic_task_id)
+        self.assertEqual(surviving.status, CoreSchedule.Status.PAUSED)
+        self.assertFalse(periodic_task.enabled)
+
+    def test_active_one_off_survivor_fails_closed(self):
+        retired, _surviving, periodic_task = self._mixed_task(one_off=True)
+        self._run_retirement()
+
+        with self.assertRaisesRegex(RuntimeError, "one-off"):
+            self._run_repair()
+
+        retired.refresh_from_db()
+        periodic_task.refresh_from_db()
+        self.assertEqual(retired.celery_periodic_task_id, periodic_task.pk)
+        self.assertFalse(periodic_task.enabled)
+
+    def test_expiring_recurring_task_fails_closed(self):
+        retired, _surviving, periodic_task = self._mixed_task()
+        periodic_task.expire_seconds = 300
+        periodic_task.save(update_fields=["expire_seconds"])
+        self._run_retirement()
+
+        with self.assertRaisesRegex(RuntimeError, "non-canonical"):
+            self._run_repair()
+
+        retired.refresh_from_db()
+        periodic_task.refresh_from_db()
+        self.assertEqual(retired.celery_periodic_task_id, periodic_task.pk)
+        self.assertFalse(periodic_task.enabled)
+
+    def test_ambiguous_task_aborts_before_any_safe_plan_is_applied(self):
+        safe_retired, _safe_surviving, safe_task = self._mixed_task()
+        ambiguous_retired, _ambiguous_surviving, ambiguous_task = (
+            self._mixed_task()
+        )
+        ambiguous_task.args = f"[{ambiguous_retired.pk}]"
+        ambiguous_task.save(update_fields=["args"])
+        self._run_retirement()
+
+        with self.assertRaisesRegex(RuntimeError, "payload"):
+            self._run_repair()
+
+        safe_retired.refresh_from_db()
+        safe_task.refresh_from_db()
+        ambiguous_retired.refresh_from_db()
+        ambiguous_task.refresh_from_db()
+        self.assertEqual(safe_retired.celery_periodic_task_id, safe_task.pk)
+        self.assertFalse(safe_task.enabled)
+        self.assertEqual(
+            ambiguous_retired.celery_periodic_task_id,
+            ambiguous_task.pk,
+        )
+        self.assertFalse(ambiguous_task.enabled)
+
+
+class WordPressPeriodicTaskRepairContractTests(SimpleTestCase):
+    def test_duplicate_positional_and_keyword_schedule_id_is_ambiguous(self):
+        migration = import_module(
+            "apps._migrations.0052_repair_retired_wordpress_periodic_tasks"
+        )
+        periodic_task = SimpleNamespace(
+            args="[7]",
+            kwargs='{"schedule_id": 7}',
+        )
+        self.assertIsNone(migration._task_schedule_id(periodic_task))
 
 
 class WordPressRetiredSqlAllowlistTests(SimpleTestCase):

@@ -1,9 +1,7 @@
-import pytz
 from django.contrib.auth.models import User
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.utils.timezone import get_current_timezone
 from rest_framework.authtoken.models import Token
 from rest_framework import serializers
 from apps.console.account.models import CoreAccount
@@ -107,9 +105,24 @@ class CoreMemberAccountWriteSerializer(serializers.ModelSerializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
+    """Public identity fields embedded in member read responses.
+
+    Authorization metadata belongs to Django's authentication boundary.  A
+    shared-workspace member may see a peer's basic directory identity, but must
+    never receive staff flags, global permissions, or auth-group primary keys.
+    Profile mutations continue to use the separate UserWriteSerializer below.
+    """
+
     class Meta:
         model = User
-        exclude = ("password",)
+        fields = (
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+        )
+        read_only_fields = fields
 
 
 class UserWriteSerializer(serializers.ModelSerializer):
@@ -214,44 +227,30 @@ class MemberTokenRevokeAuthSerializer(serializers.Serializer):
 
 
 class CoreMemberSerializer(serializers.ModelSerializer):
-    created_display = serializers.SerializerMethodField()
-    modified_display = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
     email = serializers.SerializerMethodField()
     user = UserSerializer()
-    memberships = CoreMemberAccountSerializer(many=True)
+    memberships = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreMember
-        # Password reset capability is a bearer secret. It must never appear in
-        # the team-member API, even to another member of the same account.
-        exclude = (
-            "password_reset_token",
-            "password_reset_token_created",
-            "auth_multi_factor_secret",
-            "auth_multi_factor_pending_created",
-            "auth_multi_factor_last_counter",
-            "auth_session_version",
+        # This shared-workspace read endpoint is a directory contract, not an
+        # identity-security or profile-settings endpoint. Keep it allowlisted so
+        # new CoreMember fields (MFA state, reset state, timezone, account M2M,
+        # etc.) cannot become tenant-visible merely by being added to the model.
+        fields = (
+            "id",
+            "user",
+            "full_name",
+            "email",
+            "memberships",
         )
+        read_only_fields = fields
         datatables_always_serialize = (
             "id",
             "user",
             "memberships",
         )
-
-    @staticmethod
-    def get_created_display(obj):
-        timezone = str(get_current_timezone())
-        timezone = pytz.timezone(timezone)
-        date_time = obj.created.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
-        return date_time
-
-    @staticmethod
-    def get_modified_display(obj):
-        timezone = str(get_current_timezone())
-        timezone = pytz.timezone(timezone)
-        date_time = obj.modified.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
-        return date_time
 
     @staticmethod
     def get_full_name(obj):
@@ -261,10 +260,37 @@ class CoreMemberSerializer(serializers.ModelSerializer):
     def get_email(obj):
         return obj.email
 
+    def get_memberships(self, obj):
+        """Expose self memberships while constraining peer workspace state.
+
+        The signed-in identity keeps its account-switcher contract. A peer may be
+        discoverable through a shared workspace, but that must not turn the peer
+        detail representation into a directory of their other workspaces.
+        """
+        request = self.context.get("request")
+        if request is None or not hasattr(request.user, "member"):
+            memberships = obj.memberships.none()
+        elif obj.pk == request.user.member.pk:
+            # Preserve the signed-in identity endpoint as the account switcher
+            # contract: a person may review their own workspace memberships.
+            memberships = obj.memberships.all()
+        else:
+            account = request.user.member.get_current_account()
+            memberships = obj.memberships.filter(account=account)
+        return CoreMemberAccountSerializer(
+            memberships,
+            many=True,
+            context=self.context,
+        ).data
+
 
 class CoreMemberWriteSerializer(serializers.ModelSerializer):
     user = UserWriteSerializer()
-    memberships = CoreMemberAccountWriteSerializer(many=True)
+    memberships = CoreMemberAccountWriteSerializer(
+        many=True,
+        required=False,
+        max_length=1,
+    )
 
     class Meta:
         model = CoreMember
@@ -292,9 +318,11 @@ class CoreMemberWriteSerializer(serializers.ModelSerializer):
                 request.session[AUTH_SESSION_VERSION_KEY] = (
                     instance.auth_session_version
                 )
-        for membership in memberships:
-            super().update(instance.memberships.get(current=True), membership)
-            super().update(instance.memberships.get(current=True).account, membership)
+        # These are the signed-in member's recipient preferences for the current
+        # workspace.  Account-wide event gates are owner-managed through the
+        # account endpoint and must never be writable through a self-profile PATCH.
+        if memberships:
+            super().update(instance.memberships.get(current=True), memberships[0])
         instance = super().update(instance, validated_data)
         if instance.timezone:
             self.context["request"].session["django_timezone"] = instance.timezone

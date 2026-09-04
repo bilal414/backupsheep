@@ -358,7 +358,7 @@ complete container isolation:
 
 | Volume | Purpose | Capacity concern |
 | --- | --- | --- |
-| `pgdata` | Accounts, encrypted credentials, schedules, backup/restore rows, durable execution and activity state | Database growth, transaction health and recovery |
+| `postgres_data_v1` | Accounts, encrypted credentials, schedules, backup/restore rows, durable execution and activity state | Database growth, transaction health and recovery |
 | `rabbitmq_data` | Durable queue messages | Queue backlog and broker disk alarms |
 | `database_workdir` | Private database dumps/restores and database run logs | Largest database operation plus reserve |
 | `files_workdir` | Private file-source work, website incremental caches and files run logs | Largest full website tree/archive plus persistent caches and reserve |

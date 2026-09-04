@@ -1,321 +1,1012 @@
-<div x-data="setupOpenConnection()">
-    <div class="space-y-6">
-        <!-- Object type tabs -->
-        <div class="border-b border-slate-200">
-            <nav class="-mb-px flex gap-4 overflow-x-auto sm:gap-6" aria-label="Tabs">
-                <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
-                   x-bind:class="object_type === 'cloud' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
-                   class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">Servers</a>
-                {% if integration.code != "aws_rds" and integration.code != "hetzner" %}
-                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
-                       x-bind:class="object_type === 'volume' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
-                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">Volumes</a>
-                {% endif %}
-                {% if integration.code == "aws" %}
-                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 's3' %}"
-                       x-bind:class="object_type === 's3' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
-                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">S3 Buckets</a>
-                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'dynamodb' %}"
-                       x-bind:class="object_type === 'dynamodb' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
-                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">DynamoDB Tables</a>
-                {% endif %}
-                {% if integration.code == "vultr" %}
-                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'vultr_database' %}"
-                       x-bind:class="object_type === 'vultr_database' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
-                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">Managed Databases</a>
-                {% endif %}
-            </nav>
-        </div>
+<div
+    x-data="setupOpenConnection()"
+    @keydown.escape.window="if (reviewOpen && linkingKey === null) closeReviewDialog()"
+    class="source-discovery"
+    data-integration-code="{{ integration.code }}"
+    data-connection-id="{{ connection.id }}"
+    data-location-id="{{ connection.location.id|default:'' }}"
+    data-object-type="{{ object_code }}"
+    data-provider-name="{{ integration.name }}"
+    data-connection-name="{{ connection.name }}"
+    data-resource-label="{{ resource_label }}"
+    data-resource-label-plural="{{ resource_label_plural }}"
+    data-can-reconnect="{{ oauth_reconnect_available|yesno:'true,false' }}"
+    data-provider-account-url="{% url 'console:setup:integration_open' integration_code %}"
+>
+    <div class="sr-only" role="status" aria-live="polite" aria-atomic="true" x-text="announcement"></div>
 
-        <!-- Loading -->
-        <template x-if="loading">
-            <div class="flex items-center justify-center rounded-xl border border-slate-200 bg-white px-6 py-12 shadow-sm">
-                <svg class="h-8 w-8 animate-spin text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                <span class="sr-only">Loading...</span>
-            </div>
-        </template>
-
-        <!-- Error + reconnect -->
-        <template x-if="error">
-            <div class="space-y-4">
-                <div class="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
-                    <svg class="mt-0.5 h-5 w-5 flex-none text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
-                    </svg>
-                    <div class="min-w-0 flex-1">
-                        <p class="font-medium leading-6">There was error with your request</p>
-                        <ul role="list" class="mt-1 list-disc space-y-1 pl-5 text-red-700">
-                            <li x-text="error"></li>
-                        </ul>
-                    </div>
-                </div>
-                <button @click="restartOauth()" x-bind:disabled="oauthRestartLoading" type="button"
-                        class="flex w-full flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white px-6 py-10 text-center transition hover:border-slate-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                    <img class="h-10 max-h-10" src="{{ STATIC_URL }}{{ integration.image }}" alt="{{ integration.name }} Backups">
-                    <span class="mt-3 block text-sm font-semibold text-slate-900">Reconnect {{ integration.name }} ({{ connection.name }}) Connection</span>
-                </button>
-            </div>
-        </template>
-
-        <!-- Empty state -->
-        <div x-cloak x-show="objectList?.length === 0" class="rounded-xl border border-slate-200 bg-white px-5 py-6 shadow-sm sm:px-6">
-            <h3 class="text-sm font-semibold text-slate-900">
-                No {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} found
-            </h3>
-            <p class="mt-2 max-w-xl text-sm text-slate-500">
-                Unable to fetch any {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} from your {{ integration.name }} account. If you are using Teams, then switch to team account before
-                setting up integration.
-            </p>
-            <a href="{% url 'console:setup:integration_open' integration_code %}" class="mt-3 inline-flex items-center gap-1.5 text-sm font-medium text-indigo-600 transition hover:text-indigo-700">
-                Select or add different {{ integration.name }} integration
-                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
-                </svg>
+    <nav class="sd-tabs" aria-label="{{ integration.name }} resource types">
+        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
+           class="sd-tab{% if object_code == 'cloud' %} is-active{% endif %}"
+           {% if object_code == 'cloud' %}aria-current="page"{% endif %}>
+            Servers
+            <span x-cloak x-show="object_type === 'cloud' && hasLoaded" class="sd-tab-count" x-text="totalCount"></span>
+        </a>
+        {% if integration.code != "aws_rds" and integration.code != "hetzner" %}
+            <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
+               class="sd-tab{% if object_code == 'volume' %} is-active{% endif %}"
+               {% if object_code == 'volume' %}aria-current="page"{% endif %}>
+                Volumes
+                <span x-cloak x-show="object_type === 'volume' && hasLoaded" class="sd-tab-count" x-text="totalCount"></span>
             </a>
+        {% endif %}
+        {% if integration.code == "aws" %}
+            <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 's3' %}"
+               class="sd-tab{% if object_code == 's3' %} is-active{% endif %}"
+               {% if object_code == 's3' %}aria-current="page"{% endif %}>
+                S3 buckets
+                <span x-cloak x-show="object_type === 's3' && hasLoaded" class="sd-tab-count" x-text="totalCount"></span>
+            </a>
+            <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'dynamodb' %}"
+               class="sd-tab{% if object_code == 'dynamodb' %} is-active{% endif %}"
+               {% if object_code == 'dynamodb' %}aria-current="page"{% endif %}>
+                DynamoDB tables
+                <span x-cloak x-show="object_type === 'dynamodb' && hasLoaded" class="sd-tab-count" x-text="totalCount"></span>
+            </a>
+        {% endif %}
+        {% if integration.code == "vultr" %}
+            <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'vultr_database' %}"
+               class="sd-tab{% if object_code == 'vultr_database' %} is-active{% endif %}"
+               {% if object_code == 'vultr_database' %}aria-current="page"{% endif %}>
+                Managed databases
+                <span x-cloak x-show="object_type === 'vultr_database' && hasLoaded" class="sd-tab-count" x-text="totalCount"></span>
+            </a>
+        {% endif %}
+    </nav>
+
+    <section class="sd-scope-receipt" aria-labelledby="source-discovery-boundary-heading">
+        <div class="sd-scope-heading">
+            <div>
+                <p class="sd-eyebrow">Scope and consequence</p>
+                <h2 id="source-discovery-boundary-heading">Provider inventory receipt</h2>
+            </div>
+            <span class="sd-status sd-status-verified">
+                <span class="sd-status-dot" aria-hidden="true"></span>
+                {{ connection.get_status_display }} connection
+            </span>
+        </div>
+        <div class="sd-scope-grid">
+            <div class="sd-scope-cell">
+                <span class="sd-scope-label">Provider scope</span>
+                <strong>{{ integration.name }} · {{ connection.name }}</strong>
+                <span>Workspace: {{ connection.account.name }}</span>
+            </div>
+            <div class="sd-scope-cell">
+                <span class="sd-scope-label">Inventory freshness</span>
+                <strong x-text="freshnessLabel()">Waiting for inventory</strong>
+                <span x-text="freshnessDetail()">No provider inventory has been received.</span>
+            </div>
+            <div class="sd-scope-cell sd-scope-boundary">
+                <span class="sd-scope-label">Action boundary</span>
+                <strong>BackupSheep registration only</strong>
+                <span>No snapshot, schedule, backup, or recovery evidence is created on this page.</span>
+            </div>
+        </div>
+    </section>
+
+    <section class="sd-command-panel" aria-labelledby="source-inventory-heading">
+        <div class="sd-command-heading">
+            <div>
+                <p class="sd-eyebrow">Read-only discovery</p>
+                <h2 id="source-inventory-heading"><span class="sd-title-case">{{ resource_label_plural }}</span> returned by {{ integration.name }}</h2>
+                <p>Search the current receipt, review provider metadata, then add one exact resource at a time.</p>
+            </div>
+            <button
+                type="button"
+                class="sd-button sd-button-secondary"
+                @click="refreshInventory()"
+                :disabled="loading || refreshing || linkingKey !== null"
+                :aria-busy="refreshing.toString()"
+            >
+                <svg :class="{'is-spinning': refreshing}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M20 11a8.1 8.1 0 00-15.5-2M4 4v5h5m-5 4a8.1 8.1 0 0015.5 2M20 20v-5h-5"/>
+                </svg>
+                <span x-text="refreshing ? 'Refreshing…' : 'Refresh inventory'">Refresh inventory</span>
+            </button>
         </div>
 
-        <!-- Object list -->
-        <template x-if="objectList?.length > 0">
-            <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-                <table id="section-nodes" class="min-w-full divide-y divide-slate-200 text-sm">
-                    <thead>
-                        <tr class="bg-slate-50">
-                            <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Name</th>
-                            <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Region</th>
-                            <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Size</th>
-                            <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100">
-                        <template x-for="object in objectList">
-                            <tr class="transition hover:bg-slate-50">
-                                <td class="px-4 py-3">
-                                    <div class="flex items-center gap-3">
-                                        <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                                            <svg x-cloak x-show="object_type==='cloud'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                                <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/>
-                                            </svg>
-                                            <svg x-cloak x-show="object_type==='volume'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
-                                            </svg>
-                                            <svg x-cloak x-show="object_type==='s3' || object_type==='dynamodb' || object_type==='vultr_database'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"/>
-                                            </svg>
-                                        </span>
-                                        <div class="min-w-0">
-                                            <span class="block truncate text-sm font-medium text-slate-900" x-text="object._bs_name"></span>
-                                            <span x-show="object._bs_vol_type" class="mt-0.5 inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20">
-                                                <span x-text="object._bs_vol_type"></span>
-                                            </span>
+        <form class="sd-filters" role="search" @submit.prevent>
+            <div class="sd-field sd-search-field">
+                <label for="source-resource-search">Search resources</label>
+                <div class="sd-input-wrap">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m1.35-5.65a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                    <input
+                        id="source-resource-search"
+                        type="search"
+                        x-model.debounce.200ms="query"
+                        @keydown.escape.stop="query = ''"
+                        :disabled="!hasLoaded"
+                        placeholder="Name, provider ID, region, or type"
+                        autocomplete="off"
+                    >
+                </div>
+            </div>
+            <div class="sd-field">
+                <label for="source-region-filter">Region</label>
+                <select id="source-region-filter" x-model="regionFilter" :disabled="!hasLoaded || regions.length === 0">
+                    <option value="all">All regions</option>
+                    <template x-for="region in regions" :key="region">
+                        <option :value="region" x-text="region"></option>
+                    </template>
+                </select>
+            </div>
+            <div class="sd-field">
+                <label for="source-state-filter">BackupSheep state</label>
+                <select id="source-state-filter" x-ref="stateFilter" x-model="stateFilter" :disabled="!hasLoaded">
+                    <option value="all">All states</option>
+                    <option value="available">Available to add</option>
+                    <option value="attached">Already added</option>
+                    <option value="attention">Needs review</option>
+                </select>
+            </div>
+            <button
+                x-cloak
+                x-show="hasActiveFilters"
+                type="button"
+                class="sd-button sd-button-quiet sd-clear-filters"
+                @click="clearFilters()"
+            >Clear filters</button>
+        </form>
+
+        <div x-cloak x-show="hasLoaded" class="sd-count-receipt">
+            <dl>
+                <div>
+                    <dt>Returned</dt>
+                    <dd x-text="totalCount">0</dd>
+                </div>
+                <div>
+                    <dt>Available</dt>
+                    <dd x-text="availableCount">0</dd>
+                </div>
+                <div>
+                    <dt>Already added</dt>
+                    <dd x-text="attachedCount">0</dd>
+                </div>
+                <div>
+                    <dt>Needs review</dt>
+                    <dd x-text="reviewCount">0</dd>
+                </div>
+            </dl>
+            <p aria-live="polite">
+                Showing <strong x-text="filteredObjects.length">0</strong> of <strong x-text="totalCount">0</strong> returned <span x-text="resource_label_plural">resources</span>.
+            </p>
+        </div>
+    </section>
+
+    <template x-if="error">
+        <aside class="sd-alert" :class="error.kind === 'access' ? 'sd-alert-attention' : 'sd-alert-incident'" role="alert">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+            </svg>
+            <div class="sd-alert-copy">
+                <h2 x-text="error.title"></h2>
+                <p x-text="error.detail"></p>
+                <p x-show="hasLoaded" class="sd-alert-stale">The last received inventory remains visible below and may now be stale.</p>
+                <p x-show="error.requestId" class="sd-request-id"><span>Request ID</span> <code x-text="error.requestId"></code></p>
+            </div>
+            <div class="sd-alert-actions">
+                <button type="button" class="sd-button sd-button-secondary" @click="refreshInventory()" :disabled="loading || refreshing">Try discovery again</button>
+                <template x-if="canReconnect && error.kind === 'access'">
+                    <button type="button" class="sd-button sd-button-primary" @click="restartOauth()" :disabled="oauthRestartLoading" :aria-busy="oauthRestartLoading.toString()">
+                        <span x-text="oauthRestartLoading ? 'Preparing…' : 'Reconnect provider'">Reconnect provider</span>
+                    </button>
+                </template>
+                <a class="sd-button sd-button-quiet" :href="providerAccountUrl">Review provider account</a>
+            </div>
+        </aside>
+    </template>
+
+    <section x-cloak x-show="loading && !hasLoaded" class="sd-state-panel sd-loading-panel" role="status" aria-live="polite">
+        <div class="sd-state-copy">
+            <span class="sd-spinner" aria-hidden="true"></span>
+            <div>
+                <h2>Discovering <span x-text="resource_label_plural">resources</span></h2>
+                <p x-text="'Reading ' + providerName + ' inventory for ' + connectionName + '. No resource is being changed.'"></p>
+            </div>
+        </div>
+        <div class="sd-skeleton" aria-hidden="true">
+            <span></span><span></span><span></span>
+        </div>
+    </section>
+
+    <section x-cloak x-show="hasLoaded && totalCount === 0 && !loading" class="sd-state-panel">
+        <span class="sd-state-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/></svg>
+        </span>
+        <h2>No <span x-text="resource_label_plural">resources</span> were returned</h2>
+        <p>This provider account returned no resources of this type. The result can also reflect the scopes granted to the provider credential.</p>
+        <div class="sd-state-actions">
+            <button type="button" class="sd-button sd-button-secondary" @click="refreshInventory()">Refresh inventory</button>
+            <a class="sd-button sd-button-quiet" :href="providerAccountUrl">Review provider account</a>
+        </div>
+    </section>
+
+    <section x-cloak x-show="hasLoaded && totalCount > 0 && filteredObjects.length === 0" class="sd-state-panel">
+        <span class="sd-state-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+        </span>
+        <h2>No resources match these filters</h2>
+        <p>The inventory receipt still contains <span x-text="totalCount">0</span> resources. Clear the search and filters to review them.</p>
+        <button type="button" class="sd-button sd-button-secondary" @click="clearFilters()">Clear filters</button>
+    </section>
+
+    <aside x-cloak x-show="hasLoaded && totalCount > 0 && attachedCount === totalCount" class="sd-all-attached" role="status">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <div><strong>Every returned resource is already added.</strong><span>Registration status is not backup or recovery proof.</span></div>
+        <a href="{% url 'console:node:index' %}#source-inventory">View sources</a>
+    </aside>
+
+    <section x-cloak x-show="hasLoaded && totalCount > 0 && filteredObjects.length > 0" class="sd-table-panel" aria-labelledby="source-inventory-table-heading">
+        <div class="sd-table-heading">
+            <div>
+                <p class="sd-eyebrow">Current receipt</p>
+                <h2 id="source-inventory-table-heading">Resource inventory</h2>
+            </div>
+            <span x-show="refreshing" class="sd-refreshing-label" role="status"><span class="sd-spinner" aria-hidden="true"></span>Refreshing; prior receipt shown</span>
+        </div>
+        <div class="sd-table-scroll" tabindex="0" aria-label="Scrollable provider resource inventory">
+            <table class="sd-table">
+                <caption class="sr-only">Provider resources returned for this connection, their provider metadata, BackupSheep registration state, and available actions.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Resource</th>
+                        <th scope="col">Location and capacity</th>
+                        <th scope="col">Provider state</th>
+                        <th scope="col">BackupSheep state</th>
+                        <th scope="col"><span class="sr-only">Action</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="(object, index) in filteredObjects" :key="objectKey(object, index)">
+                        <tr tabindex="-1" :class="{'is-linking': isLinking(object), 'needs-review': rowReceipt(object)?.kind === 'unknown' || !hasResourceIdentity(object)}">
+                            <td data-label="Resource">
+                                <div class="sd-resource-cell">
+                                    <span class="sd-resource-mark" aria-hidden="true">
+                                        <svg x-show="object_type === 'cloud'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/></svg>
+                                        <svg x-show="object_type === 'volume'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/></svg>
+                                        <svg x-show="object_type === 's3' || object_type === 'dynamodb' || object_type === 'vultr_database'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"/></svg>
+                                    </span>
+                                    <div class="sd-resource-copy">
+                                        <strong x-text="resourceName(object)" :title="resourceName(object)"></strong>
+                                        <div class="sd-resource-id">
+                                            <code x-text="resourceId(object)"></code>
+                                            <button x-show="hasResourceIdentity(object)" type="button" @click="copyResourceId(object)" :aria-label="'Copy provider resource ID for ' + resourceName(object)" title="Copy provider resource ID">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75A1.125 1.125 0 013.75 20.625v-9.75c0-.621.504-1.125 1.125-1.125H8.25m7.5 7.5h3.375c.621 0 1.125-.504 1.125-1.125v-9.75c0-.621-.504-1.125-1.125-1.125h-9.75A1.125 1.125 0 008.25 6.375v9.75c0 .621.504 1.125 1.125 1.125h6.375z"/></svg>
+                                            </button>
+                                        </div>
+                                        <div class="sd-resource-badges">
+                                            <span x-text="resourceTypeLabel(object)"></span>
+                                            <span x-show="object._bs_vol_type" x-text="safeText(object._bs_vol_type, '')"></span>
                                         </div>
                                     </div>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-3 text-slate-500">
-                                    <span x-text="object._bs_region"></span>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-3 text-slate-500">
-                                    <span x-text="object._bs_size"></span> <span x-show="object._bs_size">GB</span>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-3 text-right">
-                                    <button @click="linkObject(object)" x-bind:disabled="object._bs_attached===true" type="button"
-                                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                                        Link Node
+                                </div>
+                            </td>
+                            <td data-label="Location and capacity">
+                                <strong x-text="resourceRegion(object)"></strong>
+                                <span x-text="resourceSize(object)"></span>
+                            </td>
+                            <td data-label="Provider state">
+                                <span class="sd-status" :class="providerStateClass(object)">
+                                    <span class="sd-status-dot" aria-hidden="true"></span>
+                                    <span x-text="providerState(object)"></span>
+                                </span>
+                                <small>Provider-reported metadata</small>
+                            </td>
+                            <td data-label="BackupSheep state">
+                                <span class="sd-status" :class="backupStateClass(object)">
+                                    <span class="sd-status-dot" aria-hidden="true"></span>
+                                    <span x-text="backupState(object)"></span>
+                                </span>
+                                <small x-text="backupStateDetail(object)"></small>
+                                <small x-show="rowReceipt(object)?.requestId" class="sd-row-request"><span>Request</span> <code x-text="rowReceipt(object)?.requestId"></code></small>
+                            </td>
+                            <td data-label="Action" class="sd-row-action">
+                                <template x-if="!isAttached(object) && hasResourceIdentity(object) && rowReceipt(object)?.kind !== 'unknown'">
+                                    <button
+                                        type="button"
+                                        class="sd-button sd-button-primary"
+                                        @click="openReview(object, $event.currentTarget)"
+                                        :disabled="linkingKey !== null || loading || refreshing"
+                                        :aria-busy="isLinking(object).toString()"
+                                    >
+                                        <span x-show="isLinking(object)" class="sd-spinner" aria-hidden="true"></span>
+                                        <span x-text="addButtonLabel(object)">Add source</span>
                                     </button>
-                                </td>
-                            </tr>
-                        </template>
-                    </tbody>
-                </table>
-            </div>
-        </template>
+                                </template>
+                                <template x-if="rowReceipt(object)?.kind === 'unknown'">
+                                    <button type="button" class="sd-button sd-button-secondary" @click="refreshInventory()" :disabled="loading || refreshing || linkingKey !== null">Refresh to reconcile</button>
+                                </template>
+                                <span x-show="!isAttached(object) && !hasResourceIdentity(object)" class="sd-no-action">Provider ID required</span>
+                                <span x-show="isAttached(object)" class="sd-no-action">No action needed</span>
+                            </td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+        <footer class="sd-table-note">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/></svg>
+            <p>Discovery reads provider inventory. Adding a source creates a BackupSheep registration record; it does not create or modify a provider snapshot.</p>
+        </footer>
+    </section>
+
+    <div x-cloak x-show="reviewOpen" class="sd-dialog-layer" aria-hidden="false">
+        <div class="sd-dialog-backdrop" aria-hidden="true"></div>
+        <div class="sd-dialog-position">
+            <section
+                x-ref="reviewDialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="source-review-title"
+                aria-describedby="source-review-description"
+                tabindex="-1"
+                class="sd-dialog"
+                @keydown.tab="trapReviewDialog($event)"
+            >
+                <header class="sd-dialog-header">
+                    <div>
+                        <p class="sd-eyebrow">Registration preflight</p>
+                        <h2 id="source-review-title">Review exact source</h2>
+                        <p id="source-review-description">Confirm the provider scope and resource identity before BackupSheep creates a source record.</p>
+                    </div>
+                    <button x-ref="reviewClose" type="button" class="sd-dialog-close" @click="closeReviewDialog()" aria-label="Close source review">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                </header>
+
+                <div class="sd-dialog-body">
+                    <dl class="sd-review-grid">
+                        <div>
+                            <dt>Provider account</dt>
+                            <dd><strong x-text="providerName"></strong><span x-text="connectionName"></span></dd>
+                        </div>
+                        <div>
+                            <dt>Exact resource</dt>
+                            <dd><strong x-text="resourceName(reviewObject)"></strong><code x-text="resourceId(reviewObject)"></code></dd>
+                        </div>
+                        <div>
+                            <dt>Location and capacity</dt>
+                            <dd><strong x-text="resourceRegion(reviewObject)"></strong><span x-text="resourceSize(reviewObject)"></span></dd>
+                        </div>
+                        <div>
+                            <dt>Provider state</dt>
+                            <dd><span class="sd-status" :class="providerStateClass(reviewObject)"><span class="sd-status-dot" aria-hidden="true"></span><span x-text="providerState(reviewObject)"></span></span><span>Provider-reported metadata</span></dd>
+                        </div>
+                    </dl>
+
+                    <div class="sd-preflight-boundary">
+                        <div>
+                            <span class="sd-preflight-mark sd-preflight-mark-yes" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75"/></svg>
+                            </span>
+                            <p><strong>This action creates</strong><span>One BackupSheep source registration for the exact resource above.</span></p>
+                        </div>
+                        <div>
+                            <span class="sd-preflight-mark sd-preflight-mark-no" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                            </span>
+                            <p><strong>This action does not create</strong><span>A provider snapshot, schedule, backup run, successful-backup evidence, or recovery proof.</span></p>
+                        </div>
+                    </div>
+                </div>
+
+                <footer class="sd-dialog-footer">
+                    <p>After registration, review the source and configure protection separately.</p>
+                    <div>
+                        <button x-ref="reviewCancel" type="button" class="sd-button sd-button-secondary" @click="closeReviewDialog()">Cancel</button>
+                        <button type="button" class="sd-button sd-button-primary" @click="confirmReview()" :disabled="linkingKey !== null">Add source</button>
+                    </div>
+                </footer>
+            </section>
+        </div>
     </div>
+
+    <aside x-cloak x-show="addedCount > 0" class="sd-next-step" role="status">
+        <div>
+            <p class="sd-eyebrow">Registration receipt</p>
+            <h2><span x-text="addedCount">0</span> <span x-text="addedCount === 1 ? 'source' : 'sources'"></span> added in this session</h2>
+            <p>Protection is not configured by this action. Review the source and assign an appropriate schedule and storage policy.</p>
+        </div>
+        <a class="sd-button sd-button-primary" href="{% url 'console:node:index' %}#source-inventory">Review sources</a>
+    </aside>
 </div>
+
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('setupOpenConnection', () => ({
+            loading: false,
+            refreshing: false,
+            hasLoaded: false,
             error: null,
-            objectList: null,
-            oauth_url: null,
-            integration_code: "{{integration.code}}",
-            connection_id: "{{connection.id}}",
-            location_id: "{{connection.location.id}}",
-            object_type: "{{object_code}}",
+            objectList: [],
+            query: '',
+            regionFilter: 'all',
+            stateFilter: 'all',
+            observedAt: null,
+            requestReceipt: null,
+            linkingKey: null,
+            rowReceipts: {},
+            addedCount: 0,
+            announcement: '',
+            reviewOpen: false,
+            reviewObject: null,
+            reviewTrigger: null,
             oauthRestartLoading: false,
+            discoveryController: null,
+            integration_code: '',
+            connection_id: '',
+            location_id: '',
+            object_type: '',
+            providerName: '',
+            connectionName: '',
+            resource_label: 'resource',
+            resource_label_plural: 'resources',
+            canReconnect: false,
+            providerAccountUrl: '',
 
             init() {
+                const config = this.$root.dataset;
+                this.integration_code = config.integrationCode || '';
+                this.connection_id = config.connectionId || '';
+                this.location_id = config.locationId || '';
+                this.object_type = config.objectType || '';
+                this.providerName = config.providerName || 'provider';
+                this.connectionName = config.connectionName || 'provider account';
+                this.resource_label = config.resourceLabel || 'resource';
+                this.resource_label_plural = config.resourceLabelPlural || 'resources';
+                this.canReconnect = config.canReconnect === 'true';
+                this.providerAccountUrl = config.providerAccountUrl || '#';
                 this.getObjects();
             },
 
-            openUrl(url) {
-                window.location.href = url;
+            get totalCount() {
+                return this.objectList.length;
             },
 
-            async restartOauth() {
-                if (this.oauthRestartLoading) return;
-                this.oauthRestartLoading = true;
-                try {
-                    const oauthUrl = await this.getOauthUrl();
-                    if (oauthUrl) this.openUrl(oauthUrl);
-                } finally {
-                    this.oauthRestartLoading = false;
+            get attachedCount() {
+                return this.objectList.filter((object) => this.isAttached(object)).length;
+            },
+
+            get availableCount() {
+                return this.objectList.filter((object) => (
+                    !this.isAttached(object)
+                    && this.hasResourceIdentity(object)
+                    && this.rowReceipt(object)?.kind !== 'unknown'
+                )).length;
+            },
+
+            get reviewCount() {
+                return this.objectList.filter((object) => (
+                    !this.isAttached(object)
+                    && (!this.hasResourceIdentity(object) || this.rowReceipt(object)?.kind === 'unknown')
+                )).length;
+            },
+
+            get regions() {
+                return [...new Set(
+                    this.objectList
+                        .map((object) => this.resourceRegion(object))
+                        .filter((region) => region && region !== 'Not reported')
+                )].sort((left, right) => left.localeCompare(right));
+            },
+
+            get hasActiveFilters() {
+                return this.query.trim() !== '' || this.regionFilter !== 'all' || this.stateFilter !== 'all';
+            },
+
+            get filteredObjects() {
+                const term = this.query.trim().toLocaleLowerCase();
+                return this.objectList.filter((object) => {
+                    if (this.regionFilter !== 'all' && this.resourceRegion(object) !== this.regionFilter) return false;
+                    if (!this.matchesStateFilter(object)) return false;
+                    if (!term) return true;
+                    const searchable = [
+                        this.resourceName(object),
+                        this.resourceId(object),
+                        this.resourceRegion(object),
+                        this.resourceTypeLabel(object),
+                        this.providerState(object),
+                    ].join(' ').toLocaleLowerCase();
+                    return searchable.includes(term);
+                });
+            },
+
+            safeText(value, fallback = 'Not reported') {
+                if (typeof value === 'string' || typeof value === 'number') {
+                    const normalized = String(value).trim();
+                    return normalized || fallback;
+                }
+                if (value && typeof value === 'object') {
+                    for (const key of ['name', 'label', 'code', 'regionName', 'city']) {
+                        if (value[key] !== undefined && value[key] !== null) {
+                            return this.safeText(value[key], fallback);
+                        }
+                    }
+                }
+                return fallback;
+            },
+
+            resourceName(object) {
+                return this.safeText(object?._bs_name, this.rawResourceId(object) || 'Unnamed resource');
+            },
+
+            rawResourceId(object) {
+                const value = object?._bs_unique_id ?? object?.id ?? object?.uuid ?? object?.arn;
+                return this.safeText(value, '');
+            },
+
+            resourceId(object) {
+                return this.rawResourceId(object) || 'Provider ID not reported';
+            },
+
+            hasResourceIdentity(object) {
+                return this.rawResourceId(object) !== '';
+            },
+
+            objectKey(object, index = 0) {
+                const sourceIndex = this.objectList.indexOf(object);
+                return `${this.object_type}:${this.resourceId(object)}:${sourceIndex >= 0 ? sourceIndex : index}`;
+            },
+
+            receiptKey(object) {
+                return `${this.object_type}:${this.resourceId(object)}`;
+            },
+
+            resourceTypeLabel(object) {
+                const rawType = this.safeText(object?._bs_resource_type, this.object_type)
+                    .replace(/_/g, ' ')
+                    .toLocaleLowerCase();
+                const labels = {
+                    cloud: 'Server',
+                    server: 'Server',
+                    instance: 'Server instance',
+                    volume: 'Volume',
+                    s3: 'S3 bucket',
+                    dynamodb: 'DynamoDB table',
+                    vultr_database: 'Managed database',
+                };
+                return labels[rawType] || rawType.replace(/\b\w/g, (letter) => letter.toUpperCase());
+            },
+
+            resourceRegion(object) {
+                return this.safeText(object?._bs_region, 'Not reported');
+            },
+
+            resourceSize(object) {
+                const value = object?._bs_size;
+                if (value === undefined || value === null || value === '') return 'Capacity not reported';
+                if (typeof value === 'number' && Number.isFinite(value)) {
+                    return `${new Intl.NumberFormat().format(value)} GB`;
+                }
+                const normalized = this.safeText(value, 'Capacity not reported');
+                return /\b(?:kb|mb|gb|tb|bytes?)\b/i.test(normalized) ? normalized : `${normalized} GB`;
+            },
+
+            providerState(object) {
+                const candidates = [
+                    object?._bs_provider_state,
+                    object?.status,
+                    object?.State?.Name,
+                    object?.state,
+                    object?.power_state,
+                    object?.server_state,
+                    object?.lifecycle_state,
+                ];
+                for (const candidate of candidates) {
+                    const normalized = this.safeText(candidate, '');
+                    if (normalized) return normalized.replace(/_/g, ' ');
+                }
+                return 'Not reported';
+            },
+
+            providerStateClass(object) {
+                const state = this.providerState(object).toLocaleLowerCase();
+                if (['active', 'available', 'online', 'ready', 'running', 'ok'].includes(state)) return 'sd-status-verified';
+                if (['error', 'failed', 'offline', 'terminated', 'deleted'].includes(state)) return 'sd-status-incident';
+                if (['pending', 'paused', 'stopped', 'stopping', 'provisioning', 'rebooting'].includes(state)) return 'sd-status-attention';
+                return 'sd-status-neutral';
+            },
+
+            isAttached(object) {
+                return object?._bs_attached === true;
+            },
+
+            rowReceipt(object) {
+                return this.rowReceipts[this.receiptKey(object)] || null;
+            },
+
+            setRowReceipt(object, receipt) {
+                this.rowReceipts = {
+                    ...this.rowReceipts,
+                    [this.receiptKey(object)]: receipt,
+                };
+            },
+
+            backupState(object) {
+                const receipt = this.rowReceipt(object);
+                if (this.isAttached(object)) return 'Already added';
+                if (!this.hasResourceIdentity(object)) return 'Provider ID required';
+                if (receipt?.kind === 'unknown') return 'Outcome not confirmed';
+                if (receipt?.kind === 'error') return 'Add failed';
+                return 'Available to add';
+            },
+
+            backupStateClass(object) {
+                const receipt = this.rowReceipt(object);
+                if (this.isAttached(object)) return 'sd-status-verified';
+                if (!this.hasResourceIdentity(object)) return 'sd-status-attention';
+                if (receipt?.kind === 'unknown') return 'sd-status-attention';
+                if (receipt?.kind === 'error') return 'sd-status-incident';
+                return 'sd-status-neutral';
+            },
+
+            backupStateDetail(object) {
+                const receipt = this.rowReceipt(object);
+                if (receipt?.kind === 'success') return 'Added now; protection is not configured.';
+                if (this.isAttached(object)) return 'Registered in BackupSheep; backup evidence is separate.';
+                if (!this.hasResourceIdentity(object)) return 'Registration is blocked because the provider did not return a stable resource ID.';
+                if (receipt?.kind === 'unknown') return 'Refresh inventory before attempting another add.';
+                if (receipt?.kind === 'error') return receipt.detail;
+                return 'No BackupSheep source is registered for this receipt.';
+            },
+
+            matchesStateFilter(object) {
+                if (this.stateFilter === 'all') return true;
+                const receipt = this.rowReceipt(object);
+                if (this.stateFilter === 'attached') return this.isAttached(object);
+                if (this.stateFilter === 'attention') return !this.hasResourceIdentity(object) || receipt?.kind === 'unknown';
+                return !this.isAttached(object) && this.hasResourceIdentity(object) && receipt?.kind !== 'unknown';
+            },
+
+            isLinking(object) {
+                return this.linkingKey === this.receiptKey(object);
+            },
+
+            addButtonLabel(object) {
+                if (this.isLinking(object)) return 'Adding…';
+                if (this.rowReceipt(object)?.kind === 'error') return 'Try add again';
+                return 'Add source';
+            },
+
+            openReview(object, trigger) {
+                if (this.linkingKey !== null || this.isAttached(object) || !this.hasResourceIdentity(object) || this.rowReceipt(object)?.kind === 'unknown') return;
+                this.reviewObject = object;
+                this.reviewTrigger = trigger || document.activeElement;
+                this.reviewOpen = true;
+                document.documentElement.classList.add('sd-dialog-open');
+                this.$nextTick(() => {
+                    const target = this.$refs.reviewCancel || this.$refs.reviewDialog;
+                    if (target && typeof target.focus === 'function') target.focus();
+                });
+            },
+
+            closeReviewDialog(restoreFocus = true) {
+                if (!this.reviewOpen) return;
+                const trigger = this.reviewTrigger;
+                this.reviewOpen = false;
+                this.reviewObject = null;
+                this.reviewTrigger = null;
+                document.documentElement.classList.remove('sd-dialog-open');
+                if (restoreFocus) {
+                    this.$nextTick(() => {
+                        if (trigger && typeof trigger.focus === 'function') trigger.focus({preventScroll: true});
+                    });
                 }
             },
 
-            async getObjects() {
-                this.loading = true;
-                let url = "/api/v1/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams({
-                    location: this.location_id,
-                    object_type: this.object_type,
-                });
-
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'GET',
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        this.loading = false;
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        this.scheduleErrors = json;
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
-                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
-                    this.objectList = json;
-                    this.loading = false;
-                }).catch((error) => {
-                    {#Alpine.store('notifications').items.push({show: true, error: true, heading: 'Error!', details: error.message});#}
-                    this.error = error;
-                });
+            trapReviewDialog(event) {
+                if (!this.reviewOpen || !this.$refs.reviewDialog) return;
+                const focusable = [...this.$refs.reviewDialog.querySelectorAll(
+                    'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+                )].filter((element) => element.getClientRects().length > 0);
+                if (!focusable.length) {
+                    event.preventDefault();
+                    this.$refs.reviewDialog.focus();
+                    return;
+                }
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+                if (event.shiftKey && (document.activeElement === first || !this.$refs.reviewDialog.contains(document.activeElement))) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
             },
 
-            async linkObject(object) {
-                Alpine.store('showLoading').toggle();
-                const isAWSBackupResource = this.integration_code === "aws"
-                    && (this.object_type === "s3" || this.object_type === "dynamodb");
-                const isVultrDatabase = this.integration_code === "vultr"
-                    && this.object_type === "vultr_database";
+            confirmReview() {
+                if (!this.reviewOpen || !this.reviewObject || this.linkingKey !== null) return;
+                const object = this.reviewObject;
+                const focusTarget = this.reviewTrigger?.closest('tr') || null;
+                this.closeReviewDialog(false);
+                this.$nextTick(() => this.linkObject(object, focusTarget));
+            },
+
+            clearFilters() {
+                this.query = '';
+                this.regionFilter = 'all';
+                this.stateFilter = 'all';
+                this.announcement = `Filters cleared. Showing ${this.totalCount} returned ${this.resource_label_plural}.`;
+            },
+
+            freshnessLabel() {
+                if (this.refreshing) return 'Refreshing provider inventory';
+                if (this.loading && !this.hasLoaded) return 'Discovering provider inventory';
+                if (this.observedAt) {
+                    return `Received ${new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(this.observedAt)}`;
+                }
+                return 'No inventory receipt';
+            },
+
+            freshnessDetail() {
+                if (this.refreshing && this.observedAt) return 'The prior receipt remains visible until refresh completes.';
+                if (this.requestReceipt) return `Request ID ${this.requestReceipt}`;
+                if (this.observedAt) return 'Client receipt time; completeness depends on provider permissions.';
+                return 'No provider inventory has been received.';
+            },
+
+            async readResponse(response) {
+                const body = await response.text();
+                if (!body) return {};
+                try {
+                    return JSON.parse(body);
+                } catch (error) {
+                    return {detail: body.slice(0, 500)};
+                }
+            },
+
+            requestId(response, payload) {
+                return payload?.request_id
+                    || response.headers.get('X-Request-ID')
+                    || response.headers.get('X-Correlation-ID')
+                    || null;
+            },
+
+            responseError(response, payload) {
+                const failure = new Error(
+                    this.safeText(payload?.detail, `${response.status} ${response.statusText || 'Request failed'}`)
+                );
+                failure.responseStatus = response.status;
+                failure.responseConfirmed = response.status < 500;
+                failure.requestId = this.requestId(response, payload);
+                return failure;
+            },
+
+            discoveryFailure(failure) {
+                const status = failure?.responseStatus;
+                let kind = 'provider';
+                let title = `Unable to discover ${this.resource_label_plural}`;
+                let detail = failure?.message || 'The provider inventory request could not be completed.';
+
+                if (failure?.name === 'AbortError') {
+                    kind = 'timeout';
+                    title = 'Provider discovery timed out';
+                    detail = 'The provider did not return inventory within the expected time. No resource was changed.';
+                } else if (status === 401 || status === 403) {
+                    kind = 'access';
+                    title = 'Provider access is not available';
+                    detail = 'The connection was rejected or does not have permission to read this inventory. Review the provider account and credential scope.';
+                } else if (status === 429) {
+                    kind = 'rate';
+                    title = 'Provider request limit reached';
+                    detail = 'The provider asked BackupSheep to slow down. Wait before trying discovery again.';
+                } else if (!failure?.responseStatus) {
+                    kind = 'network';
+                    title = 'Inventory response was not received';
+                    detail = 'The browser could not confirm a provider inventory response. No resource registration was attempted.';
+                }
+
+                return {kind, title, detail, requestId: failure?.requestId || null};
+            },
+
+            async getObjects({manual = false} = {}) {
+                if (this.loading || this.refreshing) return;
+                if (this.hasLoaded) this.refreshing = true;
+                else this.loading = true;
+                this.error = null;
+                this.announcement = manual
+                    ? `Refreshing ${this.resource_label_plural}.`
+                    : `Discovering ${this.resource_label_plural}.`;
+
+                const params = new URLSearchParams({object_type: this.object_type});
+                if (this.location_id) params.set('location', this.location_id);
+                const url = `/api/v1/connections/${encodeURIComponent(this.integration_code)}/${encodeURIComponent(this.connection_id)}/objects/?${params}`;
+                const controller = new AbortController();
+                this.discoveryController = controller;
+                const timeout = window.setTimeout(() => controller.abort(), 30000);
+
+                try {
+                    const response = await fetch(url, {
+                        headers: {'Accept': 'application/json'},
+                        method: 'GET',
+                        signal: controller.signal,
+                    });
+                    const payload = await this.readResponse(response);
+                    if (!response.ok) throw this.responseError(response, payload);
+                    const items = Array.isArray(payload) ? payload : payload?.results;
+                    if (!Array.isArray(items)) {
+                        const invalid = new Error('The provider returned an inventory format BackupSheep could not verify.');
+                        invalid.responseStatus = 502;
+                        invalid.responseConfirmed = false;
+                        invalid.requestId = this.requestId(response, payload);
+                        throw invalid;
+                    }
+                    this.objectList = items.filter((item) => item && typeof item === 'object');
+                    this.rowReceipts = {};
+                    this.observedAt = new Date();
+                    this.requestReceipt = this.requestId(response, payload);
+                    this.hasLoaded = true;
+                    this.announcement = `${this.totalCount} ${this.resource_label_plural} returned. ${this.availableCount} available to add, ${this.attachedCount} already added, and ${this.reviewCount} needing review.`;
+                } catch (failure) {
+                    this.error = this.discoveryFailure(failure);
+                    this.announcement = `${this.error.title}. ${this.error.detail}`;
+                } finally {
+                    window.clearTimeout(timeout);
+                    if (this.discoveryController === controller) this.discoveryController = null;
+                    this.loading = false;
+                    this.refreshing = false;
+                }
+            },
+
+            refreshInventory() {
+                this.getObjects({manual: true});
+            },
+
+            endpointForObject() {
+                const isAWSBackupResource = this.integration_code === 'aws'
+                    && (this.object_type === 's3' || this.object_type === 'dynamodb');
+                const isVultrDatabase = this.integration_code === 'vultr'
+                    && this.object_type === 'vultr_database';
                 let endpointObjectCode = (isAWSBackupResource || isVultrDatabase)
-                    ? "cloud" : "{{object_code}}";
+                    ? "cloud" : this.object_type;
                 let endpointIntegrationCode = isVultrDatabase
                     ? "vultr_database" : this.integration_code;
-                let url = "/api/v1/" + endpointObjectCode + "s/" + endpointIntegrationCode + "/";
+                return `/api/v1/${encodeURIComponent(endpointObjectCode)}s/${encodeURIComponent(endpointIntegrationCode)}/`;
+            },
 
-                let project_id = null;
+            payloadForObject(object) {
+                let projectId = null;
                 let zone = null;
-
-                if (this.integration_code === "ovh_ca" || this.integration_code === "ovh_eu" || this.integration_code === "ovh_us") {
-                    if (object?.project) {
-                        project_id = object.project.project_id;
-                    }
-                }
-                else if (this.integration_code === "google_cloud") {
-                    if (object?._bs_project_id) {
-                        project_id = object._bs_project_id;
-                    }
-                    if (object?._bs_zone) {
-                        zone = object._bs_zone;
-                    }
+                if (['ovh_ca', 'ovh_eu', 'ovh_us'].includes(this.integration_code) && object?.project) {
+                    projectId = object.project.project_id;
+                } else if (this.integration_code === 'google_cloud') {
+                    projectId = object?._bs_project_id || null;
+                    zone = object?._bs_zone || null;
                 }
 
-                let data = {
-                    node: {
-                        connection: this.connection_id,
-                        name: object._bs_name,
-                    },
+                const data = {
+                    node: {connection: this.connection_id, name: this.resourceName(object)},
                     location: this.location_id,
-                    name: object._bs_name,
-                    unique_id: object._bs_unique_id,
+                    name: this.resourceName(object),
+                    unique_id: this.rawResourceId(object),
                     resource_type: object._bs_resource_type || this.object_type,
-                    project_id: project_id,
+                    project_id: projectId,
                     zone: zone,
-                    metadata: object
+                    metadata: object,
                 };
-                if (isVultrDatabase) {
+
+                if (this.integration_code === 'vultr' && this.object_type === 'vultr_database') {
                     delete data.resource_type;
                     data.engine = object._bs_engine || object.database_engine || object.engine || '';
                     data.region = object.region || object._bs_region || '';
                     data.plan = object.plan || '';
                     data.provider_status = object.status || '';
                 }
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'POST',
-                    body: JSON.stringify(data)
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        this.loading = false;
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
-                    Alpine.store('notifications').items.push({show: true, success: true, heading: 'Node successfully linked.', details: json.detail});
-                    object._bs_attached = true;
-                    Alpine.store('showLoading').toggle();
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({show: true, error: true, heading: 'Error!', details: error.message});
-                    this.error = error;
-                    Alpine.store('showLoading').toggle();
-                });
+                return data;
             },
-            async getOauthUrl() {
-                let url = "/api/v1/connections/" + this.integration_code + "/oauth_url/";
 
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'POST',
-                    body: JSON.stringify({restart: true}),
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
+            outcomeIsUnknown(failure) {
+                return failure?.name === 'AbortError'
+                    || failure?.responseConfirmed !== true
+                    || Number(failure?.responseStatus || 0) >= 500
+                    || Number(failure?.responseStatus || 0) === 409;
+            },
+
+            notify(notification) {
+                const store = Alpine.store('notifications');
+                if (store && Array.isArray(store.items)) store.items.push({show: true, ...notification});
+            },
+
+            async linkObject(object, focusTarget) {
+                const key = this.receiptKey(object);
+                if (this.linkingKey !== null || this.isAttached(object) || !this.hasResourceIdentity(object) || this.rowReceipt(object)?.kind === 'unknown') return;
+                this.linkingKey = key;
+                const existingReceipts = {...this.rowReceipts};
+                delete existingReceipts[key];
+                this.rowReceipts = existingReceipts;
+                this.announcement = `Adding ${this.resourceName(object)} as a BackupSheep source.`;
+
+                const controller = new AbortController();
+                const timeout = window.setTimeout(() => controller.abort(), 45000);
+                try {
+                    const response = await fetch(this.endpointForObject(), {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        method: 'POST',
+                        body: JSON.stringify(this.payloadForObject(object)),
+                        signal: controller.signal,
+                    });
+                    const payload = await this.readResponse(response);
+                    if (!response.ok) throw this.responseError(response, payload);
+
+                    object._bs_attached = true;
+                    this.addedCount += 1;
+                    this.setRowReceipt(object, {
+                        kind: 'success',
+                        detail: 'Added to BackupSheep. Protection is not configured.',
+                        requestId: this.requestId(response, payload),
+                    });
+                    this.announcement = `${this.resourceName(object)} was added as a BackupSheep source. No backup or schedule was created.`;
+                    this.notify({
+                        success: true,
+                        heading: 'Source added to BackupSheep.',
+                        details: 'Protection is not configured and no backup has run.',
+                    });
+                } catch (failure) {
+                    if (this.outcomeIsUnknown(failure)) {
+                        this.setRowReceipt(object, {
+                            kind: 'unknown',
+                            detail: 'The add response was not confirmed. Refresh inventory before trying again.',
+                            requestId: failure?.requestId || null,
+                        });
+                        this.announcement = `Outcome not confirmed for ${this.resourceName(object)}. Refresh inventory before trying again.`;
+                        this.notify({
+                            warning: true,
+                            heading: 'Outcome not confirmed.',
+                            details: 'The operation may have completed. Refresh inventory before attempting another add.',
+                        });
                     } else {
-                        this.loading = false;
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        this.scheduleErrors = json;
-                        throw new Error(json.detail);
+                        const detail = failure?.message || 'The source could not be added.';
+                        this.setRowReceipt(object, {kind: 'error', detail, requestId: failure?.requestId || null});
+                        this.announcement = `${this.resourceName(object)} was not added. ${detail}`;
+                        this.notify({error: true, heading: 'Source was not added.', details: detail});
                     }
-                }).then((json) => {
-                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
-                    this.oauth_url = json.oauth_url;
-                    return this.oauth_url;
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({show: true, error: true, heading: 'Error! Unable to get OAuth url.', details: error.message});
-                    return null;
-                });
-                return response;
+                } finally {
+                    window.clearTimeout(timeout);
+                    this.linkingKey = null;
+                    this.$nextTick(() => {
+                        const nextAction = this.$root.querySelector('.sd-row-action button:not([disabled])');
+                        const target = focusTarget?.isConnected ? focusTarget : (nextAction || this.$refs.stateFilter);
+                        if (target?.isConnected && typeof target.focus === 'function') target.focus({preventScroll: true});
+                    });
+                }
+            },
+
+            async copyResourceId(object) {
+                try {
+                    await navigator.clipboard.writeText(this.resourceId(object));
+                    this.announcement = 'Provider resource ID copied to clipboard.';
+                    this.notify({success: true, heading: 'Resource ID copied.', details: 'Provider resource ID copied to clipboard.'});
+                } catch (failure) {
+                    this.announcement = 'Provider resource ID could not be copied.';
+                    this.notify({error: true, heading: 'Copy failed.', details: 'Select the resource ID and copy it manually.'});
+                }
+            },
+
+            async restartOauth() {
+                if (!this.canReconnect || this.oauthRestartLoading) return;
+                this.oauthRestartLoading = true;
+                try {
+                    const response = await fetch(`/api/v1/connections/${encodeURIComponent(this.integration_code)}/oauth_url/`, {
+                        headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+                        method: 'POST',
+                        body: JSON.stringify({restart: true}),
+                    });
+                    const payload = await this.readResponse(response);
+                    if (!response.ok) throw this.responseError(response, payload);
+                    if (!payload?.oauth_url) throw new Error('The provider did not return a reconnection URL.');
+                    window.location.assign(payload.oauth_url);
+                } catch (failure) {
+                    const detail = failure?.message || 'Unable to prepare provider reconnection.';
+                    this.notify({error: true, heading: 'Reconnect unavailable.', details: detail});
+                } finally {
+                    this.oauthRestartLoading = false;
+                }
             },
         }));
     });

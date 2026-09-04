@@ -1,11 +1,11 @@
 meta {
-  name: PUT /api/v1/storage/local/{{resourceId}}/
+  name: POST /api/v1/invites/{{resourceId}}/resend/
   type: http
-  seq: 7
+  seq: 10
 }
 
-put {
-  url: {{baseUrl}}/api/v1/storage/local/{{resourceId}}/
+post {
+  url: {{baseUrl}}/api/v1/invites/{{resourceId}}/resend/
   body: json
   auth: none
 }
@@ -16,10 +16,7 @@ headers {
 }
 
 body:json {
-  {
-    "storage_local": {},
-    "name": "Example resource"
-  }
+  {}
 }
 
 script:pre-request {
@@ -35,10 +32,10 @@ tests {
 }
 
 docs {
-  Operation ID: `put-api-v1-storage-local-resourceid`
+  Operation ID: `post-api-v1-invites-resourceid-resend`
 
   Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
 
-  Django action: `apps.api.v1.storage.local.views.CoreStorageLocalView.update`
-  Source: `apps/api/v1/storage/local/views.py`
+  Django action: `apps.api.v1.invite.views.CoreInviteView.resend`
+  Source: `apps/api/v1/invite/views.py`
 }

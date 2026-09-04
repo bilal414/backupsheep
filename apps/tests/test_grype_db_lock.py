@@ -41,19 +41,19 @@ class GrypeDatabaseLockTests(TestCase):
     def test_checked_in_lock_is_exact_and_fresh_at_evidence_cut(self) -> None:
         validated = prepare_grype_db._validate_lock(
             deepcopy(self.lock),
-            now=datetime(2026, 8, 30, 23, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 9, 4, 3, 0, tzinfo=timezone.utc),
         )
         self.assertEqual(validated["database"]["schema_version"], "v6.1.9")
         self.assertEqual(
             hashlib.sha256(self.lock_bytes).hexdigest(),
-            "769a77cb012d1a23db23af7dd68ebf7ad4411441e2a058a08e4f8831baa94a55",
+            "07fb19ba8d924fca629f0cedca97e8beec8dd9d73b1c19187ba263f484721dec",
         )
 
     def test_lock_expires_closed(self) -> None:
         with self.assertRaisesRegex(prepare_grype_db.GrypeDBError, "not currently fresh"):
             prepare_grype_db._validate_lock(
                 deepcopy(self.lock),
-                now=datetime(2026, 9, 4, 6, 27, 52, tzinfo=timezone.utc),
+                now=datetime(2026, 9, 8, 6, 30, 55, tzinfo=timezone.utc),
             )
 
     def test_archive_url_checksum_must_equal_locked_digest(self) -> None:
@@ -62,7 +62,7 @@ class GrypeDatabaseLockTests(TestCase):
         with self.assertRaisesRegex(prepare_grype_db.GrypeDBError, "official Grype"):
             prepare_grype_db._validate_lock(
                 altered,
-                now=datetime(2026, 8, 30, 23, 0, tzinfo=timezone.utc),
+                now=datetime(2026, 9, 4, 3, 0, tzinfo=timezone.utc),
             )
 
     def test_archive_url_cannot_change_host_or_redirect_authority(self) -> None:

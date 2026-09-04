@@ -10,8 +10,8 @@ class CoreDatabaseBackupViewPermissions(MemberGroupPermissions):
         "destroy": "backup_delete",
         "cancel": "backup_delete",
         "retry": "backup_create",
-        "restore": "backup_create",
-        "resume_restore": "backup_create",
+        "restore": "backup_restore",
+        "resume_restore": "backup_restore",
     }
 
     object_node_path = "database.node"

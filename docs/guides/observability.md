@@ -79,12 +79,17 @@ Suggested job alerts:
 
 ```bash
 ./backupsheep-compose exec -T rabbitmq \
-  rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers durable
+  rabbitmqctl -q -p backupsheep list_queues \
+  name messages_ready messages_unacknowledged consumers durable --silent
 
 ./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect active
 ./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect reserved
 ./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect scheduled
 ```
+
+The stock application is pinned to the `backupsheep` virtual host. Never substitute an
+unqualified queue listing: RabbitMQ would inspect `/`, which can be empty while this
+installation's queues have consumers or unacknowledged work.
 
 Track queue depth and oldest-message age per lane. A sustained `storage` queue with healthy
 database/file queues indicates upload throughput pressure; a queue with zero consumers
@@ -149,7 +154,8 @@ restore monitoring.
 
 Monitor the host filesystems underlying every named volume:
 
-- `pgdata`: free bytes, database size, connections, locks, transaction age and backup age;
+- `postgres_data_v1`: free bytes, database size, connections, locks, transaction age and
+  backup age;
 - `rabbitmq_data`: free bytes, memory/disk alarms, messages and consumer count;
 - `database_workdir`: free bytes/inodes and growth of database dumps/restores/run logs;
 - `files_workdir`: free bytes/inodes and growth of file-source work, website caches and logs;
@@ -164,12 +170,34 @@ Useful local snapshots:
 ```bash
 ./backupsheep-compose stats --no-stream
 docker system df
+COMPOSE_PROJECT='<exact persisted BACKUPSHEEP_COMPOSE_PROJECT_NAME>'
+[[ "${COMPOSE_PROJECT}" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]
 for service in worker-database worker-files worker-storage; do
-  container="$(./backupsheep-compose --profile operations ps -q "${service}")"
-  test -z "${container}" || docker inspect "${container}" \
-    --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+  containers="$(
+    ./backupsheep-compose --profile operations ps --all --quiet "${service}"
+  )"
+  while IFS= read -r container; do
+    [[ -n "${container}" ]] || continue
+    [[ "$(docker inspect "${container}" --format \
+      '{{index .Config.Labels "com.docker.compose.project"}}')" == "${COMPOSE_PROJECT}" ]]
+    docker inspect "${container}" --format \
+      '{{range .Mounts}}{{println .Type "|" .Name "|" .Source "|" .Destination "|rw=" .RW}}{{end}}'
+    volumes="$(docker inspect "${container}" --format \
+      '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}')"
+    while IFS= read -r volume; do
+      [[ -n "${volume}" ]] || continue
+      docker volume inspect "${volume}" --format \
+        '{{.Name}}|project={{index .Labels "com.docker.compose.project"}}|driver={{.Driver}}|options={{json .Options}}|source={{.Mountpoint}}'
+    done <<< "${volumes}"
+  done <<< "${containers}"
 done
 ```
+
+Replace the project placeholder with the exact persisted value; do not infer it from a
+directory name or accept an ambient Compose project. `ps --all --quiet` covers stopped and
+scaled worker replicas. The per-container type, logical name, host source, destination and
+read/write flag distinguish bind mounts from named volumes; `docker volume inspect` then
+resolves each named volume's project label, driver, options and exact host mountpoint.
 
 `docker system df` is diagnostic. Do not automatically prune volumes or image data without
 resolving exact ownership and rollback requirements.

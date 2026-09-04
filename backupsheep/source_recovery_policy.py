@@ -27,6 +27,22 @@ SOURCE_RECOVERY_UNAVAILABLE_MESSAGE = (
     "workflow."
 )
 
+RETIRED_SOURCE_UNAVAILABLE_MESSAGE = (
+    "This source family is retired. New connections, protection, backup runs, "
+    "restores, downloads, and in-app inspection of its historical backups are "
+    "unavailable. Historical database rows are retained for controlled operator "
+    "audit or migration; retirement does not delete data held by the source provider."
+)
+
+
+def source_recovery_unavailable_message(integration_code: str | None) -> str:
+    """Return public copy that distinguishes retirement from a recovery gap."""
+
+    code = str(integration_code or "").strip().lower()
+    if code in RETIRED_SOURCE_FAMILIES:
+        return RETIRED_SOURCE_UNAVAILABLE_MESSAGE
+    return SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+
 
 class SourceRecoveryUnavailable(APIException):
     """Public-safe refusal shared by HTTP and worker entry points."""
@@ -34,6 +50,12 @@ class SourceRecoveryUnavailable(APIException):
     status_code = status.HTTP_409_CONFLICT
     default_detail = SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
     default_code = "source_recovery_unavailable"
+
+    def __init__(self, integration_code: str | None = None):
+        super().__init__(
+            detail=source_recovery_unavailable_message(integration_code),
+            code=self.default_code,
+        )
 
 
 def _strict_setting_true(name: str) -> bool:
@@ -74,7 +96,7 @@ def require_source_backup_creation(integration_code: str | None) -> None:
     """Raise a stable conflict before any source/backup mutation or dispatch."""
 
     if not source_backup_creation_available(integration_code):
-        raise SourceRecoveryUnavailable()
+        raise SourceRecoveryUnavailable(integration_code)
 
 
 def available_backup_endpoints(endpoints) -> list[str]:

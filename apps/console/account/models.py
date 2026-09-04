@@ -451,6 +451,10 @@ class CoreAccountGroup(TimeStampedModel):
                 "Can create on-demand backup of node."
             ),
             (
+                "backup_restore",
+                "Can restore backups to scoped nodes or new resources."
+            ),
+            (
                 "backup_download",
                 "Can download any on-demand/scheduled backup of node."
             ),
@@ -482,4 +486,4 @@ class CoreAccountGroup(TimeStampedModel):
 
     @property
     def node_count(self):
-        return 0
+        return self.nodes.count()

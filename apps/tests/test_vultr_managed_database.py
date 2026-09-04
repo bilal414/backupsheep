@@ -232,6 +232,8 @@ class VultrManagedDatabaseModelTests(BaseTestCase):
         restore = CoreVultrDatabaseRestore.objects.get()
         self.assertEqual(first.data["correlation_id"], str(restore.correlation_id))
         self.assertEqual(first.data["backup"], backup.id)
+        self.assertEqual(first.data["backup_id"], backup.id)
+        self.assertEqual(replay.data["backup_id"], backup.id)
         self.assertEqual(first.data["execution_status"]["status"], "pending")
         self.assertNotIn("vultr-db-ui-request", str(first.data))
         dispatch.assert_called_once_with(
@@ -248,6 +250,7 @@ class VultrManagedDatabaseModelTests(BaseTestCase):
         )
         self.assertEqual(listed.status_code, 200)
         self.assertEqual([item["id"] for item in listed.data], [restore.id])
+        self.assertEqual([item["backup_id"] for item in listed.data], [backup.id])
 
     def test_node_restore_api_rejects_vultr_database_key_reuse(self):
         backup = self._backup()

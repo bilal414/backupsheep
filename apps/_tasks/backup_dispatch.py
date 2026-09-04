@@ -19,9 +19,9 @@ from django.utils import timezone
 from sentry_sdk import capture_exception
 from backupsheep.source_recovery_policy import (
     SOURCE_CREATION_POLICY_FAMILIES,
-    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
-    source_backup_creation_available,
     require_source_backup_creation,
+    source_backup_creation_available,
+    source_recovery_unavailable_message,
 )
 
 
@@ -374,7 +374,9 @@ def publish_backup_request(request_id, *, force=False):
                 else "REQUEST_INELIGIBLE"
             )
             request.last_error_message = (
-                SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+                source_recovery_unavailable_message(
+                    request.node.connection.integration.code
+                )
                 if request.last_error_code == "SOURCE_RECOVERY_UNAVAILABLE"
                 else _SAFE_INELIGIBLE_REQUEST
             )

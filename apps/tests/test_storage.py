@@ -43,6 +43,7 @@ from apps.console.storage.models import (
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
+from backupsheep.download_urls import UnsafeBrowserDownloadTarget
 
 
 def make_local_storage(account, member, *, path=None, no_delete=None):
@@ -637,8 +638,28 @@ class LocalStorageDeleteTests(BaseTestCase):
         )
         self.assertEqual(
             point.generate_download_url(),
-            f"/api/v1/storage/local/file/{point.id}/",
+            f"/api/v1/storage/local/file/website/{point.id}/",
         )
+        self.assertEqual(
+            point.generate_browser_download_target(),
+            f"/api/v1/storage/local/file/website/{point.id}/",
+        )
+
+    def test_browser_download_target_rejects_unsafe_provider_output(self):
+        storage = make_local_storage(self.account, self.member)
+        point = make_website_backup_point(
+            self.member,
+            storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="/backups/x.zip",
+        )
+        with mock.patch.object(
+            point,
+            "generate_download_url",
+            return_value="javascript:alert(document.domain)",
+        ):
+            with self.assertRaises(UnsafeBrowserDownloadTarget):
+                point.generate_browser_download_target()
 
 
 class LocalStorageDownloadViewTests(BaseTestCase):
@@ -654,12 +675,46 @@ class LocalStorageDownloadViewTests(BaseTestCase):
             storage_file_id=target,
         )
 
+    def _make_family_point_with_file(
+        self,
+        family,
+        account,
+        member,
+        root,
+        payload,
+        *,
+        backup_status=UtilBackup.Status.COMPLETE,
+    ):
+        storage = make_local_storage(account, member)
+        target = os.path.join(root, f"{family}-{uuid.uuid4().hex}.zip")
+        with open(target, "wb") as fh:
+            fh.write(payload)
+        if family == "website":
+            point = make_website_backup_point(
+                member,
+                storage,
+                status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+                storage_file_id=target,
+            )
+        else:
+            point = make_category_backup_point(
+                member,
+                storage,
+                category=family,
+                size=len(payload),
+            )
+            point.storage_file_id = target
+            point.save(update_fields=["storage_file_id", "modified"])
+        point.backup.status = backup_status
+        point.backup.save(update_fields=["status", "modified"])
+        return point
+
     def test_download_streams_file_for_owner(self):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
             payload = b"zip-bytes" * 100
             point = self._make_point_with_file(self.account, self.member, tmp, payload)
             self.client.force_login(self.user)
-            r = self.client.get(f"/api/v1/storage/local/file/{point.id}/")
+            r = self.client.get(f"/api/v1/storage/local/file/website/{point.id}/")
             self.assertEqual(r.status_code, 200)
             self.assertEqual(b"".join(r.streaming_content), payload)
             self.assertIn("attachment", r.headers["Content-Disposition"])
@@ -669,8 +724,83 @@ class LocalStorageDownloadViewTests(BaseTestCase):
             other_account, other_member, _ = factories.make_account()
             point = self._make_point_with_file(other_account, other_member, tmp, b"zip-bytes")
             self.client.force_login(self.user)
-            r = self.client.get(f"/api/v1/storage/local/file/{point.id}/")
+            r = self.client.get(f"/api/v1/storage/local/file/website/{point.id}/")
             self.assertEqual(r.status_code, 404)
+
+    def test_family_routes_require_complete_parent_for_every_backup_family(self):
+        with tempfile.TemporaryDirectory() as tmp, override_settings(
+            LOCAL_STORAGE_ROOT=tmp,
+            BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+            BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        ):
+            self.client.force_login(self.user)
+            for family in ("website", "database", "basecamp"):
+                with self.subTest(family=family):
+                    payload = f"{family}-bytes".encode()
+                    point = self._make_family_point_with_file(
+                        family,
+                        self.account,
+                        self.member,
+                        tmp,
+                        payload,
+                        backup_status=UtilBackup.Status.IN_PROGRESS,
+                    )
+                    url = f"/api/v1/storage/local/file/{family}/{point.id}/"
+                    self.assertEqual(self.client.get(url).status_code, 404)
+
+                    point.backup.status = UtilBackup.Status.COMPLETE
+                    point.backup.save(update_fields=["status", "modified"])
+                    response = self.client.get(url)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(b"".join(response.streaming_content), payload)
+
+    def test_family_qualified_routes_prevent_cross_table_id_collisions(self):
+        with tempfile.TemporaryDirectory() as tmp, override_settings(
+            LOCAL_STORAGE_ROOT=tmp,
+            BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+            BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        ):
+            website = self._make_family_point_with_file(
+                "website", self.account, self.member, tmp, b"website-bytes"
+            )
+            database = self._make_family_point_with_file(
+                "database", self.account, self.member, tmp, b"database-bytes"
+            )
+            if database.id != website.id:
+                database_backup = database.backup
+                database_storage = database.storage
+                database_path = database.storage_file_id
+                database.delete()
+                database = CoreDatabaseBackupStoragePoints.objects.create(
+                    id=website.id,
+                    backup=database_backup,
+                    storage=database_storage,
+                    status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE,
+                    storage_file_id=database_path,
+                )
+            self.assertEqual(database.id, website.id)
+
+            self.client.force_login(self.user)
+            website_response = self.client.get(
+                f"/api/v1/storage/local/file/website/{website.id}/"
+            )
+            database_response = self.client.get(
+                f"/api/v1/storage/local/file/database/{database.id}/"
+            )
+            self.assertEqual(website_response.status_code, 200)
+            self.assertEqual(database_response.status_code, 200)
+            self.assertEqual(
+                b"".join(website_response.streaming_content), b"website-bytes"
+            )
+            self.assertEqual(
+                b"".join(database_response.streaming_content), b"database-bytes"
+            )
+            self.assertEqual(
+                self.client.get(
+                    f"/api/v1/storage/local/file/{website.id}/"
+                ).status_code,
+                404,
+            )
 
 
 class S3ImmutabilityFollowupTests(BaseTestCase):

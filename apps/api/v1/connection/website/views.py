@@ -1,6 +1,7 @@
 import uuid
 
 from django.db.models import Q
+from apps.api.v1.utils.api_helpers import provider_connections_for_action
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -84,9 +85,8 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         }
 
     def get_queryset(self):
-        member = self.request.user.member
-        return CoreConnection.objects.filter(
-            account=member.get_current_account(), integration__code="website"
+        return provider_connections_for_action(self.request, getattr(self, "action", None)).filter(
+            integration__code="website"
         )
 
     def create(self, request, *args, **kwargs):
@@ -193,7 +193,7 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             requested_by_member=request.user.member,
         )
         return Response(
-            {"detail": "Validation passed. Integration is good for backups."}
+            {"detail": "Provider credentials and account access were validated. No backup or recovery was tested."}
         )
 
     @action(detail=True, methods=["post"])

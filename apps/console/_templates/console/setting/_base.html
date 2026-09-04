@@ -1,0 +1,65 @@
+{% extends "console/_master.html" %}
+
+{% block page_class %}settings-page{% endblock %}
+
+{% block extra_styles %}
+    {{ block.super }}
+    <link rel="stylesheet" href="{{ STATIC_URL }}console/css/settings.css">
+{% endblock %}
+
+{% block content %}
+    <section class="settings-workspace" aria-labelledby="settings-page-title">
+        <header class="settings-header">
+            <div class="settings-breadcrumb" aria-label="Settings context">
+                <span>Settings</span>
+                <span aria-hidden="true">/</span>
+                <span>{% if settings_scope == "identity" %}Personal identity{% else %}Current workspace{% endif %}</span>
+            </div>
+            <div class="settings-heading-row">
+                <div class="min-w-0">
+                    <h1 id="settings-page-title" class="settings-title">{% block settings_page_title %}Settings{% endblock %}</h1>
+                    <p class="settings-description">{% block settings_page_description %}{% endblock %}</p>
+                </div>
+            </div>
+
+            <dl class="settings-scope-rail" aria-label="Change scope and authority">
+                <div>
+                    <dt>Change scope</dt>
+                    <dd>{% if settings_scope == "identity" %}Your identity across BackupSheep{% else %}This workspace only{% endif %}</dd>
+                </div>
+                <div>
+                    <dt>Current workspace</dt>
+                    <dd>{{ account.get_name|default:"No active workspace" }} <span class="settings-role-badge">{{ settings_role_label }}</span></dd>
+                </div>
+                <div>
+                    <dt>Sign-in protection</dt>
+                    <dd>
+                        {% if settings_mfa_enabled %}
+                            <span class="settings-status settings-status--verified">Authenticator verified</span>
+                        {% else %}
+                            <span class="settings-status settings-status--attention">Authenticator not enabled</span>
+                        {% endif %}
+                    </dd>
+                </div>
+            </dl>
+        </header>
+
+        <div class="settings-layout">
+            {% include "console/setting/_nav.html" %}
+            <div class="settings-main">
+                {% if settings_read_only %}
+                    <div class="settings-read-only" role="status">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 11V8a3 3 0 0 1 6 0v3m-8 0h10a1 1 0 0 1 1 1v7H6v-7a1 1 0 0 1 1-1Z"/>
+                        </svg>
+                        <div>
+                            <p>View-only workspace access</p>
+                            <span>You can review this area. Only the current workspace owner can make administrative changes.</span>
+                        </div>
+                    </div>
+                {% endif %}
+                {% block settings_content %}{% endblock %}
+            </div>
+        </div>
+    </section>
+{% endblock %}

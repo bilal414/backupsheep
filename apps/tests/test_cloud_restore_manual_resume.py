@@ -522,7 +522,9 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
         )[0]
         self.assertIn("body: JSON.stringify({restore_id: restoreId})", resume_block)
         self.assertIn("response.status !== 200 && response.status !== 202", resume_block)
-        self.assertIn("await this.getNativeCloudRestores(false)", resume_block)
+        self.assertIn("await this.getNativeCloudRestores(false, false, backupId, generation)", resume_block)
+        self.assertIn("this.requestWithTimeout", resume_block)
+        self.assertIn("this.nativeRestoreContextMatches(backupId, generation)", resume_block)
         self.assertIn("this.startNativeRestorePolling()", resume_block)
         self.assertNotIn("/restore_backup/", resume_block)
         self.assertNotIn("restore_snapshot", resume_block)
@@ -542,9 +544,9 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
 
     def test_duplicate_name_polling_requires_recovery_id_then_tracks_exact_id(self):
         polling_block = self.source.split(
-            "async getNativeCloudRestores(showErrors = false, allowNameRecovery = false)",
+            "async getNativeCloudRestores(",
             1,
-        )[1].split("async startNativeCloudRestore()", 1)[0]
+        )[1].split("async reconcileNativeRestoreSubmission", 1)[0]
         tracked_branch = polling_block.split("if (trackedId !== null)", 1)[1].split(
             "else if (allowNameRecovery)", 1
         )[0]
@@ -559,7 +561,7 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
             polling_block,
         )
         self.assertIn(
-            "this.nativeRestore.recoveryId && this.nativeRestore.recoveryTargetName",
+            "const pendingRequest = this.nativeRestorePendingRequestBody",
             polling_block,
         )
         self.assertIn(

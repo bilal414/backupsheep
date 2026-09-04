@@ -45,6 +45,7 @@ from apps.api.v1.utils.boto import (
 from ..utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps._tasks.helper.tasks import delete_from_disk
 from backupsheep.celery import app
+from backupsheep.download_urls import validated_browser_download_target
 from botocore.config import Config
 from ..vultr import (
     is_terminal_snapshot_failure,
@@ -5363,13 +5364,22 @@ class BaseBackupStoragePoints(TimeStampedModel):
     def direct_download_permitted(self):
         """Return false when a browser URL would expose ciphertext as a ZIP."""
 
-        encrypted = self.backup.artifact_records.filter(
-            storage_id=self.storage_id,
-            role__in=("archive", "destination"),
-        ).filter(
-            models.Q(artifact_format=CoreBackupArtifact.Format.BSE1)
-            | models.Q(encryption_envelope__isnull=False)
-        ).exists()
+        backup = self.backup
+        encrypted_storage_ids = getattr(
+            backup,
+            "_api_encrypted_destination_storage_ids",
+            None,
+        )
+        if encrypted_storage_ids is None:
+            encrypted = backup.artifact_records.filter(
+                storage_id=self.storage_id,
+                role__in=("archive", "destination"),
+            ).filter(
+                models.Q(artifact_format=CoreBackupArtifact.Format.BSE1)
+                | models.Q(encryption_envelope__isnull=False)
+            ).exists()
+        else:
+            encrypted = self.storage_id in encrypted_storage_ids
         allow_legacy = getattr(
             settings, "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE", False
         )
@@ -5383,6 +5393,11 @@ class BaseBackupStoragePoints(TimeStampedModel):
             and type(enterprise) is bool
             and not enterprise
         )
+
+    def generate_browser_download_target(self):
+        """Generate and validate the value exposed to the browser console."""
+
+        return validated_browser_download_target(self.generate_download_url())
 
     def generate_download_url(self, *, for_restore=False):
         if not for_restore and not self.direct_download_permitted():
@@ -5901,8 +5916,17 @@ class BaseBackupStoragePoints(TimeStampedModel):
             return response
         elif self.storage.type.code == "local":
             # Local Storage files never leave this server; the download view streams
-            # them through the app (session-authenticated, account-scoped).
-            return f"/api/v1/storage/local/file/{self.id}/"
+            # them through the app (session-authenticated, account-scoped). The
+            # family is part of the identity because each storage-point table
+            # has its own integer primary-key sequence.
+            family = {
+                "corewebsitebackupstoragepoints": "website",
+                "coredatabasebackupstoragepoints": "database",
+                "corebasecampbackupstoragepoints": "basecamp",
+            }.get(self._meta.model_name)
+            if not family:
+                raise RuntimeError("Local backup family is not supported for download.")
+            return f"/api/v1/storage/local/file/{family}/{self.id}/"
 
 
     def delete_requested(self):

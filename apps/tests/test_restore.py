@@ -1165,7 +1165,10 @@ from apps._tasks.integration import restore_common
 from apps._tasks.integration import restore_database as RD
 from apps._tasks.integration import restore_website as RW
 from apps._tasks.integration.restore_common import RestoreError
-from apps.api.v1.backup.database.views import CoreDatabaseBackupView
+from apps.api.v1.backup.database.views import (
+    CoreDatabaseBackupView,
+    _in_place_confirmation,
+)
 from apps.api.v1.backup.website.views import CoreWebsiteBackupView
 from apps.console.backup.models import (
     CoreDatabaseBackup,
@@ -2555,9 +2558,12 @@ class WebsiteRestoreAPITests(RestoreBackendBase):
         force_authenticate(request, user=self.user)
         return view(request, pk=backup.id)
 
-    def _get(self, backup):
+    def _get(self, backup, *, source_scope=False):
         view = CoreWebsiteBackupView.as_view({"get": "restores"})
-        request = APIRequestFactory().get(f"/api/v1/backups/website/{backup.id}/restores/")
+        request = APIRequestFactory().get(
+            f"/api/v1/backups/website/{backup.id}/restores/",
+            {"scope": "source"} if source_scope else None,
+        )
         force_authenticate(request, user=self.user)
         return view(request, pk=backup.id)
 
@@ -2576,6 +2582,48 @@ class WebsiteRestoreAPITests(RestoreBackendBase):
         node, backup = self._website_backup()
         resp = self._post(backup, {"confirm": True, "storage_point_id": 999999})
         self.assertEqual(resp.status_code, 404)
+
+    def test_storage_point_id_requires_a_positive_json_integer(self):
+        _node, backup = self._website_backup()
+        self._website_point(backup, self._make_zip({"index.html": "x"}))
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ) as dispatch:
+            for value in (True, False, 0, -1, "1", 1.0, None, {}, []):
+                with self.subTest(value=value):
+                    response = self._post(
+                        backup,
+                        {
+                            "confirm": True,
+                            "storage_point_id": value,
+                        },
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("storage_point_id", response.data)
+
+        self.assertFalse(CoreWebsiteRestore.objects.filter(backup=backup).exists())
+        dispatch.assert_not_called()
+
+    def test_empty_storage_file_id_is_not_restore_eligible(self):
+        _node, backup = self._website_backup()
+        point = self._website_point(backup, self._make_zip({"index.html": "x"}))
+        point.storage_file_id = ""
+        point.save(update_fields=["storage_file_id", "modified"])
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ) as dispatch:
+            explicit = self._post(
+                backup,
+                {"confirm": True, "storage_point_id": point.id},
+            )
+            implicit = self._post(backup, {"confirm": True})
+
+        self.assertEqual(explicit.status_code, 404)
+        self.assertEqual(implicit.status_code, 400)
+        self.assertFalse(CoreWebsiteRestore.objects.filter(backup=backup).exists())
+        dispatch.assert_not_called()
 
     def test_ambiguous_storage_points_400(self):
         node, backup = self._website_backup()
@@ -2615,6 +2663,217 @@ class WebsiteRestoreAPITests(RestoreBackendBase):
         )
         self.assertTrue(restore.celery_task_id.startswith("website-restore-"))
 
+    def test_request_id_replays_exact_restore_without_a_second_dispatch(self):
+        _node, backup = self._website_backup()
+        stored = self._website_point(backup, self._make_zip({"index.html": "x"}))
+        request_id = str(uuid.uuid4())
+        payload = {
+            "confirm": True,
+            "delete": False,
+            "storage_point_id": stored.id,
+            "request_id": request_id,
+        }
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ) as dispatch:
+            first = self._post(backup, payload)
+            replay = self._post(backup, payload)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(first.data["id"], replay.data["id"])
+        self.assertEqual(
+            first.data["correlation_id"], replay.data["correlation_id"]
+        )
+        self.assertEqual(
+            first.data["execution_status"]["recovery_id"], request_id
+        )
+        self.assertEqual(
+            CoreWebsiteRestore.objects.filter(backup=backup).count(), 1
+        )
+        restore = CoreWebsiteRestore.objects.get(backup=backup)
+        self.assertEqual(
+            restore.execution_metadata["api_request"]["recovery_id"],
+            request_id,
+        )
+        self.assertEqual(
+            len(restore.execution_metadata["api_request"]["fingerprint"]), 64
+        )
+        self.assertNotIn("execution_metadata", first.data)
+        dispatch.assert_called_once()
+
+    def test_request_id_reuse_with_changed_copy_or_delete_conflicts(self):
+        _node, backup = self._website_backup()
+        first_point = self._website_point(
+            backup, self._make_zip({"index.html": "first"}, name="first.zip")
+        )
+        second_point = self._website_point(
+            backup, self._make_zip({"index.html": "second"}, name="second.zip")
+        )
+        request_id = str(uuid.uuid4())
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ) as dispatch:
+            first = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "delete": False,
+                    "storage_point_id": first_point.id,
+                    "request_id": request_id,
+                },
+            )
+            changed_delete = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "delete": True,
+                    "storage_point_id": first_point.id,
+                    "request_id": request_id,
+                },
+            )
+            changed_copy = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "delete": False,
+                    "storage_point_id": second_point.id,
+                    "request_id": request_id,
+                },
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(changed_delete.status_code, 409)
+        self.assertEqual(changed_copy.status_code, 409)
+        self.assertEqual(
+            changed_delete.data["code"], "restore_idempotency_conflict"
+        )
+        self.assertEqual(
+            CoreWebsiteRestore.objects.filter(backup=backup).count(), 1
+        )
+        dispatch.assert_called_once()
+
+    def test_different_request_is_blocked_until_existing_restore_is_terminal(self):
+        _node, backup = self._website_backup()
+        point = self._website_point(backup, self._make_zip({"index.html": "x"}))
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ) as dispatch:
+            first = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "storage_point_id": point.id,
+                    "request_id": str(uuid.uuid4()),
+                },
+            )
+            blocked = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "storage_point_id": point.id,
+                    "request_id": str(uuid.uuid4()),
+                },
+            )
+            CoreWebsiteRestore.objects.filter(pk=first.data["id"]).update(
+                status=CoreWebsiteRestore.Status.COMPLETE
+            )
+            after_terminal = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "storage_point_id": point.id,
+                    "request_id": str(uuid.uuid4()),
+                },
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.data["code"], "active_restore_exists")
+        self.assertEqual(after_terminal.status_code, 201)
+        self.assertNotEqual(first.data["id"], after_terminal.data["id"])
+        self.assertEqual(
+            CoreWebsiteRestore.objects.filter(backup=backup).count(), 2
+        )
+        self.assertEqual(dispatch.call_count, 2)
+
+    def test_request_id_must_be_a_canonical_uuid_v4(self):
+        _node, backup = self._website_backup()
+        self._website_point(backup, self._make_zip({"index.html": "x"}))
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ) as dispatch:
+            response = self._post(
+                backup,
+                {"confirm": True, "request_id": "not-a-uuid"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("request_id", response.data)
+        self.assertFalse(CoreWebsiteRestore.objects.filter(backup=backup).exists())
+        dispatch.assert_not_called()
+
+    def test_broker_failure_keeps_one_replayable_restore(self):
+        _node, backup = self._website_backup()
+        self._website_point(backup, self._make_zip({"index.html": "x"}))
+        request_id = str(uuid.uuid4())
+        payload = {"confirm": True, "request_id": request_id}
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async",
+            side_effect=RuntimeError(
+                "amqp://broker-user:SUPER-SECRET@10.0.0.4/vhost"
+            ),
+        ):
+            failed = self._post(backup, payload)
+
+        self.assertEqual(failed.status_code, 503)
+        self.assertNotIn("SUPER-SECRET", str(failed.data))
+        restore = CoreWebsiteRestore.objects.get(backup=backup)
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ) as replay_dispatch:
+            replay = self._post(backup, payload)
+
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(replay.data["id"], restore.id)
+        self.assertEqual(
+            replay.data["execution_status"]["recovery_id"], request_id
+        )
+        self.assertEqual(
+            CoreWebsiteRestore.objects.filter(backup=backup).count(), 1
+        )
+        replay_dispatch.assert_not_called()
+
+    def test_explicit_false_delete_is_preserved(self):
+        _node, backup = self._website_backup()
+        self._website_point(backup, self._make_zip({"index.html": "x"}))
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ):
+            resp = self._post(backup, {"confirm": True, "delete": False})
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data["params"], {"delete": False})
+
+    def test_string_false_delete_is_rejected(self):
+        _node, backup = self._website_backup()
+        self._website_point(backup, self._make_zip({"index.html": "x"}))
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_website_backup.apply_async"
+        ) as dispatch:
+            resp = self._post(backup, {"confirm": True, "delete": "false"})
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("delete", resp.data)
+        self.assertFalse(CoreWebsiteRestore.objects.filter(backup=backup).exists())
+        dispatch.assert_not_called()
+
     def test_explicit_storage_point_accepted(self):
         node, backup = self._website_backup()
         self._website_point(backup, self._make_zip({"a": "1"}))
@@ -2625,6 +2884,7 @@ class WebsiteRestoreAPITests(RestoreBackendBase):
             resp = self._post(backup, {"confirm": True, "storage_point_id": stored2.id})
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.data["storage_point"], stored2.id)
+        self.assertEqual(resp.data["params"], {"delete": False})
 
     def test_restores_list_shape_matches_ui_contract(self):
         node, backup = self._website_backup()
@@ -2652,6 +2912,50 @@ class WebsiteRestoreAPITests(RestoreBackendBase):
         self.assertEqual(row["backup"], backup.id)
         self.assertEqual(row["storage_point"], stored.id)
 
+    def test_source_scope_keeps_selected_history_and_only_active_sibling_rows(self):
+        _node, backup = self._website_backup()
+        selected_terminal = CoreWebsiteRestore.objects.create(
+            backup=backup,
+            name="selected-terminal",
+            status=CoreWebsiteRestore.Status.COMPLETE,
+        )
+        sibling_backup = CoreWebsiteBackup.objects.create(
+            website=backup.website,
+            uuid=f"t{uuid.uuid4().hex}",
+            status=UtilBackup.Status.COMPLETE,
+            type=UtilBackup.Type.ON_DEMAND,
+        )
+        sibling_active = CoreWebsiteRestore.objects.create(
+            backup=sibling_backup,
+            name="sibling-active",
+            status=CoreWebsiteRestore.Status.IN_PROGRESS,
+        )
+        sibling_terminal = CoreWebsiteRestore.objects.create(
+            backup=sibling_backup,
+            name="sibling-terminal",
+            status=CoreWebsiteRestore.Status.FAILED,
+        )
+        _other_node, other_backup = self._website_backup()
+        other_active = CoreWebsiteRestore.objects.create(
+            backup=other_backup,
+            name="other-source-active",
+            status=CoreWebsiteRestore.Status.IN_PROGRESS,
+        )
+
+        scoped = self._get(backup, source_scope=True)
+        self.assertEqual(scoped.status_code, 200)
+        scoped_ids = {item["id"] for item in scoped.data}
+        self.assertIn(selected_terminal.id, scoped_ids)
+        self.assertIn(sibling_active.id, scoped_ids)
+        self.assertNotIn(sibling_terminal.id, scoped_ids)
+        self.assertNotIn(other_active.id, scoped_ids)
+
+        per_point = self._get(backup)
+        self.assertEqual(
+            [item["id"] for item in per_point.data],
+            [selected_terminal.id],
+        )
+
 
 class DatabaseRestoreAPITests(RestoreBackendBase):
     def _post(self, backup, payload):
@@ -2662,9 +2966,12 @@ class DatabaseRestoreAPITests(RestoreBackendBase):
         force_authenticate(request, user=self.user)
         return view(request, pk=backup.id)
 
-    def _get(self, backup):
+    def _get(self, backup, *, source_scope=False):
         view = CoreDatabaseBackupView.as_view({"get": "restores"})
-        request = APIRequestFactory().get(f"/api/v1/backups/database/{backup.id}/restores/")
+        request = APIRequestFactory().get(
+            f"/api/v1/backups/database/{backup.id}/restores/",
+            {"scope": "source"} if source_scope else None,
+        )
         force_authenticate(request, user=self.user)
         return view(request, pk=backup.id)
 
@@ -2686,6 +2993,48 @@ class DatabaseRestoreAPITests(RestoreBackendBase):
         )
         resp = self._post(backup, {"confirm": True})
         self.assertEqual(resp.status_code, 404)
+
+    def test_storage_point_id_requires_a_positive_json_integer(self):
+        _node, backup = self._db_backup()
+        self._database_point(backup, self._make_zip({"appdb.sql": "x"}))
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_database_backup.apply_async"
+        ) as dispatch:
+            for value in (True, False, 0, -1, "1", 1.0, None, {}, []):
+                with self.subTest(value=value):
+                    response = self._post(
+                        backup,
+                        {
+                            "confirm": True,
+                            "storage_point_id": value,
+                        },
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("storage_point_id", response.data)
+
+        self.assertFalse(CoreDatabaseRestore.objects.filter(backup=backup).exists())
+        dispatch.assert_not_called()
+
+    def test_empty_storage_file_id_is_not_restore_eligible(self):
+        _node, backup = self._db_backup()
+        point = self._database_point(backup, self._make_zip({"appdb.sql": "x"}))
+        point.storage_file_id = ""
+        point.save(update_fields=["storage_file_id", "modified"])
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_database_backup.apply_async"
+        ) as dispatch:
+            explicit = self._post(
+                backup,
+                {"confirm": True, "storage_point_id": point.id},
+            )
+            implicit = self._post(backup, {"confirm": True})
+
+        self.assertEqual(explicit.status_code, 404)
+        self.assertEqual(implicit.status_code, 400)
+        self.assertFalse(CoreDatabaseRestore.objects.filter(backup=backup).exists())
+        dispatch.assert_not_called()
 
     def test_happy_path_201(self):
         node, backup = self._db_backup()
@@ -2712,6 +3061,132 @@ class DatabaseRestoreAPITests(RestoreBackendBase):
         )
         self.assertTrue(restore.celery_task_id.startswith("database-restore-"))
 
+    def test_request_id_replays_exact_fork_without_a_second_dispatch(self):
+        _node, backup = self._db_backup()
+        stored = self._database_point(backup, self._make_zip({"appdb.sql": "x"}))
+        request_id = str(uuid.uuid4())
+        payload = {
+            "confirm": True,
+            "storage_point_id": stored.id,
+            "request_id": request_id,
+        }
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_database_backup.apply_async"
+        ) as dispatch:
+            first = self._post(backup, payload)
+            replay = self._post(backup, payload)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(first.data["id"], replay.data["id"])
+        self.assertEqual(first.data["params"], replay.data["params"])
+        self.assertEqual(
+            first.data["execution_status"]["recovery_id"], request_id
+        )
+        self.assertEqual(
+            CoreDatabaseRestore.objects.filter(backup=backup).count(), 1
+        )
+        dispatch.assert_called_once()
+
+    def test_request_id_reuse_with_changed_copy_or_mode_conflicts(self):
+        _node, backup = self._db_backup()
+        first_point = self._database_point(
+            backup, self._make_zip({"appdb.sql": "first"}, name="db-first.zip")
+        )
+        second_point = self._database_point(
+            backup, self._make_zip({"appdb.sql": "second"}, name="db-second.zip")
+        )
+        request_id = str(uuid.uuid4())
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_database_backup.apply_async"
+        ) as dispatch:
+            first = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "storage_point_id": first_point.id,
+                    "request_id": request_id,
+                },
+            )
+            changed_copy = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "storage_point_id": second_point.id,
+                    "request_id": request_id,
+                },
+            )
+            mapping = {"appdb": "appdb"}
+            changed_mode = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "mode": "in_place",
+                    "target_mapping": mapping,
+                    "target_confirmation": _in_place_confirmation(mapping),
+                    "storage_point_id": first_point.id,
+                    "request_id": request_id,
+                },
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(changed_copy.status_code, 409)
+        self.assertEqual(changed_mode.status_code, 409)
+        self.assertEqual(
+            changed_mode.data["code"], "restore_idempotency_conflict"
+        )
+        self.assertEqual(
+            CoreDatabaseRestore.objects.filter(backup=backup).count(), 1
+        )
+        dispatch.assert_called_once()
+
+    def test_different_request_is_blocked_until_database_restore_is_terminal(self):
+        _node, backup = self._db_backup()
+        point = self._database_point(backup, self._make_zip({"appdb.sql": "x"}))
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_database_backup.apply_async"
+        ) as dispatch:
+            first = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "storage_point_id": point.id,
+                    "request_id": str(uuid.uuid4()),
+                },
+            )
+            blocked = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "storage_point_id": point.id,
+                    "request_id": str(uuid.uuid4()),
+                },
+            )
+            CoreDatabaseRestore.objects.filter(pk=first.data["id"]).update(
+                status=CoreDatabaseRestore.Status.FAILED
+            )
+            after_terminal = self._post(
+                backup,
+                {
+                    "confirm": True,
+                    "storage_point_id": point.id,
+                    "request_id": str(uuid.uuid4()),
+                },
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.data["code"], "active_restore_exists")
+        self.assertEqual(after_terminal.status_code, 201)
+        self.assertNotEqual(first.data["id"], after_terminal.data["id"])
+        self.assertEqual(
+            CoreDatabaseRestore.objects.filter(backup=backup).count(), 2
+        )
+        self.assertEqual(dispatch.call_count, 2)
+
     def test_restores_list_shape_matches_ui_contract(self):
         node, backup = self._db_backup()
         stored = self._database_point(backup, self._make_zip({"appdb.sql": "x"}))
@@ -2729,6 +3204,50 @@ class DatabaseRestoreAPITests(RestoreBackendBase):
         self.assertEqual(row["status_display"], "Pending")
         self.assertEqual(row["backup"], backup.id)
         self.assertEqual(row["storage_point"], stored.id)
+
+    def test_source_scope_keeps_selected_history_and_only_active_sibling_rows(self):
+        _node, backup = self._db_backup()
+        selected_terminal = CoreDatabaseRestore.objects.create(
+            backup=backup,
+            name="selected-terminal",
+            status=CoreDatabaseRestore.Status.COMPLETE,
+        )
+        sibling_backup = CoreDatabaseBackup.objects.create(
+            database=backup.database,
+            uuid=f"t{uuid.uuid4().hex}",
+            status=UtilBackup.Status.COMPLETE,
+            type=UtilBackup.Type.ON_DEMAND,
+        )
+        sibling_active = CoreDatabaseRestore.objects.create(
+            backup=sibling_backup,
+            name="sibling-active",
+            status=CoreDatabaseRestore.Status.PENDING,
+        )
+        sibling_terminal = CoreDatabaseRestore.objects.create(
+            backup=sibling_backup,
+            name="sibling-terminal",
+            status=CoreDatabaseRestore.Status.FAILED,
+        )
+        _other_node, other_backup = self._db_backup()
+        other_active = CoreDatabaseRestore.objects.create(
+            backup=other_backup,
+            name="other-source-active",
+            status=CoreDatabaseRestore.Status.IN_PROGRESS,
+        )
+
+        scoped = self._get(backup, source_scope=True)
+        self.assertEqual(scoped.status_code, 200)
+        scoped_ids = {item["id"] for item in scoped.data}
+        self.assertIn(selected_terminal.id, scoped_ids)
+        self.assertIn(sibling_active.id, scoped_ids)
+        self.assertNotIn(sibling_terminal.id, scoped_ids)
+        self.assertNotIn(other_active.id, scoped_ids)
+
+        per_point = self._get(backup)
+        self.assertEqual(
+            [item["id"] for item in per_point.data],
+            [selected_terminal.id],
+        )
 
 
 # ---------------------------------------------------------------------------

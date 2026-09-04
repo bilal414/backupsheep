@@ -3,23 +3,23 @@ window.BACKUPSHEEP_DOC_CATALOG = {
   "metadata": {
     "schemaVersion": 1,
     "api": {
-      "api_operations": 890,
+      "api_operations": 892,
       "health_operations": 1,
-      "total_operations": 891,
-      "unique_paths": 510
+      "total_operations": 893,
+      "unique_paths": 512
     },
     "generatedFrom": "Django root URL resolver on the checked-out branch",
     "configurationVariables": 298,
     "provenance": {
-      "sourceRevision": "4099c3f31e0a",
-      "catalogSource": "git-ref",
-      "workingTreeApiChanges": false,
-      "includesWorkingTreeApiChanges": false,
+      "sourceRevision": "4388504d0bac",
+      "catalogSource": "working-tree",
+      "workingTreeApiChanges": true,
+      "includesWorkingTreeApiChanges": true,
       "committedApi": {
-        "api_operations": 890,
+        "api_operations": 920,
         "health_operations": 1,
-        "total_operations": 891,
-        "unique_paths": 510
+        "total_operations": 921,
+        "unique_paths": 528
       }
     }
   },
@@ -7577,6 +7577,22 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/10 Account and Team/Invites/008-post-cancel.bru"
     },
     {
+      "operation_id": "post-api-v1-invites-resourceid-reject",
+      "method": "POST",
+      "path": "/api/v1/invites/{{resourceId}}/reject/",
+      "regex_route": "api/v1/^invites/(?P<pk>[^/.]+)/reject/$",
+      "view": "apps.api.v1.invite.views.CoreInviteView",
+      "action": "reject",
+      "source": "apps/api/v1/invite/views.py",
+      "auth": "token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/10 Account and Team/Invites/009-post-reject.bru",
+      "family": "invites",
+      "source_href": "../../apps/api/v1/invite/views.py",
+      "bruno_href": "../../bruno/requests/10 Account and Team/Invites/009-post-reject.bru"
+    },
+    {
       "operation_id": "post-api-v1-invites-resourceid-resend",
       "method": "POST",
       "path": "/api/v1/invites/{{resourceId}}/resend/",
@@ -7587,10 +7603,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/10 Account and Team/Invites/009-post-resend.bru",
+      "file": "requests/10 Account and Team/Invites/010-post-resend.bru",
       "family": "invites",
       "source_href": "../../apps/api/v1/invite/views.py",
-      "bruno_href": "../../bruno/requests/10 Account and Team/Invites/009-post-resend.bru"
+      "bruno_href": "../../bruno/requests/10 Account and Team/Invites/010-post-resend.bru"
     },
     {
       "operation_id": "get-api-v1-logs",
@@ -11257,6 +11273,22 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "bruno_href": "../../bruno/requests/80 Storage/Local/002-post-create.bru"
     },
     {
+      "operation_id": "get-api-v1-storage-local-file-backupfamily-storedbackupid",
+      "method": "GET",
+      "path": "/api/v1/storage/local/file/{{backupFamily}}/{{storedBackupId}}/",
+      "regex_route": "api/v1/storage/local/file/<slug:backup_family>/<int:stored_backup_id>/",
+      "view": "apps.api.v1.storage.local.views.LocalStorageFileDownloadView",
+      "action": "get",
+      "source": "apps/api/v1/storage/local/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/80 Storage/Local/003-get-get.bru",
+      "family": "storage",
+      "source_href": "../../apps/api/v1/storage/local/views.py",
+      "bruno_href": "../../bruno/requests/80 Storage/Local/003-get-get.bru"
+    },
+    {
       "operation_id": "get-api-v1-storage-local-file-storedbackupid",
       "method": "GET",
       "path": "/api/v1/storage/local/file/{{storedBackupId}}/",
@@ -11267,10 +11299,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "auth": "token",
       "safety": "download",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/003-get-get.bru",
+      "file": "requests/80 Storage/Local/004-get-get.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/local/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Local/003-get-get.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Local/004-get-get.bru"
     },
     {
       "operation_id": "delete-api-v1-storage-local-resourceid",
@@ -11283,10 +11315,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/004-delete-destroy.bru",
+      "file": "requests/80 Storage/Local/005-delete-destroy.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/local/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Local/004-delete-destroy.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Local/005-delete-destroy.bru"
     },
     {
       "operation_id": "get-api-v1-storage-local-resourceid",
@@ -11299,10 +11331,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "auth": "token",
       "safety": "safe-read",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/005-get-retrieve.bru",
+      "file": "requests/80 Storage/Local/006-get-retrieve.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/local/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Local/005-get-retrieve.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Local/006-get-retrieve.bru"
     },
     {
       "operation_id": "patch-api-v1-storage-local-resourceid",
@@ -11315,10 +11347,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/006-patch-partial-update.bru",
+      "file": "requests/80 Storage/Local/007-patch-partial-update.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/local/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Local/006-patch-partial-update.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Local/007-patch-partial-update.bru"
     },
     {
       "operation_id": "put-api-v1-storage-local-resourceid",
@@ -11331,10 +11363,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/007-put-update.bru",
+      "file": "requests/80 Storage/Local/008-put-update.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/local/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Local/007-put-update.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Local/008-put-update.bru"
     },
     {
       "operation_id": "post-api-v1-storage-local-resourceid-validate",
@@ -11347,10 +11379,10 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/008-post-validate.bru",
+      "file": "requests/80 Storage/Local/009-post-validate.bru",
       "family": "storage",
       "source_href": "../../apps/api/v1/storage/local/views.py",
-      "bruno_href": "../../bruno/requests/80 Storage/Local/008-post-validate.bru"
+      "bruno_href": "../../bruno/requests/80 Storage/Local/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-onedrive",

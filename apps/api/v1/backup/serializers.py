@@ -3,6 +3,7 @@ import uuid
 from datetime import timezone as datetime_timezone
 
 from django.contrib.contenttypes.models import ContentType
+from django.db import models
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
@@ -1015,20 +1016,54 @@ class BackupExecutionStatusListSerializer(serializers.ListSerializer):
             state_by_id = {}
             for state in states:
                 state_by_id.setdefault(state.backup_object_id, state)
-            artifacts = CoreBackupArtifact.objects.filter(
-                backup_content_type=content_type,
-                backup_object_id__in=object_ids,
-                role=CoreBackupArtifact.Role.SOURCE,
-                verified_at__isnull=False,
-            ).order_by("-verified_at", "-pk")
+            artifacts = (
+                CoreBackupArtifact.objects.filter(
+                    backup_content_type=content_type,
+                    backup_object_id__in=object_ids,
+                )
+                .filter(
+                    models.Q(
+                        role=CoreBackupArtifact.Role.SOURCE,
+                        verified_at__isnull=False,
+                    )
+                    | (
+                        models.Q(
+                            role__in=(
+                                CoreBackupArtifact.Role.ARCHIVE,
+                                CoreBackupArtifact.Role.DESTINATION,
+                            )
+                        )
+                        & (
+                            models.Q(
+                                artifact_format=CoreBackupArtifact.Format.BSE1
+                            )
+                            | models.Q(encryption_envelope__isnull=False)
+                        )
+                    )
+                )
+                .order_by("-verified_at", "-pk")
+            )
             artifact_by_id = {}
+            encrypted_storage_ids_by_backup = {}
             for artifact in artifacts:
-                artifact_by_id.setdefault(artifact.backup_object_id, artifact)
+                if artifact.role == CoreBackupArtifact.Role.SOURCE:
+                    artifact_by_id.setdefault(artifact.backup_object_id, artifact)
+                    continue
+                encrypted_storage_ids_by_backup.setdefault(
+                    artifact.backup_object_id,
+                    set(),
+                ).add(artifact.storage_id)
             for item in items:
                 item._api_execution_state = state_by_id.get(item.pk)
                 item._api_execution_state_loaded = True
                 item._api_artifact = artifact_by_id.get(item.pk)
                 item._api_artifact_loaded = True
+                # Storage-point serializers consult this complete set instead
+                # of issuing one artifact-custody query per destination. An
+                # empty set is a loaded result, distinct from a missing cache.
+                item._api_encrypted_destination_storage_ids = frozenset(
+                    encrypted_storage_ids_by_backup.get(item.pk, ())
+                )
             upload_items = [
                 item
                 for item in items

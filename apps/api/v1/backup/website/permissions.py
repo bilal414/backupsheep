@@ -10,7 +10,7 @@ class CoreWebsiteBackupViewPermissions(MemberGroupPermissions):
         "destroy": "backup_delete",
         "cancel": "backup_delete",
         "retry": "backup_create",
-        "restore": "backup_create",
+        "restore": "backup_restore",
     }
 
     object_node_path = "website.node"

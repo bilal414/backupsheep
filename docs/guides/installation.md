@@ -469,56 +469,113 @@ non-exportable HSM/KMS keys: the matching source worker, Docker daemon, and host
 administrators are inside the custody boundary. The stock runtime does not currently
 provide a hardware-backed artifact-key provider.
 
-Inspect IDs without printing key material, then stop all operations before rotating one
-lane. Supply the observed active ID as a replay/staleness witness:
+Rotate during a maintenance window that blocks user-triggered work. Stop Beat, let every
+active/reserved/scheduled task and durable active row reach a reconciled terminal state,
+and require all six reviewed queues to be empty. The inspection below runs inside the
+matching source image; it does not assume the host has a compatible Python environment.
+Recreating the exact pair before the one-off gives the wrapper a current, healthy guard,
+and stopping the long-lived worker keeps the inspection as the only lane process. Supply
+the observed active ID as a replay/staleness witness:
 
 ```bash
 cd "$HOME/.local/share/backupsheep"
-KEYRING="$PWD/.secrets/artifact_local_file_database_keyring"
+set -euo pipefail
+COMMIT='<40-character-reviewed-release-commit>'
 INSTALLATION_ID='<the existing 64-hex BACKUPSHEEP_INSTALLATION_ID>'
-python scripts/manage_artifact_keyring.py inspect \
-  --path "$KEYRING" --lane database --installation-id "$INSTALLATION_ID"
-OLD_ACTIVE='lfk-<32-lowercase-hex-from-inspect>'
+LANE=database                    # or: files
+WORKER="worker-${LANE}"
+GUARD="${LANE}-egress-guard"
+case "${LANE}" in database|files) ;; *) exit 1 ;; esac
+
+INSTALLER=("$PWD/install.sh")
+INSTALL_ARGS=(
+  --ref "${COMMIT}"
+  --install-dir "$PWD"
+  --project-name backupsheep
+  --domain backups.example.com
+)
+# Add the same reviewed root-install or approved-override arguments used by this install.
+
+./backupsheep-compose --profile operations stop beat
+QUEUE_STATE="$(./backupsheep-compose exec -T rabbitmq \
+  rabbitmqctl -q -p backupsheep list_queues \
+  name messages_ready messages_unacknowledged --silent)"
+printf '%s\n' "${QUEUE_STATE}" | awk '
+  NF == 0 { next }
+  NF != 3 || $1 !~ /^(default|cloud|database|files|storage|logs)$/ ||
+    seen[$1]++ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ ||
+    $2 != 0 || $3 != 0 { failed = 1; exit }
+  { count++ }
+  END { if (failed || count != 6) exit 1 }
+'
+
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate "${GUARD}" "${WORKER}"
+./backupsheep-compose --profile operations stop "${WORKER}"
+OLD_ACTIVE="$(
+  ./backupsheep-compose --profile operations run --rm --no-deps "${WORKER}" \
+    python -c '
+import os
+from backupsheep.artifact_crypto.providers.local_file import LocalFileKeyProvider
+lane = os.environ["BACKUPSHEEP_RUNTIME_ROLE"]
+with LocalFileKeyProvider(
+    os.environ["BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH"],
+    lane=lane,
+    installation_id=os.environ["BACKUPSHEEP_INSTALLATION_ID"],
+) as provider:
+    print(provider.active_key_id)
+'
+)"
+[[ "${OLD_ACTIVE}" =~ ^lfk-[0-9a-f]{32}$ ]]
+
 ./backupsheep-compose --profile operations down --timeout 300
-./install.sh \
-  --ref "${COMMIT}" \
-  --install-dir "$PWD" \
-  --project-name backupsheep \
-  --domain backups.example.com \
-  --rotate-artifact-keyring database \
-  --expected-artifact-active-key-id "$OLD_ACTIVE" \
+"${INSTALLER[@]}" "${INSTALL_ARGS[@]}" \
+  --rotate-artifact-keyring "${LANE}" \
+  --expected-artifact-active-key-id "${OLD_ACTIVE}" \
   --skip-start
 ```
 
 The rotation atomically prepends a new random key and retains every old entry. Repeating
 the same command fails because its expected active ID is stale. A keyring holds at most
-eight keys; a full keyring refuses rotation rather than evicting recovery material.
+eight keys; a full keyring refuses rotation rather than evicting recovery material. Keep
+this maintenance shell open because the post-copy commands below deliberately reuse its
+validated lane, installation-ID, key-ID and installer arrays. If the shell is lost, stop
+and re-establish those exact values before continuing.
 
 Do **not** start the matching source worker yet. First copy the exact post-rotation
 keyring (which now contains the new and all retained roots) to the approved encrypted,
 access-audited off-host recovery system. Restore that copy into an isolated owner-mode
 `0700` directory, set the file to owner-mode `0400`, compare its SHA-256 digest with the
-live post-rotation file, and run `manage_artifact_keyring.py inspect` against the restored
-copy with the same installation ID and lane. Record the digest, retained IDs and
-successful isolated inspection in the change evidence. A pre-rotation backup alone
+live post-rotation file, and use the same containerized provider inspection in an isolated
+BackupSheep deployment whose lane secret is the restored copy. The standalone
+`scripts/manage_artifact_keyring.py` path is only for a non-Docker deployment that has
+installed the repository's documented Python environment; it is not a host prerequisite
+for this Compose procedure. Record the digest, retained IDs and successful isolated
+inspection in the change evidence. A pre-rotation backup alone
 cannot recover backups first wrapped under the new active root. No matching source worker
 may start and no new backup may use the key until this recovery gate passes.
 
-After that gate, start the reviewed core normally, then run the database command from the matching source
-service first without and then with `--apply` (use `worker-files` and `--lane files` for
-the files keyring):
+After that gate, start the reviewed core without operations. The queue and maintenance
+gates above must still hold. Recreate the exact guard/worker pair, stop its long-lived
+worker, and run the command from that source service first without and then with
+`--apply`:
 
 ```bash
-./backupsheep-compose --profile operations run --rm worker-database \
+"${INSTALLER[@]}" "${INSTALL_ARGS[@]}"
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate "${GUARD}" "${WORKER}"
+./backupsheep-compose --profile operations stop "${WORKER}"
+
+./backupsheep-compose --profile operations run --rm --no-deps "${WORKER}" \
   python manage.py rotate_artifact_key_wraps \
-  --expected-source-key-id "$OLD_ACTIVE" \
-  --installation-id-witness '<64-hex-installation-id>' \
-  --lane database
-./backupsheep-compose --profile operations run --rm worker-database \
+  --expected-source-key-id "${OLD_ACTIVE}" \
+  --installation-id-witness "${INSTALLATION_ID}" \
+  --lane "${LANE}"
+./backupsheep-compose --profile operations run --rm --no-deps "${WORKER}" \
   python manage.py rotate_artifact_key_wraps \
-  --expected-source-key-id "$OLD_ACTIVE" \
-  --installation-id-witness '<64-hex-installation-id>' \
-  --lane database --apply
+  --expected-source-key-id "${OLD_ACTIVE}" \
+  --installation-id-witness "${INSTALLATION_ID}" \
+  --lane "${LANE}" --apply
 ```
 
 Continue bounded batches until `remaining_source=0`. Retain the old key through the

@@ -16,6 +16,7 @@ from rest_framework_datatables.filters import DatatablesFilterBackend
 from sentry_sdk import capture_exception
 
 from apps.console.storage.models import CoreStorage
+from apps.console.utils.models import UtilBackup
 from apps._tasks.integration.storage.tasks import (
     delete_storage_requested,
     validate_local_storage,
@@ -24,8 +25,7 @@ from .filters import CoreStorageLocalFilter
 from .permissions import CoreStorageLocalPermissions
 from .serializers import CoreStorageReadSerializer, CoreStorageWriteSerializer
 from ...utils.api_filters import DateRangeFilter
-from ...utils.api_helpers import visible_nodes
-from ...utils.api_permissions import member_has_perm
+from ...utils.api_permissions import member_has_perm, permitted_nodes
 from ...utils.api_serializers import ReadWriteSerializerMixin
 
 
@@ -100,7 +100,7 @@ class LocalStorageFileDownloadView(APIView):
 
     permission_classes = (IsAuthenticated,)
 
-    def get(self, request, stored_backup_id):
+    def get(self, request, stored_backup_id, backup_family=None):
         from apps.console.backup.models import (
             CoreWebsiteBackupStoragePoints,
             CoreDatabaseBackupStoragePoints,
@@ -111,27 +111,50 @@ class LocalStorageFileDownloadView(APIView):
         if not member_has_perm(request, "backup_download"):
             raise PermissionDenied("You do not have permission to download backups.")
 
-        allowed_nodes = visible_nodes(request.user.member)
+        allowed_nodes = permitted_nodes(request, "backup_download")
 
-        stored_backup = None
-        for model, node_lookup in (
-                (CoreWebsiteBackupStoragePoints, "backup__website__node"),
-                (CoreDatabaseBackupStoragePoints, "backup__database__node"),
-                (CoreBasecampBackupStoragePoints, "backup__basecamp__node"),
-        ):
+        family_models = {
+            "website": (
+                CoreWebsiteBackupStoragePoints,
+                "backup__website__node",
+            ),
+            "database": (
+                CoreDatabaseBackupStoragePoints,
+                "backup__database__node",
+            ),
+            "basecamp": (
+                CoreBasecampBackupStoragePoints,
+                "backup__basecamp__node",
+            ),
+        }
+        if backup_family is not None:
+            selected = family_models.get(str(backup_family))
+            if selected is None:
+                raise Http404
+            candidates = (selected,)
+        else:
+            # Legacy URLs did not identify the table, even though the remaining
+            # storage-point tables have independent integer primary keys. Keep
+            # unambiguous bookmarks working, but fail closed if an ID collides.
+            candidates = tuple(family_models.values())
+
+        matches = []
+        for model, node_lookup in candidates:
             stored_backup = model.objects.filter(
                 id=stored_backup_id,
                 storage__account=account,
                 storage__type__code="local",
+                backup__status=UtilBackup.Status.COMPLETE,
                 status=model.Status.UPLOAD_COMPLETE,
                 storage_file_id__isnull=False,
                 **{f"{node_lookup}__in": allowed_nodes},
-            ).first()
+            ).exclude(storage_file_id="").first()
             if stored_backup:
-                break
+                matches.append(stored_backup)
 
-        if not stored_backup:
+        if len(matches) != 1:
             raise Http404
+        stored_backup = matches[0]
 
         if not stored_backup.direct_download_permitted():
             # The web container must never regain a /backups mount merely to

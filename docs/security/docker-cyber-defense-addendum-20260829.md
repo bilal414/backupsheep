@@ -9,7 +9,7 @@
 **Implementation snapshot:** final committed SHA pending
 
 **Primary change:** replace the application artifact-encryption dependency on AWS KMS
-with installation-local, lane-scoped wrapping-key files  
+with installation-local, lane-scoped wrapping-key files
 **Parent assessment:**
 [`docker-hardening-20260823.md`](docker-hardening-20260823.md)
 

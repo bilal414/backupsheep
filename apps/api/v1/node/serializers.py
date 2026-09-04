@@ -4,7 +4,16 @@ from rest_framework import serializers
 from apps.console.account.models import CoreAccount
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.api.v1.connection.serializers import CoreConnectionSerializer
-from apps.api.v1.utils.api_helpers import CurrentMemberDefault, CurrentAccountDefault
+from apps.api.v1.utils.api_helpers import (
+    CurrentAccountDefault,
+    CurrentMemberDefault,
+    visible_connections,
+)
+from apps.api.v1.utils.api_permissions import (
+    SOURCE_DISCOVERY_PERMISSIONS,
+    active_current_membership,
+    member_has_perm,
+)
 from apps.console.backup.models import CoreCloudRestore, CoreVultrDatabaseRestore
 from apps.console.connection.models import CoreConnection
 from apps.api.v1.backup.serializers import RestoreExecutionStatusMixin
@@ -14,7 +23,105 @@ from apps.console.node.models import (
 from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
+_CONNECTION_UNAVAILABLE = (
+    "Select a connection you can access in your active workspace."
+)
+
+
+class CurrentWorkspaceConnectionField(serializers.PrimaryKeyRelatedField):
+    """Resolve connection identifiers only inside the active workspace scope.
+
+    A global ``CoreConnection`` queryset lets a guessed primary key become a
+    hydrated connection before the nested source serializer can enforce its
+    tenant boundary.  Some provider serializers immediately use that hydrated
+    object to obtain credentials and rediscover the provider resource.  Scope
+    the relation itself so a foreign, non-current, suspended-membership, or
+    group-hidden connection is indistinguishable from an unknown identifier
+    and cannot reach that provider path.
+    """
+
+    default_error_messages = {
+        "does_not_exist": _CONNECTION_UNAVAILABLE,
+        "incorrect_type": _CONNECTION_UNAVAILABLE,
+    }
+
+    def get_queryset(self):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        member = getattr(user, "member", None)
+        if member is None or not getattr(user, "is_authenticated", False):
+            return CoreConnection.objects.none()
+
+        membership = active_current_membership(member)
+        if membership is None:
+            return CoreConnection.objects.none()
+
+        # ``visible_connections`` applies both the active-account boundary and
+        # the member's node/group scope.  Retaining the explicit account
+        # predicate documents the invariant and keeps this field fail-closed if
+        # the helper's implementation evolves.
+        return visible_connections(member).filter(account_id=membership.account_id)
+
+
+def _is_source_creation(serializer):
+    """Return whether this nested serializer is validating a create action."""
+
+    view = serializer.context.get("view")
+    action = getattr(view, "action", None)
+    if action is not None:
+        return action == "create"
+    return serializer.instance is None
+
+
+def _validate_current_workspace_connection(serializer, data):
+    """Defense-in-depth for callers that bypass the DRF view permission gate."""
+
+    connection = data.get("connection")
+    if connection is None and serializer.instance is not None:
+        connection = getattr(serializer.instance, "connection", None)
+    if connection is None:
+        return data
+
+    request = serializer.context.get("request")
+    user = getattr(request, "user", None)
+    member = getattr(user, "member", None)
+    membership = active_current_membership(member) if member is not None else None
+    if (
+        membership is None
+        or connection.account_id != membership.account_id
+        or not visible_connections(member).filter(pk=connection.pk).exists()
+    ):
+        raise serializers.ValidationError({"connection": _CONNECTION_UNAVAILABLE})
+
+    # Source registration consumes a connection and may enter a provider
+    # credential/client path.  Match inventory discovery's conjunctive
+    # authorization boundary even when a serializer is invoked outside its
+    # normal viewset.
+    if _is_source_creation(serializer) and not all(
+        member_has_perm(request, codename)
+        for codename in SOURCE_DISCOVERY_PERMISSIONS
+    ):
+        raise serializers.ValidationError({"connection": _CONNECTION_UNAVAILABLE})
+    return data
+
+
+class CurrentWorkspaceNodeWriteSerializer(serializers.ModelSerializer):
+    """Shared tenant and authorization boundary for nested source writes."""
+
+    source_creation_permissions = SOURCE_DISCOVERY_PERMISSIONS
+    connection = CurrentWorkspaceConnectionField(
+        queryset=CoreConnection.objects.all()
+    )
+
+    def validate(self, data):
+        return _validate_current_workspace_connection(self, data)
+
+
 class CoreNodeSerializer(serializers.ModelSerializer):
+    source_creation_permissions = SOURCE_DISCOVERY_PERMISSIONS
+    connection = CurrentWorkspaceConnectionField(
+        queryset=CoreConnection.objects.all()
+    )
     account = CoreAccountSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     type_display = serializers.SerializerMethodField(read_only=True)
@@ -28,6 +135,8 @@ class CoreNodeSerializer(serializers.ModelSerializer):
         datatables_always_serialize = ("id",)
 
     def validate(self, data):
+        if self.instance is None:
+            _validate_current_workspace_connection(self, data)
         # Existing rows stay readable and can still be paused/deleted, but a
         # generic PATCH must not reactivate a recovery-incomplete source.
         if (
@@ -122,131 +231,64 @@ class CoreNodeReadSerializer(serializers.ModelSerializer):
         return date_time
 
 
-class CoreDatabaseNodeWriteSerializer(serializers.ModelSerializer):
+class CoreDatabaseNodeWriteSerializer(CurrentWorkspaceNodeWriteSerializer):
     added_by = serializers.HiddenField(default=CurrentMemberDefault())
     type = serializers.HiddenField(default=CoreNode.Type.DATABASE)
-    connection = serializers.PrimaryKeyRelatedField(
-        queryset=CoreConnection.objects.filter()
-    )
 
     class Meta:
         model = CoreNode
         fields = "__all__"
 
-    def validate(self, data):
-        connection = data["connection"]
-        member = self.context["request"].user.member
-        if not connection.account.memberships.filter(member=member).exists():
-            raise serializers.ValidationError(
-                "You don't have access to this node."
-            )
-        return data
 
-
-class CoreWebsiteNodeWriteSerializer(serializers.ModelSerializer):
+class CoreWebsiteNodeWriteSerializer(CurrentWorkspaceNodeWriteSerializer):
     added_by = serializers.HiddenField(default=CurrentMemberDefault())
     type = serializers.HiddenField(default=CoreNode.Type.WEBSITE)
-    connection = serializers.PrimaryKeyRelatedField(
-        queryset=CoreConnection.objects.filter()
-    )
 
     class Meta:
         model = CoreNode
         fields = "__all__"
 
-    def validate(self, data):
-        connection = data["connection"]
-        member = self.context["request"].user.member
-        if not connection.account.memberships.filter(member=member).exists():
-            raise serializers.ValidationError(
-                "You don't have access to this node."
-            )
-        return data
 
-
-class CoreNodeWriteSerializer(serializers.ModelSerializer):
+class CoreNodeWriteSerializer(CurrentWorkspaceNodeWriteSerializer):
     added_by = serializers.HiddenField(default=CurrentMemberDefault())
     type = serializers.HiddenField(default=CoreNode.Type.CLOUD)
-    connection = serializers.PrimaryKeyRelatedField(
-        queryset=CoreConnection.objects.filter()
-    )
 
     class Meta:
         model = CoreNode
         fields = "__all__"
 
-    def validate(self, data):
-        connection = data["connection"]
-        member = self.context["request"].user.member
-        if not connection.account.memberships.filter(member=member).exists():
-            raise serializers.ValidationError(
-                "You don't have access to this node."
-            )
-        return data
 
-
-class CoreSaaSNodeWriteSerializer(serializers.ModelSerializer):
+class CoreSaaSNodeWriteSerializer(CurrentWorkspaceNodeWriteSerializer):
     added_by = serializers.HiddenField(default=CurrentMemberDefault())
     type = serializers.HiddenField(default=CoreNode.Type.SAAS)
-    connection = serializers.PrimaryKeyRelatedField(
-        queryset=CoreConnection.objects.filter()
-    )
 
     class Meta:
         model = CoreNode
         fields = "__all__"
 
     def validate(self, data):
+        data = super().validate(data)
         connection = data["connection"]
-        member = self.context["request"].user.member
-        if not connection.account.memberships.filter(member=member).exists():
-            raise serializers.ValidationError(
-                "You don't have access to this node."
-            )
         require_source_backup_creation(connection.integration.code)
         return data
 
 
-class CoreCloudNodeWriteSerializer(serializers.ModelSerializer):
+class CoreCloudNodeWriteSerializer(CurrentWorkspaceNodeWriteSerializer):
     added_by = serializers.HiddenField(default=CurrentMemberDefault())
     type = serializers.HiddenField(default=CoreNode.Type.CLOUD)
-    connection = serializers.PrimaryKeyRelatedField(
-        queryset=CoreConnection.objects.filter()
-    )
 
     class Meta:
         model = CoreNode
         fields = "__all__"
 
-    def validate(self, data):
-        connection = data["connection"]
-        member = self.context["request"].user.member
-        if not connection.account.memberships.filter(member=member).exists():
-            raise serializers.ValidationError(
-                "You don't have access to this node."
-            )
-        return data
 
-
-class CoreVolumeNodeWriteSerializer(serializers.ModelSerializer):
+class CoreVolumeNodeWriteSerializer(CurrentWorkspaceNodeWriteSerializer):
     added_by = serializers.HiddenField(default=CurrentMemberDefault())
     type = serializers.HiddenField(default=CoreNode.Type.VOLUME)
-    connection = serializers.PrimaryKeyRelatedField(
-        queryset=CoreConnection.objects.filter()
-    )
 
     class Meta:
         model = CoreNode
         fields = "__all__"
-
-    def validate(self, data):
-        connection = data["connection"]
-        member = self.context["request"].user.member
-        if not connection.account.memberships.filter(member=member).exists():
-            raise serializers.ValidationError(
-                "You don't have access to this node."
-            )
-        return data
 
 
 class CoreCloudRestoreSerializer(RestoreExecutionStatusMixin, serializers.ModelSerializer):
@@ -293,6 +335,10 @@ class CoreVultrDatabaseRestoreSerializer(
 ):
     """Expose Vultr fork restores through the same safe UI status contract."""
 
+    # Keep the model's conventional ``backup`` relation for compatibility and
+    # expose the same scalar identity used by every other native restore API.
+    # The browser's durable reconciliation contract must not branch by provider.
+    backup_id = serializers.IntegerField(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

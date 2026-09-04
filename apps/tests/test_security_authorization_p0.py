@@ -145,7 +145,8 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
                     f"{view_class.__name__}.{action} unexpectedly allowed",
                 )
 
-        # Granting node management in this account authorizes the same actions.
+        # Source management alone must not authorize provider credential or
+        # connection changes.
         self.current_group.group.permissions.add(_permission("node_changes"))
         request = RequestFactory().get("/validate/")
         request.user = self.team_user
@@ -153,7 +154,39 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
             action="validate",
             action_permissions=CoreGoogleCloudView.action_permissions,
         )
+        self.assertFalse(permission.has_permission(request, view))
+
+        # Integration management is the explicit account-scoped boundary for
+        # provider credentials and connection operations.
+        self.current_group.group.permissions.add(
+            _permission("integration_changes")
+        )
         self.assertTrue(permission.has_permission(request, view))
+
+    def test_integration_manager_can_operate_an_empty_account_connection(self):
+        connection = factories.make_connection(
+            self.account,
+            self.member,
+            code="digitalocean",
+            name="Account-scoped empty connection",
+        )
+
+        denied = self.team_client.post(
+            f"/api/v1/connections/{connection.pk}/pause/",
+            {},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, 403, denied.content)
+
+        self.current_group.group.permissions.add(
+            _permission("integration_changes")
+        )
+        allowed = self.team_client.post(
+            f"/api/v1/connections/{connection.pk}/pause/",
+            {},
+            format="json",
+        )
+        self.assertEqual(allowed.status_code, 200, allowed.content)
 
     def test_team_member_cannot_escalate_or_administer_account(self):
         group_response = self.team_client.post(
@@ -339,7 +372,7 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
         ):
             point, node = self._local_point(root)
             self.current_group.nodes.add(node)
-            url = f"/api/v1/storage/local/file/{point.pk}/"
+            url = f"/api/v1/storage/local/file/website/{point.pk}/"
 
             self.assertEqual(self.team_client.get(url).status_code, 403)
 
@@ -350,6 +383,27 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
 
             hidden_node = factories.make_website_node(self.account, self.member)
             self.current_group.nodes.set([hidden_node])
+            self.assertEqual(self.team_client.get(url).status_code, 404)
+
+    def test_local_download_permission_must_cover_the_backup_node(self):
+        with tempfile.TemporaryDirectory() as root, override_settings(
+            LOCAL_STORAGE_ROOT=root,
+            BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+            BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        ):
+            point, visibility_only_node = self._local_point(root)
+            self.current_group.nodes.add(visibility_only_node)
+
+            permission_group = _account_group(
+                self.account,
+                "download-other-node",
+                self.team_user,
+                permissions=("backup_download",),
+            )
+            permitted_node = factories.make_website_node(self.account, self.member)
+            permission_group.nodes.add(permitted_node)
+
+            url = f"/api/v1/storage/local/file/website/{point.pk}/"
             self.assertEqual(self.team_client.get(url).status_code, 404)
 
     def _set_pcloud_state(self, browser, state="expected-state"):

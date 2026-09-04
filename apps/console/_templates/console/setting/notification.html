@@ -1,424 +1,294 @@
-{% extends "console/_master.html" %}
-{% block title %}Settings - Notifications{% endblock %}
-{% block meta_title %}Settings - Notifications{% endblock %}
-{% block meta_description %}Settings - Notifications{% endblock %}
-{% block meta_keywords %}Settings - Notifications{% endblock %}
-{% block page_class %}page_settings dashboard-page{% endblock %}
-{% block content %}
-    <div class="space-y-6" x-data="settingsNotifications()">
-        <!-- Page header -->
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Notifications</h2>
-                <p class="mt-1 text-sm text-slate-500">Backup notification settings and integrations with third-party apps.</p>
-            </div>
-        </div>
+{% extends "console/setting/_base.html" %}
+{% block title %}Settings - Notification channels{% endblock %}
+{% block meta_title %}Settings - Notification channels{% endblock %}
+{% block meta_description %}Manage workspace Slack and Telegram notification destinations.{% endblock %}
+{% block meta_keywords %}Settings - Notification channels{% endblock %}
+{% block settings_page_title %}Notification channels{% endblock %}
+{% block settings_page_description %}Manage the workspace destinations that can receive allowed backup events. Event gates and recipient preferences are configured separately.{% endblock %}
 
-        <!-- Settings navigation -->
-        <div class="border-b border-slate-200">
-            <nav class="-mb-px flex gap-6 overflow-x-auto" aria-label="Settings">
-                <a href="{% url 'console:settings:profile' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Profile</a>
-                <a href="{% url 'console:settings:account' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Account</a>
-                <a href="{% url 'console:settings:multifactor' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Multi-Factor Auth</a>
-                <a href="{% url 'console:settings:password' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Password</a>
-                <a href="{% url 'console:settings:group' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Groups</a>
-                <a href="{% url 'console:settings:user' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Users</a>
-                <a href="{% url 'console:settings:invite' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Invites</a>
-                <a href="{% url 'console:settings:notification' %}" aria-current="page" class="whitespace-nowrap border-b-2 border-indigo-600 px-1 pb-3 text-sm font-medium text-indigo-600 transition">Notifications</a>
-            </nav>
-        </div>
-
-        <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="providers-heading">
-            <div class="border-b border-slate-200 px-5 py-4">
-                <h2 id="providers-heading" class="text-sm font-semibold text-slate-900">Notification channels</h2>
-                <p class="mt-0.5 text-xs text-slate-500">Connect a channel to receive backup notifications.</p>
-            </div>
-            <div class="grid grid-cols-1 gap-3 p-5 sm:grid-cols-2">
-                <a href="{{ slack_oauth_url }}" class="group flex items-center gap-3 rounded-lg border border-slate-200 p-3.5 transition hover:border-slate-300 hover:bg-slate-50">
-                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-slate-100">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 122.8 122.8" aria-hidden="true">
-                            <path d="M25.8 77.6c0 7.1-5.8 12.9-12.9 12.9S0 84.7 0 77.6s5.8-12.9 12.9-12.9h12.9v12.9zm6.5 0c0-7.1 5.8-12.9 12.9-12.9s12.9 5.8 12.9 12.9v32.3c0 7.1-5.8 12.9-12.9 12.9s-12.9-5.8-12.9-12.9V77.6z"
-                                  fill="#e01e5a"></path>
-                            <path d="M45.2 25.8c-7.1 0-12.9-5.8-12.9-12.9S38.1 0 45.2 0s12.9 5.8 12.9 12.9v12.9H45.2zm0 6.5c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9H12.9C5.8 58.1 0 52.3 0 45.2s5.8-12.9 12.9-12.9h32.3z"
-                                  fill="#36c5f0"></path>
-                            <path d="M97 45.2c0-7.1 5.8-12.9 12.9-12.9s12.9 5.8 12.9 12.9-5.8 12.9-12.9 12.9H97V45.2zm-6.5 0c0 7.1-5.8 12.9-12.9 12.9s-12.9-5.8-12.9-12.9V12.9C64.7 5.8 70.5 0 77.6 0s12.9 5.8 12.9 12.9v32.3z"
-                                  fill="#2eb67d"></path>
-                            <path d="M77.6 97c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9-12.9-5.8-12.9-12.9V97h12.9zm0-6.5c-7.1 0-12.9-5.8-12.9-12.9s5.8-12.9 12.9-12.9h32.3c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9H77.6z"
-                                  fill="#ecb22e"></path>
-                        </svg>
-                    </span>
-                    <span class="min-w-0 flex-1">
-                        <span class="block text-sm font-semibold text-slate-900">Connect Slack</span>
-                        <span class="mt-0.5 block text-xs text-slate-500">Send backup notifications to a Slack channel.</span>
-                    </span>
-                    <svg class="h-4 w-4 flex-none text-slate-400 transition group-hover:text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/>
-                    </svg>
-                </a>
-                <a href="#connect-telegram" class="group flex items-center gap-3 rounded-lg border border-slate-200 p-3.5 transition hover:border-slate-300 hover:bg-slate-50">
-                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-slate-100 text-sky-600">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                            <path d="M21.6 3.4 3.9 10.2c-.9.3-.9 1.6 0 1.9l4.5 1.6 1.7 5.3c.3.9 1.4 1.1 2 .4l2.5-2.8 4.2 3.1c.8.6 1.9.1 2.1-.9l2.3-14.1c.2-1-.7-1.7-1.6-1.3Z" fill="currentColor" opacity=".18"/>
-                            <path d="m8.4 13.7 8.9-7.1-6.6 8.8m-2.3-1.7 3.2 1.1 1.1 3.5m2-2.7 3.9 2.9c.8.6 1.9.1 2.1-.9l2.3-14.1c.2-1-.7-1.7-1.6-1.3L3.9 10.2c-.9.3-.9 1.6 0 1.9l4.5 1.6 1.7 5.3c.3.9 1.4 1.1 2 .4l2.5-2.8Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
-                    </span>
-                    <span class="min-w-0 flex-1">
-                        <span class="block text-sm font-semibold text-slate-900">Add Telegram</span>
-                        <span class="mt-0.5 block text-xs text-slate-500">Route backup alerts to a Telegram channel.</span>
-                    </span>
-                    <svg class="h-4 w-4 flex-none text-slate-400 transition group-hover:text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/>
-                    </svg>
-                </a>
-            </div>
-        </section>
-
-        {% if notifications_slack.count > 0 %}
-            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="slack-channels-heading">
+{% block settings_content %}
+    <div class="space-y-6"{% if settings_can_manage_workspace %} x-data="settingsNotifications()"{% endif %}>
+        {% if settings_can_manage_workspace %}
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="channel-boundary-heading">
                 <div class="border-b border-slate-200 px-5 py-4">
-                    <h2 id="slack-channels-heading" class="text-sm font-semibold text-slate-900">Slack Channels</h2>
-                    <p class="mt-0.5 text-xs text-slate-500">List of your Slack channels you connected.</p>
+                    <h2 id="channel-boundary-heading" class="text-sm font-semibold text-slate-900">Delivery boundary</h2>
+                    <p class="mt-0.5 text-xs leading-5 text-slate-500">Connected channels are shared workspace destinations. “Send test message” performs a real provider delivery attempt; it does not change workspace event gates or member recipient preferences.</p>
                 </div>
-                <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-slate-200 text-sm">
-                        <thead>
-                            <tr class="bg-slate-50">
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Team</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Channel</th>
-                                <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-slate-100">
-                            {% for slack in notifications_slack %}
-                                <tr class="transition hover:bg-slate-50">
-                                    <td class="px-4 py-3 font-medium text-slate-900">{{ slack.data.team.name }}</td>
-                                    <td class="px-4 py-3 text-slate-700">{{ slack.channel }}</td>
-                                    <td class="whitespace-nowrap px-4 py-3 text-right">
-                                        <div class="inline-flex items-center gap-2">
-                                            <button @click="validateSlack('{{ slack.id }}')"
-                                                    type="button"
-                                                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                                                Validate
-                                            </button>
-                                            <button @click="removeSlack('{{ slack.id }}')"
-                                                    type="button"
-                                                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">
-                                                Remove
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+                <div class="grid gap-3 p-5 sm:grid-cols-2">
+                    {% if slack_oauth_url %}
+                        <a href="{{ slack_oauth_url }}" class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 p-4 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                            <span>
+                                <span class="block">Connect Slack</span>
+                                <span class="mt-1 block text-xs font-normal text-slate-500">Authorize one incoming-webhook destination through Slack.</span>
+                            </span>
+                            <span aria-hidden="true">→</span>
+                        </a>
+                    {% else %}
+                        <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                            <p class="text-sm font-semibold text-slate-900">Slack connection unavailable</p>
+                            <p class="mt-1 text-xs leading-5 text-slate-500">Slack OAuth is not configured for this installation. Existing destinations can still be reviewed below.</p>
+                        </div>
+                    {% endif %}
+                    <a href="#telegram-editor" class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 p-4 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                        <span>
+                            <span class="block">Add Telegram destination</span>
+                            <span class="mt-1 block text-xs font-normal text-slate-500">Validate a bot-accessible channel or chat before saving.</span>
+                        </span>
+                        <span aria-hidden="true">↓</span>
+                    </a>
                 </div>
             </section>
-        {% endif %}
 
-        {% if notifications_telegram.count > 0 %}
-            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="telegram-channels-heading">
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="connected-channels-heading">
                 <div class="border-b border-slate-200 px-5 py-4">
-                    <h2 id="telegram-channels-heading" class="text-sm font-semibold text-slate-900">Telegram Channels</h2>
-                    <p class="mt-0.5 text-xs text-slate-500">List of your Telegram channels you connected.</p>
+                    <h2 id="connected-channels-heading" class="text-sm font-semibold text-slate-900">Connected destinations</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">Only display metadata is shown. Provider credentials and Telegram destination identifiers are not rendered in Settings.</p>
                 </div>
-                <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-slate-200 text-sm">
-                        <thead>
-                            <tr class="bg-slate-50">
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Channel Name</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Channel ID</th>
-                                <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-slate-100">
-                            {% for telegram in notifications_telegram %}
-                                <tr class="transition hover:bg-slate-50">
-                                    <td class="px-4 py-3 font-medium text-slate-900">{{ telegram.channel_name }}</td>
-                                    <td class="px-4 py-3 text-slate-700">{{ telegram.chat_id }}</td>
-                                    <td class="whitespace-nowrap px-4 py-3 text-right">
-                                        <div class="inline-flex items-center gap-2">
-                                            <button @click="validateTelegram('{{ telegram.id }}')"
-                                                    type="button"
-                                                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                                                Validate
-                                            </button>
-                                            <button @click="removeTelegram('{{ telegram.id }}')"
-                                                    type="button"
-                                                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">
-                                                Remove
-                                            </button>
-                                        </div>
-                                    </td>
+                {% if notifications_slack or notifications_telegram %}
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-slate-200 text-sm">
+                            <thead>
+                                <tr class="bg-slate-50">
+                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Provider</th>
+                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Display destination</th>
+                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Identifier handling</th>
+                                    <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
                                 </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-        {% endif %}
-
-        <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="telegram-add-heading">
-            <div class="border-b border-slate-200 px-5 py-4">
-                <h2 id="telegram-add-heading" class="text-sm font-semibold text-slate-900">Add Telegram Channel</h2>
-                <p class="mt-0.5 text-xs text-slate-500">Please add BackupSheep Bot <a class="font-medium text-indigo-600 transition hover:text-indigo-700" href="t.me/backupsheep_bot" target="_blank">backupsheep_bot</a> to your channel as admin.</p>
-            </div>
-            <div class="p-5">
-                <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                    <div>
-                        <label for="channel_name" class="block text-sm font-medium text-slate-700">Channel Name</label>
-                        <input x-model="telegram.channel_name" type="text" name="channel_name" id="channel_name"
-                               autocomplete="channel_name"
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="notificationErrors.channel_name" class="mt-1.5 text-xs font-medium text-red-600"
-                           id="channel_name-error"
-                           x-text="notificationErrors.channel_name"></p>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                {% for slack in notifications_slack %}
+                                    <tr>
+                                        <td data-label="Provider" class="px-4 py-3">
+                                            <span class="block font-medium text-slate-900">Slack</span>
+                                            <span class="mt-0.5 block text-xs text-slate-500">{{ slack.team_name }}</span>
+                                        </td>
+                                        <td data-label="Display destination" class="px-4 py-3 text-slate-700">{{ slack.channel }}</td>
+                                        <td data-label="Identifier handling" class="px-4 py-3 text-slate-500">Provider credentials protected</td>
+                                        <td data-label="Actions" class="px-4 py-3 text-right">
+                                            <div class="flex flex-wrap items-center justify-end gap-2">
+                                                <button type="button" @click="sendTest('slack', '{{ slack.id }}', '{{ slack.channel|escapejs }}')" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Send test message</button>
+                                                <button type="button" @click="openRemove('slack', '{{ slack.id }}', '{{ slack.channel|escapejs }}', $el)" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-50">Disconnect</button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                                {% for telegram in notifications_telegram %}
+                                    <tr>
+                                        <td data-label="Provider" class="px-4 py-3 font-medium text-slate-900">Telegram</td>
+                                        <td data-label="Display destination" class="px-4 py-3 text-slate-700">{{ telegram.channel_name }}</td>
+                                        <td data-label="Identifier handling" class="px-4 py-3 text-slate-500">Destination identifier protected</td>
+                                        <td data-label="Actions" class="px-4 py-3 text-right">
+                                            <div class="flex flex-wrap items-center justify-end gap-2">
+                                                <button type="button" @click="sendTest('telegram', '{{ telegram.id }}', '{{ telegram.channel_name|escapejs }}')" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Send test message</button>
+                                                <button type="button" @click="openRemove('telegram', '{{ telegram.id }}', '{{ telegram.channel_name|escapejs }}', $el)" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-50">Disconnect</button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
                     </div>
-                    <div>
-                        <label for="chat_id" class="block text-sm font-medium text-slate-700">Channel/Chat ID <span class="font-medium text-indigo-600">(<a href="https://community.jamaicans.dev/t/get-the-telegram-channel-id/427" target="_blank" class="transition hover:text-indigo-700">how to find chat id?</a>)</span></label>
-                        <input x-model="telegram.chat_id" type="text" name="chat_id" id="chat_id"
-                               autocomplete="chat_id"
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="notificationErrors.chat_id" class="mt-1.5 text-xs font-medium text-red-600"
-                           id="chat_id-error"
-                           x-text="notificationErrors.chat_id"></p>
+                {% else %}
+                    <div class="px-5 py-8">
+                        <p class="text-sm font-medium text-slate-900">No shared channel destinations are connected.</p>
+                        <p class="mt-1 text-sm text-slate-600">Connect Slack or add a Telegram destination to route workspace events beyond member email recipients.</p>
+                    </div>
+                {% endif %}
+            </section>
+
+            <section id="telegram-editor" class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="telegram-editor-heading">
+                <div class="border-b border-slate-200 px-5 py-4">
+                    <h2 id="telegram-editor-heading" class="text-sm font-semibold text-slate-900">Add Telegram destination</h2>
+                    <p class="mt-0.5 text-xs leading-5 text-slate-500">Add <a href="https://t.me/backupsheep_bot" target="_blank" rel="noopener noreferrer" class="font-medium text-indigo-600 underline underline-offset-2">backupsheep_bot<span class="sr-only"> (opens in a new tab)</span></a> to the destination first. Saving performs one real validation message before the destination is stored.</p>
+                </div>
+                <div class="space-y-5 p-5">
+                    <div x-cloak x-show="formError" x-ref="formError" tabindex="-1" class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
+                        <p class="font-semibold">The Telegram destination could not be added.</p>
+                        <p class="mt-1" x-text="formError"></p>
+                    </div>
+                    <div class="grid gap-5 sm:grid-cols-2">
+                        <div>
+                            <label for="telegram-channel-name" class="block text-sm font-medium text-slate-700">Display name</label>
+                            <input x-model="telegram.channel_name" type="text" id="telegram-channel-name" autocomplete="off" :aria-invalid="Boolean(errors.channel_name)" aria-describedby="telegram-channel-name-help telegram-channel-name-error" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p id="telegram-channel-name-help" class="mt-1.5 text-xs text-slate-500">A recognizable label for operators; it does not rename the Telegram channel.</p>
+                            <p x-cloak x-show="errors.channel_name" id="telegram-channel-name-error" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(errors.channel_name)"></p>
+                        </div>
+                        <div>
+                            <label for="telegram-chat-id" class="block text-sm font-medium text-slate-700">Channel or chat identifier</label>
+                            <input x-model="telegram.chat_id" type="password" id="telegram-chat-id" autocomplete="off" spellcheck="false" :aria-invalid="Boolean(errors.chat_id)" aria-describedby="telegram-chat-id-help telegram-chat-id-error" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <p id="telegram-chat-id-help" class="mt-1.5 text-xs text-slate-500">This provider destination identifier is submitted for validation and is not shown again in Settings.</p>
+                            <p x-cloak x-show="errors.chat_id" id="telegram-chat-id-error" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(errors.chat_id)"></p>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                    <span class="mr-auto text-xs text-slate-500" role="status" aria-live="polite" x-text="operationStatus"></span>
+                    <button type="button" @click="addTelegram()" :disabled="busy" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60"><span x-text="busy ? 'Validating…' : 'Validate and add'"></span></button>
+                </div>
+            </section>
+
+            <div x-cloak x-show="removeDialog.open" @keydown.escape.window="closeRemove()" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="remove-channel-title" aria-describedby="remove-channel-description">
+                <div class="flex min-h-full items-center justify-center p-4">
+                    <button type="button" class="fixed inset-0 cursor-default bg-slate-900/40" aria-label="Close disconnect channel dialog" @click="closeRemove()"></button>
+                    <div x-ref="removePanel" @keydown.tab="trapRemoveFocus($event)" class="relative w-full max-w-md rounded-xl border border-slate-200 bg-white">
+                        <div class="px-5 py-4">
+                            <h2 id="remove-channel-title" class="text-base font-semibold text-slate-900">Disconnect <span x-text="removeDialog.providerLabel"></span> destination?</h2>
+                            <p id="remove-channel-description" class="mt-2 text-sm leading-6 text-slate-600"><span class="font-medium" x-text="removeDialog.name"></span> will stop receiving new workspace events immediately. This does not change event gates, member preferences, or provider-side channel membership.</p>
+                        </div>
+                        <div class="flex items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                            <button type="button" x-ref="removeCancel" @click="closeRemove()" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50">Cancel</button>
+                            <button type="button" @click="confirmRemove()" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-60"><span x-text="busy ? 'Disconnecting…' : 'Disconnect destination'"></span></button>
+                        </div>
                     </div>
                 </div>
             </div>
-            <div class="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-3">
-                <button id="connect-telegram" @click="addTelegram()"
-                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                    <span>Add Channel</span>
-                </button>
-            </div>
-        </section>
+        {% else %}
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="channels-read-only-heading">
+                <div class="px-5 py-8">
+                    <h2 id="channels-read-only-heading" class="text-sm font-semibold text-slate-900">Owner-managed delivery destinations</h2>
+                    <p class="mt-1 max-w-2xl text-sm leading-6 text-slate-600">Connected provider destinations are intentionally not loaded for view-only workspace members. Ask the workspace owner to review, test, connect, or disconnect a shared notification channel.</p>
+                </div>
+            </section>
+        {% endif %}
     </div>
 {% endblock %}
+
 {% block extra_scripts %}
-    <script>
-        document.addEventListener('alpine:init', () => {
-            Alpine.data('settingsNotifications', () => ({
-                notificationErrors: {},
-                telegram: {},
-                init() {
-                },
-                async validateSlack(notification_id) {
-                    Alpine.store('showLoading').toggle("Validation...");
-
-                    let url = "/api/v1/notifications-slack/" + notification_id + "/validate/";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'POST',
-                        body: '{}',
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-
-                            throw new Error(json.detail);
+    {% if settings_can_manage_workspace %}
+        <script>
+            document.addEventListener('alpine:init', () => {
+                Alpine.data('settingsNotifications', () => ({
+                    telegram: {channel_name: '', chat_id: ''},
+                    errors: {},
+                    formError: '',
+                    operationStatus: '',
+                    busy: false,
+                    removeDialog: {open: false, provider: '', providerLabel: '', id: null, name: '', returnFocus: null},
+                    firstError(value) {
+                        if (Array.isArray(value)) return value[0] || '';
+                        if (value && typeof value === 'object') return Object.values(value).flat()[0] || '';
+                        return value || '';
+                    },
+                    notify(heading, details, success = false) {
+                        Alpine.store('notifications').items.push({show: true, [success ? 'success' : 'error']: true, heading, details});
+                    },
+                    async mutation(url, method, data) {
+                        let response;
+                        try {
+                            response = await fetch(url, {
+                                headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+                                method,
+                                body: data === undefined ? undefined : JSON.stringify(data),
+                            });
+                        } catch (error) {
+                            const unknown = new Error('The server response was not received.');
+                            unknown.outcomeUnknown = true;
+                            throw unknown;
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                async removeSlack(notification_id) {
-                    Alpine.store('showLoading').toggle();
-
-                    let url = "/api/v1/notifications-slack/" + notification_id + "/";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'DELETE',
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-                        if (response.status === 204) {
-                            return {"detail": "Notification integration is deleted."};
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        let json = {};
+                        try { json = await response.json(); } catch (error) { json = {}; }
+                        if (!response.ok) {
+                            if (response.status >= 500) {
+                                const unknown = new Error('The server response was incomplete.');
+                                unknown.outcomeUnknown = true;
+                                throw unknown;
                             }
-
-                            throw new Error(json.detail);
+                            this.errors = json;
+                            throw new Error(this.firstError(json.detail || json.non_field_errors || Object.values(json)[0]) || 'The request was rejected.');
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                        location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-
-                async addTelegram() {
-                    Alpine.store('showLoading').toggle("Saving invite details.");
-
-                    let url = "/api/v1/notifications-telegram/";
-                    let method = "POST";
-
-                    let data = this.telegram
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-                        if (response.ok) {
-                            return response.json();
+                        return json;
+                    },
+                    showMutationError(error, definiteHeading) {
+                        if (error.outcomeUnknown) {
+                            this.notify('Change outcome not confirmed', 'The provider request or Settings change may have completed. Reload this page before retrying.');
                         } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.notificationErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
+                            this.formError = error.message;
+                            this.notify(definiteHeading, error.message);
+                            this.$nextTick(() => this.$refs.formError?.focus());
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                        window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                async validateTelegram(notification_id) {
-                    Alpine.store('showLoading').toggle("Validation...");
-
-                    let url = "/api/v1/notifications-telegram/" + notification_id + "/validate/";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'POST',
-                        body: '{}',
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-
-                            throw new Error(json.detail);
+                    },
+                    async addTelegram() {
+                        if (this.busy) return;
+                        this.busy = true;
+                        this.errors = {};
+                        this.formError = '';
+                        this.operationStatus = 'Validating destination and sending a test message…';
+                        try {
+                            await this.mutation('/api/v1/notifications-telegram/', 'POST', this.telegram);
+                            this.telegram = {channel_name: '', chat_id: ''};
+                            this.notify('Telegram destination added', 'The provider accepted the validation message and the destination was stored.', true);
+                            window.location.reload();
+                        } catch (error) {
+                            this.operationStatus = '';
+                            this.showMutationError(error, 'Telegram destination not added');
+                        } finally {
+                            this.busy = false;
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                async removeTelegram(notification_id) {
-                    Alpine.store('showLoading').toggle();
-
-                    let url = "/api/v1/notifications-telegram/" + notification_id + "/";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'DELETE',
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-                        if (response.status === 204) {
-                            return {"detail": "Notification integration is deleted."};
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-
-                            throw new Error(json.detail);
+                    },
+                    async sendTest(provider, id, name) {
+                        if (this.busy) return;
+                        this.busy = true;
+                        this.operationStatus = 'Sending a real test message to ' + name + '…';
+                        try {
+                            const endpoint = provider === 'slack' ? 'notifications-slack' : 'notifications-telegram';
+                            await this.mutation('/api/v1/' + endpoint + '/' + id + '/validate/', 'POST', {});
+                            this.operationStatus = '';
+                            this.notify('Test message accepted', 'BackupSheep received a successful provider response for ' + name + '.', true);
+                        } catch (error) {
+                            this.operationStatus = '';
+                            this.showMutationError(error, 'Test message not accepted');
+                        } finally {
+                            this.busy = false;
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                        location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-            }));
-        });
-    </script>
+                    },
+                    openRemove(provider, id, name, trigger) {
+                        this.removeDialog = {
+                            open: true,
+                            provider,
+                            providerLabel: provider === 'slack' ? 'Slack' : 'Telegram',
+                            id,
+                            name,
+                            returnFocus: trigger,
+                        };
+                        this.$nextTick(() => this.$refs.removeCancel?.focus());
+                    },
+                    closeRemove() {
+                        if (!this.removeDialog.open || this.busy) return;
+                        const trigger = this.removeDialog.returnFocus;
+                        this.removeDialog.open = false;
+                        this.$nextTick(() => trigger?.focus());
+                    },
+                    trapRemoveFocus(event) {
+                        const focusable = Array.from(this.$refs.removePanel?.querySelectorAll('button:not([disabled]), [href], input:not([disabled])') || []);
+                        if (!focusable.length) return;
+                        const first = focusable[0];
+                        const last = focusable[focusable.length - 1];
+                        if (event.shiftKey && document.activeElement === first) {
+                            event.preventDefault();
+                            last.focus();
+                        } else if (!event.shiftKey && document.activeElement === last) {
+                            event.preventDefault();
+                            first.focus();
+                        }
+                    },
+                    async confirmRemove() {
+                        if (this.busy || !this.removeDialog.id) return;
+                        this.busy = true;
+                        const endpoint = this.removeDialog.provider === 'slack' ? 'notifications-slack' : 'notifications-telegram';
+                        try {
+                            await this.mutation('/api/v1/' + endpoint + '/' + this.removeDialog.id + '/', 'DELETE');
+                            this.notify('Destination disconnected', this.removeDialog.name + ' will no longer receive new workspace events.', true);
+                            window.location.reload();
+                        } catch (error) {
+                            this.removeDialog.open = false;
+                            this.showMutationError(error, 'Destination not disconnected');
+                            this.$nextTick(() => this.removeDialog.returnFocus?.focus());
+                        } finally {
+                            this.busy = false;
+                        }
+                    },
+                }));
+            });
+        </script>
+    {% endif %}
 {% endblock %}

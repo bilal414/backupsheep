@@ -35,6 +35,9 @@ from apps._tasks.integration.restore_common import (
     _destination_ledger_exists,
     fetch_backup_zip,
 )
+from apps.api.v1.backup.website.serializers import (
+    CoreWebsiteBackupStoragePointsSerializer,
+)
 from apps._tasks.integration.restore import _schedule_local_restore_handoff_cleanup
 from apps.console.backup.models import (
     CoreBackupArtifact,
@@ -393,12 +396,19 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
             source_artifact, ciphertext
         )
         self.assertFalse(point.direct_download_permitted())
+        self.assertFalse(
+            CoreWebsiteBackupStoragePointsSerializer(point).data[
+                "direct_download_permitted"
+            ]
+        )
         with self.assertRaises(RuntimeError):
             point.generate_download_url()
 
         self.client.force_login(self.user)
         with override_settings(LOCAL_STORAGE_ROOT=str(local_root)):
-            response = self.client.get(f"/api/v1/storage/local/file/{point.pk}/")
+            response = self.client.get(
+                f"/api/v1/storage/local/file/website/{point.pk}/"
+            )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["artifact_format"], "bse1")
 

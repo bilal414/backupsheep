@@ -1,282 +1,302 @@
-{% extends "console/_master.html" %}
-{% block title %}Settings - Multi-Factor Authentication{% endblock %}
-{% block meta_title %}Settings - Multi-Factor Authentication{% endblock %}
-{% block meta_description %}Settings - Multi-Factor Authentication{% endblock %}
-{% block meta_keywords %}Settings - Multi-Factor Authentication{% endblock %}
-{% block page_class %}page_settings dashboard-page{% endblock %}
-{% block content %}
+{% extends "console/setting/_base.html" %}
+{% block title %}Settings - Authenticator{% endblock %}
+{% block meta_title %}Settings - Authenticator{% endblock %}
+{% block meta_description %}Manage authenticator app sign-in protection.{% endblock %}
+{% block meta_keywords %}Settings - Authenticator{% endblock %}
+{% block settings_page_title %}Authenticator{% endblock %}
+{% block settings_page_description %}Protect your BackupSheep identity with a verified time-based one-time password (TOTP).{% endblock %}
+
+{% block settings_content %}
+    {{ mfa_initial|json_script:"settings-mfa-initial" }}
     <div class="space-y-6" x-data="settingsMultiFactor()">
-        <!-- Page header -->
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Multi-Factor Authentication</h2>
-                <p class="mt-1 text-sm text-slate-500">You can use authenticator apps like Authy, Google Authenticator.</p>
-            </div>
-        </div>
-
-        <!-- Settings navigation -->
-        <div class="border-b border-slate-200">
-            <nav class="-mb-px flex gap-6 overflow-x-auto" aria-label="Settings">
-                <a href="{% url 'console:settings:profile' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Profile</a>
-                <a href="{% url 'console:settings:account' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Account</a>
-                <a href="{% url 'console:settings:multifactor' %}" aria-current="page" class="whitespace-nowrap border-b-2 border-indigo-600 px-1 pb-3 text-sm font-medium text-indigo-600 transition">Multi-Factor Auth</a>
-                <a href="{% url 'console:settings:password' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Password</a>
-                <a href="{% url 'console:settings:group' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Groups</a>
-                <a href="{% url 'console:settings:user' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Users</a>
-                <a href="{% url 'console:settings:invite' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Invites</a>
-                <a href="{% url 'console:settings:notification' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">Notifications</a>
-            </nav>
-        </div>
-
         <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="mfa-heading">
-            <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
                 <div class="min-w-0">
-                    <h2 id="mfa-heading" class="text-sm font-semibold text-slate-900">Token authentication</h2>
-                    <p class="mt-0.5 text-xs text-slate-500">Pair an authenticator app to require a token at sign in.</p>
+                    <h2 id="mfa-heading" class="text-sm font-semibold text-slate-900">Authenticator app (TOTP)</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">Requires a rotating six-digit code at sign in. SMS, security keys, passkeys, and recovery codes are not available in this version.</p>
                 </div>
-                <span x-cloak x-show="member.auth_multi_factor_id" class="inline-flex flex-none items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Enabled</span>
-                <span x-cloak x-show="!member.auth_multi_factor_id" class="inline-flex flex-none items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10"><span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>Not enabled</span>
+                <span x-cloak x-show="state === 'enabled'" class="inline-flex flex-none items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Verified and enabled</span>
+                <span x-cloak x-show="state === 'pending'" class="inline-flex flex-none items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-600/20"><span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>Setup pending</span>
+                <span x-cloak x-show="state === 'disabled'" class="inline-flex flex-none items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10"><span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>Not enabled</span>
             </div>
-            <div class="space-y-6 p-5">
-                <div x-cloak x-show="memberErrors.non_field_errors" class="space-y-2">
-                    <template x-for="non_field_error in memberErrors.non_field_errors">
-                        <div class="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
-                            <svg class="mt-0.5 h-5 w-5 flex-none text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
-                            </svg>
-                            <p class="min-w-0 flex-1 font-medium leading-6" x-text="non_field_error"></p>
-                        </div>
-                    </template>
+
+            <div class="space-y-5 p-5">
+                <div x-cloak x-show="memberErrors.detail || memberErrors.non_field_errors" class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert" tabindex="-1" x-ref="errorSummary">
+                    <p class="font-semibold">The request could not be completed.</p>
+                    <p class="mt-1" x-text="firstError(memberErrors.detail || memberErrors.non_field_errors)"></p>
                 </div>
+
+                <div x-cloak x-show="state === 'pending'" class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" role="status">
+                    <p class="font-semibold">Setup is not active yet.</p>
+                    <p class="mt-1 text-xs leading-5">Add the secret to your authenticator app, then enter one current code below. BackupSheep will report this factor as enabled only after that code is verified.</p>
+                </div>
+
+                <div x-cloak x-show="state === 'enabled'" class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+                    <p class="font-semibold">Sign-in protection is active.</p>
+                    <p class="mt-1 text-xs leading-5">Removing this factor requires your current password and a fresh authenticator code. Other browser sessions and API tokens are revoked after a successful change; this browser remains signed in.</p>
+                </div>
+
                 <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                    <div x-cloak x-show="!binding?.uri">
-                        <label for="current_password" class="block text-sm font-medium text-slate-700">Current Password</label>
+                    <div x-cloak x-show="state !== 'pending'">
+                        <label for="current_password" class="block text-sm font-medium text-slate-700">Current password</label>
                         <input x-model="member.current_password" type="password" name="currentPassword"
                                id="current_password" autocomplete="current-password"
+                               :aria-invalid="Boolean(memberErrors.current_password)" aria-describedby="current-password-error"
                                class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="memberErrors.current_password" class="mt-1.5 text-xs font-medium text-red-600"
-                           x-text="memberErrors.current_password"></p>
+                        <p x-cloak x-show="memberErrors.current_password" id="current-password-error" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(memberErrors.current_password)"></p>
                     </div>
+
                     <div>
-                        <label for="displayName" class="block text-sm font-medium text-slate-700">Display Name</label>
+                        <label for="displayName" class="block text-sm font-medium text-slate-700">Authenticator label</label>
                         <input x-model="member.display_name" type="text" name="displayName" id="displayName"
-                               {% if request.user.member.auth_multi_factor_display_name %} readonly{% endif %}
-                               autocomplete="displayName"
+                               :readonly="state !== 'disabled'" autocomplete="off"
+                               :aria-invalid="Boolean(memberErrors.display_name)" aria-describedby="display-name-help display-name-error"
                                class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 read-only:bg-slate-50 read-only:text-slate-500 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="memberErrors.display_name" class="mt-1.5 text-xs font-medium text-red-600"
-                           id="displayName-error"
-                           x-text="memberErrors.display_name"></p>
+                        <p id="display-name-help" class="mt-1.5 text-xs text-slate-500">Use a recognizable label such as “Work phone”.</p>
+                        <p x-cloak x-show="memberErrors.display_name" id="display-name-error" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(memberErrors.display_name)"></p>
                     </div>
-                    <div x-cloak x-show="binding?.uri || member.auth_multi_factor_id">
-                        <label for="verify_token" class="block text-sm font-medium text-slate-700">Verify Token</label>
+
+                    <div x-cloak x-show="state === 'pending' || state === 'enabled'">
+                        <label for="verify_token" class="block text-sm font-medium text-slate-700">Six-digit authenticator code</label>
                         <input x-model="member.auth_multi_factor_token" type="text" name="verificationCode"
-                               id="verify_token"
-                               inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
-                               autocomplete="one-time-code"
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="memberErrors.auth_multi_factor_token" class="mt-1.5 text-xs font-medium text-red-600"
-                           id="verificationCode-error"
-                           x-text="memberErrors.auth_multi_factor_token"></p>
-                    </div>
-                    <div x-cloak x-show="binding.uri">
-                        <label for="uri" class="block text-sm font-medium text-slate-700">URI</label>
-                        <input x-model="binding.uri" type="text" name="uri"
-                               id="uri"
-                               readonly
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 read-only:bg-slate-50 read-only:text-slate-500 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                    </div>
-                    <div x-cloak x-show="binding.secret">
-                        <label for="secret" class="block text-sm font-medium text-slate-700">Secret</label>
-                        <input x-model="binding.secret" type="text" name="secret"
-                               id="secret"
-                               readonly
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 read-only:bg-slate-50 read-only:text-slate-500 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                               id="verify_token" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+                               autocomplete="one-time-code" placeholder="000000"
+                               :aria-invalid="Boolean(memberErrors.auth_multi_factor_token)" aria-describedby="verification-code-error"
+                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm tracking-[0.22em] text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                        <p x-cloak x-show="memberErrors.auth_multi_factor_token" id="verification-code-error" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(memberErrors.auth_multi_factor_token)"></p>
                     </div>
                 </div>
+
+                <div x-cloak x-show="state === 'pending'" class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <p class="text-sm font-semibold text-slate-900">Manual setup secret</p>
+                            <p class="mt-0.5 text-xs text-slate-500">Treat this like a password. Do not paste it into support messages or logs.</p>
+                        </div>
+                        <button type="button" @click="secretVisible = !secretVisible" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600" :aria-expanded="secretVisible" aria-controls="totp-secret" x-text="secretVisible ? 'Hide secret' : 'Reveal secret'"></button>
+                    </div>
+                    <div class="mt-3 flex flex-col gap-2 sm:flex-row">
+                        <input id="totp-secret" readonly :type="secretVisible ? 'text' : 'password'" x-model="binding.secret" class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900">
+                        <button type="button" @click="copySecret()" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Copy secret</button>
+                    </div>
+                    <p class="mt-2 text-xs font-medium text-emerald-700" role="status" aria-live="polite" x-text="copyStatus"></p>
+                    <details x-cloak x-show="secretVisible" class="mt-3 text-xs text-slate-600">
+                        <summary class="cursor-pointer font-semibold">Advanced provisioning URI</summary>
+                        <p class="mt-2 break-all rounded bg-white p-2 font-mono" x-text="binding.uri"></p>
+                    </details>
+                </div>
             </div>
-            <div class="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-3">
-                <button @click="setupTokenAuth()" x-cloak x-show="!member.auth_multi_factor_id"
+
+            <div class="flex flex-wrap items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                <span class="mr-auto text-xs text-slate-500" role="status" aria-live="polite" x-text="operationStatus"></span>
+                <button type="button" x-ref="setupTokenAuth" @click="setupTokenAuth()" x-cloak x-show="state === 'disabled'" :disabled="busy"
                         class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                    Setup Token Auth
+                    <span x-text="busy ? 'Starting…' : 'Start setup'"></span>
                 </button>
-                <button @click="verifyTokenAuth()" x-cloak x-show="member.auth_multi_factor_id && binding.uri"
+                <button type="button" @click="verifyTokenAuth()" x-cloak x-show="state === 'pending'" :disabled="busy"
                         class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                    Verify Token Auth
+                    <span x-text="busy ? 'Verifying…' : 'Verify and enable'"></span>
                 </button>
-                <button @click="revokeTokenAuth()" x-cloak x-show="member.auth_multi_factor_id && !binding.uri"
-                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:opacity-60">
-                    Revoke Token Auth
+                <button type="button" @click="openRevokeDialog($el)" x-cloak x-show="state === 'enabled'" :disabled="busy"
+                        class="inline-flex items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:opacity-60">
+                    <span x-text="busy ? 'Removing…' : 'Remove authenticator'"></span>
                 </button>
             </div>
         </section>
+
+        <div x-cloak x-show="revokeDialog.open" @keydown.escape.window="closeRevokeDialog()" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="revoke-authenticator-title" aria-describedby="revoke-authenticator-description">
+            <div class="flex min-h-full items-center justify-center p-4">
+                <button type="button" class="fixed inset-0 cursor-default bg-slate-900/40" aria-label="Close remove authenticator dialog" @click="closeRevokeDialog()"></button>
+                <div x-ref="revokeDialogPanel" @keydown.tab="trapRevokeDialogFocus($event)" class="relative w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl">
+                    <div class="px-5 py-4">
+                        <h2 id="revoke-authenticator-title" class="text-base font-semibold text-slate-900">Remove authenticator?</h2>
+                        <p id="revoke-authenticator-description" class="mt-2 text-sm leading-6 text-slate-600">You will no longer be asked for a second factor at sign in. A successful removal revokes other browser sessions and API tokens; this browser remains signed in.</p>
+                    </div>
+                    <div class="flex items-center justify-end gap-3 border-t border-slate-200 px-5 py-3">
+                        <button type="button" x-ref="revokeCancel" @click="closeRevokeDialog()" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Cancel</button>
+                        <button type="button" @click="revokeTokenAuth()" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-60"><span x-text="busy ? 'Removing…' : 'Remove authenticator'"></span></button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 {% endblock %}
+
 {% block extra_scripts %}
     <script>
         document.addEventListener('alpine:init', () => {
             Alpine.data('settingsMultiFactor', () => ({
+                initial: JSON.parse(document.getElementById('settings-mfa-initial').textContent),
                 memberErrors: {},
-                member: {
-                    display_name: null,
-                    auth_multi_factor_id: null,
-                    auth_multi_factor_token: null,
-                    current_password: null,
-                },
+                member: {display_name: '', auth_multi_factor_token: '', current_password: ''},
                 binding: {},
-                recaptchaVerifier: null,
-                verificationId: null,
-                verificationCode: null,
-                showMultiFactorAuth: null,
-                init() {//user.providerData[0].providerId
-                    {% if request.user.member.auth_multi_factor_id %}
-                        this.member.auth_multi_factor_id = "{{ request.user.member.auth_multi_factor_id }}";
-                        this.member.display_name = "{{ request.user.member.auth_multi_factor_display_name|escapejs }}";
-                    {% endif %}
+                state: 'disabled',
+                busy: false,
+                secretVisible: false,
+                copyStatus: '',
+                operationStatus: '',
+                revokeDialog: {open: false, returnFocus: null},
+                init() {
+                    this.state = this.initial.state;
+                    this.member.display_name = this.initial.display_name || '';
+                },
+                firstError(value) {
+                    if (Array.isArray(value)) return value[0] || '';
+                    if (value && typeof value === 'object') return Object.values(value).flat()[0] || '';
+                    return value || '';
+                },
+                unknownSecurityChangeError() {
+                    const unknown = new Error('The server response did not confirm the security change. Reload before deciding whether to retry.');
+                    unknown.outcomeUnknown = true;
+                    return unknown;
+                },
+                async mutation(path, payload) {
+                    let response;
+                    try {
+                        response = await fetch('/api/v1/members/' + this.initial.id + '/' + path + '/', {
+                            headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+                            method: 'POST',
+                            body: JSON.stringify(payload),
+                        });
+                    } catch (error) {
+                        const unknown = new Error('The server response was not received. Reload before deciding whether to retry.');
+                        unknown.outcomeUnknown = true;
+                        throw unknown;
+                    }
+                    let json = {};
+                    try { json = await response.json(); } catch (error) { json = {}; }
+                    if (!response.ok) {
+                        if (response.status >= 500) {
+                            const unknown = new Error('The server response was incomplete. Reload before deciding whether to retry.');
+                            unknown.outcomeUnknown = true;
+                            throw unknown;
+                        }
+                        const errorPayload = json && typeof json === 'object' && !Array.isArray(json)
+                            ? json
+                            : {};
+                        this.memberErrors = errorPayload;
+                        throw new Error(this.firstError(errorPayload.detail || errorPayload.non_field_errors || Object.values(errorPayload)[0]) || 'The request was rejected.');
+                    }
+                    if (!json || typeof json !== 'object' || Array.isArray(json)
+                        || typeof json.detail !== 'string' || !json.detail.trim()) {
+                        throw this.unknownSecurityChangeError();
+                    }
+                    return json;
+                },
+                showMutationError(error, definiteHeading) {
+                    const outcomeUnknown = Boolean(error.outcomeUnknown);
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: outcomeUnknown ? 'Security change outcome not confirmed' : definiteHeading,
+                        details: outcomeUnknown ? 'The change may have completed. Reload this page before retrying or entering another code.' : error.message,
+                    });
+                    if (!outcomeUnknown) this.$nextTick(() => this.$refs.errorSummary?.focus());
                 },
                 async setupTokenAuth() {
-                    Alpine.store('showLoading').toggle("Configuring two-factor authentication.");
-
-                    let url = "/api/v1/members/" + {{ request.user.member.id }} +"/auth_multi_factor_token_setup/";
-
-                    let data = this.member;
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'POST',
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-
-                            this.memberErrors = json;
-                            throw new Error(json.detail);
+                    if (this.busy) return;
+                    this.busy = true;
+                    this.memberErrors = {};
+                    this.operationStatus = '';
+                    try {
+                        const json = await this.mutation('auth_multi_factor_token_setup', {
+                            display_name: this.member.display_name,
+                            current_password: this.member.current_password,
+                        });
+                        if (!json.binding || typeof json.binding !== 'object' || Array.isArray(json.binding)
+                            || typeof json.binding.secret !== 'string' || !json.binding.secret
+                            || typeof json.binding.uri !== 'string' || !json.binding.uri) {
+                            throw this.unknownSecurityChangeError();
                         }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                        this.binding = json.binding;
-                        this.member.auth_multi_factor_id = json.auth_multi_factor_id;
-                        this.member.current_password = null;
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                        this.binding = json.binding || {};
+                        this.state = 'pending';
+                        this.member.current_password = '';
+                        this.operationStatus = 'Setup started. Verification is still required.';
+                    } catch (error) {
+                        this.showMutationError(error, 'Authenticator setup not started');
+                    } finally {
+                        this.busy = false;
+                    }
                 },
                 async verifyTokenAuth() {
-                    Alpine.store('showLoading').toggle("Configuring two-factor authentication.");
-
-                    let url = "/api/v1/members/" + {{ request.user.member.id }} +"/auth_multi_factor_token_verify/";
-
-                    let data = this.member;
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'POST',
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-
-                            this.memberErrors = json;
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                        window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
+                    if (this.busy) return;
+                    this.busy = true;
+                    this.memberErrors = {};
+                    this.operationStatus = '';
+                    try {
+                        await this.mutation('auth_multi_factor_token_verify', {auth_multi_factor_token: this.member.auth_multi_factor_token});
+                        this.state = 'enabled';
+                        this.binding = {};
+                        this.secretVisible = false;
+                        this.member.auth_multi_factor_token = '';
+                        this.operationStatus = 'Authenticator verified and enabled. Other sessions and API tokens were revoked.';
+                        Alpine.store('notifications').items.push({show: true, success: true, heading: 'Authenticator enabled', details: this.operationStatus});
+                    } catch (error) {
+                        this.showMutationError(error, 'Authenticator not enabled');
+                    } finally {
+                        this.busy = false;
+                    }
                 },
                 async revokeTokenAuth() {
-                    Alpine.store('showLoading').toggle("Revoking two-factor authentication.");
-
-                    let url = "/api/v1/members/" + {{ request.user.member.id }} +"/auth_multi_factor_token_revoke/";
-
-                    let data = this.member;
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'POST',
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-
-                            this.memberErrors = json;
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
+                    if (this.busy) return;
+                    const trigger = this.revokeDialog.returnFocus;
+                    this.revokeDialog.returnFocus = null;
+                    let revoked = false;
+                    this.busy = true;
+                    this.memberErrors = {};
+                    this.operationStatus = '';
+                    try {
+                        await this.mutation('auth_multi_factor_token_revoke', {
+                            current_password: this.member.current_password,
+                            auth_multi_factor_token: this.member.auth_multi_factor_token,
                         });
-                        window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
+                        this.state = 'disabled';
+                        revoked = true;
+                        this.member = {display_name: '', auth_multi_factor_token: '', current_password: ''};
+                        this.operationStatus = 'Authenticator removed. Other sessions and API tokens were revoked.';
+                        Alpine.store('notifications').items.push({show: true, success: true, heading: 'Authenticator removed', details: this.operationStatus});
+                    } catch (error) {
+                        this.showMutationError(error, 'Authenticator not removed');
+                    } finally {
+                        this.revokeDialog.open = false;
+                        this.busy = false;
+                        this.$nextTick(() => {
+                            const target = revoked ? this.$refs.setupTokenAuth : trigger;
+                            if (target?.isConnected && target.getClientRects().length > 0 && typeof target.focus === 'function') target.focus();
                         });
-                    });
+                    }
                 },
-
+                openRevokeDialog(trigger) {
+                    this.revokeDialog = {open: true, returnFocus: trigger};
+                    this.$nextTick(() => this.$refs.revokeCancel?.focus());
+                },
+                closeRevokeDialog() {
+                    if (!this.revokeDialog.open || this.busy) return;
+                    const trigger = this.revokeDialog.returnFocus;
+                    this.revokeDialog.open = false;
+                    this.$nextTick(() => trigger?.focus());
+                },
+                trapRevokeDialogFocus(event) {
+                    const focusable = Array.from(this.$refs.revokeDialogPanel?.querySelectorAll('button:not([disabled]), [href], input:not([disabled])') || []);
+                    if (!focusable.length) return;
+                    const first = focusable[0];
+                    const last = focusable[focusable.length - 1];
+                    if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                },
+                async copySecret() {
+                    try {
+                        await navigator.clipboard.writeText(this.binding.secret || '');
+                        this.copyStatus = 'Secret copied. Clear your clipboard after adding it to your authenticator.';
+                    } catch (error) {
+                        this.copyStatus = 'Copy was blocked. Select the revealed secret manually.';
+                    }
+                },
             }));
         });
     </script>

@@ -1,4 +1,5 @@
 from django.db.models import Q
+from apps.api.v1.utils.api_helpers import provider_connections_for_action
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
 from rest_framework import viewsets
@@ -53,11 +54,9 @@ class CoreAWSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         }
 
     def get_queryset(self):
-        member = self.request.user.member
-        query = Q(account=member.get_current_account(), integration__code="aws")
-        # query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        queryset = CoreConnection.objects.filter(query)
-        return queryset
+        return provider_connections_for_action(self.request, getattr(self, "action", None)).filter(
+            integration__code="aws"
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -90,9 +89,9 @@ class CoreAWSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             connection = self.get_object()
             validation = connection.auth_aws.validate()
             if validation:
-                return Response({"detail": "Validation passed. Integration is good for backups."}, status=status.HTTP_200_OK)
+                return Response({"detail": "Provider credentials and account access were validated. No backup or recovery was tested."}, status=status.HTTP_200_OK)
             else:
-                return Response({"detail": "Validation failed. Backups will fail. Check integration details immediately."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Provider access validation failed. Review credentials and permissions before using this connection."}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             raise NodeConnectionErrorEligibleObjects(e.__str__())
 

@@ -14,7 +14,7 @@ from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.account.models import CoreAccount
 from apps.console.connection.managed_ssh import acquire_managed_ssh_mutation_lock
 from apps.console.connection.models import CoreConnection, CoreIntegration, CoreConnectionLocation
-from apps.api.v1.utils.api_helpers import visible_nodes
+from apps.api.v1.utils.api_helpers import scoped_connections, visible_nodes
 from apps.api.v1.utils.api_permissions import MemberGroupPermissions
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
@@ -52,15 +52,9 @@ class CoreConnectionView(viewsets.ModelViewSet):
     search_fields = all_fields
 
     def get_queryset(self):
-        member = self.request.user.member
-        query_partners = Q(account=member.get_current_account())
-        queryset = CoreConnection.objects.filter(
-            query_partners,
+        return scoped_connections(self.request).filter(
             integration__enabled=True,
         ).exclude(integration__code__in=RETIRED_SOURCE_FAMILIES)
-        if not member.is_primary_account:
-            queryset = queryset.filter(nodes__in=visible_nodes(member)).distinct()
-        return queryset
 
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
@@ -122,7 +116,7 @@ class CoreConnectionView(viewsets.ModelViewSet):
         return Response(
             {
                 "success": True,
-                "message": "Validation passed. Integration is good for backups.",
+                "message": "Provider credentials and account access were validated. No backup or recovery was tested.",
             },
             status=status.HTTP_200_OK,
         )

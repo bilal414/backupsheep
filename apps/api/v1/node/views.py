@@ -437,8 +437,8 @@ class CoreNodeView(viewsets.ModelViewSet):
         "reset_incremental": "node_changes",
         "validate": "backup_create",
         "take_snapshot": "backup_create",
-        "restore_backup": "backup_create",
-        "resume_restore": "backup_create",
+        "restore_backup": "backup_restore",
+        "resume_restore": "backup_restore",
     }
     serializer_class = CoreNodeSerializer
     all_fields = [f.name for f in CoreNode._meta.get_fields()]
@@ -1483,8 +1483,24 @@ class CoreNodeView(viewsets.ModelViewSet):
         try:
             validation = self.get_object().validate()
             if validation:
-                return Response({"detail": "Validation passed. Node is good for backups."}, status=status.HTTP_200_OK)
+                return Response(
+                    {
+                        "detail": (
+                            "The provider source is currently reachable and active. "
+                            "No backup or recovery was tested."
+                        )
+                    },
+                    status=status.HTTP_200_OK,
+                )
             else:
-                return Response({"detail": "Validation failed. Backups will fail. Check if node exists and status is active."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {
+                        "detail": (
+                            "The provider source could not be confirmed reachable and active. "
+                            "Review its current existence, status, and access before retrying."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         except Exception as e:
             raise NodeValidationFailed(e.__str__())

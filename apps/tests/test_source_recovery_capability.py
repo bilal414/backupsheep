@@ -25,11 +25,13 @@ from apps.console.setting.models import CoreSiteSettings
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
 from backupsheep.source_recovery_policy import (
+    RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
     SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
     SourceRecoveryUnavailable,
     available_backup_endpoints,
     require_source_backup_creation,
     source_backup_creation_available,
+    source_recovery_unavailable_message,
 )
 from utils.middleware import OnboardingMiddleware
 
@@ -51,6 +53,27 @@ LEGACY_COMPATIBILITY_POLICY = {
 
 
 class SourceRecoveryPolicyTests(SimpleTestCase):
+    def test_retired_source_message_does_not_promise_runtime_inspection(self):
+        self.assertEqual(
+            source_recovery_unavailable_message("wordpress"),
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
+        self.assertNotIn(
+            "remain available for inspection",
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
+        self.assertIn(
+            "retained for controlled operator audit or migration",
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
+        with self.assertRaises(SourceRecoveryUnavailable) as raised:
+            require_source_backup_creation("wordpress")
+        self.assertEqual(
+            str(raised.exception.detail),
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
+        self.assertEqual(raised.exception.get_codes(), "source_recovery_unavailable")
+
     @override_settings(**ENTERPRISE_POLICY)
     def test_enterprise_mode_blocks_basecamp_even_when_flag_is_true(self):
         self.assertFalse(source_backup_creation_available("basecamp"))

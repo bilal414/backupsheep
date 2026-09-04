@@ -15,10 +15,10 @@
     ]
   },
   "counts": {
-    "api_operations": 890,
+    "api_operations": 892,
     "health_operations": 1,
-    "total_operations": 891,
-    "unique_paths": 510
+    "total_operations": 893,
+    "unique_paths": 512
   },
   "operations": [
     {
@@ -6158,6 +6158,19 @@
       "file": "requests/10 Account and Team/Invites/008-post-cancel.bru"
     },
     {
+      "operation_id": "post-api-v1-invites-resourceid-reject",
+      "method": "POST",
+      "path": "/api/v1/invites/{{resourceId}}/reject/",
+      "regex_route": "api/v1/^invites/(?P<pk>[^/.]+)/reject/$",
+      "view": "apps.api.v1.invite.views.CoreInviteView",
+      "action": "reject",
+      "source": "apps/api/v1/invite/views.py",
+      "auth": "token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/10 Account and Team/Invites/009-post-reject.bru"
+    },
+    {
       "operation_id": "post-api-v1-invites-resourceid-resend",
       "method": "POST",
       "path": "/api/v1/invites/{{resourceId}}/resend/",
@@ -6168,7 +6181,7 @@
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/10 Account and Team/Invites/009-post-resend.bru"
+      "file": "requests/10 Account and Team/Invites/010-post-resend.bru"
     },
     {
       "operation_id": "get-api-v1-logs",
@@ -9148,6 +9161,19 @@
       "file": "requests/80 Storage/Local/002-post-create.bru"
     },
     {
+      "operation_id": "get-api-v1-storage-local-file-backupfamily-storedbackupid",
+      "method": "GET",
+      "path": "/api/v1/storage/local/file/{{backupFamily}}/{{storedBackupId}}/",
+      "regex_route": "api/v1/storage/local/file/<slug:backup_family>/<int:stored_backup_id>/",
+      "view": "apps.api.v1.storage.local.views.LocalStorageFileDownloadView",
+      "action": "get",
+      "source": "apps/api/v1/storage/local/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/80 Storage/Local/003-get-get.bru"
+    },
+    {
       "operation_id": "get-api-v1-storage-local-file-storedbackupid",
       "method": "GET",
       "path": "/api/v1/storage/local/file/{{storedBackupId}}/",
@@ -9158,7 +9184,7 @@
       "auth": "token",
       "safety": "download",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/003-get-get.bru"
+      "file": "requests/80 Storage/Local/004-get-get.bru"
     },
     {
       "operation_id": "delete-api-v1-storage-local-resourceid",
@@ -9171,7 +9197,7 @@
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/004-delete-destroy.bru"
+      "file": "requests/80 Storage/Local/005-delete-destroy.bru"
     },
     {
       "operation_id": "get-api-v1-storage-local-resourceid",
@@ -9184,7 +9210,7 @@
       "auth": "token",
       "safety": "safe-read",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/005-get-retrieve.bru"
+      "file": "requests/80 Storage/Local/006-get-retrieve.bru"
     },
     {
       "operation_id": "patch-api-v1-storage-local-resourceid",
@@ -9197,7 +9223,7 @@
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/006-patch-partial-update.bru"
+      "file": "requests/80 Storage/Local/007-patch-partial-update.bru"
     },
     {
       "operation_id": "put-api-v1-storage-local-resourceid",
@@ -9210,7 +9236,7 @@
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/007-put-update.bru"
+      "file": "requests/80 Storage/Local/008-put-update.bru"
     },
     {
       "operation_id": "post-api-v1-storage-local-resourceid-validate",
@@ -9223,7 +9249,7 @@
       "auth": "token",
       "safety": "mutation",
       "kind": "machine-api",
-      "file": "requests/80 Storage/Local/008-post-validate.bru"
+      "file": "requests/80 Storage/Local/009-post-validate.bru"
     },
     {
       "operation_id": "get-api-v1-storage-onedrive",

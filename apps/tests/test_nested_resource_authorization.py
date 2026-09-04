@@ -10,6 +10,10 @@ from django.test import RequestFactory
 from rest_framework.test import APIClient
 
 from apps.api.v1.utils.api_permissions import MemberGroupPermissions
+from apps.api.v1.backup.website.permissions import (
+    CoreWebsiteBackupViewPermissions,
+)
+from apps.api.v1.node.views import CoreNodeView
 from apps.console.account.models import CoreAccountGroup
 from apps.console.backup.models import CoreWebsiteBackup
 from apps.console.member.models import CoreMemberAccount
@@ -113,6 +117,7 @@ class NestedResourceAuthorizationTests(BaseTestCase):
                 _permission(codename)
                 for codename in (
                     "backup_create",
+                    "backup_restore",
                     "backup_download",
                     "backup_delete",
                     "schedule_changes",
@@ -271,3 +276,63 @@ class NestedResourceAuthorizationTests(BaseTestCase):
             f"/api/v1/backups/website/{visibility_only_backup.id}/download_transfer_log/"
         )
         self.assertEqual(owner_response.status_code, 404, owner_response.content)
+
+    def test_backup_creation_does_not_authorize_logical_or_native_restore(self):
+        restore_permission = _permission("backup_restore")
+        self.action_group.group.permissions.remove(restore_permission)
+
+        logical_permission = CoreWebsiteBackupViewPermissions()
+        logical_view = SimpleNamespace(action="restore")
+        logical_object = _object_with_path(
+            logical_permission.object_node_path,
+            self.allowed_node,
+        )
+        native_permission = MemberGroupPermissions()
+        native_view = SimpleNamespace(
+            action="restore_backup",
+            action_permissions=CoreNodeView.action_permissions,
+        )
+
+        self.assertFalse(
+            logical_permission.has_permission(self.team_request, logical_view)
+        )
+        self.assertFalse(
+            logical_permission.has_object_permission(
+                self.team_request,
+                logical_view,
+                logical_object,
+            )
+        )
+        self.assertFalse(
+            native_permission.has_permission(self.team_request, native_view)
+        )
+        self.assertFalse(
+            native_permission.has_object_permission(
+                self.team_request,
+                native_view,
+                self.allowed_node,
+            )
+        )
+
+        self.action_group.group.permissions.add(restore_permission)
+
+        self.assertTrue(
+            logical_permission.has_permission(self.team_request, logical_view)
+        )
+        self.assertTrue(
+            logical_permission.has_object_permission(
+                self.team_request,
+                logical_view,
+                logical_object,
+            )
+        )
+        self.assertTrue(
+            native_permission.has_permission(self.team_request, native_view)
+        )
+        self.assertTrue(
+            native_permission.has_object_permission(
+                self.team_request,
+                native_view,
+                self.allowed_node,
+            )
+        )

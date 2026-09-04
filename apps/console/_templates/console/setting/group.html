@@ -1,43 +1,25 @@
-{% extends "console/_master.html" %}
+{% extends "console/setting/_base.html" %}
 {% block title %}Settings - Group{% endblock %}
 {% block meta_title %}Settings - Group{% endblock %}
 {% block meta_description %}Settings - Group{% endblock %}
 {% block meta_keywords %}Settings - Group{% endblock %}
-{% block page_class %}page_settings dashboard-page{% endblock %}
-{% block content %}
+{% block settings_page_title %}Access groups{% endblock %}
+{% block settings_page_description %}Define source scope and operational permissions for members of {{ account.get_name }}.{% endblock %}
+{% block settings_content %}
     <div x-data="settingsGroup()">
         <div class="space-y-6">
-            <!-- Page header -->
-            <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                <div class="min-w-0">
-                    <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Groups</h2>
-                    <p class="mt-1 text-sm text-slate-500">Access scopes that limit which nodes team members and clients can see, and what they can do with them.</p>
-                </div>
+            {% if settings_can_manage_workspace %}
                 <div class="flex flex-none items-center gap-2">
                     <button @click="createGroupScroll()" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
                         </svg>
-                        Create Group
+                        Create access group
                     </button>
                 </div>
-            </div>
+            {% endif %}
 
-            <!-- Settings navigation -->
-            <div class="border-b border-slate-200">
-                <nav class="-mb-px flex gap-6 overflow-x-auto" aria-label="Settings">
-                    <a href="{% url 'console:settings:profile' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Profile</a>
-                    <a href="{% url 'console:settings:account' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Account</a>
-                    <a href="{% url 'console:settings:multifactor' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Multi-Factor Auth</a>
-                    <a href="{% url 'console:settings:password' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Password</a>
-                    <a href="{% url 'console:settings:group' %}" aria-current="page" class="whitespace-nowrap border-b-2 border-indigo-600 px-1 pb-3 text-sm font-medium text-indigo-600 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Groups</a>
-                    <a href="{% url 'console:settings:user' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Users</a>
-                    <a href="{% url 'console:settings:invite' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Invites</a>
-                    <a href="{% url 'console:settings:notification' %}" class="whitespace-nowrap border-b-2 border-transparent px-1 pb-3 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Notifications</a>
-                </nav>
-            </div>
-
-            {% if account.enrollments.all.count > 0 %}
+            {% if account_groups %}
                 <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="payment-details-heading">
                     <div class="border-b border-slate-200 px-5 py-4">
                         <h2 id="payment-details-heading" class="text-sm font-semibold text-slate-900">Account groups</h2>
@@ -55,7 +37,7 @@
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-100">
-                                {% for account_group in account.enrollments.all %}
+                                {% for account_group in account_groups %}
                                     <tr class="transition hover:bg-slate-50">
                                         <td class="px-4 py-3">
                                             <div class="flex items-center gap-2">
@@ -67,13 +49,23 @@
                                         </td>
                                         <td class="whitespace-nowrap px-4 py-3 text-slate-600">{{ account_group.get_type_display }}</td>
                                         <td class="whitespace-nowrap px-4 py-3 text-slate-600">{{ account_group.member_count }}</td>
-                                        <td class="whitespace-nowrap px-4 py-3 text-slate-600">{{ account_group.node_count }}</td>
+                                        <td class="whitespace-nowrap px-4 py-3 text-slate-600">
+                                            {% if account_group.node_count %}{{ account_group.node_count }} selected{% else %}All sources{% endif %}
+                                        </td>
                                         <td class="whitespace-nowrap px-4 py-3 text-right text-sm font-medium">
                                             {% if not account_group.default %}
                                                 <div class="flex items-center justify-end gap-4">
-                                                    <button @click="getGroup('{{ account_group.id }}', true)" type="button" class="text-indigo-600 transition hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Details</button>
-                                                    <button @click="getGroup('{{ account_group.id }}')" type="button" class="text-indigo-600 transition hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Modify</button>
-                                                    <button @click="deleteGroup('{{ account_group.id }}')" type="button" class="text-red-600 transition hover:text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Delete</button>
+                                                    <button @click="getGroup('{{ account_group.id }}', true, $el)" type="button" class="text-indigo-600 transition hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Details</button>
+                                                    {% if settings_can_manage_workspace %}
+                                                        <button @click="getGroup('{{ account_group.id }}')" type="button" class="text-indigo-600 transition hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Modify</button>
+                                                        <button @click="openDeleteDialog($el)"
+                                                                data-group-id="{{ account_group.id }}"
+                                                                data-group-name="{{ account_group.name }}"
+                                                                data-member-count="{{ account_group.member_count }}"
+                                                                data-source-count="{{ account_group.node_count }}"
+                                                                type="button" aria-haspopup="dialog"
+                                                                class="text-red-600 transition hover:text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">Delete</button>
+                                                    {% endif %}
                                                 </div>
                                             {% endif %}
                                         </td>
@@ -85,6 +77,7 @@
                 </section>
             {% endif %}
 
+            {% if settings_can_manage_workspace %}
             <!-- Create / modify group -->
             <section class="rounded-xl border border-slate-200 bg-white shadow-sm" id="modify-add-group" aria-labelledby="group-form-heading">
                 <div class="border-b border-slate-200 px-5 py-4">
@@ -104,54 +97,12 @@
                             <p x-cloak x-show="groupErrors.name" class="mt-1.5 text-xs font-medium text-red-600" id="name-error" x-text="groupErrors.name"></p>
                         </div>
                         <div>
-                            <label for="country" class="block text-sm font-medium text-slate-700">Type</label>
-                            <div class="relative mt-1.5">
-                                <button @click="toggleTypeDropdown()"
-                                        type="button"
-                                        class="relative w-full cursor-pointer rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
-                                    <span class="block truncate" x-text="typeName(group.type)"></span>
-                                    <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
-                                        <svg class="h-5 w-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 15L12 18.75 15.75 15m-7.5-6L12 5.25 15.75 9"/>
-                                        </svg>
-                                    </span>
-                                </button>
-                                <template x-if="openType">
-                                    <ul
-                                            x-show="openType"
-                                            @click.self="toggleTypeDropdown()"
-                                            x-transition:leave="transition ease-in duration-100"
-                                            x-transition:leave-start="opacity-100"
-                                            x-transition:leave-end="opacity-0"
-                                            class="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1 text-sm shadow-lg focus:outline-none"
-                                            tabindex="-1" role="listbox"
-                                            aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
-                                        {% for type in types %}
-                                            <li
-                                                    @click="group.type = '{{ type.0 }}';toggleTypeDropdown()"
-                                                    @mouseenter="typeActiveIndex = '{{ forloop.counter }}'"
-                                                    @mouseleave="typeActiveIndex = null"
-                                                    :class="{ 'text-white bg-indigo-600': typeActiveIndex === '{{ forloop.counter }}', 'text-slate-700': !(typeActiveIndex === '{{ forloop.counter }}') }"
-                                                    class="relative cursor-pointer select-none py-2 pl-8 pr-4"
-                                                    id="listbox-option-0" role="option">
-                                                <span class="block truncate font-normal">
-                                                    {{ type.1 }}
-                                                </span>
-                                                <span
-                                                        x-show="group.type === '{{ type.0 }}'"
-                                                        :class="{ 'text-indigo-600': (group.type === '{{ type.0 }}') && (typeActiveIndex !== '{{ forloop.counter }}'), 'text-white': (!(group.type === '{{ type.0 }}') || (typeActiveIndex === '{{ forloop.counter }}')) }"
-                                                        class="absolute inset-y-0 left-0 flex items-center pl-1.5 text-indigo-600">
-                                                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
-                                                    </svg>
-                                                </span>
-                                            </li>
-                                        {% endfor %}
-                                    </ul>
-                                </template>
-                            </div>
-                            <p x-cloak x-show="groupErrors.type" class="mt-1.5 text-xs font-medium text-red-600" id="email-error" x-text="groupErrors.type"></p>
+                            <label for="group-type" class="block text-sm font-medium text-slate-700">Type</label>
+                            <select id="group-type" x-model="group.type" :aria-invalid="Boolean(groupErrors.type)" aria-describedby="group-type-error" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                                <option value="">Choose a group type</option>
+                                {% for type in types %}<option value="{{ type.0 }}">{{ type.1 }}</option>{% endfor %}
+                            </select>
+                            <p x-cloak x-show="groupErrors.type" class="mt-1.5 text-xs font-medium text-red-600" id="group-type-error" x-text="groupErrors.type"></p>
                         </div>
                     </div>
 
@@ -161,18 +112,18 @@
                             <svg class="h-5 w-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/>
                             </svg>
-                            <h3 id="profile-notifications" class="text-sm font-semibold text-slate-900">Permissions</h3>
+                            <h3 id="group-permissions" class="text-sm font-semibold text-slate-900">Operational permissions</h3>
                         </div>
-                        <p class="mt-1 text-xs text-slate-500">These permissions will only apply to nodes within this group.</p>
+                        <p class="mt-1 text-xs text-slate-500">Permissions apply only within this group’s source scope. Notification routing is configured separately and is not a group permission.</p>
                         <fieldset class="mt-4">
-                            <legend class="sr-only">Notifications</legend>
+                            <legend class="sr-only">Operational permissions</legend>
                             <div class="divide-y divide-slate-100 border-y border-slate-200">
                                 <div class="flex items-start justify-between gap-4 py-4">
                                     <div class="min-w-0 flex-1">
                                         <label for="backup_create" id="backup_create-label" class="block text-sm font-medium text-slate-900">On-Demand Backups</label>
                                         <p id="backup_create-description" class="mt-0.5 text-xs text-slate-500">Users can create on-demand backups of nodes.</p>
                                     </div>
-                                    <button type="button"
+                                    <button type="button" id="backup_create"
                                             @click="permissions.backup_create=!permissions.backup_create"
                                             :class="permissions.backup_create ? 'bg-indigo-600' : 'bg-slate-200'"
                                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
@@ -185,10 +136,26 @@
                                 </div>
                                 <div class="flex items-start justify-between gap-4 py-4">
                                     <div class="min-w-0 flex-1">
+                                        <label for="backup_restore" id="backup_restore-label" class="block text-sm font-medium text-slate-900">Restore Backups</label>
+                                        <p id="backup_restore-description" class="mt-0.5 text-xs leading-5 text-slate-500">Users can start and resume restores for sources in this group. Restores can overwrite data and may remove files when that option is explicitly confirmed.</p>
+                                    </div>
+                                    <button type="button" id="backup_restore"
+                                            @click="permissions.backup_restore=!permissions.backup_restore"
+                                            :class="permissions.backup_restore ? 'bg-indigo-600' : 'bg-slate-200'"
+                                            class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                            role="switch" :aria-checked="permissions.backup_restore"
+                                            aria-labelledby="backup_restore-label">
+                                        <span :class="permissions.backup_restore ? 'translate-x-5' : 'translate-x-0'"
+                                              aria-hidden="true"
+                                              class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                    </button>
+                                </div>
+                                <div class="flex items-start justify-between gap-4 py-4">
+                                    <div class="min-w-0 flex-1">
                                         <label for="backup_download" id="backup_download-label" class="block text-sm font-medium text-slate-900">Download Backups</label>
                                         <p id="backup_download-description" class="mt-0.5 text-xs text-slate-500">Users can download backups of nodes in this group.</p>
                                     </div>
-                                    <button type="button"
+                                    <button type="button" id="backup_download"
                                             @click="permissions.backup_download=!permissions.backup_download"
                                             :class="permissions.backup_download ? 'bg-indigo-600' : 'bg-slate-200'"
                                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
@@ -204,7 +171,7 @@
                                         <label for="backup_delete" id="backup_delete-label" class="block text-sm font-medium text-slate-900">Delete Backups</label>
                                         <p id="backup_delete-description" class="mt-0.5 text-xs text-slate-500">Users can delete backups of nodes in this group.</p>
                                     </div>
-                                    <button type="button"
+                                    <button type="button" id="backup_delete"
                                             @click="permissions.backup_delete=!permissions.backup_delete"
                                             :class="permissions.backup_delete ? 'bg-indigo-600' : 'bg-slate-200'"
                                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
@@ -220,7 +187,7 @@
                                         <label for="schedule_changes" id="schedule_changes-label" class="block text-sm font-medium text-slate-900">Schedule Changes</label>
                                         <p id="schedule_changes-description" class="mt-0.5 text-xs text-slate-500">Users can create, modify and delete backup schedules.</p>
                                     </div>
-                                    <button type="button"
+                                    <button type="button" id="schedule_changes"
                                             @click="permissions.schedule_changes=!permissions.schedule_changes"
                                             :class="permissions.schedule_changes ? 'bg-indigo-600' : 'bg-slate-200'"
                                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
@@ -236,7 +203,7 @@
                                         <label for="node_changes" id="node_changes-label" class="block text-sm font-medium text-slate-900">Node Changes</label>
                                         <p id="node_changes-description" class="mt-0.5 text-xs text-slate-500">Users can create, modify and delete nodes.</p>
                                     </div>
-                                    <button type="button"
+                                    <button type="button" id="node_changes"
                                             @click="permissions.node_changes=!permissions.node_changes"
                                             :class="permissions.node_changes ? 'bg-indigo-600' : 'bg-slate-200'"
                                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
@@ -252,7 +219,7 @@
                                         <label for="integration_changes" id="integration_changes-label" class="block text-sm font-medium text-slate-900">Integration Changes</label>
                                         <p id="integration_changes-description" class="mt-0.5 text-xs text-slate-500">Users can create, modify and delete integrations.</p>
                                     </div>
-                                    <button type="button"
+                                    <button type="button" id="integration_changes"
                                             @click="permissions.integration_changes=!permissions.integration_changes"
                                             :class="permissions.integration_changes ? 'bg-indigo-600' : 'bg-slate-200'"
                                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
@@ -268,7 +235,7 @@
                                         <label for="storage_changes" id="storage_changes-label" class="block text-sm font-medium text-slate-900">Storage Changes</label>
                                         <p id="storage_changes-description" class="mt-0.5 text-xs text-slate-500">Users can create, modify and delete storage accounts.</p>
                                     </div>
-                                    <button type="button"
+                                    <button type="button" id="storage_changes"
                                             @click="permissions.storage_changes=!permissions.storage_changes"
                                             :class="permissions.storage_changes ? 'bg-indigo-600' : 'bg-slate-200'"
                                             class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
@@ -283,103 +250,29 @@
                         </fieldset>
                     </div>
 
-                    <!-- Notification -->
-                    <div>
-                        <div class="flex items-center gap-2">
-                            <svg class="h-5 w-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0M3.124 7.5A8.969 8.969 0 015.292 3m13.416 0a8.969 8.969 0 012.168 4.5"/>
-                            </svg>
-                            <h3 id="notifications" class="text-sm font-semibold text-slate-900">Notification</h3>
-                        </div>
-                        <p class="mt-1 text-xs text-slate-500">These notification settings will override any user level notification settings in this group.</p>
-                        <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                            <div class="flex items-center gap-3">
-                                <button type="button"
-                                        @click="toggleNotification('success')"
-                                        :class="permissions.notify_on_success ? 'bg-indigo-600' : 'bg-slate-200'"
-                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="permissions.notify_on_success" aria-labelledby="annual-billing-label">
-                                    <span :class="permissions.notify_on_success ? 'translate-x-5' : 'translate-x-0'"
-                                          aria-hidden="true"
-                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
-                                </button>
-                                <span id="annual-billing-label" class="text-sm font-medium text-slate-700">Backup Success</span>
-                            </div>
-                            <div class="flex items-center gap-3">
-                                <button type="button"
-                                        @click="toggleNotification('fail')"
-                                        :class="permissions.notify_on_fail ? 'bg-indigo-600' : 'bg-slate-200'"
-                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="permissions.notify_on_fail" aria-labelledby="annual-billing-label">
-                                    <span :class="permissions.notify_on_fail ? 'translate-x-5' : 'translate-x-0'"
-                                          aria-hidden="true"
-                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
-                                </button>
-                                <span id="annual-billing-label" class="text-sm font-medium text-slate-700">Backup Failure</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Channels -->
-                    <div>
-                        <div class="flex items-center gap-2">
-                            <svg class="h-5 w-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75"/>
-                            </svg>
-                            <h3 id="notifications" class="text-sm font-semibold text-slate-900">Channels</h3>
-                        </div>
-                        <p class="mt-1 text-xs text-slate-500">These notification settings will override any user level notification settings in this group.</p>
-                        <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
-                            <div class="flex items-center gap-3">
-                                <button type="button"
-                                        @click="toggleNotification('email')"
-                                        :class="permissions.notify_via_email ? 'bg-indigo-600' : 'bg-slate-200'"
-                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="permissions.notify_via_email" aria-labelledby="annual-billing-label">
-                                    <span :class="permissions.notify_via_email ? 'translate-x-5' : 'translate-x-0'"
-                                          aria-hidden="true"
-                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
-                                </button>
-                                <span id="annual-billing-label" class="text-sm font-medium text-slate-700">Email</span>
-                            </div>
-                            <div class="flex items-center gap-3">
-                                <button type="button"
-                                        @click="toggleNotification('slack')"
-                                        :class="permissions.notify_via_slack ? 'bg-indigo-600' : 'bg-slate-200'"
-                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="permissions.notify_via_slack" aria-labelledby="annual-billing-label">
-                                    <span :class="permissions.notify_via_slack ? 'translate-x-5' : 'translate-x-0'"
-                                          aria-hidden="true"
-                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
-                                </button>
-                                <span id="annual-billing-label" class="text-sm font-medium text-slate-700">Slack</span>
-                            </div>
-                            <div class="flex items-center gap-3">
-                                <button type="button"
-                                        @click="toggleNotification('telegram')"
-                                        :class="permissions.notify_via_telegram ? 'bg-indigo-600' : 'bg-slate-200'"
-                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-                                        role="switch" :aria-checked="permissions.notify_via_telegram" aria-labelledby="annual-billing-label">
-                                    <span :class="permissions.notify_via_telegram ? 'translate-x-5' : 'translate-x-0'"
-                                          aria-hidden="true"
-                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
-                                </button>
-                                <span id="annual-billing-label" class="text-sm font-medium text-slate-700">Telegram</span>
-                            </div>
-                        </div>
-                    </div>
-
                     <!-- Nodes -->
                     <div>
                         <div class="flex items-center gap-2">
                             <svg class="h-5 w-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/>
                             </svg>
-                            <h3 id="nodes" class="text-sm font-semibold text-slate-900">Nodes</h3>
+                            <h3 id="nodes" class="text-sm font-semibold text-slate-900">Source scope</h3>
                         </div>
-                        <p class="mt-1 text-xs text-slate-500">Limit this group to specific nodes. Leave all unchecked to grant access to every node.</p>
+                        <p class="mt-1 text-xs text-slate-500">Choose an explicit scope. “All sources” includes sources added later.</p>
                         <div class="mt-4">
-                            <fieldset class="h-56 overflow-y-auto rounded-lg border border-slate-200">
+                            <fieldset class="mb-3 space-y-2" aria-describedby="source-scope-help">
+                                <legend class="sr-only">Group source scope</legend>
+                                <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm">
+                                    <input type="radio" value="all" x-model="nodeScope" class="mt-0.5 h-4 w-4 border-slate-300 text-indigo-600 focus:ring-indigo-600">
+                                    <span><strong class="block font-semibold text-slate-900">All current and future sources</strong><span class="mt-0.5 block text-xs text-slate-500">Members inherit access as new sources are added.</span></span>
+                                </label>
+                                <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm">
+                                    <input type="radio" value="selected" x-model="nodeScope" class="mt-0.5 h-4 w-4 border-slate-300 text-indigo-600 focus:ring-indigo-600">
+                                    <span><strong class="block font-semibold text-slate-900">Selected sources only</strong><span class="mt-0.5 block text-xs text-slate-500">Members can access only the sources checked below.</span></span>
+                                </label>
+                            </fieldset>
+                            <p id="source-scope-help" class="sr-only">An empty source list is stored as access to all sources.</p>
+                            <fieldset x-cloak x-show="nodeScope === 'selected'" class="h-56 overflow-y-auto rounded-lg border border-slate-200">
                                 <div class="divide-y divide-slate-100">
                                     <template x-for="node in accountNodes" :key="node.id">
                                         <div class="relative flex items-start gap-3 px-3 py-3">
@@ -412,12 +305,12 @@
                             <svg class="h-5 w-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184"/>
                             </svg>
-                            <h3 id="notifications" class="text-sm font-semibold text-slate-900">Notes</h3>
+                            <h3 id="group-notes" class="text-sm font-semibold text-slate-900">Notes</h3>
                         </div>
                         <p class="mt-1 text-xs text-slate-500">Optional notes about this group.</p>
                         <div class="mt-4">
-                            <label for="notes"></label>
-                            <textarea x-model="group.notes" rows="4" name="notes" id="notes"
+                            <label for="group-notes-input" class="sr-only">Group notes</label>
+                            <textarea x-model="group.notes" rows="4" name="notes" id="group-notes-input"
                                       class="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
                         </div>
                     </div>
@@ -430,11 +323,90 @@
                     </button>
                 </div>
             </section>
+            {% endif %}
+        </div>
+
+        <!-- Delete group confirmation -->
+        <div x-cloak x-show="deleteDialog.open"
+             @keydown.escape.window="deleteDialog.open && closeDeleteDialog()"
+             class="fixed inset-0 z-50 overflow-y-auto"
+             aria-labelledby="delete-group-dialog-title"
+             aria-describedby="delete-group-dialog-description"
+             role="dialog" aria-modal="true">
+            <div x-show="deleteDialog.open"
+                 x-transition:enter="transition ease-out duration-200"
+                 x-transition:enter-start="opacity-0"
+                 x-transition:enter-end="opacity-100"
+                 x-transition:leave="transition ease-in duration-150"
+                 x-transition:leave-start="opacity-100"
+                 x-transition:leave-end="opacity-0"
+                 class="fixed inset-0 bg-slate-900/50" @click="closeDeleteDialog()" aria-hidden="true"></div>
+
+            <div class="flex min-h-full items-center justify-center p-4 sm:p-6">
+                <div x-show="deleteDialog.open"
+                     x-transition:enter="transition ease-out duration-200"
+                     x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                     x-transition:leave="transition ease-in duration-150"
+                     x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                     x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     x-ref="deleteDialogPanel" @keydown.tab="trapDeleteDialogFocus($event)"
+                     class="relative w-full overflow-hidden rounded-xl border border-slate-200 bg-white p-5 text-left shadow-xl sm:max-w-lg sm:p-6">
+                    <div class="flex items-start gap-4">
+                        <div class="grid h-11 w-11 flex-none place-items-center rounded-full bg-red-50 text-red-600 ring-1 ring-inset ring-red-100">
+                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+                            </svg>
+                        </div>
+                        <div class="min-w-0 flex-1">
+                            <h3 id="delete-group-dialog-title" class="text-base font-semibold text-slate-900"
+                                x-text="deleteDialog.name ? `Delete “${deleteDialog.name}”?` : 'Delete access group?'"></h3>
+                            <p id="delete-group-dialog-description" class="mt-1.5 text-sm leading-6 text-slate-600">
+                                This permanently removes the access group and its permission policy. It cannot be undone.
+                            </p>
+                        </div>
+                    </div>
+
+                    <dl class="mt-5 divide-y divide-slate-200 rounded-lg border border-slate-200 bg-slate-50/70 text-sm">
+                        <div class="grid grid-cols-[7rem_1fr] gap-3 px-4 py-3">
+                            <dt class="font-medium text-slate-700">Members</dt>
+                            <dd class="text-slate-600">
+                                <span class="font-semibold text-slate-900" x-text="deleteDialog.memberCount"></span>
+                                <span x-text="deleteDialog.memberCount === 1 ? ' member is assigned.' : ' members are assigned.'"></span>
+                                <span x-show="deleteDialog.memberCount > 0" class="mt-1 block text-red-700">Remove every member before this group can be deleted.</span>
+                            </dd>
+                        </div>
+                        <div class="grid grid-cols-[7rem_1fr] gap-3 px-4 py-3">
+                            <dt class="font-medium text-slate-700">Source scope</dt>
+                            <dd class="text-slate-600">
+                                <span x-show="deleteDialog.sourceCount === 0">The all-current-and-future-sources policy will be removed.</span>
+                                <span x-show="deleteDialog.sourceCount > 0"><strong class="font-semibold text-slate-900" x-text="deleteDialog.sourceCount"></strong> selected source <span x-text="deleteDialog.sourceCount === 1 ? 'assignment' : 'assignments'"></span> will be removed from this group.</span>
+                            </dd>
+                        </div>
+                    </dl>
+
+                    <div class="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+                        Protected sources, schedules, backups, and stored recovery points are not deleted. If confirmation is interrupted, reload this page before retrying so you do not repeat an operation with an unknown outcome.
+                    </div>
+
+                    <div class="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                        <button x-ref="deleteDialogCancel" @click="closeDeleteDialog()" :disabled="deleteDialog.busy" type="button"
+                                class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+                            Cancel
+                        </button>
+                        <button @click="confirmDeleteGroup()"
+                                :disabled="deleteDialog.busy || deleteDialog.memberCount > 0" type="button"
+                                class="inline-flex items-center justify-center rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:opacity-60">
+                            <span x-text="deleteDialog.busy ? 'Deleting…' : 'Delete access group'"></span>
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Group details modal -->
-        <div x-cloak x-show="openGroup" @keydown.escape.window="closeGroupModal()" class="fixed inset-0 z-50 overflow-y-auto"
-             aria-labelledby="modal-title" role="dialog" aria-modal="true">
+        <div x-cloak x-show="openGroup" @keydown.escape.window="openGroup && closeGroupModal()" class="fixed inset-0 z-50 overflow-y-auto"
+             aria-labelledby="group-dialog-title" role="dialog" aria-modal="true">
             <div x-show="openGroup"
                  x-transition:enter="transition ease-out duration-200"
                  x-transition:enter-start="opacity-0"
@@ -452,6 +424,7 @@
                      x-transition:leave="transition ease-in duration-150"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     x-ref="groupDialogPanel" @keydown.tab="trapGroupDialogFocus($event)"
                      class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-xl border border-slate-200 bg-white px-4 pt-5 pb-4 text-left shadow-xl sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
                     <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto grid h-12 w-12 place-items-center rounded-full bg-indigo-50 text-indigo-600">
@@ -465,8 +438,10 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"/>
                             </svg>
                         </div>
+                        <div class="mt-3 text-center sm:mt-5">
+                            <h3 class="text-base font-semibold text-slate-900" id="group-dialog-title" x-text="loading ? 'Loading group details…' : (groupView.name || 'Group details')"></h3>
+                        </div>
                         <div x-show="!loading" class="mt-3 text-center sm:mt-5">
-                            <h3 class="text-base font-semibold text-slate-900" id="modal-title" x-text="groupView.name"></h3>
                             <div class="mt-2">
                                 <p class="text-sm text-slate-500">
                                     The group permissions, notes and other details.
@@ -474,15 +449,8 @@
                             </div>
                         </div>
                         <div x-cloak x-show="loading" class="mt-3 text-center sm:mt-5">
-                            <h3 class="text-base font-semibold text-slate-900" id="modal-title">
-                                Loading group details...
-                            </h3>
                             <div class="mt-2">
-                                <p class="text-sm text-slate-500">
-                                    Requesting on-demand
-                                    {% if object.type == 3 or object.type == 4 or object.type == 5 %}backup{% else %}
-                                        snapshot{% endif %} for <br/><strong>{{ object.name }}</strong>
-                                </p>
+                                <p class="text-sm text-slate-500">Retrieving this group’s source scope and operational permissions.</p>
                             </div>
                         </div>
 
@@ -492,26 +460,24 @@
                                     Permissions
                                 </label>
                                 <div class="mt-2">
-                                    <ul role="list" class="divide-y divide-slate-100">
-                                        <div class="h-56 overflow-y-auto">
+                                    <ul role="list" class="h-56 overflow-y-auto divide-y divide-slate-100">
                                             <template x-for="permission in groupView.permission_details">
                                                 <li class="relative bg-white px-2 py-3 transition hover:bg-slate-50">
                                                     <p class="truncate text-sm font-medium text-slate-900" x-text="permission.codename_alt"></p>
                                                     <p class="mt-1 line-clamp-2 text-sm text-slate-500" x-text="permission.name"></p>
                                                 </li>
                                             </template>
-                                        </div>
                                     </ul>
                                 </div>
                             </div>
                         </div>
                         <div x-show="!loading" class="mt-3 text-left sm:mt-5">
                             <div>
-                                <label for="notes" class="block text-sm font-semibold text-slate-900">
+                                <label for="group-notes-detail" class="block text-sm font-semibold text-slate-900">
                                     Notes
                                 </label>
                                 <div class="mt-2">
-                                    <textarea readonly x-model="groupView.notes" id="notes" name="notes" rows="3"
+                                    <textarea readonly x-model="groupView.notes" id="group-notes-detail" name="notes" rows="3"
                                               class="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
                                 </div>
                             </div>
@@ -519,7 +485,7 @@
                     </div>
 
                     <div x-show="!loading" class="mt-5 sm:mt-6">
-                        <button @click="closeGroupModal()" type="button"
+                        <button x-ref="groupDialogClose" @click="closeGroupModal()" type="button"
                                 class="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 sm:w-auto">
                             Close
                         </button>
@@ -536,20 +502,32 @@
             Alpine.data('settingsGroup', () => ({
                 loading: null,
                 openGroup: null,
+                groupDialogReturnFocus: null,
+                deleteDialog: {
+                    open: false,
+                    busy: false,
+                    id: null,
+                    name: '',
+                    memberCount: 0,
+                    sourceCount: 0,
+                    returnFocus: null,
+                },
                 groupErrors: {},
                 groupView: {},
                 group: {
                     notes: null,
                     nodes: [],
                 },
+                nodeScope: null,
                 accountNodes: [],
+                permissionKeys: [
+                    'backup_create', 'backup_restore', 'backup_download', 'backup_delete',
+                    'schedule_changes', 'node_changes', 'integration_changes',
+                    'storage_changes'
+                ],
                 permissions: {
-                    notify_on_success: false,
-                    notify_on_fail: false,
-                    notify_via_email: false,
-                    notify_via_slack: false,
-                    notify_via_telegram: false,
                     backup_create: false,
+                    backup_restore: false,
                     backup_download: false,
                     backup_delete: false,
                     schedule_changes: false,
@@ -560,7 +538,7 @@
                 openType: false,
                 typeActiveIndex: null,
                 init() {
-                    this.getAccountNodes();
+                    {% if settings_can_manage_workspace %}this.getAccountNodes();{% endif %}
                 },
                 async getAccountNodes() {
                     // Node picker: fetch this account's nodes from the node API.
@@ -599,22 +577,77 @@
                 openGroupModal() {
                     this.loading = false;
                     this.openGroup = true;
+                    this.$nextTick(() => this.$refs.groupDialogClose?.focus());
                 },
                 closeGroupModal() {
+                    if (!this.openGroup) return;
+                    const trigger = this.groupDialogReturnFocus;
                     this.openGroup = false;
+                    this.groupDialogReturnFocus = null;
+                    this.$nextTick(() => {
+                        if (trigger?.isConnected && typeof trigger.focus === 'function') trigger.focus();
+                    });
+                },
+                trapGroupDialogFocus(event) {
+                    const focusable = Array.from(this.$refs.groupDialogPanel?.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled])') || []);
+                    if (!focusable.length) return;
+                    const first = focusable[0];
+                    const last = focusable[focusable.length - 1];
+                    if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                },
+                openDeleteDialog(trigger) {
+                    if (this.deleteDialog.busy) return;
+                    this.deleteDialog.id = trigger.dataset.groupId;
+                    this.deleteDialog.name = trigger.dataset.groupName || 'this access group';
+                    this.deleteDialog.memberCount = Number.parseInt(trigger.dataset.memberCount || '0', 10) || 0;
+                    this.deleteDialog.sourceCount = Number.parseInt(trigger.dataset.sourceCount || '0', 10) || 0;
+                    this.deleteDialog.returnFocus = trigger;
+                    this.deleteDialog.open = true;
+                    this.$nextTick(() => this.$refs.deleteDialogCancel?.focus());
+                },
+                closeDeleteDialog(force = false) {
+                    if (!this.deleteDialog.open || (this.deleteDialog.busy && !force)) return;
+                    const trigger = this.deleteDialog.returnFocus;
+                    this.deleteDialog.open = false;
+                    this.deleteDialog.busy = false;
+                    this.deleteDialog.returnFocus = null;
+                    this.$nextTick(() => {
+                        if (trigger?.isConnected && typeof trigger.focus === 'function') trigger.focus();
+                    });
+                },
+                trapDeleteDialogFocus(event) {
+                    const focusable = Array.from(this.$refs.deleteDialogPanel?.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled])') || []);
+                    if (!focusable.length) return;
+                    const first = focusable[0];
+                    const last = focusable[focusable.length - 1];
+                    if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                },
+                unknownMutationOutcome(action, name) {
+                    const error = new Error(`${action} outcome not confirmed for “${name}”. Reload this page before retrying.`);
+                    error.outcomeUnknown = true;
+                    return error;
                 },
                 createGroupScroll() {
                     this.group = {
                         notes: null,
                         nodes: [],
                     }
+                    this.nodeScope = null;
                     this.permissions = {
-                        notify_on_success: false,
-                        notify_on_fail: false,
-                        notify_via_email: false,
-                        notify_via_slack: false,
-                        notify_via_telegram: false,
                         backup_create: false,
+                        backup_restore: false,
                         backup_download: false,
                         backup_delete: false,
                         schedule_changes: false,
@@ -626,6 +659,15 @@
                     element.scrollIntoView();
                 },
                 async saveGroup(group_id) {
+                    this.groupErrors = {};
+                    if (!this.nodeScope) {
+                        this.groupErrors.nodes = 'Choose “All current and future sources” or “Selected sources only”.';
+                        return;
+                    }
+                    if (this.nodeScope === 'selected' && this.group.nodes.length === 0) {
+                        this.groupErrors.nodes = 'Select at least one source, or explicitly choose all sources.';
+                        return;
+                    }
                     Alpine.store('showLoading').toggle("Saving group details.");
 
                     let url = "/api/v1/groups/";
@@ -637,94 +679,128 @@
                     }
 
                     // Names of the enabled permission flags, e.g. ["backup_create", "node_changes"].
-                    const permissions = Object.keys(this.permissions).filter((prop) => this.permissions[prop]);
+                    const permissions = this.permissionKeys.filter((prop) => this.permissions[prop]);
 
-                    let data = this.group;
-                    data.permissions = permissions;
+                    let data = {
+                        ...this.group,
+                        nodes: this.nodeScope === 'all' ? [] : this.group.nodes,
+                        permissions: permissions,
+                    };
 
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                        body: JSON.stringify(data)
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
+                    try {
+                        let response;
+                        try {
+                            response = await fetch(url, {
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'Content-Type': 'application/json'
+                                },
+                                method: method,
+                                body: JSON.stringify(data)
+                            });
+                        } catch (networkError) {
+                            throw this.unknownMutationOutcome('Save', this.group.name || 'access group');
+                        }
 
-                        if (response.ok) {
-                            return response.json();
-                        } else {
+                        if (!response.ok) {
                             let json;
                             try {
                                 json = await response.json();
-                                this.groupErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                                if (json && typeof json === 'object' && !Array.isArray(json)) {
+                                    this.groupErrors = json;
+                                }
+                            } catch (parseError) {
+                                json = null;
                             }
-                            throw new Error(json.detail);
+                            const detail = json && typeof json.detail === 'string'
+                                ? json.detail
+                                : response.status + " - " + response.statusText + ". Review the fields and try again.";
+                            throw new Error(detail);
                         }
-                    }).then((json) => {
+
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (parseError) {
+                            throw this.unknownMutationOutcome('Save', this.group.name || 'access group');
+                        }
+                        if (!json || typeof json !== 'object' || Array.isArray(json)) {
+                            throw this.unknownMutationOutcome('Save', this.group.name || 'access group');
+                        }
+
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
-                            heading: 'Success!',
-                            details: json.detail
+                            heading: 'Access group saved',
+                            details: typeof json.detail === 'string' ? json.detail : 'The access policy was saved. Reloading the workspace view.'
                         });
                         window.location.reload();
-                    }).catch((error) => {
+                    } catch (error) {
                         Alpine.store('notifications').items.push({
                             show: true,
                             error: true,
-                            heading: 'Error!',
+                            heading: error.outcomeUnknown ? 'Save outcome not confirmed' : 'Access group not saved',
                             details: error.message
                         });
-                    });
-                },
-                async deleteGroup(group_id) {
-                    Alpine.store('showLoading').toggle("Deleting group details.");
-
-                    let url = "/api/v1/groups/" + group_id + "/";
-                    let method = "DELETE";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                    }).then(async (response) => {
+                    } finally {
                         Alpine.store('showLoading').toggle();
+                    }
+                },
+                async confirmDeleteGroup() {
+                    if (this.deleteDialog.busy || this.deleteDialog.memberCount > 0 || !this.deleteDialog.id) return;
+                    this.deleteDialog.busy = true;
+                    const groupName = this.deleteDialog.name;
+                    const url = "/api/v1/groups/" + this.deleteDialog.id + "/";
 
-                        if (response.status === 204) {
-                            return {"detail": "Group deleted."};
-                        } else {
+                    try {
+                        let response;
+                        try {
+                            response = await fetch(url, {
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'Content-Type': 'application/json'
+                                },
+                                method: "DELETE",
+                            });
+                        } catch (networkError) {
+                            throw this.unknownMutationOutcome('Delete', groupName);
+                        }
+
+                        if (response.status !== 204) {
+                            if (response.ok) {
+                                throw this.unknownMutationOutcome('Delete', groupName);
+                            }
                             let json;
                             try {
                                 json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            } catch (parseError) {
+                                json = null;
                             }
-                            throw new Error(json.detail);
+                            const detail = json && typeof json.detail === 'string'
+                                ? json.detail
+                                : response.status + " - " + response.statusText + ". The group was not deleted.";
+                            throw new Error(detail);
                         }
-                    }).then((json) => {
+
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
-                            heading: 'Success!',
-                            details: json.detail
+                            heading: 'Access group deleted',
+                            details: `“${groupName}” was deleted. Protected sources and recovery points were not deleted.`
                         });
                         window.location.reload();
-                    }).catch((error) => {
+                    } catch (error) {
+                        this.deleteDialog.busy = false;
                         Alpine.store('notifications').items.push({
                             show: true,
                             error: true,
-                            heading: 'Error!',
+                            heading: error.outcomeUnknown ? 'Delete outcome not confirmed' : 'Access group not deleted',
                             details: error.message
                         });
-                    });
+                        this.closeDeleteDialog(true);
+                    }
                 },
-                async getGroup(group_id, openGroup) {
+                async getGroup(group_id, openGroup, trigger = null) {
                     Alpine.store('showLoading').toggle("Fetching group details.");
 
                     let url = "/api/v1/groups/" + group_id + "/";
@@ -762,13 +838,17 @@
 
                         if (openGroup) {
                             this.groupView = json;
+                            this.groupDialogReturnFocus = trigger;
                             this.openGroupModal();
                         } else {
                             this.group = json;
-                            this.permissions = json.permissions;
+                            this.permissions = Object.fromEntries(
+                                this.permissionKeys.map((key) => [key, Boolean(json.permissions?.[key])])
+                            );
                             this.group.type = this.group.type.toString();
                             // Checkbox binding uses string values; the API returns int ids.
                             this.group.nodes = (json.nodes || []).map(String);
+                            this.nodeScope = this.group.nodes.length ? 'selected' : 'all';
                             const element = document.getElementById("modify-add-group");
                             element.scrollIntoView();
                         }
@@ -788,23 +868,6 @@
                         return "Client"
                     } else {
                         return "--Choose Group Type--"
-                    }
-                },
-                toggleTypeDropdown() {
-                    this.openType = !this.openType;
-                    this.typeActiveIndex = null;
-                },
-                toggleNotification(notificationType) {
-                    if (notificationType === "success") {
-                        this.permissions.notify_on_success = !this.permissions.notify_on_success;
-                    } else if (notificationType === "fail") {
-                        this.permissions.notify_on_fail = !this.permissions.notify_on_fail;
-                    } else if (notificationType === "email") {
-                        this.permissions.notify_via_email = !this.permissions.notify_via_email;
-                    } else if (notificationType === "slack") {
-                        this.permissions.notify_via_slack = !this.permissions.notify_via_slack;
-                    } else if (notificationType === "telegram") {
-                        this.permissions.notify_via_telegram = !this.permissions.notify_via_telegram;
                     }
                 },
             }));
