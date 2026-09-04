@@ -351,7 +351,7 @@ class VerifierFixture:
             "stdlib": "go1.26.6",
             "golang.org/x/mod": "v0.40.0",
             "golang.org/x/text": "v0.41.0",
-            "google.golang.org/grpc": "v1.82.1",
+            "google.golang.org/grpc": "v1.83.1",
         }
         syft = [
             self._syft_artifact(
@@ -367,7 +367,7 @@ class VerifierFixture:
             "stdlib": "v1.26.6",
             "golang.org/x/mod": "v0.40.0",
             "golang.org/x/text": "v0.41.0",
-            "google.golang.org/grpc": "v1.82.1",
+            "google.golang.org/grpc": "v1.83.1",
         }
         trivy = [
             self._trivy_package(

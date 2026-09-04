@@ -89,7 +89,7 @@ EXPECTED_LABELS = {
     ),
     "com.backupsheep.release-verifier.go-version": "go1.26.6",
     "com.backupsheep.release-verifier.module-graph-sha256": (
-        "894396e4119d1620852793d03419a7130f4c62881ae5e11301b36c2a775aa6f2"
+        "b913f70c7e494d63e88eef7da2b937d463085d120aac35a6bea66f5676cb920a"
     ),
 }
 EXPECTED_MODULE_GRAPH_SHA256 = EXPECTED_LABELS[
@@ -100,13 +100,13 @@ EXPECTED_GO_PACKAGE_COUNT = 253
 # ``name<TAB>version<LF>`` record each.  The main module uses an empty canonical
 # version and stdlib uses ``go1.26.6`` in both scanner representations.
 EXPECTED_GO_INVENTORY_SHA256 = (
-    "0ad176aed866225bca24705f62048289fdf818d8936e33e81c24c2aa5f530a0e"
+    "e16ec12d4a7b87ad68878a26d96016f5da813b3066b77573991b30925b56b035"
 )
 EXPECTED_GO_IDENTITIES = {
     "stdlib": "go1.26.6",
     "golang.org/x/mod": "v0.40.0",
     "golang.org/x/text": "v0.41.0",
-    "google.golang.org/grpc": "v1.82.1",
+    "google.golang.org/grpc": "v1.83.1",
 }
 MAIN_MODULE = "github.com/sigstore/cosign/v3"
 SYFT_MAIN_PLACEHOLDER = "UNKNOWN"
@@ -119,8 +119,8 @@ EXPECTED_SYFT_SCHEMA = {
     ),
 }
 EXPECTED_TRIVY_VERSION = "0.74.0"
-EXPECTED_BUILD_TIMESTAMP = "2026-08-29T00:00:00Z"
-EXPECTED_LAYER_ANNOTATIONS = {"buildkit/rewritten-timestamp": "1787961600"}
+EXPECTED_BUILD_TIMESTAMP = "2026-09-04T00:00:00Z"
+EXPECTED_LAYER_ANNOTATIONS = {"buildkit/rewritten-timestamp": "1788480000"}
 
 EXPECTED_HISTORY = (
     (
@@ -135,7 +135,7 @@ EXPECTED_HISTORY = (
         "11926fa5bbbbde47e88fc006b625a17769b743b2 "
         "com.backupsheep.release-verifier.go-version=go1.26.6 "
         "com.backupsheep.release-verifier.module-graph-sha256="
-        "894396e4119d1620852793d03419a7130f4c62881ae5e11301b36c2a775aa6f2",
+        "b913f70c7e494d63e88eef7da2b937d463085d120aac35a6bea66f5676cb920a",
         True,
     ),
     (

@@ -478,7 +478,7 @@ class CISecurityTopologyContractTests(TestCase):
             "stdlib": {"go1.26.6"},
             "golang.org/x/mod": {"v0.40.0"},
             "golang.org/x/text": {"v0.41.0"},
-            "google.golang.org/grpc": {"v1.82.1"},
+            "google.golang.org/grpc": {"v1.83.1"},
             "github.com/sigstore/cosign/v3": {"UNKNOWN"},
         }
         image_scan.validate_verifier_go_packages(syft, "Syft")
@@ -524,7 +524,7 @@ class CISecurityTopologyContractTests(TestCase):
             "stdlib": {"v1.26.6"},
             "golang.org/x/mod": {"v0.40.0"},
             "golang.org/x/text": {"v0.41.0"},
-            "google.golang.org/grpc": {"v1.82.1"},
+            "google.golang.org/grpc": {"v1.83.1"},
             "github.com/sigstore/cosign/v3": {"<unversioned-main-module>"},
         }
         image_scan.validate_verifier_go_packages(exact, "Trivy", 1)
@@ -549,7 +549,7 @@ class CISecurityTopologyContractTests(TestCase):
                     {"name": "stdlib", "version": "go1.26.6", "type": "go-module"},
                     {"name": "golang.org/x/mod", "version": "v0.40.0", "type": "go-module"},
                     {"name": "golang.org/x/text", "version": "v0.41.0", "type": "go-module"},
-                    {"name": "google.golang.org/grpc", "version": "v1.82.1", "type": "go-module"},
+                    {"name": "google.golang.org/grpc", "version": "v1.83.1", "type": "go-module"},
                 ],
                 "source": {
                     "type": "image",
@@ -572,7 +572,7 @@ class CISecurityTopologyContractTests(TestCase):
                             {"Name": "stdlib", "Version": "v1.26.6"},
                             {"Name": "golang.org/x/mod", "Version": "v0.40.0"},
                             {"Name": "golang.org/x/text", "Version": "v0.41.0"},
-                            {"Name": "google.golang.org/grpc", "Version": "v1.82.1"},
+                            {"Name": "google.golang.org/grpc", "Version": "v1.83.1"},
                         ],
                     }
                 ],
