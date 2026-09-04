@@ -358,9 +358,20 @@ def prepare(lock_path: Path, grype: Path, cache_dir: Path, evidence_path: Path) 
     _write_evidence(evidence_path, evidence)
 
 
-def verify(lock_path: Path, grype: Path, cache_dir: Path, evidence_path: Path) -> None:
+def verify(
+    lock_path: Path,
+    grype: Path,
+    cache_dir: Path,
+    evidence_path: Path,
+    *,
+    now: datetime | None = None,
+) -> None:
+    effective_now = now or datetime.now(timezone.utc)
+    if effective_now.tzinfo is None:
+        raise GrypeDBError("freshness time must be timezone aware")
+    effective_now = effective_now.astimezone(timezone.utc)
     lock_document, lock_bytes = _load(lock_path, "Grype DB lock")
-    lock = _validate_lock(lock_document)
+    lock = _validate_lock(lock_document, now=effective_now)
     evidence, _ = _load(evidence_path, "Grype DB evidence")
     _exact(
         evidence,
@@ -393,8 +404,7 @@ def verify(lock_path: Path, grype: Path, cache_dir: Path, evidence_path: Path) -
         raise GrypeDBError("Grype DB evidence differs from the lock")
     prepared = _time(evidence["prepared_at"], "evidence.prepared_at")
     built = _time(lock["database"]["built_at"], "lock.database.built_at")
-    now = datetime.now(timezone.utc)
-    if not built <= prepared <= now:
+    if not built <= prepared <= effective_now:
         raise GrypeDBError("Grype DB preparation time is inconsistent")
     _verify_cache(cache_dir, lock)
     home = cache_dir.parent

@@ -395,6 +395,11 @@ class ArtifactPipelineEncryptionTests(BaseTestCase):
         point, _destination, _remote, local_root = self._local_destination(
             source_artifact, ciphertext
         )
+        # Exercise the encrypted-artifact guard after every ordinary download
+        # eligibility condition has passed. Incomplete backups intentionally
+        # remain undiscoverable through the download endpoint.
+        self.backup.status = UtilBackup.Status.COMPLETE
+        self.backup.save(update_fields=["status", "modified"])
         self.assertFalse(point.direct_download_permitted())
         self.assertFalse(
             CoreWebsiteBackupStoragePointsSerializer(point).data[

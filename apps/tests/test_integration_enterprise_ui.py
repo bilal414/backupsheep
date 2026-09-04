@@ -6,6 +6,7 @@ the forms are rendered once and then populated by Alpine at runtime.
 """
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -53,6 +54,11 @@ class IntegrationEnterpriseTemplateContractTests(SimpleTestCase):
                 get_template(template_name)
 
     def test_connection_controller_is_valid_javascript(self):
+        if shutil.which("node") is None:
+            self.skipTest(
+                "Node.js is intentionally absent from the production runtime; "
+                "the dependency-and-deployment CI job performs this syntax check."
+            )
         script = self.register.split("<script>", 1)[1].split("</script>", 1)[0]
         completed = subprocess.run(
             ["node", "--check"],
