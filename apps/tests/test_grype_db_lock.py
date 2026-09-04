@@ -56,6 +56,18 @@ class GrypeDatabaseLockTests(TestCase):
                 now=datetime(2026, 9, 8, 6, 30, 55, tzinfo=timezone.utc),
             )
 
+    def test_verify_rejects_a_naive_injected_freshness_time(self) -> None:
+        with self.assertRaisesRegex(
+            prepare_grype_db.GrypeDBError, "timezone aware"
+        ):
+            prepare_grype_db.verify(
+                Path("unused-lock"),
+                Path("unused-tool"),
+                Path("unused-cache"),
+                Path("unused-evidence"),
+                now=datetime(2026, 8, 30, 23, 0, 0),
+            )
+
     def test_archive_url_checksum_must_equal_locked_digest(self) -> None:
         altered = deepcopy(self.lock)
         altered["archive"]["sha256"] = "0" * 64
@@ -150,14 +162,29 @@ class GrypeDatabaseLockTests(TestCase):
             }
             evidence_path = root / "evidence.json"
             evidence_path.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+            verification_time = datetime(
+                2026, 8, 30, 23, 0, 0, tzinfo=timezone.utc
+            )
             with mock.patch.object(prepare_grype_db, "_tool_version"), mock.patch.object(
                 prepare_grype_db, "_status"
             ):
-                prepare_grype_db.verify(lock_path, tool, cache, evidence_path)
+                prepare_grype_db.verify(
+                    lock_path,
+                    tool,
+                    cache,
+                    evidence_path,
+                    now=verification_time,
+                )
                 evidence["database_sha256"] = "f" * 64
                 evidence_path.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
                 with self.assertRaisesRegex(prepare_grype_db.GrypeDBError, "differs from the lock"):
-                    prepare_grype_db.verify(lock_path, tool, cache, evidence_path)
+                    prepare_grype_db.verify(
+                        lock_path,
+                        tool,
+                        cache,
+                        evidence_path,
+                        now=verification_time,
+                    )
 
     def test_cache_rejects_any_unreviewed_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

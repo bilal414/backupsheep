@@ -540,6 +540,20 @@ raise SystemExit(99)
             r'BACKUPSHEEP_CELERY_SECURITY_GENERATION:\s+["\']3["\']',
         )
 
+    def test_supply_chain_ci_validates_enterprise_javascript_at_build_time(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "supply-chain-security.yml"
+        ).read_text(encoding="utf-8")
+        dependency_job = workflow.split(
+            "  dependency-and-deployment-checks:\n", 1
+        )[1].split("\n  application-security-regression:\n", 1)[0]
+
+        self.assertIn(
+            "name: Validate enterprise integration controller JavaScript",
+            dependency_job,
+        )
+        self.assertIn("python - <<'PY' | node --check", dependency_job)
+
     def test_supply_chain_ci_blocks_on_the_full_offline_application_suite(self):
         workflow = (
             ROOT / ".github" / "workflows" / "supply-chain-security.yml"

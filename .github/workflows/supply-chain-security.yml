@@ -86,6 +86,23 @@ jobs:
       - name: Audit frontend lock
         run: npm audit --package-lock-only --audit-level=high
 
+      - name: Validate enterprise integration controller JavaScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | node --check
+          from pathlib import Path
+
+          template = Path(
+              "apps/console/_templates/console/setup/_setup_and_list_connection.html"
+          ).read_text(encoding="utf-8")
+          try:
+              controller = template.split("<script>", 1)[1].split("</script>", 1)[0]
+          except IndexError as exc:
+              raise SystemExit("enterprise integration controller script is missing") from exc
+          print(controller, end="")
+          PY
+
       - name: Validate deployment manifests
         run: |
           cp .env_sample .env
