@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "source_repository": "bilal414/backupsheep",
   "release_workflow": ".github/workflows/release-images.yml",
   "registry": "ghcr.io",
@@ -18,6 +18,16 @@
       "quarantine_repository": "ghcr.io/bilal414/backupsheep-egress-quarantine",
       "official_repository": "ghcr.io/bilal414/backupsheep-egress",
       "dockerfile": "Dockerfile.egress"
+    },
+    "rabbitmq": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-rabbitmq",
+      "dockerfile": "Dockerfile.rabbitmq"
+    },
+    "rabbitmq-upgrade": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-upgrade-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-upgrade",
+      "dockerfile": "Dockerfile.rabbitmq-upgrade"
     }
   },
   "platforms": [
@@ -29,6 +39,47 @@
     "oidc_issuer": "https://token.actions.githubusercontent.com",
     "certificate_identity_regex": "^https://github\\.com/bilal414/backupsheep/\\.github/workflows/release-images\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$",
     "workflow_trigger": "push"
+  },
+  "consumer": {
+    "descriptor_filename": "backupsheep-release-descriptor-v2.txt",
+    "descriptor_bundle_filename": "backupsheep-release-descriptor-v2.sigstore.json",
+    "manifest_filename": "release-manifest.json",
+    "consumer_script_filename": "backupsheep-consume-signed-release-v2.sh",
+    "consumer_script_bundle_filename": "backupsheep-consume-signed-release-v2.sigstore.json",
+    "trusted_root": {
+      "path": "deploy/release/sigstore-trusted-root.json",
+      "sha256": "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
+      "source_repository": "sigstore/root-signing",
+      "source_commit": "0d8bd7c40a20b5291c18fb80fbe8c9f598685a2c",
+      "source_path": "targets/trusted_root.json"
+    },
+    "cosign_image": {
+      "version": "3.1.3",
+      "runtime_contract_version": 1,
+      "repository": "ghcr.io/bilal414/backupsheep-release-verifier",
+      "index_digest": "sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e",
+      "reference": "ghcr.io/bilal414/backupsheep-release-verifier@sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e",
+      "platforms": {
+        "linux/amd64": {
+          "manifest_digest": "sha256:29c25a1a2bcbe8190166f65e0914fbd4c904968be5a615f59421dc8fd4526f06",
+          "config_digest": "sha256:6feeb7c97d6b7b709f2dc6b33723de442205437694fd3679461d78635745349d"
+        },
+        "linux/arm64": {
+          "manifest_digest": "sha256:2d0bfa77e828bff3c198039763f05f44017e6c2cd75572fce8f61431a95b927d",
+          "config_digest": "sha256:9a6ceeac0bc63631bd168417839d56e01a2ee157411daef235df13e0c8d04c01"
+        }
+      }
+    }
+  },
+  "transition": {
+    "schema_version": 1,
+    "policy_path": "deploy/release-transition-policy.json",
+    "migration_contract_command": [
+      "python",
+      "-m",
+      "apps.release_migration_contract"
+    ],
+    "maximum_predecessors": 8
   },
   "attestations": {
     "provenance_predicate_type": "https://slsa.dev/provenance/v1",
@@ -52,6 +103,12 @@
       "sha256": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
       "archive_member": null
     },
+    "grype": {
+      "version": "0.116.1",
+      "url": "https://github.com/anchore/grype/releases/download/v0.116.1/grype_0.116.1_linux_amd64.tar.gz",
+      "sha256": "0122df7b655981abe547ad3d2190d65551dac6a2bfc80b4dc2a989b5d0587458",
+      "archive_member": "grype"
+    },
     "oras": {
       "version": "1.3.3",
       "url": "https://github.com/oras-project/oras/releases/download/v1.3.3/oras_1.3.3_linux_amd64.tar.gz",
@@ -74,6 +131,16 @@
   "vulnerability_policy": {
     "scanner": "trivy",
     "scanner_version": "0.74.0",
+    "secondary_scanner": "grype",
+    "secondary_scanner_version": "0.116.1",
+    "database": {
+      "lock_path": "deploy/trivy-db-lock.json",
+      "lock_sha256": "sha256:dd5161885e56cd0cd4211ed0e96afc63ea00a61a265129f3fcb49628184e95ef"
+    },
+    "secondary_database": {
+      "lock_path": "deploy/grype-db-lock.json",
+      "lock_sha256": "sha256:769a77cb012d1a23db23af7dd68ebf7ad4411441e2a058a08e4f8831baa94a55"
+    },
     "fail_severities": [
       "HIGH",
       "CRITICAL"

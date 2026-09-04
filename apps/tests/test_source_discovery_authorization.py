@@ -22,7 +22,6 @@ from apps.api.v1.connection.ovh_us.views import CoreOVHUSView
 from apps.api.v1.connection.upcloud.views import CoreUpCloudView
 from apps.api.v1.connection.vultr.views import CoreVultrView
 from apps.api.v1.connection.website.views import CoreWebsiteView
-from apps.api.v1.connection.wordpress.views import CoreWordPressView
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.api.v1.utils.api_permissions import (
     MemberGroupPermissions,
@@ -52,7 +51,6 @@ PROVIDER_INVENTORY_VIEWS = (
     CoreUpCloudView,
     CoreVultrView,
     CoreWebsiteView,
-    CoreWordPressView,
 )
 
 

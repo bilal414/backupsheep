@@ -9,14 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 
-from apps._tasks.exceptions import (
-    IntegrationValidationError,
-    NodeConnectionErrorEligibleObjects,
-)
-from apps._tasks.integration.oracle import (
-    OracleProviderError,
-    discover_oracle_objects,
-)
+from apps._tasks.integration.oracle import discover_oracle_objects
 from apps.console.connection.models import CoreConnection, CoreConnectionLocation
 from apps.console.node.models import CoreOracle, CoreNode
 
@@ -82,39 +75,39 @@ class CoreOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
-        try:
-            connection = self.get_object()
-            validation = connection.validate()
-            if validation:
-                return Response(
-                    {"detail": "Provider credentials and account access were validated. No backup or recovery was tested."}, status=status.HTTP_200_OK
+        connection = self.get_object()
+        validation = connection.validate()
+        if validation:
+            return Response(
+                {
+                    "detail": (
+                        "Provider credentials and account access were validated. "
+                        "No backup or recovery was tested."
+                    )
+                },
+                status=status.HTTP_200_OK,
+            )
+        return Response(
+            {
+                "detail": (
+                    "Provider access validation failed. Review credentials and "
+                    "permissions before using this connection."
                 )
-            else:
-                return Response(
-                    {"detail": "Provider access validation failed. Review credentials and permissions before using this connection."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        except Exception as e:
-            raise IntegrationValidationError(e.__str__())
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     @action(detail=True, methods=["get"])
     @safe_connection_action(stage="object_discovery")
     def objects(self, request, pk=None):
-        try:
-            connection = self.get_object()
-            eligible_objects = discover_oracle_objects(
-                connection.auth_oracle,
-                self.request.query_params.get("object_type"),
-            )
-            for eligible_object in eligible_objects:
-                query = Q(unique_id=eligible_object["id"], node__connection=connection)
-                query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-                if CoreOracle.objects.filter(query).exists():
-                    eligible_object["_bs_attached"] = True
-            return Response(eligible_objects)
-        except OracleProviderError as error:
-            raise NodeConnectionErrorEligibleObjects(str(error))
-        except Exception:
-            raise NodeConnectionErrorEligibleObjects(
-                "Oracle Cloud discovery failed safely. Verify the region, permissions, and compartment access."
-            )
+        connection = self.get_object()
+        eligible_objects = discover_oracle_objects(
+            connection.auth_oracle,
+            self.request.query_params.get("object_type"),
+        )
+        for eligible_object in eligible_objects:
+            query = Q(unique_id=eligible_object["id"], node__connection=connection)
+            query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
+            if CoreOracle.objects.filter(query).exists():
+                eligible_object["_bs_attached"] = True
+        return Response(eligible_objects)

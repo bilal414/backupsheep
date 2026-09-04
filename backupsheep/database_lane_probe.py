@@ -17,6 +17,11 @@ from contextlib import closing
 import psycopg2
 from psycopg2 import errors, sql
 
+from backupsheep.artifact_crypto.envelope import (
+    ALGORITHM as ARTIFACT_ALGORITHM,
+    DEFAULT_CHUNK_SIZE as ARTIFACT_CHUNK_SIZE,
+    FORMAT_VERSION as ARTIFACT_FORMAT_VERSION,
+)
 from backupsheep.database_identity import IdentityConfiguration, ProvisioningError
 from backupsheep.database_lane_policy import (
     EXPECTED_ROUTINES,
@@ -25,9 +30,22 @@ from backupsheep.database_lane_policy import (
     MANAGED_SSH_RETENTION_ROUTINE,
     MANAGED_SSH_ROUTINES,
     MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
+    RETIRED_TABLES,
     SSH_HOST_KEY_REVOKE_WITNESS_TABLE,
     STORAGE_CONFIG_TABLES,
 )
+
+
+_RETIRED_TABLE_READ_SQL = {
+    "core_auth_wordpress": "SELECT * FROM public.core_auth_wordpress LIMIT 1",
+    "core_wordpress": "SELECT * FROM public.core_wordpress LIMIT 1",
+    "core_wordpress_backup": (
+        "SELECT * FROM public.core_wordpress_backup LIMIT 1"
+    ),
+    "core_wordpress_backup_mtm_storage_points": (
+        "SELECT * FROM public.core_wordpress_backup_mtm_storage_points LIMIT 1"
+    ),
+}
 
 
 class LaneProbeError(RuntimeError):
@@ -71,6 +89,20 @@ def _expect_allowed(connection, statement: str, *, label: str) -> None:
         connection.rollback()
         raise LaneProbeError(f"{label} was unexpectedly denied") from None
     connection.rollback()
+
+
+def _expect_retired_table_read_denied(connection, table: str, *, lane: str) -> None:
+    if frozenset(_RETIRED_TABLE_READ_SQL) != RETIRED_TABLES:
+        raise LaneProbeError("retired-table SQL allowlist is out of sync")
+    try:
+        statement = _RETIRED_TABLE_READ_SQL[table]
+    except (KeyError, TypeError) as error:
+        raise LaneProbeError("refusing an unreviewed retired-table identifier") from error
+    _expect_denied(
+        connection,
+        statement,
+        label=f"{lane} retired table read {table}",
+    )
 
 
 def _assert_role_boundary(connection, lane: str, expected_user: str) -> None:
@@ -211,13 +243,16 @@ def _insert_artifact_fixture(cursor, *, model_name: str, suffix: str):
             plaintext_byte_count, plaintext_sha256, ciphertext_byte_count,
             status, sealed_at, execution_id
         ) VALUES (
-            pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(), %s, 1,
-            'AES-256-GCM-SIV', 4194304, %s, %s, %s, 0, %s, 0,
+            pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(), %s, %s,
+            %s, %s, %s, %s, %s, 0, %s, 0,
             'pending', NULL, %s
         ) RETURNING id
         """,
         (
             str(uuid.uuid4()),
+            ARTIFACT_FORMAT_VERSION,
+            ARTIFACT_ALGORITHM,
+            ARTIFACT_CHUNK_SIZE,
             f'{{"probe":"{suffix}"}}',
             "a" * 64,
             "b" * 64,
@@ -1818,7 +1853,6 @@ def run_probe(config: IdentityConfiguration) -> None:
                 (
                     "core_basecamp_backup_mtm_storage_points",
                     "core_website_backup_mtm_storage_points",
-                    "core_wordpress_backup_mtm_storage_points",
                 ),
             ),
         ):
@@ -1832,6 +1866,13 @@ def run_probe(config: IdentityConfiguration) -> None:
                     connections[lane],
                     f"DELETE FROM public.{table} WHERE false",
                     label=f"{lane} destination authorization delete {table}",
+                )
+        for lane, connection in connections.items():
+            for table in sorted(RETIRED_TABLES):
+                _expect_retired_table_read_denied(
+                    connection,
+                    table,
+                    lane=lane,
                 )
         _expect_denied(
             connections["app"],

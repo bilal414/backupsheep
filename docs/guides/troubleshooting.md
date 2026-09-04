@@ -66,7 +66,7 @@ Static assets are collected in the offline, non-root image-build step and WhiteN
 serves the immutable result. Rebuild the current image and inspect app startup:
 
 ```bash
-./backupsheep-compose build db app app-egress-guard
+./backupsheep-compose build db app app-egress-guard rabbitmq
 ./backupsheep-compose up --detach --no-build --no-deps --force-recreate \
   app-egress-guard app
 ./backupsheep-compose logs --tail=200 app

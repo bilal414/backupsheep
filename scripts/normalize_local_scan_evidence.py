@@ -14,12 +14,16 @@ from pathlib import Path
 
 from build_release_manifest import _platform_digests, _write_json
 from verify_release import (
+    CONSUMER_VERIFIER_IMAGE_NAME,
     MAX_CONTROL_FILE_BYTES,
     MAX_EVIDENCE_FILE_BYTES,
+    RELEASE_IMAGE_NAMES,
     ReleaseVerificationError,
     _digest,
     _load_json,
     _mapping,
+    _sha256_path,
+    _validate_grype_report,
     _validate_policy,
 )
 
@@ -45,20 +49,44 @@ def _decoded_json(value: object, label: str) -> tuple[bytes, dict]:
 def normalize(
     *,
     policy: dict,
-    index_path: Path,
+    index_path: Path | None,
     image_name: str,
     platform: str,
     syft_path: Path,
     trivy_path: Path,
+    grype_path: Path,
 ) -> None:
     policy = _validate_policy(policy)
-    if image_name not in policy["images"] or platform not in policy["platforms"]:
-        raise ReleaseVerificationError("the scan image or platform is not authorized")
-    child_digest = _digest(
-        _platform_digests(index_path, policy["platforms"])[platform],
-        "child manifest digest",
+    repository_root = Path(__file__).resolve().parents[1]
+    grype_policy = policy["vulnerability_policy"]["secondary_database"]
+    grype_lock_path = repository_root / grype_policy["lock_path"]
+    if _sha256_path(grype_lock_path) != grype_policy["lock_sha256"]:
+        raise ReleaseVerificationError("the Grype DB lock differs from release policy")
+    grype_lock = _mapping(
+        _load_json(grype_lock_path, maximum_bytes=MAX_CONTROL_FILE_BYTES),
+        "Grype DB lock",
     )
-    reference = f"{policy['images'][image_name]['quarantine_repository']}@{child_digest}"
+    if platform not in policy["platforms"]:
+        raise ReleaseVerificationError("the scan image or platform is not authorized")
+    expected_config_digest: str | None = None
+    if image_name == CONSUMER_VERIFIER_IMAGE_NAME:
+        if index_path is not None:
+            raise ReleaseVerificationError("the consumer verifier scan must not accept a release OCI index")
+        verifier = policy["consumer"]["cosign_image"]
+        child = verifier["platforms"][platform]
+        child_digest = _digest(child["manifest_digest"], "consumer verifier child digest")
+        expected_config_digest = _digest(
+            child["config_digest"], "consumer verifier config digest"
+        )
+        reference = f"{verifier['repository']}@{child_digest}"
+    else:
+        if image_name not in policy["images"] or index_path is None:
+            raise ReleaseVerificationError("the release scan requires an authorized image and OCI index")
+        child_digest = _digest(
+            _platform_digests(index_path, policy["platforms"])[platform],
+            "child manifest digest",
+        )
+        reference = f"{policy['images'][image_name]['quarantine_repository']}@{child_digest}"
 
     syft = _mapping(
         _load_json(syft_path, maximum_bytes=MAX_EVIDENCE_FILE_BYTES), "Syft report"
@@ -74,6 +102,8 @@ def normalize(
         raise ReleaseVerificationError("Syft embedded manifest has the wrong digest")
     config = _mapping(manifest.get("config"), "OCI child config")
     config_digest = _digest(config.get("digest"), "OCI child config digest")
+    if expected_config_digest is not None and config_digest != expected_config_digest:
+        raise ReleaseVerificationError("consumer verifier config does not match the policy trust record")
     if metadata.get("imageID") != config_digest:
         raise ReleaseVerificationError("Syft image ID does not match the child config")
     manifest_layers = manifest.get("layers")
@@ -97,20 +127,59 @@ def normalize(
     ] != compressed_layers:
         raise ReleaseVerificationError("Trivy layers do not match the retained child manifest")
 
+    grype = _mapping(
+        _load_json(grype_path, maximum_bytes=MAX_EVIDENCE_FILE_BYTES), "Grype report"
+    )
+    grype_source = _mapping(grype.get("source"), "Grype source")
+    if grype_source.get("type") != "image":
+        raise ReleaseVerificationError("Grype did not scan an image")
+    grype_target = _mapping(grype_source.get("target"), "Grype source target")
+    if grype_target.get("manifestDigest") != child_digest:
+        raise ReleaseVerificationError("Grype did not scan the retained child manifest")
+    if grype_target.get("imageID") != config_digest:
+        raise ReleaseVerificationError("Grype image ID does not match the child config")
+    grype_manifest_bytes, _ = _decoded_json(
+        grype_target.get("manifest"), "Grype embedded manifest"
+    )
+    if grype_manifest_bytes != manifest_bytes:
+        raise ReleaseVerificationError("Grype embedded manifest differs from Syft")
+    grype_layers = grype_target.get("layers")
+    if not isinstance(grype_layers, list) or [
+        _digest(_mapping(layer, "Grype layer").get("digest"), "Grype layer digest")
+        for layer in grype_layers
+    ] != compressed_layers:
+        raise ReleaseVerificationError("Grype layers do not match the retained child manifest")
+
     metadata["userInput"] = reference
     trivy["ArtifactName"] = reference
+    grype_target["userInput"] = reference
+    _validate_grype_report(
+        grype,
+        reference,
+        child_digest,
+        policy["vulnerability_policy"]["secondary_scanner_version"],
+        set(policy["vulnerability_policy"]["fail_severities"]),
+        "Grype report",
+        grype_lock,
+    )
     _write_json(syft_path, syft)
     _write_json(trivy_path, trivy)
+    _write_json(grype_path, grype)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
-    parser.add_argument("--index", type=Path, required=True)
-    parser.add_argument("--image", choices=("app", "postgres", "egress"), required=True)
+    parser.add_argument("--index", type=Path)
+    parser.add_argument(
+        "--image",
+        choices=(*RELEASE_IMAGE_NAMES, CONSUMER_VERIFIER_IMAGE_NAME),
+        required=True,
+    )
     parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     parser.add_argument("--syft", type=Path, required=True)
     parser.add_argument("--trivy", type=Path, required=True)
+    parser.add_argument("--grype", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
         policy = _load_json(arguments.policy, maximum_bytes=MAX_CONTROL_FILE_BYTES)
@@ -121,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
             platform=arguments.platform,
             syft_path=arguments.syft,
             trivy_path=arguments.trivy,
+            grype_path=arguments.grype,
         )
         return 0
     except (OSError, ReleaseVerificationError, json.JSONDecodeError) as exc:

@@ -131,9 +131,11 @@ class DirectSourceCreatePermissionContractTests(SimpleTestCase):
             )
             guarded_views.add(view_class)
 
-        # Generic node creation plus every provider/database/site/SaaS source
-        # view currently registered by the API router must participate.
-        self.assertGreaterEqual(len(guarded_views), 28)
+        # Generic node creation plus every active provider/database/site/SaaS
+        # source view currently registered by the API router must participate.
+        # WordPress retirement removes its former source-create view, leaving
+        # 27 guarded routes in the current catalog.
+        self.assertGreaterEqual(len(guarded_views), 27)
 
 
 class NodeCreationConnectionAuthorizationTests(BaseTestCase):

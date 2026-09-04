@@ -78,8 +78,8 @@ not remove the run's database status, execution status, storage points, or
 activity entries.
 
 Direct browser/ZIP export is intentionally not a recovery path for BSE1. The storage lane
-has ciphertext but no source KMS identity, while the web process has neither the artifact
-mount nor a source-lane KMS identity. Database and website restores use the fenced reverse
+has ciphertext but no source keyring, while the web process has neither the artifact
+mount nor a source-lane keyring. Database and website restores use the fenced reverse
 ciphertext handoff and authenticate/decrypt only in the exact source lane.
 
 ## Crash and duplicate-delivery behavior

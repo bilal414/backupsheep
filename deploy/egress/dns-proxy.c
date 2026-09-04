@@ -343,6 +343,7 @@ static size_t process_query(const char *forwarder_path,
                             const unsigned char *request, size_t request_length,
                             unsigned char *response) {
     struct dns_question question;
+    size_t canonical_question_length = 0U;
     size_t response_length = 0U;
     uint16_t flags;
 
@@ -362,6 +363,18 @@ static size_t process_query(const char *forwarder_path,
     }
     if (query_forwarder(forwarder_path, &question, response,
                         &response_length) != 0) {
+        return build_error_response(request, &question, 2U, response,
+                                    DNS_MAX_PACKET);
+    }
+    /*
+     * Docker's embedded resolver may apply DNS 0x20 case randomization even
+     * though the forwarder supplied a lowercase canonical question. Replace
+     * the already-validated, uncompressed response question with the proxy's
+     * immutable lowercase form before returning it to the workload. The wire
+     * length is unchanged, so any answer compression pointers remain valid.
+     */
+    if (encode_question(&question, response, response_length,
+                        &canonical_question_length) != 0) {
         return build_error_response(request, &question, 2U, response,
                                     DNS_MAX_PACKET);
     }

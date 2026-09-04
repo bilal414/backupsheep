@@ -204,7 +204,7 @@ RUN set -eux; \
             "Source: postgresql-${pg_major} (${pg_version})" \
             "Architecture: ${TARGETARCH}" \
             'Maintainer: BackupSheep Security <security@backupsheep.com>' \
-            'Depends: libc6 (= 2.43-2ubuntu2.3), libpq5 (= 18.6-0ubuntu0.26.04.1), libreadline8t64 (= 8.3-4), libssl3t64 (= 3.5.5-1ubuntu3.4), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
+            'Depends: libc6 (= 2.43-2ubuntu2.3), libpq5 (= 18.6-0ubuntu0.26.04.1), libreadline8t64 (= 8.3-4), libssl3t64 (= 3.5.5-1ubuntu3.5), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
             "Built-Using: postgresql-${pg_major} (= ${pg_version})" \
             'Section: database' \
             'Priority: optional' \
@@ -319,7 +319,7 @@ RUN set -eux; \
         'Source: mysql-community (8.4.11)' \
         "Architecture: ${TARGETARCH}" \
         'Maintainer: BackupSheep Security <security@backupsheep.com>' \
-        'Depends: libc6 (= 2.43-2ubuntu2.3), libgcc-s1 (= 16-20260322-1ubuntu1), libncurses6 (= 6.6+20251231-1), libssl3t64 (= 3.5.5-1ubuntu3.4), libstdc++6 (= 16-20260322-1ubuntu1), libzstd1 (= 1.5.7+dfsg-3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
+        'Depends: libc6 (= 2.43-2ubuntu2.3), libgcc-s1 (= 16-20260322-1ubuntu1), libncurses6 (= 6.6+20251231-1), libssl3t64 (= 3.5.5-1ubuntu3.5), libstdc++6 (= 16-20260322-1ubuntu1), libzstd1 (= 1.5.7+dfsg-3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
         'Built-Using: mysql-community (= 8.4.11)' \
         'Section: database' \
         'Priority: optional' \
@@ -354,33 +354,88 @@ RUN --network=none set -eux; \
     test ! -e /usr/bin/pebble
 
 
-# Resolve and download the exact Ubuntu runtime package closure against signed
-# repository metadata. The final stage installs these .deb files with networking
-# disabled, so a missing dependency or moved version fails closed.
+# Resolve the exact AMD64 Ubuntu runtime package closure from a fixed, signed
+# archive snapshot. The final stage installs these .deb files with networking
+# disabled, so a missing dependency or changed snapshot fails closed.
 FROM ubuntu-runtime-base AS ubuntu-runtime-packages
 
 ARG TARGETARCH
-RUN set -eux; \
+RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt,target=/tmp/backupsheep-build-ca-certificates.crt,ro \
+    set -eux; \
+    snapshot_id='20260831T131500Z'; \
+    echo '714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5  /tmp/backupsheep-build-ca-certificates.crt' \
+        | sha256sum -c -; \
     case "$TARGETARCH" in \
-        amd64|arm64) ;; \
+        amd64) ;; \
         *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
+    test "$(dpkg --print-architecture)" = amd64; \
+    rm -f \
+        /etc/apt/sources.list \
+        /etc/apt/sources.list.d/*.list \
+        /etc/apt/sources.list.d/*.sources; \
+    printf '%s\n' \
+        'Types: deb' \
+        "URIs: https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/" \
+        'Suites: resolute resolute-updates resolute-security' \
+        'Components: main universe' \
+        'Architectures: amd64' \
+        'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+        > /etc/apt/sources.list.d/backupsheep-ubuntu-snapshot.sources; \
+    printf '%s\n' \
+        'Acquire::https::CaInfo "/tmp/backupsheep-build-ca-certificates.crt";' \
+        > /etc/apt/apt.conf.d/99backupsheep-build-ca; \
+    printf '%s\n' \
+        'Acquire::Retries "3";' \
+        'Acquire::https::Timeout "30";' \
+        > /etc/apt/apt.conf.d/98backupsheep-snapshot-retries; \
+    snapshot_apt_retry() { \
+        snapshot_attempt=1; \
+        while [ "$snapshot_attempt" -le 4 ]; do \
+            if "$@"; then \
+                return 0; \
+            else \
+                snapshot_status=$?; \
+            fi; \
+            if [ "$snapshot_status" -ge 126 ]; then \
+                return "$snapshot_status"; \
+            fi; \
+            case "$snapshot_attempt" in \
+                1) sleep 15 ;; \
+                2) sleep 30 ;; \
+                3) sleep 60 ;; \
+                4) return "$snapshot_status" ;; \
+            esac; \
+            snapshot_attempt=$((snapshot_attempt + 1)); \
+        done; \
+    }; \
+    rm -rf /var/lib/apt/lists/*; \
     install -d -m 0755 /runtime-debs/partial /extract-debs \
         /mariadb-dump-package/DEBIAN \
         /mariadb-dump-package/usr/bin \
         /mariadb-dump-package/usr/share/backupsheep/provenance; \
-    apt-get update; \
+    snapshot_apt_retry apt-get -o APT::Update::Error-Mode=any update; \
+    snapshot_uris="$(apt-get indextargets --format '$(URI)' | LC_ALL=C sort -u)"; \
+    test -n "$snapshot_uris"; \
+    for snapshot_uri in $snapshot_uris; do \
+        case "$snapshot_uri" in \
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/dists/resolute/main/binary-amd64/Packages"|\
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/dists/resolute/universe/binary-amd64/Packages"|\
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/dists/resolute-updates/main/binary-amd64/Packages"|\
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/dists/resolute-updates/universe/binary-amd64/Packages"|\
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/dists/resolute-security/main/binary-amd64/Packages"|\
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/dists/resolute-security/universe/binary-amd64/Packages") ;; \
+            *) echo "Ubuntu metadata escaped the reviewed snapshot: $snapshot_uri" >&2; exit 1 ;; \
+        esac; \
+    done; \
     cd /extract-debs; \
-    apt-get download "mariadb-client=1:11.8.6-5ubuntu0.1"; \
+    snapshot_apt_retry apt-get download "mariadb-client=1:11.8.6-5ubuntu0.1"; \
     mariadb_archive="$(find /extract-debs -maxdepth 1 -type f -name 'mariadb-client_*.deb' -print -quit)"; \
     test -n "$mariadb_archive"; \
     test "$(dpkg-deb --field "$mariadb_archive" Package)" = "mariadb-client"; \
     test "$(dpkg-deb --field "$mariadb_archive" Version)" = "1:11.8.6-5ubuntu0.1"; \
     mariadb_architecture="$(dpkg-deb --field "$mariadb_archive" Architecture)"; \
-    case "$TARGETARCH:$mariadb_architecture" in \
-        amd64:amd64|arm64:arm64) ;; \
-        *) echo "MariaDB archive architecture mismatch." >&2; exit 1 ;; \
-    esac; \
+    test "$TARGETARCH:$mariadb_architecture" = amd64:amd64; \
     dpkg-deb --fsys-tarfile "$mariadb_archive" \
         | tar -xOf - ./usr/bin/mariadb-dump \
         > /mariadb-dump-package/usr/bin/mariadb-dump; \
@@ -394,7 +449,7 @@ RUN set -eux; \
         'Source: mariadb (1:11.8.6-5ubuntu0.1)' \
         "Architecture: ${mariadb_architecture}" \
         'Maintainer: BackupSheep Security <security@backupsheep.com>' \
-        'Depends: libc6, libgcc-s1, libssl3t64 (= 3.5.5-1ubuntu3.4), libstdc++6, libzstd1 (= 1.5.7+dfsg-3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
+        'Depends: libc6, libgcc-s1, libssl3t64 (= 3.5.5-1ubuntu3.5), libstdc++6, libzstd1 (= 1.5.7+dfsg-3), zlib1g (= 1:1.3.dfsg+really1.3.1-1ubuntu3)' \
         'Built-Using: mariadb (= 1:11.8.6-5ubuntu0.1)' \
         'Section: database' \
         'Priority: optional' \
@@ -411,7 +466,8 @@ RUN set -eux; \
     test "$(dpkg-deb --field /runtime-debs/backupsheep-mariadb-dump_*.deb Package)" = "backupsheep-mariadb-dump"; \
     test "$(dpkg-deb --field /runtime-debs/backupsheep-mariadb-dump_*.deb Version)" = "11.8.6-5ubuntu0.1+backupsheep1"; \
     cd /; \
-    DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends \
+    snapshot_apt_retry env DEBIAN_FRONTEND=noninteractive \
+        apt-get -y --no-install-recommends \
         -o Dir::Cache::archives=/runtime-debs \
         --download-only install \
         "bsdutils=1:2.41.3-3ubuntu2" \
@@ -436,7 +492,7 @@ RUN set -eux; \
         "libpq5=18.6-0ubuntu0.26.04.1" \
         "libreadline8t64=8.3-4" \
         "libsqlite3-0=3.46.1-9ubuntu0.2" \
-        "libssl3t64=3.5.5-1ubuntu3.4" \
+        "libssl3t64=3.5.5-1ubuntu3.5" \
         "libstdc++6=16-20260322-1ubuntu1" \
         "libuuid1=2.41.3-3ubuntu2" \
         "libzstd1=1.5.7+dfsg-3" \
@@ -447,8 +503,8 @@ RUN set -eux; \
         "mysql-common=5.8+1.1.1ubuntu2" \
         "netbase=6.5build1" \
         "openssh-client=1:10.2p1-2ubuntu3.5" \
-        "openssl=3.5.5-1ubuntu3.4" \
-        "openssl-provider-legacy=3.5.5-1ubuntu3.4" \
+        "openssl=3.5.5-1ubuntu3.5" \
+        "openssl-provider-legacy=3.5.5-1ubuntu3.5" \
         "passwd=1:4.17.4-2ubuntu3" \
         "tree=2.3.1-1" \
         "tzdata=2026c-0ubuntu0.26.04.1" \
@@ -462,7 +518,11 @@ RUN set -eux; \
         | xargs -0 sha256sum > /runtime-debs/SHA256SUMS; \
     sha256sum -c /runtime-debs/SHA256SUMS; \
     rm -rf /runtime-debs/partial /runtime-debs/lock \
-        /extract-debs /mariadb-dump-package /var/lib/apt/lists/*
+        /extract-debs /mariadb-dump-package /var/lib/apt/lists/*; \
+    rm -f \
+        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries \
+        /etc/apt/apt.conf.d/99backupsheep-build-ca \
+        /etc/apt/sources.list.d/backupsheep-ubuntu-snapshot.sources
 
 
 FROM ubuntu-runtime-base AS runtime
@@ -485,7 +545,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 LABEL org.opencontainers.image.title="BackupSheep" \
       org.opencontainers.image.description="Self-hosted backup orchestration" \
       org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
-      org.opencontainers.image.licenses="GPL-3.0-only"
+      org.opencontainers.image.licenses="GPL-3.0-only" \
+      com.backupsheep.ubuntu.snapshot="20260831T131500Z"
 
 # Install the authenticated Ubuntu closure and all minimal database-client
 # packages offline. The custom packages make upstream source identities, exact
@@ -520,11 +581,11 @@ RUN --network=none \
     assert_source backupsheep-oracle-mysql-client mysql-community 8.4.11; \
     assert_package libmariadb3 1:11.8.6-5ubuntu0.1; \
     assert_package libpq5 18.6-0ubuntu0.26.04.1; \
-    assert_package libssl3t64 3.5.5-1ubuntu3.4; \
+    assert_package libssl3t64 3.5.5-1ubuntu3.5; \
     assert_package mariadb-client-core 1:11.8.6-5ubuntu0.1; \
     assert_package openssh-client 1:10.2p1-2ubuntu3.5; \
-    assert_package openssl 3.5.5-1ubuntu3.4; \
-    assert_package openssl-provider-legacy 3.5.5-1ubuntu3.4; \
+    assert_package openssl 3.5.5-1ubuntu3.5; \
+    assert_package openssl-provider-legacy 3.5.5-1ubuntu3.5; \
     assert_package tzdata 2026c-0ubuntu0.26.04.1; \
     test ! -e /usr/bin/pebble; \
     test ! -e /usr/bin/perl; \
@@ -604,6 +665,13 @@ RUN --network=none \
         grep -Fq "\"${executable}_sha256\":\"${executable_sha256}\"" "$oracle_provenance"; \
     done; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*; \
+    rm -f \
+        /etc/apt/sources.list \
+        /etc/apt/sources.list.d/*.list \
+        /etc/apt/sources.list.d/*.sources; \
+    test ! -e /etc/apt/sources.list; \
+    test -z "$(find /etc/apt/sources.list.d -mindepth 1 -maxdepth 1 \
+        -type f -print -quit)"; \
     python3.14 --version; \
     python3.14 -c 'import bz2,ctypes,curses,dbm.gnu,decimal,lzma,readline,sqlite3,ssl,uuid,zlib'; \
     for version in 14 15 16 17 18; do \
@@ -623,6 +691,10 @@ RUN --network=none \
 # pip is a build/install tool, not an application runtime dependency. Its
 # vendored package set is otherwise a second, hidden dependency tree that can
 # retain fixed vulnerabilities after the application lock is updated.
+# Setuptools also ships Windows-only PE launchers. They cannot execute in this
+# Linux image, are not part of BackupSheep's runtime, and otherwise appear as
+# anonymous binary packages in the SBOM. Remove only the reviewed launcher set
+# and fail the build if its contents change or another PE launcher appears.
 RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
     python -m pip --isolated install \
         --no-cache-dir \
@@ -637,8 +709,17 @@ RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
         /usr/local/bin/pip \
         /usr/local/bin/pip3 \
         /usr/local/bin/pip3.14 \
+    && for launcher in \
+        cli.exe cli-32.exe cli-64.exe cli-arm64.exe \
+        gui.exe gui-32.exe gui-64.exe gui-arm64.exe; do \
+        launcher_path="/usr/local/lib/python3.14/site-packages/setuptools/${launcher}"; \
+        test -f "$launcher_path"; \
+        rm -- "$launcher_path"; \
+    done \
     && test ! -e /usr/local/lib/python3.14/site-packages/pip \
-    && test -z "$(find /usr/local/bin -maxdepth 1 -type f -name 'pip*' -print -quit)"
+    && test -z "$(find /usr/local/bin -maxdepth 1 -type f -name 'pip*' -print -quit)" \
+    && test -z "$(find /usr/local/lib/python3.14/site-packages/setuptools \
+        -type f -name '*.exe' -print -quit)"
 
 RUN groupadd --gid 10001 backupsheep \
     && groupadd --gid 10002 backupsheep-database \

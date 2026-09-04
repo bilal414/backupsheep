@@ -1068,7 +1068,7 @@ def _read_native_volume_key_material(
         if not private.is_file() or stat.S_IMODE(private.stat().st_mode) != 0o600:
             raise HarnessError("A native-volume verifier protected key file has unsafe mode.")
     for public in (client_public_path, host_public_path):
-        if not public.is_file() or stat.S_IMODE(public.stat().st_mode) != 0o644:
+        if not public.is_file() or stat.S_IMODE(public.stat().st_mode) != 0o600:
             raise HarnessError("A native-volume verifier public key file has unsafe mode.")
     try:
         manifest = _strict_json_loads(
@@ -1161,7 +1161,9 @@ def _ensure_native_volume_key_material(
                 ]
             )
             os.chmod(temporary / filename, 0o600)
-            os.chmod(temporary / f"{filename}.pub", 0o644)
+            # Public keys are not secret, but the files remain private because their
+            # comments and presence are durable witnesses for this exact live run.
+            os.chmod(temporary / f"{filename}.pub", 0o600)
         client_public = _ssh_public_key(
             (temporary / "client_key.pub").read_text(encoding="utf-8"),
             label="native-volume client public key",

@@ -260,8 +260,8 @@
             <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
                 <h3 id="web-servers-heading" class="text-base font-semibold text-slate-900">Web Servers</h3>
             </div>
-            <p class="mt-1 text-sm text-slate-500">Connect any number of the cPanel, wordpress or other SFTP accounts for simple, secure, and cost-effective backups; locally or in the cloud.</p>
-            <div class="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <p class="mt-1 text-sm text-slate-500">Connect cPanel or other SFTP accounts for simple, secure, and cost-effective backups; locally or in the cloud.</p>
+            <div class="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 <a href="{% url 'console:setup:integration_open' 'website' %}"
                    data-category="web" data-search="sftp file server website backup storage"
                    x-show="cardVisible($el)"
@@ -287,7 +287,7 @@
                     <p class="mt-3 text-sm leading-6 text-slate-500">FTPS is preferred. Plain FTP is available only when installation policy explicitly allows insecure transport.</p>
                 </a>
                 <a href="{% url 'console:setup:integration_open' 'website' %}"
-                   data-category="web" data-search="ssh cpanel wordpress server website backup"
+                   data-category="web" data-search="ssh cpanel server website backup"
                    x-show="cardVisible($el)"
                    class="group flex flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-indigo-300 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                     <div class="flex items-center gap-3">
@@ -296,7 +296,7 @@
                         </span>
                         <span class="min-w-0 text-sm font-semibold text-slate-900 transition group-hover:text-indigo-600">SSH</span>
                     </div>
-                    <p class="mt-3 text-sm leading-6 text-slate-500">Schedule backups for cPanel and WordPress servers over SSH and store them in your own storage locations.</p>
+                    <p class="mt-3 text-sm leading-6 text-slate-500">Schedule backups for cPanel and other servers over SSH and store them in your own storage locations.</p>
                 </a>
             </div>
         </section>
@@ -306,26 +306,12 @@
             <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
                 <h3 id="cms-saas-heading" class="text-base font-semibold text-slate-900">CMS &amp; SaaS Applications</h3>
             </div>
-            {% if wordpress_source_protection_available or basecamp_source_protection_available %}
+            {% if basecamp_source_protection_available %}
                 <p class="mt-1 text-sm text-slate-500">Connect an explicitly enabled application source and store its backups on your configured storage accounts.</p>
             {% else %}
                 <p class="mt-1 text-sm text-slate-500">Only application sources with a complete recovery workflow are shown in this installation.</p>
             {% endif %}
-            <div class="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {% if wordpress_source_protection_available %}
-                <a id="wordpress" href="{% url 'console:setup:integration_open' 'wordpress' %}"
-                   data-category="cms" data-search="wordpress plugin cms website backup"
-                   x-show="cardVisible($el)"
-                   class="group flex flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-indigo-300 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                    <div class="flex items-center gap-3">
-                        <span class="grid h-11 w-11 flex-none place-items-center rounded-lg border border-slate-200 bg-slate-50 p-1.5 transition group-hover:border-indigo-200 group-hover:bg-indigo-50">
-                            <img class="h-full w-full object-contain" src="{{ STATIC_URL }}console/images/storage/wordpress.svg" alt="" onerror="this.onerror=null;this.src='{{ STATIC_URL }}console/images/storage/backupsheep.svg'">
-                        </span>
-                        <span class="min-w-0 text-sm font-semibold text-slate-900 transition group-hover:text-indigo-600">WordPress</span>
-                    </div>
-                    <p class="mt-3 text-sm leading-6 text-slate-500">Backup your WordPress websites using BackupSheep plugin.</p>
-                </a>
-                {% endif %}
+            <div class="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {% if basecamp_source_protection_available %}
                 <a id="basecamp" href="{% url 'console:setup:integration_open' 'basecamp' %}"
                    data-category="cms" data-search="basecamp saas project backup"

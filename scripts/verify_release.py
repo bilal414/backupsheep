@@ -14,9 +14,19 @@ import stat
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from prepare_trivy_db import (
+    TrivyDBError,
+    validate_evidence_document as validate_trivy_db_evidence,
+    validate_lock_document as validate_trivy_db_lock,
+)
+import prepare_grype_db as grype_db
+import release_transition
+
+from release_subprocess import run_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +51,41 @@ PREDICATE_ANNOTATION = "in-toto.io/predicate-type"
 IN_TOTO_MEDIA_TYPE = "application/vnd.in-toto+json"
 IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 IN_TOTO_STATEMENT_V01_TYPE = "https://in-toto.io/Statement/v0.1"
+RELEASE_IMAGE_NAMES = (
+    "app",
+    "postgres",
+    "egress",
+    "rabbitmq",
+    "rabbitmq-upgrade",
+)
+CONSUMER_VERIFIER_IMAGE_NAME = "release-verifier"
+EXPECTED_RELEASE_IMAGES = {
+    "app": {
+        "quarantine_repository": "ghcr.io/bilal414/backupsheep-quarantine",
+        "official_repository": "ghcr.io/bilal414/backupsheep",
+        "dockerfile": "Dockerfile",
+    },
+    "postgres": {
+        "quarantine_repository": "ghcr.io/bilal414/backupsheep-postgres-quarantine",
+        "official_repository": "ghcr.io/bilal414/backupsheep-postgres",
+        "dockerfile": "Dockerfile.postgres",
+    },
+    "egress": {
+        "quarantine_repository": "ghcr.io/bilal414/backupsheep-egress-quarantine",
+        "official_repository": "ghcr.io/bilal414/backupsheep-egress",
+        "dockerfile": "Dockerfile.egress",
+    },
+    "rabbitmq": {
+        "quarantine_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-quarantine",
+        "official_repository": "ghcr.io/bilal414/backupsheep-rabbitmq",
+        "dockerfile": "Dockerfile.rabbitmq",
+    },
+    "rabbitmq-upgrade": {
+        "quarantine_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-upgrade-quarantine",
+        "official_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-upgrade",
+        "dockerfile": "Dockerfile.rabbitmq-upgrade",
+    },
+}
 
 
 class ReleaseVerificationError(ValueError):
@@ -168,6 +213,8 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
             "platforms",
             "release_tag_regex",
             "identity",
+            "consumer",
+            "transition",
             "attestations",
             "tools",
             "vulnerability_policy",
@@ -175,7 +222,7 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         },
         "policy",
     )
-    if _integer(policy["schema_version"], "policy.schema_version") != 2:
+    if _integer(policy["schema_version"], "policy.schema_version") != 4:
         raise ReleaseVerificationError("unsupported release policy schema")
 
     source_repository = _string(policy["source_repository"], "policy.source_repository")
@@ -189,11 +236,12 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         raise ReleaseVerificationError("only ghcr.io is authorized by this verifier")
 
     images = _mapping(policy["images"], "policy.images")
-    if set(images) != {"app", "postgres", "egress"}:
+    if tuple(images) != RELEASE_IMAGE_NAMES:
         raise ReleaseVerificationError(
-            "policy.images must contain exactly app, postgres, and egress"
+            "policy.images must contain exactly app, postgres, egress, rabbitmq, and rabbitmq-upgrade in order"
         )
     all_repositories: list[str] = []
+    all_dockerfiles: list[str] = []
     for image_name, raw_image in images.items():
         image = _mapping(raw_image, f"policy.images.{image_name}")
         _exact_keys(
@@ -213,8 +261,13 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         dockerfile = _string(image["dockerfile"], f"policy.images.{image_name}.dockerfile")
         if PurePosixPath(dockerfile).is_absolute() or ".." in PurePosixPath(dockerfile).parts:
             raise ReleaseVerificationError(f"policy.images.{image_name}.dockerfile is unsafe")
+        if image != EXPECTED_RELEASE_IMAGES[image_name]:
+            raise ReleaseVerificationError(f"policy.images.{image_name} differs from the exact release contract")
+        all_dockerfiles.append(dockerfile)
     if len(all_repositories) != len(set(all_repositories)):
         raise ReleaseVerificationError("release repositories must all be distinct")
+    if len(all_dockerfiles) != len(set(all_dockerfiles)):
+        raise ReleaseVerificationError("release Dockerfiles must all be distinct")
 
     platforms = _unique_strings(policy["platforms"], "policy.platforms")
     if platforms != ["linux/amd64", "linux/arm64"]:
@@ -243,6 +296,151 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
     if identity["workflow_trigger"] != "push":
         raise ReleaseVerificationError("release signatures must be produced by a push workflow")
 
+    consumer = _mapping(policy["consumer"], "policy.consumer")
+    _exact_keys(
+        consumer,
+        {
+            "descriptor_filename",
+            "descriptor_bundle_filename",
+            "manifest_filename",
+            "consumer_script_filename",
+            "consumer_script_bundle_filename",
+            "trusted_root",
+            "cosign_image",
+        },
+        "policy.consumer",
+    )
+    expected_consumer_names = {
+        "descriptor_filename": "backupsheep-release-descriptor-v2.txt",
+        "descriptor_bundle_filename": "backupsheep-release-descriptor-v2.sigstore.json",
+        "manifest_filename": "release-manifest.json",
+        "consumer_script_filename": "backupsheep-consume-signed-release-v2.sh",
+        "consumer_script_bundle_filename": "backupsheep-consume-signed-release-v2.sigstore.json",
+    }
+    for key, expected in expected_consumer_names.items():
+        if consumer[key] != expected:
+            raise ReleaseVerificationError(f"policy.consumer.{key} is not the canonical consumer filename")
+    trusted_root = _mapping(consumer["trusted_root"], "policy.consumer.trusted_root")
+    _exact_keys(
+        trusted_root,
+        {"path", "sha256", "source_repository", "source_commit", "source_path"},
+        "policy.consumer.trusted_root",
+    )
+    if trusted_root["path"] != "deploy/release/sigstore-trusted-root.json":
+        raise ReleaseVerificationError("policy.consumer.trusted_root.path is not canonical")
+    if not HEX_SHA256_RE.fullmatch(
+        _string(trusted_root["sha256"], "policy.consumer.trusted_root.sha256")
+    ):
+        raise ReleaseVerificationError("policy.consumer.trusted_root.sha256 must be lowercase SHA-256")
+    if trusted_root["source_repository"] != "sigstore/root-signing":
+        raise ReleaseVerificationError("policy.consumer.trusted_root source repository is not authorized")
+    if not COMMIT_RE.fullmatch(
+        _string(trusted_root["source_commit"], "policy.consumer.trusted_root.source_commit")
+    ):
+        raise ReleaseVerificationError("policy.consumer.trusted_root source commit must be exact")
+    if trusted_root["source_path"] != "targets/trusted_root.json":
+        raise ReleaseVerificationError("policy.consumer.trusted_root source path is not canonical")
+
+    trusted_root_path = (ROOT / trusted_root["path"]).resolve()
+    try:
+        trusted_root_path.relative_to(ROOT)
+    except ValueError as exc:
+        raise ReleaseVerificationError("consumer trusted root escapes the repository") from exc
+    trusted_root_payload = _mapping(
+        _load_json(trusted_root_path, maximum_bytes=64 * 1024),
+        "consumer trusted root",
+    )
+    if trusted_root_payload.get("mediaType") != (
+        "application/vnd.dev.sigstore.trustedroot+json;version=0.1"
+    ):
+        raise ReleaseVerificationError("checked-in consumer trusted root media type is invalid")
+    if _sha256_path(trusted_root_path) != f"sha256:{trusted_root['sha256']}":
+        raise ReleaseVerificationError("checked-in consumer trusted root digest mismatch")
+
+    cosign_image = _mapping(consumer["cosign_image"], "policy.consumer.cosign_image")
+    _exact_keys(
+        cosign_image,
+        {
+            "version",
+            "runtime_contract_version",
+            "repository",
+            "index_digest",
+            "reference",
+            "platforms",
+        },
+        "policy.consumer.cosign_image",
+    )
+    if cosign_image["version"] != "3.1.3":
+        raise ReleaseVerificationError("policy.consumer.cosign_image.version is not the reviewed version")
+    if (
+        _integer(
+            cosign_image["runtime_contract_version"],
+            "policy.consumer.cosign_image.runtime_contract_version",
+        )
+        != 1
+    ):
+        raise ReleaseVerificationError("consumer verifier runtime contract is not supported")
+    verifier_repository = _validate_repository(
+        cosign_image["repository"], registry, "policy.consumer.cosign_image.repository"
+    )
+    if verifier_repository != "ghcr.io/bilal414/backupsheep-release-verifier":
+        raise ReleaseVerificationError("policy.consumer.cosign_image.repository is not authorized")
+    if verifier_repository in all_repositories:
+        raise ReleaseVerificationError("consumer verifier repository must be separate from release repositories")
+    verifier_index = _digest(
+        cosign_image["index_digest"], "policy.consumer.cosign_image.index_digest"
+    )
+    if cosign_image["reference"] != f"{verifier_repository}@{verifier_index}":
+        raise ReleaseVerificationError("policy.consumer.cosign_image.reference is not index-digest bound")
+    verifier_platforms = _mapping(
+        cosign_image["platforms"], "policy.consumer.cosign_image.platforms"
+    )
+    if list(verifier_platforms) != platforms:
+        raise ReleaseVerificationError("policy consumer verifier platforms must exactly match policy platforms in order")
+    verifier_digests = [verifier_index]
+    for platform in platforms:
+        record = _mapping(
+            verifier_platforms[platform],
+            f"policy.consumer.cosign_image.platforms.{platform}",
+        )
+        _exact_keys(
+            record,
+            {"manifest_digest", "config_digest"},
+            f"policy.consumer.cosign_image.platforms.{platform}",
+        )
+        verifier_digests.extend(
+            (
+                _digest(record["manifest_digest"], f"consumer verifier {platform} manifest digest"),
+                _digest(record["config_digest"], f"consumer verifier {platform} config digest"),
+            )
+        )
+    if len(verifier_digests) != len(set(verifier_digests)):
+        raise ReleaseVerificationError("consumer verifier index, manifest, and config digests must all be distinct")
+
+    transition_policy = _mapping(policy["transition"], "policy.transition")
+    _exact_keys(
+        transition_policy,
+        {
+            "schema_version",
+            "policy_path",
+            "migration_contract_command",
+            "maximum_predecessors",
+        },
+        "policy.transition",
+    )
+    if transition_policy != {
+        "schema_version": 1,
+        "policy_path": "deploy/release-transition-policy.json",
+        "migration_contract_command": ["python", "-m", "apps.release_migration_contract"],
+        "maximum_predecessors": release_transition.MAX_PREDECESSORS,
+    }:
+        raise ReleaseVerificationError("policy.transition is not the reviewed schema-4 contract")
+    try:
+        reviewed_transition = release_transition.load_json(ROOT / transition_policy["policy_path"])
+        release_transition.validate_transition_policy(reviewed_transition)
+    except (OSError, release_transition.TransitionContractError) as exc:
+        raise ReleaseVerificationError(f"reviewed transition policy is invalid: {exc}") from exc
+
     attestations = _mapping(policy["attestations"], "policy.attestations")
     _exact_keys(
         attestations,
@@ -265,9 +463,9 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         raise ReleaseVerificationError("both CycloneDX JSON and SPDX JSON attestations are required")
 
     tools = _mapping(policy["tools"], "policy.tools")
-    if set(tools) != {"actionlint", "cosign", "oras", "syft", "trivy"}:
+    if set(tools) != {"actionlint", "cosign", "grype", "oras", "syft", "trivy"}:
         raise ReleaseVerificationError(
-            "policy.tools must contain exactly actionlint, cosign, oras, syft, and trivy"
+            "policy.tools must contain exactly actionlint, cosign, grype, oras, syft, and trivy"
         )
     for name, raw_tool in tools.items():
         tool = _mapping(raw_tool, f"policy.tools.{name}")
@@ -286,17 +484,57 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         member = tool["archive_member"]
         if member is not None and (not isinstance(member, str) or not member or "/" in member):
             raise ReleaseVerificationError(f"policy.tools.{name}.archive_member is unsafe")
+    if tools["cosign"]["version"] != cosign_image["version"]:
+        raise ReleaseVerificationError("consumer verifier and pinned Cosign tool versions differ")
 
     vulnerability = _mapping(policy["vulnerability_policy"], "policy.vulnerability_policy")
     _exact_keys(
         vulnerability,
-        {"scanner", "scanner_version", "fail_severities", "ignore_unfixed", "allowlist"},
+        {
+            "scanner",
+            "scanner_version",
+            "secondary_scanner",
+            "secondary_scanner_version",
+            "database",
+            "secondary_database",
+            "fail_severities",
+            "ignore_unfixed",
+            "allowlist",
+        },
         "policy.vulnerability_policy",
     )
     if vulnerability["scanner"] != "trivy":
         raise ReleaseVerificationError("Trivy is the required scanner")
     if vulnerability["scanner_version"] != tools["trivy"]["version"]:
         raise ReleaseVerificationError("Trivy policy and pinned tool versions differ")
+    if vulnerability["secondary_scanner"] != "grype":
+        raise ReleaseVerificationError("Grype is the required secondary scanner")
+    if vulnerability["secondary_scanner_version"] != tools["grype"]["version"]:
+        raise ReleaseVerificationError("Grype policy and pinned tool versions differ")
+    database = _mapping(vulnerability["database"], "policy.vulnerability_policy.database")
+    _exact_keys(
+        database,
+        {"lock_path", "lock_sha256"},
+        "policy.vulnerability_policy.database",
+    )
+    if database["lock_path"] != "deploy/trivy-db-lock.json":
+        raise ReleaseVerificationError("Trivy database lock path is not canonical")
+    _digest(database["lock_sha256"], "policy.vulnerability_policy.database.lock_sha256")
+    secondary_database = _mapping(
+        vulnerability["secondary_database"],
+        "policy.vulnerability_policy.secondary_database",
+    )
+    _exact_keys(
+        secondary_database,
+        {"lock_path", "lock_sha256"},
+        "policy.vulnerability_policy.secondary_database",
+    )
+    if secondary_database["lock_path"] != "deploy/grype-db-lock.json":
+        raise ReleaseVerificationError("Grype database lock path is not canonical")
+    _digest(
+        secondary_database["lock_sha256"],
+        "policy.vulnerability_policy.secondary_database.lock_sha256",
+    )
     if _unique_strings(vulnerability["fail_severities"], "policy.vulnerability_policy.fail_severities") != [
         "HIGH",
         "CRITICAL",
@@ -589,6 +827,227 @@ def _validate_trivy_report(document: Any, expected_reference: str, fail_severiti
         raise ReleaseVerificationError(f"{label} contains release-blocking vulnerabilities: {', '.join(forbidden[:10])}")
 
 
+def _validate_grype_report(
+    document: Any,
+    expected_reference: str,
+    expected_digest: str,
+    expected_version: str,
+    fail_severities: set[str],
+    label: str,
+    expected_database: dict[str, Any],
+    allowed_ignored: set[str] | None = None,
+    expected_vex_document: str | None = None,
+    expected_source_tags: list[str] | None = None,
+    expected_name: str = "",
+) -> dict[str, Any]:
+    """Validate an unsuppressed Grype report over one exact image child."""
+
+    allowed_ignored = allowed_ignored or set()
+    document = _mapping(document, label)
+    expected_document_keys = {"matches", "source", "distro", "descriptor"}
+    if allowed_ignored:
+        expected_document_keys.add("ignoredMatches")
+    _exact_keys(document, expected_document_keys, label)
+    source = _mapping(document["source"], f"{label}.source")
+    if source.get("type") != "image":
+        raise ReleaseVerificationError(f"{label} is not an image scan")
+    target = _mapping(source.get("target"), f"{label}.source.target")
+    if expected_source_tags is not None and target.get("tags") != expected_source_tags:
+        raise ReleaseVerificationError(f"{label} did not scan the exact VEX product tag")
+    if target.get("userInput") != expected_reference:
+        raise ReleaseVerificationError(f"{label} is not bound to {expected_reference}")
+    if target.get("manifestDigest") != expected_digest:
+        raise ReleaseVerificationError(f"{label} is not bound to child digest {expected_digest}")
+    image_id = _digest(target.get("imageID"), f"{label}.source.target.imageID")
+    manifest_payload = target.get("manifest")
+    if not isinstance(manifest_payload, str) or not manifest_payload:
+        raise ReleaseVerificationError(f"{label} has no embedded child manifest")
+    try:
+        manifest_bytes = base64.b64decode(manifest_payload, validate=True)
+        manifest = json.loads(
+            manifest_bytes,
+            object_pairs_hook=_no_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+    except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseVerificationError(f"{label} embedded child manifest is invalid") from exc
+    if "sha256:" + hashlib.sha256(manifest_bytes).hexdigest() != expected_digest:
+        raise ReleaseVerificationError(f"{label} embedded child manifest has the wrong digest")
+    manifest = _mapping(manifest, f"{label}.source.target.manifest")
+    manifest_config = _mapping(
+        manifest.get("config"), f"{label}.source.target.manifest.config"
+    )
+    if _digest(
+        manifest_config.get("digest"),
+        f"{label}.source.target.manifest.config.digest",
+    ) != image_id:
+        raise ReleaseVerificationError(f"{label} image ID is not the child config digest")
+    manifest_layers = [
+        _digest(
+            _mapping(layer, f"{label}.source.target.manifest.layers[]").get("digest"),
+            f"{label}.source.target.manifest.layers[].digest",
+        )
+        for layer in _list(
+            manifest.get("layers"), f"{label}.source.target.manifest.layers"
+        )
+    ]
+    observed_layers = [
+        _digest(
+            _mapping(layer, f"{label}.source.target.layers[]").get("digest"),
+            f"{label}.source.target.layers[].digest",
+        )
+        for layer in _list(target.get("layers"), f"{label}.source.target.layers")
+    ]
+    if not manifest_layers or observed_layers != manifest_layers:
+        raise ReleaseVerificationError(f"{label} layers do not match the embedded child manifest")
+
+    descriptor = _mapping(document["descriptor"], f"{label}.descriptor")
+    if descriptor.get("name") != "grype" or descriptor.get("version") != expected_version:
+        raise ReleaseVerificationError(f"{label} was not generated by the pinned Grype version")
+    database = _mapping(descriptor.get("db"), f"{label}.descriptor.db")
+    status = _mapping(database.get("status"), f"{label}.descriptor.db.status")
+    expected_status = {
+        "schemaVersion": expected_database["database"]["schema_version"],
+        "from": "manual import",
+        "built": expected_database["database"]["built_at"],
+        "valid": True,
+    }
+    if {key: status.get(key) for key in expected_status} != expected_status:
+        raise ReleaseVerificationError(f"{label} was not generated from the exact locked Grype DB")
+    database_path = _string(status.get("path"), f"{label}.descriptor.db.status.path")
+    if PurePosixPath(database_path).parts[-2:] != ("6", "vulnerability.db"):
+        raise ReleaseVerificationError(f"{label} used an unexpected Grype DB cache path")
+    if not _mapping(database.get("providers"), f"{label}.descriptor.db.providers"):
+        raise ReleaseVerificationError(f"{label} has no Grype DB provider evidence")
+    configuration = _mapping(
+        descriptor.get("configuration"), f"{label}.descriptor.configuration"
+    )
+    if configuration.get("name") != expected_name:
+        raise ReleaseVerificationError(f"{label} uses an unauthorized Grype source name")
+    if configuration.get("fail-on-severity") != "high":
+        raise ReleaseVerificationError(f"{label} does not enforce Grype fail-on high")
+    if configuration.get("only-fixed") is not False or configuration.get("only-notfixed") is not False:
+        raise ReleaseVerificationError(f"{label} excludes fixed or unfixed Grype findings")
+    if configuration.get("check-for-app-update") is not False:
+        raise ReleaseVerificationError(f"{label} permitted a Grype application update check")
+    if configuration.get("ignore-wontfix") not in ("", False, None):
+        raise ReleaseVerificationError(f"{label} suppresses wont-fix Grype findings")
+    if configuration.get("exclude") not in ([], None):
+        raise ReleaseVerificationError(f"{label} excludes image paths from Grype")
+    expected_vex_documents = [expected_vex_document] if expected_vex_document else []
+    if bool(allowed_ignored) != bool(expected_vex_document):
+        raise ReleaseVerificationError(f"{label} has an incomplete Grype VEX authorization")
+    if configuration.get("vex-documents") != expected_vex_documents:
+        raise ReleaseVerificationError(f"{label} uses unauthorized Grype VEX documents")
+    if configuration.get("vex-add") not in ([], None):
+        raise ReleaseVerificationError(f"{label} uses inline Grype VEX statements")
+
+    # JSON reports with suppression evidence add ignoredMatches. Exact top-level
+    # keys above reject that form; also reject vulnerability-specific ignore
+    # rules recorded in Grype's effective configuration. Grype's fixed built-in
+    # package inventory exclusions have an empty vulnerability field.
+    for position, raw_ignore in enumerate(
+        _list(configuration.get("ignore") or [], f"{label}.descriptor.configuration.ignore")
+    ):
+        ignore = _mapping(
+            raw_ignore, f"{label}.descriptor.configuration.ignore[{position}]"
+        )
+        if ignore.get("vulnerability") or ignore.get("namespace") or ignore.get("fix-state"):
+            raise ReleaseVerificationError(f"{label} contains a Grype vulnerability suppression")
+        vex_status = ignore.get("vex-status") or ""
+        if vex_status and (
+            not allowed_ignored or vex_status not in {"fixed", "not_affected"}
+        ):
+            raise ReleaseVerificationError(f"{label} contains an unauthorized Grype VEX rule")
+
+    forbidden: list[str] = []
+    for position, raw_match in enumerate(_list(document["matches"], f"{label}.matches")):
+        match = _mapping(raw_match, f"{label}.matches[{position}]")
+        vulnerability = _mapping(
+            match.get("vulnerability"), f"{label}.matches[{position}].vulnerability"
+        )
+        vulnerability_id = _string(
+            vulnerability.get("id"), f"{label}.matches[{position}].vulnerability.id"
+        )
+        severity = _string(
+            vulnerability.get("severity"),
+            f"{label}.matches[{position}].vulnerability.severity",
+        ).upper()
+        artifact = _mapping(match.get("artifact"), f"{label}.matches[{position}].artifact")
+        _string(artifact.get("name"), f"{label}.matches[{position}].artifact.name")
+        _string(artifact.get("version"), f"{label}.matches[{position}].artifact.version")
+        _string(artifact.get("type"), f"{label}.matches[{position}].artifact.type")
+        if severity in fail_severities:
+            forbidden.append(f"{vulnerability_id}:{severity}")
+    if forbidden:
+        raise ReleaseVerificationError(
+            f"{label} contains release-blocking vulnerabilities: {', '.join(forbidden[:10])}"
+        )
+    observed_ignored: set[str] = set()
+    for position, raw_match in enumerate(
+        _list(document.get("ignoredMatches") or [], f"{label}.ignoredMatches")
+    ):
+        match = _mapping(raw_match, f"{label}.ignoredMatches[{position}]")
+        vulnerability = _mapping(
+            match.get("vulnerability"),
+            f"{label}.ignoredMatches[{position}].vulnerability",
+        )
+        vulnerability_id = _string(
+            vulnerability.get("id"),
+            f"{label}.ignoredMatches[{position}].vulnerability.id",
+        )
+        severity = _string(
+            vulnerability.get("severity"),
+            f"{label}.ignoredMatches[{position}].vulnerability.severity",
+        ).upper()
+        artifact = _mapping(
+            match.get("artifact"), f"{label}.ignoredMatches[{position}].artifact"
+        )
+        if (
+            vulnerability_id not in allowed_ignored
+            or vulnerability_id in observed_ignored
+            or severity not in fail_severities
+            or artifact.get("name") != "erlang"
+            or artifact.get("version") != "26.2.5.21"
+            or artifact.get("type") != "binary"
+            or artifact.get("purl") != "pkg:generic/erlang@26.2.5.21"
+            or match.get("appliedIgnoreRules")
+            != [{"namespace": "vex", "vex-status": "not_affected"}]
+        ):
+            raise ReleaseVerificationError(
+                f"{label} contains an unauthorized ignored Grype finding"
+            )
+        observed_ignored.add(vulnerability_id)
+    if observed_ignored != allowed_ignored:
+        raise ReleaseVerificationError(
+            f"{label} does not contain the exact reviewed ignored Grype finding set"
+        )
+    return {"image_id": image_id, "target": target}
+
+
+def _validate_report_database_binding(
+    value: Any, expected: dict[str, Any], label: str
+) -> dict[str, Any]:
+    binding = _mapping(value, label)
+    _exact_keys(
+        binding,
+        {
+            "lock_sha256",
+            "preparation_evidence_sha256",
+            "database_sha256",
+            "database_schema_version",
+            "database_generated_at",
+        },
+        label,
+    )
+    for key in ("lock_sha256", "preparation_evidence_sha256", "database_sha256"):
+        _digest(binding.get(key), f"{label}.{key}")
+    _string(binding.get("database_generated_at"), f"{label}.database_generated_at")
+    if binding != expected:
+        raise ReleaseVerificationError(f"{label} is not bound to the exact reviewed scanner DB")
+    return binding
+
+
 def _records_by_platform(records: Any, platforms: list[str], label: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for position, raw_record in enumerate(_list(records, label)):
@@ -602,11 +1061,472 @@ def _records_by_platform(records: Any, platforms: list[str], label: str) -> dict
     return result
 
 
+def _validate_vulnerability_database(
+    policy: dict[str, Any],
+    value: Any,
+    artifacts_dir: Path,
+    release_created_at: str,
+) -> dict[str, Any]:
+    """Bind every vulnerability report to both reviewed, release-time-fresh DBs."""
+
+    database = _mapping(value, "manifest.vulnerability_database")
+    _exact_keys(
+        database,
+        {
+            "lock",
+            "preparation_evidence",
+            "secondary_lock",
+            "secondary_preparation_evidence",
+        },
+        "manifest.vulnerability_database",
+    )
+
+    lock_record = _mapping(database["lock"], "manifest.vulnerability_database.lock")
+    _exact_keys(lock_record, {"file", "sha256"}, "manifest.vulnerability_database.lock")
+    if lock_record["file"] != "vulnerability/trivy-db-lock.json":
+        raise ReleaseVerificationError("manifest Trivy DB lock path is not canonical")
+    expected_lock_digest = policy["vulnerability_policy"]["database"]["lock_sha256"]
+    if lock_record["sha256"] != expected_lock_digest:
+        raise ReleaseVerificationError("manifest Trivy DB lock digest differs from policy")
+    _, lock_document = _verify_file(
+        artifacts_dir, lock_record, "manifest.vulnerability_database.lock"
+    )
+
+    evidence_record = _mapping(
+        database["preparation_evidence"],
+        "manifest.vulnerability_database.preparation_evidence",
+    )
+    _exact_keys(
+        evidence_record,
+        {"file", "sha256"},
+        "manifest.vulnerability_database.preparation_evidence",
+    )
+    if evidence_record["file"] != "vulnerability/trivy-db-evidence.json":
+        raise ReleaseVerificationError("manifest Trivy DB evidence path is not canonical")
+    _, evidence_document = _verify_file(
+        artifacts_dir,
+        evidence_record,
+        "manifest.vulnerability_database.preparation_evidence",
+    )
+
+    try:
+        lock = validate_trivy_db_lock(lock_document)
+        release_time = datetime.strptime(
+            release_created_at, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        evidence = validate_trivy_db_evidence(
+            evidence_document,
+            lock,
+            expected_lock_digest.removeprefix("sha256:"),
+            now=release_time,
+            check_freshness=True,
+        )
+    except TrivyDBError as exc:
+        raise ReleaseVerificationError(f"invalid release Trivy DB evidence: {exc}") from exc
+
+    secondary_lock_record = _mapping(
+        database["secondary_lock"], "manifest.vulnerability_database.secondary_lock"
+    )
+    _exact_keys(
+        secondary_lock_record,
+        {"file", "sha256"},
+        "manifest.vulnerability_database.secondary_lock",
+    )
+    if secondary_lock_record["file"] != "vulnerability/grype-db-lock.json":
+        raise ReleaseVerificationError("manifest Grype DB lock path is not canonical")
+    expected_secondary_digest = policy["vulnerability_policy"]["secondary_database"][
+        "lock_sha256"
+    ]
+    if secondary_lock_record["sha256"] != expected_secondary_digest:
+        raise ReleaseVerificationError("manifest Grype DB lock digest differs from policy")
+    _, secondary_lock_document = _verify_file(
+        artifacts_dir,
+        secondary_lock_record,
+        "manifest.vulnerability_database.secondary_lock",
+    )
+
+    secondary_evidence_record = _mapping(
+        database["secondary_preparation_evidence"],
+        "manifest.vulnerability_database.secondary_preparation_evidence",
+    )
+    _exact_keys(
+        secondary_evidence_record,
+        {"file", "sha256"},
+        "manifest.vulnerability_database.secondary_preparation_evidence",
+    )
+    if secondary_evidence_record["file"] != "vulnerability/grype-db-evidence.json":
+        raise ReleaseVerificationError("manifest Grype DB evidence path is not canonical")
+    _, secondary_evidence_document = _verify_file(
+        artifacts_dir,
+        secondary_evidence_record,
+        "manifest.vulnerability_database.secondary_preparation_evidence",
+    )
+    try:
+        release_time = datetime.strptime(
+            release_created_at, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        secondary_lock = grype_db._validate_lock(  # noqa: SLF001 - shared trust schema
+            secondary_lock_document, now=release_time
+        )
+        secondary_evidence = _mapping(
+            secondary_evidence_document, "Grype DB preparation evidence"
+        )
+        _exact_keys(
+            secondary_evidence,
+            {
+                "schema_version",
+                "lock_sha256",
+                "grype_version",
+                "prepared_at",
+                "archive_sha256",
+                "archive_size",
+                "database_schema_version",
+                "database_built_at",
+                "database_sha256",
+                "database_size",
+            },
+            "Grype DB preparation evidence",
+        )
+        expected_secondary_evidence = {
+            "schema_version": 1,
+            "lock_sha256": expected_secondary_digest.removeprefix("sha256:"),
+            "grype_version": policy["vulnerability_policy"]["secondary_scanner_version"],
+            "archive_sha256": secondary_lock["archive"]["sha256"],
+            "archive_size": secondary_lock["archive"]["size"],
+            "database_schema_version": secondary_lock["database"]["schema_version"],
+            "database_built_at": secondary_lock["database"]["built_at"],
+            "database_sha256": secondary_lock["database"]["sha256"],
+            "database_size": secondary_lock["database"]["size"],
+        }
+        if {
+            key: value
+            for key, value in secondary_evidence.items()
+            if key != "prepared_at"
+        } != expected_secondary_evidence:
+            raise ReleaseVerificationError("Grype DB preparation evidence differs from the lock")
+        prepared_time = datetime.strptime(
+            _timestamp(
+                secondary_evidence["prepared_at"], "Grype DB preparation evidence.prepared_at"
+            ),
+            "%Y-%m-%dT%H:%M:%SZ",
+        ).replace(tzinfo=timezone.utc)
+        built_time = datetime.strptime(
+            secondary_lock["database"]["built_at"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        if not built_time <= prepared_time <= release_time:
+            raise ReleaseVerificationError("Grype DB evidence preparation time is inconsistent")
+    except grype_db.GrypeDBError as exc:
+        raise ReleaseVerificationError(f"invalid release Grype DB evidence: {exc}") from exc
+    return {
+        "lock": lock,
+        "preparation_evidence": evidence,
+        "secondary_lock": secondary_lock,
+        "secondary_preparation_evidence": secondary_evidence,
+        "report_bindings": {
+            "trivy": {
+                "lock_sha256": lock_record["sha256"],
+                "preparation_evidence_sha256": evidence_record["sha256"],
+                "database_sha256": f"sha256:{evidence['db_sha256']}",
+                "database_schema_version": evidence["database_schema_version"],
+                "database_generated_at": evidence["updated_at"],
+            },
+            "grype": {
+                "lock_sha256": secondary_lock_record["sha256"],
+                "preparation_evidence_sha256": secondary_evidence_record["sha256"],
+                "database_sha256": f"sha256:{secondary_evidence['database_sha256']}",
+                "database_schema_version": secondary_evidence[
+                    "database_schema_version"
+                ],
+                "database_generated_at": secondary_evidence["database_built_at"],
+            },
+        },
+    }
+
+
+def _validate_consumer_evidence(
+    policy: dict[str, Any],
+    value: Any,
+    artifacts_dir: Path,
+    vulnerability_database: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the release to the separately bootstrapped verifier and fresh scans."""
+
+    consumer_policy = policy["consumer"]
+    consumer = _mapping(value, "manifest.consumer")
+    _exact_keys(
+        consumer,
+        {
+            "descriptor_filename",
+            "descriptor_bundle_filename",
+            "manifest_filename",
+            "consumer_script_filename",
+            "consumer_script_bundle_filename",
+            "trusted_root",
+            "cosign_image",
+        },
+        "manifest.consumer",
+    )
+    for key in (
+        "descriptor_filename",
+        "descriptor_bundle_filename",
+        "manifest_filename",
+        "consumer_script_filename",
+        "consumer_script_bundle_filename",
+    ):
+        if consumer[key] != consumer_policy[key]:
+            raise ReleaseVerificationError(f"manifest.consumer.{key} differs from policy")
+
+    trusted_policy = consumer_policy["trusted_root"]
+    trusted = _mapping(consumer["trusted_root"], "manifest.consumer.trusted_root")
+    _exact_keys(
+        trusted,
+        {"file", "sha256", "source_repository", "source_commit", "source_path"},
+        "manifest.consumer.trusted_root",
+    )
+    if trusted["file"] != "consumer/sigstore-trusted-root.json":
+        raise ReleaseVerificationError("manifest consumer trusted-root artifact path is not canonical")
+    expected_trusted_digest = f"sha256:{trusted_policy['sha256']}"
+    if trusted["sha256"] != expected_trusted_digest:
+        raise ReleaseVerificationError("manifest consumer trusted-root digest differs from policy")
+    for key in ("source_repository", "source_commit", "source_path"):
+        if trusted[key] != trusted_policy[key]:
+            raise ReleaseVerificationError(f"manifest consumer trusted-root {key} differs from policy")
+    _, trusted_document = _verify_file(
+        artifacts_dir,
+        {"file": trusted["file"], "sha256": trusted["sha256"]},
+        "manifest.consumer.trusted_root",
+    )
+    trusted_document = _mapping(trusted_document, "consumer trusted-root document")
+    _exact_keys(
+        trusted_document,
+        {"mediaType", "tlogs", "certificateAuthorities", "ctlogs", "timestampAuthorities"},
+        "consumer trusted-root document",
+    )
+    if trusted_document["mediaType"] != "application/vnd.dev.sigstore.trustedroot+json;version=0.1":
+        raise ReleaseVerificationError("consumer trusted-root media type is not supported")
+    for key in ("tlogs", "certificateAuthorities", "ctlogs", "timestampAuthorities"):
+        if not _list(trusted_document[key], f"consumer trusted-root {key}"):
+            raise ReleaseVerificationError(f"consumer trusted-root {key} is empty")
+
+    verifier_policy = consumer_policy["cosign_image"]
+    verifier = _mapping(consumer["cosign_image"], "manifest.consumer.cosign_image")
+    _exact_keys(
+        verifier,
+        {
+            "version",
+            "runtime_contract_version",
+            "repository",
+            "index_digest",
+            "reference",
+            "platforms",
+        },
+        "manifest.consumer.cosign_image",
+    )
+    for key in (
+        "version",
+        "runtime_contract_version",
+        "repository",
+        "index_digest",
+        "reference",
+    ):
+        if verifier[key] != verifier_policy[key]:
+            raise ReleaseVerificationError(f"manifest consumer verifier {key} differs from policy")
+
+    platforms = policy["platforms"]
+    platform_records = _records_by_platform(
+        verifier["platforms"], platforms, "manifest.consumer.cosign_image.platforms"
+    )
+    source_documents: dict[str, Any] = {}
+    report_documents: dict[str, Any] = {}
+    secondary_report_documents: dict[str, Any] = {}
+    for platform in platforms:
+        record = platform_records[platform]
+        label = f"manifest.consumer.cosign_image.platforms[{platform}]"
+        _exact_keys(
+            record,
+            {
+                "platform",
+                "manifest_digest",
+                "config_digest",
+                "source_catalog",
+                "vulnerability_report",
+                "secondary_vulnerability_report",
+            },
+            label,
+        )
+        expected = verifier_policy["platforms"][platform]
+        if record["manifest_digest"] != expected["manifest_digest"]:
+            raise ReleaseVerificationError(f"{label}.manifest_digest differs from policy")
+        if record["config_digest"] != expected["config_digest"]:
+            raise ReleaseVerificationError(f"{label}.config_digest differs from policy")
+        child_digest = _digest(record["manifest_digest"], f"{label}.manifest_digest")
+        config_digest = _digest(record["config_digest"], f"{label}.config_digest")
+        reference = f"{verifier_policy['repository']}@{child_digest}"
+        slug = platform.replace("/", "-")
+
+        catalog_record = _mapping(record["source_catalog"], f"{label}.source_catalog")
+        _exact_keys(
+            catalog_record,
+            {"format", "generator", "generator_version", "file", "sha256"},
+            f"{label}.source_catalog",
+        )
+        if (
+            catalog_record["format"] != "syft-json"
+            or catalog_record["generator"] != "syft"
+            or catalog_record["generator_version"] != policy["tools"]["syft"]["version"]
+        ):
+            raise ReleaseVerificationError(f"{label}.source_catalog format or generator is not authorized")
+        if catalog_record["file"] != f"consumer/release-verifier-{slug}.syft.json":
+            raise ReleaseVerificationError(f"{label}.source_catalog path is not canonical")
+        _, catalog = _verify_file(artifacts_dir, catalog_record, f"{label}.source_catalog")
+        _validate_syft_catalog(
+            catalog,
+            reference,
+            child_digest,
+            policy["tools"]["syft"]["version"],
+            f"{label}.source_catalog.document",
+        )
+        source_metadata = _mapping(
+            _mapping(catalog, f"{label}.source_catalog.document").get("source"),
+            f"{label}.source_catalog.document.source",
+        ).get("metadata")
+        if _mapping(source_metadata, f"{label}.source_catalog.document.source.metadata").get(
+            "imageID"
+        ) != config_digest:
+            raise ReleaseVerificationError(f"{label}.source_catalog is not config-digest bound")
+
+        report_record = _mapping(record["vulnerability_report"], f"{label}.vulnerability_report")
+        _exact_keys(
+            report_record,
+            {
+                "scanner",
+                "scanner_version",
+                "fail_severities",
+                "ignore_unfixed",
+                "database",
+                "file",
+                "sha256",
+            },
+            f"{label}.vulnerability_report",
+        )
+        vulnerability = policy["vulnerability_policy"]
+        if (
+            report_record["scanner"] != vulnerability["scanner"]
+            or report_record["scanner_version"] != vulnerability["scanner_version"]
+            or report_record["fail_severities"] != vulnerability["fail_severities"]
+            or _boolean(report_record["ignore_unfixed"], f"{label}.ignore_unfixed")
+        ):
+            raise ReleaseVerificationError(f"{label}.vulnerability_report weakens policy")
+        if report_record["file"] != f"consumer/release-verifier-{slug}.trivy.json":
+            raise ReleaseVerificationError(f"{label}.vulnerability_report path is not canonical")
+        _validate_report_database_binding(
+            report_record["database"],
+            vulnerability_database["report_bindings"]["trivy"],
+            f"{label}.vulnerability_report.database",
+        )
+        _, report = _verify_file(
+            artifacts_dir, report_record, f"{label}.vulnerability_report"
+        )
+        _validate_trivy_report(
+            report,
+            reference,
+            set(vulnerability["fail_severities"]),
+            f"{label}.vulnerability_report.document",
+        )
+        report_metadata = _mapping(
+            _mapping(report, f"{label}.vulnerability_report.document").get("Metadata"),
+            f"{label}.vulnerability_report.document.Metadata",
+        )
+        if report_metadata.get("ImageID") != config_digest:
+            raise ReleaseVerificationError(f"{label}.vulnerability_report is not config-digest bound")
+
+        secondary_report_record = _mapping(
+            record["secondary_vulnerability_report"],
+            f"{label}.secondary_vulnerability_report",
+        )
+        _exact_keys(
+            secondary_report_record,
+            {
+                "scanner",
+                "scanner_version",
+                "fail_severities",
+                "ignore_unfixed",
+                "database",
+                "file",
+                "sha256",
+            },
+            f"{label}.secondary_vulnerability_report",
+        )
+        if (
+            secondary_report_record["scanner"] != vulnerability["secondary_scanner"]
+            or secondary_report_record["scanner_version"]
+            != vulnerability["secondary_scanner_version"]
+            or secondary_report_record["fail_severities"]
+            != vulnerability["fail_severities"]
+            or _boolean(
+                secondary_report_record["ignore_unfixed"],
+                f"{label}.secondary_vulnerability_report.ignore_unfixed",
+            )
+        ):
+            raise ReleaseVerificationError(
+                f"{label}.secondary_vulnerability_report weakens policy"
+            )
+        if secondary_report_record["file"] != f"consumer/release-verifier-{slug}.grype.json":
+            raise ReleaseVerificationError(
+                f"{label}.secondary_vulnerability_report path is not canonical"
+            )
+        _validate_report_database_binding(
+            secondary_report_record["database"],
+            vulnerability_database["report_bindings"]["grype"],
+            f"{label}.secondary_vulnerability_report.database",
+        )
+        _, secondary_report = _verify_file(
+            artifacts_dir,
+            secondary_report_record,
+            f"{label}.secondary_vulnerability_report",
+        )
+        grype_binding = _validate_grype_report(
+            secondary_report,
+            reference,
+            child_digest,
+            vulnerability["secondary_scanner_version"],
+            set(vulnerability["fail_severities"]),
+            f"{label}.secondary_vulnerability_report.document",
+            vulnerability_database["secondary_lock"],
+        )
+        if grype_binding["image_id"] != config_digest:
+            raise ReleaseVerificationError(
+                f"{label}.secondary_vulnerability_report is not config-digest bound"
+            )
+        source_documents[platform] = catalog
+        report_documents[platform] = report
+        secondary_report_documents[platform] = secondary_report
+
+    return {
+        "policy": consumer_policy,
+        "manifest": consumer,
+        "source_catalogs": source_documents,
+        "vulnerability_reports": report_documents,
+        "secondary_vulnerability_reports": secondary_report_documents,
+    }
+
+
 def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[str, Any]:
     policy = _validate_policy(policy)
     manifest = _mapping(manifest, "manifest")
-    _exact_keys(manifest, {"schema_version", "release", "images"}, "manifest")
-    if _integer(manifest["schema_version"], "manifest.schema_version") != 2:
+    _exact_keys(
+        manifest,
+        {
+            "schema_version",
+            "release",
+            "transition",
+            "vulnerability_database",
+            "consumer",
+            "images",
+        },
+        "manifest",
+    )
+    if _integer(manifest["schema_version"], "manifest.schema_version") != 4:
         raise ReleaseVerificationError("unsupported release manifest schema")
     release = _mapping(manifest["release"], "manifest.release")
     _exact_keys(
@@ -634,10 +1554,53 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
         raise ReleaseVerificationError("manifest workflow run URL is invalid")
     _timestamp(release["created_at"], "manifest.release.created_at")
 
+    try:
+        reviewed_path = _safe_artifact(
+            artifacts_dir,
+            "transition/reviewed-policy.json",
+            "reviewed transition policy",
+        )
+        migration_path = _safe_artifact(
+            artifacts_dir,
+            "transition/django-migrations.json",
+            "Django migration contract",
+        )
+        reviewed_transition = release_transition.load_json(reviewed_path)
+        migration_contract = release_transition.load_json(migration_path)
+        verified_transition = release_transition.validate_transition_record(
+            manifest["transition"],
+            reviewed_policy=reviewed_transition,
+            migration_contract=migration_contract,
+            reviewed_policy_sha256=_sha256_path(reviewed_path),
+            migration_contract_sha256=_sha256_path(migration_path),
+        )
+    except (OSError, release_transition.TransitionContractError) as exc:
+        raise ReleaseVerificationError(f"manifest transition authorization is invalid: {exc}") from exc
+    if reviewed_path.read_bytes() != (ROOT / policy["transition"]["policy_path"]).read_bytes():
+        raise ReleaseVerificationError("archived transition policy does not byte-match the reviewed source input")
+
     images = _mapping(manifest["images"], "manifest.images")
-    if set(images) != set(policy["images"]):
-        raise ReleaseVerificationError("manifest image set does not match policy")
-    verified: dict[str, Any] = {"policy": policy, "manifest": manifest, "attestation_predicates": {}}
+    if tuple(images) != tuple(policy["images"]):
+        raise ReleaseVerificationError("manifest image set and order do not match policy")
+    vulnerability_database = _validate_vulnerability_database(
+        policy,
+        manifest["vulnerability_database"],
+        artifacts_dir,
+        release["created_at"],
+    )
+    verified: dict[str, Any] = {
+        "policy": policy,
+        "manifest": manifest,
+        "transition": verified_transition,
+        "vulnerability_database": vulnerability_database,
+        "consumer": _validate_consumer_evidence(
+            policy,
+            manifest["consumer"],
+            artifacts_dir,
+            vulnerability_database,
+        ),
+        "attestation_predicates": {},
+    }
     platforms = policy["platforms"]
     predicate_type = policy["attestations"]["provenance_predicate_type"]
 
@@ -659,6 +1622,7 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
                 "source_catalogs",
                 "sboms",
                 "vulnerability_reports",
+                "secondary_vulnerability_reports",
             },
             label,
         )
@@ -778,7 +1742,16 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
             record_label = f"{label}.vulnerability_reports[{platform}]"
             _exact_keys(
                 record,
-                {"platform", "scanner", "scanner_version", "fail_severities", "ignore_unfixed", "file", "sha256"},
+                {
+                    "platform",
+                    "scanner",
+                    "scanner_version",
+                    "fail_severities",
+                    "ignore_unfixed",
+                    "database",
+                    "file",
+                    "sha256",
+                },
                 record_label,
             )
             vulnerability = policy["vulnerability_policy"]
@@ -788,12 +1761,71 @@ def validate_release(policy: Any, manifest: Any, artifacts_dir: Path) -> dict[st
                 raise ReleaseVerificationError(f"{record_label} weakens the failure severity policy")
             if _boolean(record["ignore_unfixed"], f"{record_label}.ignore_unfixed"):
                 raise ReleaseVerificationError(f"{record_label} ignored unfixed vulnerabilities")
+            _validate_report_database_binding(
+                record["database"],
+                vulnerability_database["report_bindings"]["trivy"],
+                f"{record_label}.database",
+            )
             _, report = _verify_file(artifacts_dir, record, record_label)
             _validate_trivy_report(
                 report,
                 f"{quarantine}@{platform_map[platform]}",
                 set(vulnerability["fail_severities"]),
                 f"{record_label}.report",
+            )
+
+        secondary_report_records = _records_by_platform(
+            image["secondary_vulnerability_reports"],
+            platforms,
+            f"{label}.secondary_vulnerability_reports",
+        )
+        for platform, record in secondary_report_records.items():
+            record_label = f"{label}.secondary_vulnerability_reports[{platform}]"
+            _exact_keys(
+                record,
+                {
+                    "platform",
+                    "scanner",
+                    "scanner_version",
+                    "fail_severities",
+                    "ignore_unfixed",
+                    "database",
+                    "file",
+                    "sha256",
+                },
+                record_label,
+            )
+            vulnerability = policy["vulnerability_policy"]
+            if (
+                record["scanner"] != vulnerability["secondary_scanner"]
+                or record["scanner_version"]
+                != vulnerability["secondary_scanner_version"]
+            ):
+                raise ReleaseVerificationError(
+                    f"{record_label} uses an unauthorized scanner"
+                )
+            if record["fail_severities"] != vulnerability["fail_severities"]:
+                raise ReleaseVerificationError(
+                    f"{record_label} weakens the failure severity policy"
+                )
+            if _boolean(record["ignore_unfixed"], f"{record_label}.ignore_unfixed"):
+                raise ReleaseVerificationError(
+                    f"{record_label} ignored unfixed vulnerabilities"
+                )
+            _validate_report_database_binding(
+                record["database"],
+                vulnerability_database["report_bindings"]["grype"],
+                f"{record_label}.database",
+            )
+            _, report = _verify_file(artifacts_dir, record, record_label)
+            _validate_grype_report(
+                report,
+                f"{quarantine}@{platform_map[platform]}",
+                platform_map[platform],
+                vulnerability["secondary_scanner_version"],
+                set(vulnerability["fail_severities"]),
+                f"{record_label}.report",
+                vulnerability_database["secondary_lock"],
             )
 
         verified["attestation_predicates"][image_name] = {
@@ -827,12 +1859,9 @@ def _run_tool(executable: str, arguments: list[str], env_prefixes: tuple[str, ..
         if name.startswith(env_prefixes):
             environment.pop(name, None)
     try:
-        result = subprocess.run(
+        result = run_text(
             [executable, *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=environment,
+            environment=environment,
             timeout=300,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -879,6 +1908,23 @@ def _statements_from_cosign(output: str) -> list[dict[str, Any]]:
     if not statements:
         raise ReleaseVerificationError("Cosign returned no verified attestation statements")
     return statements
+
+
+def _require_one_verified_signature(output: str, *, digest: str) -> None:
+    values = _json_stream(output)
+    if len(values) == 1 and isinstance(values[0], list):
+        values = values[0]
+    if len(values) != 1:
+        raise ReleaseVerificationError(
+            f"expected exactly one verified image signature for {digest}"
+        )
+    signature = _mapping(values[0], "Cosign signature output")
+    critical = _mapping(signature.get("critical"), "Cosign signature critical data")
+    image = _mapping(critical.get("image"), "Cosign signature image data")
+    if image.get("docker-manifest-digest") != digest:
+        raise ReleaseVerificationError(
+            f"verified image signature does not bind exact digest {digest}"
+        )
 
 
 def _require_matching_attestation(
@@ -946,10 +1992,24 @@ def verify_registry_evidence(
         for repository in repositories:
             index_reference = f"{repository}@{image['digest']}"
             _fetch_and_match_index(oras, index_reference, index_path, image["digest"])
-            _run_tool(cosign, ["verify", *identity_args, index_reference], ("COSIGN_", "SIGSTORE_"))
+            signature_output = _run_tool(
+                cosign,
+                ["verify", *identity_args, index_reference],
+                ("COSIGN_", "SIGSTORE_"),
+            )
+            _require_one_verified_signature(
+                signature_output, digest=image["digest"]
+            )
             for platform, child_digest in image["platforms"].items():
                 child_reference = f"{repository}@{child_digest}"
-                _run_tool(cosign, ["verify", *identity_args, child_reference], ("COSIGN_", "SIGSTORE_"))
+                signature_output = _run_tool(
+                    cosign,
+                    ["verify", *identity_args, child_reference],
+                    ("COSIGN_", "SIGSTORE_"),
+                )
+                _require_one_verified_signature(
+                    signature_output, digest=child_digest
+                )
                 provenance_output = _run_tool(
                     cosign,
                     ["verify-attestation", "--type", "slsaprovenance1", *identity_args, child_reference],

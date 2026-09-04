@@ -1,4 +1,4 @@
-import re
+from html.parser import HTMLParser
 from unittest import mock
 
 from django.conf import settings
@@ -26,6 +26,46 @@ THIRD_PARTY_CANARIES = (
     "intercom",
     "iubenda",
 )
+
+
+class _ScriptElementParser(HTMLParser):
+    """Collect script elements without treating HTML as a regular language."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.scripts = []
+        self._active_script = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag.casefold() != "script":
+            return
+        if self._active_script is not None:
+            raise ValueError("nested script elements are not valid auth-page markup")
+        self._active_script = {
+            "attributes": {name.casefold(): value for name, value in attrs},
+            "body": [],
+        }
+        self.scripts.append(self._active_script)
+
+    def handle_data(self, data):
+        if self._active_script is not None:
+            self._active_script["body"].append(data)
+
+    def handle_endtag(self, tag):
+        if tag.casefold() == "script":
+            self._active_script = None
+
+
+def _script_elements(document):
+    parser = _ScriptElementParser()
+    parser.feed(document)
+    parser.close()
+    if parser._active_script is not None:
+        raise ValueError("unclosed script element in auth-page markup")
+    return tuple(
+        (script["attributes"], "".join(script["body"]))
+        for script in parser.scripts
+    )
 
 
 def _mark_configured():
@@ -59,14 +99,14 @@ class AuthPageIsolationTests(BaseTestCase):
         self.assertNotIn("x-data", lowered)
         self.assertNotIn("@click", lowered)
 
-        scripts = re.findall(
-            r"<script(?P<attributes>[^>]*)>(?P<body>.*?)</script>",
-            document,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
+        scripts = _script_elements(document)
         self.assertEqual(len(scripts), 1, scripts)
         attributes, body = scripts[0]
-        self.assertRegex(attributes, r'src="/static/console/js/auth(?:\.[^/\"]+)?\.js"')
+        self.assertEqual(set(attributes), {"defer", "src"})
+        self.assertIsNone(attributes["defer"])
+        self.assertRegex(
+            attributes["src"], r"^/static/console/js/auth(?:\.[^/\"]+)?\.js$"
+        )
         self.assertEqual(body.strip(), "")
 
     @override_settings(ALLOWED_HOSTS=["allowed.example"], DEBUG=False)
@@ -83,6 +123,22 @@ class AuthPageIsolationTests(BaseTestCase):
             BrowserSecurityHeadersMiddleware.AUTH_CONTENT_SECURITY_POLICY,
         )
         self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+
+    def test_security_txt_is_public_and_contains_no_instance_details(self):
+        for path in ("/.well-known/security.txt", "/security.txt"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200, response.content)
+                self.assertEqual(
+                    response.headers["Content-Type"], "text/plain; charset=utf-8"
+                )
+                document = response.content.decode()
+                self.assertIn(
+                    "Contact: https://github.com/bilal414/backupsheep/security/advisories/new",
+                    document,
+                )
+                self.assertIn("Expires: 2027-08-28T23:59:59Z", document)
+                self.assertNotIn(settings.SECRET_KEY, document)
 
     def test_login_reset_and_invite_pages_are_third_party_isolated(self):
         invite = CoreInvite.objects.create(
@@ -111,11 +167,7 @@ class AuthPageIsolationTests(BaseTestCase):
         )
         script_documents = " ".join(
             body
-            for _attributes, body in re.findall(
-                r"<script([^>]*)>(.*?)</script>",
-                document,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
+            for _attributes, body in _script_elements(document)
         )
         self.assertNotIn(reset_token, script_documents)
 

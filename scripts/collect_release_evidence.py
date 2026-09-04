@@ -15,6 +15,7 @@ from pathlib import Path
 
 from verify_release import (
     MAX_CONTROL_FILE_BYTES,
+    RELEASE_IMAGE_NAMES,
     ReleaseVerificationError,
     _digest,
     _load_json,
@@ -380,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--artifacts-dir", type=Path, required=True)
-    parser.add_argument("--image", choices=("app", "postgres", "egress"), required=True)
+    parser.add_argument("--image", choices=RELEASE_IMAGE_NAMES, required=True)
     parser.add_argument("--digest", required=True)
     parser.add_argument("--oras", default="oras")
     parser.add_argument("--oci-layout", type=Path)

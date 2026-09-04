@@ -205,12 +205,10 @@ def _recovery_backup_models():
             CoreBasecampBackup,
             CoreDatabaseBackup,
             CoreWebsiteBackup,
-            CoreWordPressBackup,
         )
         _DATABASE_BACKUP_MODELS = (CoreDatabaseBackup,)
         _FILES_BACKUP_MODELS = (
             CoreWebsiteBackup,
-            CoreWordPressBackup,
             CoreBasecampBackup,
         )
     return (
@@ -998,7 +996,6 @@ def _local_upload_is_active(backup):
     for relation_name in (
         "stored_website_backups",
         "stored_database_backups",
-        "stored_wordpress_backups",
         "stored_basecamp_backups",
     ):
         relation = getattr(backup, relation_name, None)
@@ -1240,7 +1237,7 @@ def resume_in_progress_database_backups(self):
     name="resume_in_progress_files_backups", bind=True, ignore_result=True
 )
 def resume_in_progress_files_backups(self):
-    """Recover website/WordPress/Basecamp dumps only in the files lane."""
+    """Recover website/Basecamp dumps only in the files lane."""
 
     _cloud_models, _database_models, files_models = _recovery_backup_models()
     return _resume_in_progress_backup_models(files_models, cloud=False)
@@ -1550,7 +1547,7 @@ def _prune_old_run_logs(max_age_days=None):
 
 @current_app.task(name="delete_old_logs", bind=True, ignore_result=True)
 def delete_old_logs(self, max_age_days=None):
-    """Prune website/WordPress/Basecamp run logs in the files private workdir."""
+    """Prune website/Basecamp run logs in the files private workdir."""
 
     return _prune_old_run_logs(max_age_days)
 
@@ -2367,9 +2364,7 @@ def digitalocean_clean_volume_snapshots(self):
 """
 RUNS ON ENDPOINT NODE
 """
-LOCAL_NODE_INTEGRATIONS = frozenset(
-    {"basecamp", "database", "website", "wordpress"}
-)
+LOCAL_NODE_INTEGRATIONS = frozenset({"basecamp", "database", "website"})
 
 
 def _node_deletion_lane(node):
@@ -2706,28 +2701,22 @@ def calc_stats_storage_insight(self):
                     .annotate(
                         Sum("website_backups__size"),
                         Sum("database_backups__size"),
-                        Sum("wordpress_backups__size"),
                         Count("database_backups", distinct=True),
                         Count("website_backups", distinct=True),
-                        Count("wordpress_backups", distinct=True),
                         Count("database_backups__database", distinct=True),
                         Count("website_backups__website", distinct=True),
-                        Count("wordpress_backups__wordpress", distinct=True),
                     )
                     .order_by("-created")
                 ):
                     # Counts
                     storage.stats_website_count = storage.website_backups__count
                     storage.stats_database_count = storage.database_backups__count
-                    storage.stats_wordpress_count = storage.wordpress_backups__count
                     # Backups
                     storage.stats_website_backup_count = storage.website_backups__website__count
                     storage.stats_database_backup_count = storage.database_backups__database__count
-                    storage.stats_wordpress_backup_count = storage.wordpress_backups__wordpress__count
                     # Size
                     storage.stats_website_size = storage.website_backups__size__sum
                     storage.stats_database_size = storage.database_backups__size__sum
-                    storage.stats_wordpress_size = storage.wordpress_backups__size__sum
                     storage.save()
 
     except Exception as e:

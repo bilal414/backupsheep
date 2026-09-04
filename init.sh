@@ -276,10 +276,9 @@ unset \
   allow_basecamp_credentials \
   allow_storage_provider_credentials
 
-# The stock enterprise path uses distinct file-backed AWS credentials for the
-# database and files source/restore lanes. Ambient environment, web identity,
-# container metadata and SDK endpoint overrides would either leak decrypt authority
-# to unrelated roles or bypass the reviewed KMS endpoint policy, so reject them.
+# Ambient AWS environment, web identity, container metadata, and SDK endpoint
+# overrides are not part of the stock credential model. Backup-provider credentials
+# are loaded from account-scoped encrypted database records, so reject ambient values.
 for ambient_aws_value in \
   "${AWS_ACCESS_KEY_ID:-}" \
   "${AWS_SECRET_ACCESS_KEY:-}" \
@@ -288,6 +287,7 @@ for ambient_aws_value in \
   "${AWS_PROFILE:-}" \
   "${AWS_DEFAULT_PROFILE:-}" \
   "${AWS_CONFIG_FILE:-}" \
+  "${AWS_SHARED_CREDENTIALS_FILE:-}" \
   "${AWS_CA_BUNDLE:-}" \
   "${AWS_METADATA_SERVICE_ENDPOINT:-}" \
   "${AWS_METADATA_SERVICE_ENDPOINT_MODE:-}" \
@@ -299,8 +299,7 @@ for ambient_aws_value in \
   "${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:-}" \
   "${AWS_CONTAINER_AUTHORIZATION_TOKEN:-}" \
   "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE:-}" \
-  "${AWS_ENDPOINT_URL:-}" \
-  "${AWS_ENDPOINT_URL_KMS:-}"; do
+  "${AWS_ENDPOINT_URL:-}"; do
   [ -z "$ambient_aws_value" ] \
     || fail "ambient AWS credentials, roles, metadata, and endpoint overrides are forbidden."
 done
@@ -310,36 +309,63 @@ done
   || fail "AWS instance-metadata v1 must be disabled."
 [ "${AWS_IGNORE_CONFIGURED_ENDPOINT_URLS:-}" = true ] \
   || fail "AWS SDK endpoint environment overrides must be disabled."
-database_kms_credentials='/run/secrets/artifact_kms_database_aws_credentials'
-files_kms_credentials='/run/secrets/artifact_kms_files_aws_credentials'
+database_artifact_keyring='/run/secrets/artifact_local_file_database_keyring'
+files_artifact_keyring='/run/secrets/artifact_local_file_files_keyring'
+[ "${BACKUPSHEEP_ARTIFACT_KEY_PROVIDER:-}" = local-file ] \
+  || fail "the stock artifact key provider must be local-file."
+artifact_keyring_is_read_only_mount() {
+  keyring_mount="$1"
+  awk -v target="$keyring_mount" '
+    $5 == target {
+      matches++
+      read_only = 0
+      count = split($6, options, ",")
+      for (option_index = 1; option_index <= count; option_index++) {
+        if (options[option_index] == "ro") read_only = 1
+      }
+      if (read_only) protected++
+    }
+    END { exit !(matches == 1 && protected == 1) }
+  ' /proc/self/mountinfo
+}
+artifact_keyring_metadata_is_safe() {
+  keyring_path="$1"
+  secret_parent='/run/secrets'
+  [ -d "$secret_parent" ] && [ ! -L "$secret_parent" ] \
+    && [ "$(stat -c '%u:%g' "$secret_parent")" = '0:0' ] \
+    && secret_parent_mode="$(stat -c '%a' "$secret_parent")" \
+    && [ $((0$secret_parent_mode & 022)) -eq 0 ] \
+    && [ "$(stat -c '%a:%h' "$keyring_path")" = '444:1' ] \
+    && artifact_keyring_is_read_only_mount "$keyring_path"
+}
 case "$runtime_role" in
   database)
-    artifact_kms_credentials="$database_kms_credentials"
-    [ ! -e "$files_kms_credentials" ] \
-      || fail "database must not mount the files artifact-KMS credential secret."
-    [ "${AWS_SHARED_CREDENTIALS_FILE:-}" = "$artifact_kms_credentials" ] \
-      || fail "the database lane requires its reviewed artifact-KMS credential file."
-    [ -f "$artifact_kms_credentials" ] && [ ! -L "$artifact_kms_credentials" ] \
-      || fail "the artifact-KMS credential secret must be a regular file."
-    [ "$(stat -c '%u:%g:%a:%h' "$artifact_kms_credentials")" = '0:0:444:1' ] \
-      || fail "the artifact-KMS credential secret metadata is unsafe."
+    artifact_keyring="$database_artifact_keyring"
+    [ ! -e "$files_artifact_keyring" ] \
+      || fail "database must not mount the files artifact keyring."
+    [ "${BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH:-}" = "$artifact_keyring" ] \
+      || fail "the database lane requires its reviewed artifact keyring path."
+    [ -f "$artifact_keyring" ] && [ ! -L "$artifact_keyring" ] \
+      || fail "the artifact keyring must be a regular file."
+    artifact_keyring_metadata_is_safe "$artifact_keyring" \
+      || fail "the artifact keyring metadata is unsafe."
     ;;
   files)
-    artifact_kms_credentials="$files_kms_credentials"
-    [ ! -e "$database_kms_credentials" ] \
-      || fail "files must not mount the database artifact-KMS credential secret."
-    [ "${AWS_SHARED_CREDENTIALS_FILE:-}" = "$artifact_kms_credentials" ] \
-      || fail "the files lane requires its reviewed artifact-KMS credential file."
-    [ -f "$artifact_kms_credentials" ] && [ ! -L "$artifact_kms_credentials" ] \
-      || fail "the artifact-KMS credential secret must be a regular file."
-    [ "$(stat -c '%u:%g:%a:%h' "$artifact_kms_credentials")" = '0:0:444:1' ] \
-      || fail "the artifact-KMS credential secret metadata is unsafe."
+    artifact_keyring="$files_artifact_keyring"
+    [ ! -e "$database_artifact_keyring" ] \
+      || fail "files must not mount the database artifact keyring."
+    [ "${BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH:-}" = "$artifact_keyring" ] \
+      || fail "the files lane requires its reviewed artifact keyring path."
+    [ -f "$artifact_keyring" ] && [ ! -L "$artifact_keyring" ] \
+      || fail "the artifact keyring must be a regular file."
+    artifact_keyring_metadata_is_safe "$artifact_keyring" \
+      || fail "the artifact keyring metadata is unsafe."
     ;;
   *)
-    [ -z "${AWS_SHARED_CREDENTIALS_FILE:-}" ] \
-      || fail "$runtime_role must not receive artifact-KMS credentials."
-    [ ! -e "$database_kms_credentials" ] && [ ! -e "$files_kms_credentials" ] \
-      || fail "$runtime_role must not mount an artifact-KMS credential secret."
+    [ -z "${BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH:-}" ] \
+      || fail "$runtime_role must not receive an artifact keyring path."
+    [ ! -e "$database_artifact_keyring" ] && [ ! -e "$files_artifact_keyring" ] \
+      || fail "$runtime_role must not mount an artifact keyring."
     ;;
 esac
 
@@ -619,7 +645,8 @@ chmod 0700 \
   /run/backupsheep/gunicorn \
   /run/backupsheep/ssh
 
-# Docker bind-mounts secret sources as root-owned mode 0444. Copy only this source
+# Compose retains the host owner's UID for file-backed secrets and mounts them
+# read-only at mode 0444. Copy only this source
 # lane's Ed25519 identity into its private tmpfs and expose the 0600 copy to SSH.
 # Public values are normalized to exactly "ssh-ed25519 base64" so comments can
 # never become shell/UI injection material.
@@ -723,7 +750,7 @@ if [ "$#" -ge 3 ] \
   && [ "$1" = 'python' ] \
   && [ "$2" = 'manage.py' ]; then
   case "$3" in
-    migrate|docker_preflight) run_deployment_preflight='no' ;;
+    migrate|migrate_and_verify_artifact_provider|docker_preflight) run_deployment_preflight='no' ;;
   esac
 fi
 # Database identity provision/seal are reviewed one-shots around migrations. They do

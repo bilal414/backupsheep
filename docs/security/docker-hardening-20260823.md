@@ -10,10 +10,18 @@
 entrypoint, secret loading, startup checks, and application changes required to make
 those boundaries trustworthy
 
+> **Current platform-scope decision, 2026-08-31:** Linux AMD64 (`linux/amd64`) is now
+> the sole supported release platform. This dated assessment intentionally preserves its
+> ARM64 and multi-architecture build, scan, digest, and migration observations as historical
+> evidence; they do not establish current ARM64 support and are no longer release gates.
+> Forward-looking multi-architecture requirements later in this report are superseded.
+> The dormant V2 signed-release path remains disabled pending an atomic, reviewed AMD64-only
+> trust-contract conversion.
+
 > **Current-repository follow-up, 2026-08-25:** The commit, image digests, 2,298-test
 > run, scans and demo observations below remain an immutable evidence snapshot for
 > `7be0729...`. The current working tree subsequently implemented BSE1 chunked
-> AES-256-GCM-SIV artifact envelopes with an AWS KMS integration/policy contract,
+> AES-256-GCM-SIV artifact envelopes with lane-separated local-file root keyrings,
 > private per-lane staging and ciphertext-only handoffs, generation-3 database/task
 > identities, and namespace egress guards. It also hardened the CodeQL-reported
 > credential-output, temporary-file and public exception-message paths. Those
@@ -36,6 +44,60 @@ those boundaries trustworthy
 > evidence, not a zero-vulnerability or released-multi-architecture claim; Canonical
 > still has relevant 26.04 issues in `Needs evaluation`, as detailed below.
 
+> **Repository-only transition follow-up, 2026-08-30:** The current candidate adds an
+> exact-base, networkless RabbitMQ 3.13.7 source-adoption derivative before the
+> source-controlled 4.2.9/4.3.5 transition entrypoints. In-place adoption accepts only
+> the historical single-node stock identity (`guest [administrator]` and `/`) after every
+> queue is drained, retains either the fixed `rabbitmq` node host or one unique reviewed
+> 12-lowercase-hex Docker hostname, and refuses ambiguous/multiple node trees. All project
+> containers and networks must be removed before source adoption. A separate isolated
+> helper converts only the exact `999:999` broker tree to `100:101` before 4.2.9.
+> Signed-release mode is fresh-only and refuses this local-build migration path.
+>
+> The candidate also adds exact target and canonical-model attestation, a durably flushed
+> protected P313/A313, P42/source-clean/target-ready/A42,
+> P43/target-ready/A43 host transition ledger plus secondary
+> pending/final volume witness, canonical recreation, and `.env`-last commit with narrowly
+> bounded crash recovery. The protected ledger is published before Docker mutation and
+> advanced only after exact target postflight; the broker-writable volume witness alone
+> never authorizes recovery. It also makes the stock
+> Docker database name an explicit
+> non-system lowercase identifier at every installer/runtime boundary while preserving
+> provider-valid names for external `DATABASE_URL` and non-stock discrete deployments.
+> These are repository control claims only; exact PR/merge checks and a fresh demo
+> deployment inspection remain separate pending evidence.
+> Normal startup can create a missing RabbitMQ witness only on an empty volume. The broker
+> uid can invoke the mounted nonempty-volume finalizer and write that secondary witness;
+> only the supported wrapper path gives it meaning, and only after matching protected 4.3
+> host attestation. Raw invocation of either transition overlay is unsupported.
+> All three compatibility brokers run with `network_mode: none`, no Compose networks,
+> no secrets, no dependencies, no restart, and zero enabled RabbitMQ plugins. The final
+> canonical 4.3.5 broker alone regains its private product networks and bootstrap secret
+> after exact attestation. RabbitMQ 4.2.9 remains in the affected range for
+> [multiple upstream advisories](https://www.rabbitmq.com/security), including
+> [GHSA-cfqc-c682-93mm](https://github.com/rabbitmq/rabbitmq-server/security/advisories/GHSA-cfqc-c682-93mm),
+> fixed in 4.2.10. RabbitMQ lists that patched 4.2 build as Enterprise Support; as of
+> 2026-08-30 the public GitHub binary/signature links and official Docker
+> `rabbitmq:4.2.10-alpine` tag were unavailable, while the public 4.2 tag still resolved
+> to 4.2.9. The supported hop makes the remote plugin path unreachable by disabling
+> all plugins and removing networking and secrets, and retains 4.2.9 only long enough to
+> attest flags/Khepri before 4.3.5. This is compensating containment, not a claim that the
+> upstream advisory is absent; the derivative and attestations must move to the first
+> available supported patched 4.2 image.
+> The 2026-08-30 candidate also closes the distinct bundled-OpenSSL gap. RabbitMQ's
+> Erlang crypto NIF loads `/opt/openssl`, not Alpine's distro library, so merely upgrading
+> `libcrypto3`/`libssl3` did not remediate the broker runtime. The reviewed 2026-08-27
+> official 4.3.5 and 4.2.9 rebuilds are now pinned by exact multi-architecture index digest;
+> each contains `/opt/openssl` 3.5.8, while the derivative also pins the distro packages to
+> 3.5.8-r0. The historical 3.13.7 migration image imports `/opt/openssl` 3.5.8 only from
+> the exact Ubuntu 24.04 4.3.5 rebuild while retaining RabbitMQ 3.13.7 for on-disk
+> compatibility. Build, wrapper, installer and CI checks execute Erlang's
+> `crypto:info_lib()` and inspect the running VM's `/proc/self/maps`; image labels or
+> package inventory alone are not accepted as proof of the loaded library.
+> Docker-daemon and protected
+> installation-file control remain trusted host-administrator capabilities outside the
+> application/container threat boundary.
+
 ## 2026-08-25 predecessor local candidate evidence (`0e76142`)
 
 This section is a non-demo predecessor evidence cut for implementation commit
@@ -44,8 +106,9 @@ is not a signed release claim. The locally scanned application runtime's Python 
 matched that implementation tree byte for byte. Later CodeQL remediations changed
 application source, and the bounded-DNS reconciliation fix changed the egress image, so
 the app/egress identities below are retained only as predecessor evidence. The current
-PR's native-amd64 rebuild, scans and tests are authoritative for the merge candidate;
-the protected multi-architecture release workflow remains authoritative for publication.
+PR's native-AMD64 rebuild, scans and tests are authoritative for the merge candidate.
+Signed publication remains disabled until the retained V2 multi-platform workflow and
+trust contract are converted atomically to AMD64 only.
 
 The release-candidate gate now saves each locally built image by its immutable Docker
 ID, verifies the Docker/OCI archive descriptor chain from the outer index to the exact
@@ -57,6 +120,19 @@ recomputes Trivy's tag-context artifact identity, independently matches its conf
 image ID, and requires exact cross-scanner OS package-name parity. A scanner/schema
 upgrade therefore fails closed until reviewed. No ignore file, ignored-unfixed
 relaxation or vulnerability allowlist was used.
+
+The current recurring source and exact-image gates additionally remove Trivy's mutable
+database download from the trusted scan path. They prepare only the exact
+manifest/layer/database in
+`deploy/trivy-db-lock.json`, using the hash-pinned ORAS tool with isolated credential
+state; validates the two-member archive without general extraction; runs Trivy with
+all database/check updates disabled and offline scanning enabled; and binds the lock
+and DB identity into every retained image summary. The prepared DB is rehashed after
+each scan. Freshness fails closed at the lock's exact `NextUpdate`, so a reviewer must
+verify and commit a new manifest, layer, extracted-file hashes, sizes, and timestamps.
+The official artifact is digest locked but is not represented here as independently
+signed. See `docs/guides/signed-container-releases.md` for the refresh procedure and
+the current lock's bounded validity window.
 
 | Image | Docker outer ID | Archive config ID | Archive SHA-256 | Syft packages | Trivy packages | High/Critical |
 | --- | --- | --- | --- | ---: | ---: | ---: |
@@ -98,8 +174,8 @@ checks, exact native-amd64 image scans, the full application suite and the produ
 topology/egress attack gates. The PR's successful evidence artifacts, not the predecessor
 image table above, bind those checks to the exact head under review.
 
-Those repository checks do not close protected signed multi-architecture publication,
-fresh-host or demo deployment, production KMS/IAM custody and denied cross-lane calls,
+Those repository checks do not close the currently dormant signed-release publication path,
+fresh-host or demo deployment, production keyring custody and denied cross-lane unwraps,
 or live provider backup/restore/chaos acceptance. The historical Google API credential
 incident below also remains open until provider-side revocation is proven.
 
@@ -126,7 +202,7 @@ reported in the exact application or PostgreSQL runtime payload by either scanne
 
 This is not an “attack-proof” or enterprise-certified result. No defensible review can
 promise that. The current repository materially improves the original evidence cut: it
-now implements authenticated per-backup encryption, an external KMS integration/policy
+now implements authenticated per-backup encryption, a strict local-file keyring
 contract, per-lane filesystem/database/broker identities and guarded egress.
 Enterprise approval is still conditional on exact-release validation and the residual
 gates below. A compromised
@@ -148,7 +224,7 @@ outside the container boundary.
 | Regression suite | Candidate-gated | 2,298 historical demo tests; 2,667 predecessor-candidate tests; current PR full-suite check is authoritative |
 | Historical demo core rollout | Pass at `7be0729...` | App/DB/Rabbit healthy, preflight passed, queue preserved, operations stopped; current candidate not deployed |
 | Provider operations and restores | Held | Not enabled or treated as proven by this Docker review |
-| Backup application-layer encryption | Local candidate pass; operational proof pending | BSE1 AES-256-GCM-SIV and AWS KMS policy/custody require signed-release and live restore proof |
+| Backup application-layer encryption | Local candidate pass; operational proof pending | BSE1 AES-256-GCM-SIV and lane keyring custody require signed-release and live restore proof |
 | Private staging and ciphertext handoff | Local candidate pass; deployment proof pending | Per-lane work volumes and fenced forward/reverse transfers passed local cross-UID gates; repeat on exact deployment |
 | Database/broker lane identity | Local candidate pass; deployment proof pending | Generation-3 database roles and signed broker task contracts passed local gates; exact rollout evidence remains required |
 | Container egress policy | Implemented with residual | Generation-2 deny default, exact DB/broker and outward TCP tuples, split strict DNS boundary; same-IP/same-port shared tenancy and deployment-specific NAT64 remain residuals |
@@ -271,8 +347,26 @@ authenticated backup cryptography.
   witness before the server starts. This evidence is not a claim that the demo has
   already been redeployed.
 - RabbitMQ data-generation fencing prevents a 4.3 image from guessing at a legacy
-  3.13/4.2 volume. The installer/wrapper require exact state witnesses and the
-  documented Khepri transition path.
+  3.13/4.2 volume. The local-build-only path first builds and attests a commit-tagged
+  3.13.7 security derivative from the exact historical base digest, without running
+  that vulnerable upstream image against product data. After complete project
+  container/network quiescence it proves the old single-node
+  `guest`/`/` model and drained queues, retains its fixed or reviewed 12-hex node host,
+  runs an isolated bounded `999:999` to `100:101` ownership conversion, then attests the
+  exact 4.2.9 and 4.3.5/Khepri targets. Every compatibility broker is networkless,
+  secretless, dependency-free, non-restarting and plugin-free; only the attested
+  canonical 4.3.5 service rejoins the private product networks. Signed releases remain
+  fresh-only.
+- The host transition ledger accepts only P313/A313,
+  P42/`source-clean`/`target-ready`/A42, and P43/`target-ready`/A43 source/target
+  combinations, bound to installation, project, node identity, source evidence, target
+  image ID/reference and configuration hash. `source-clean` authorizes only 3.13 source
+  detachment and the idempotent UID conversion; each `target-ready` checkpoint authorizes
+  only its exact cross-version target after clean source-layout proof. Exact retry can
+  preserve an already healthy target; absent, exited or unhealthy targets are recreated
+  only when their matching `target-ready` or attested record authorizes it. The final 4.3
+  generation is committed to `.env` only after the secondary volume witness and canonical
+  model both revalidate.
 - Current database identity generation 3 separates bootstrap, schema-owning migrator,
   app, preflight, Beat and five worker logins. Exact grants, column restrictions and
   row-level policies replace the earlier shared runtime DML identity; `db-seal` and
@@ -286,8 +380,8 @@ authenticated backup cryptography.
 ### Secrets and configuration
 
 - Django, per-lane PostgreSQL/RabbitMQ identities, per-publisher task-signing keys,
-  onboarding, optional lane-specific managed SSH keys, and separate database/files KMS
-  credentials are stored in a host-private `.secrets` directory and mounted only into
+  onboarding, optional lane-specific managed SSH keys, and separate database/files artifact
+  keyrings are stored in a host-private `.secrets` directory and mounted only into
   granted roles.
 - Direct `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD`, and onboarding-token
   environment values are blank. File-backed values take precedence through a strict
@@ -316,13 +410,16 @@ role can read every secret deliberately granted to that role.
 
 ### Artifact custody and private staging (current repository)
 
-- Database and files source lanes create chunked BSE1 envelopes with
-  AES-256-GCM-SIV, canonical authenticated context and a per-artifact data key. The
-  stock production policy requires AWS KMS wrapping, a resolved key-ARN allowlist and
-  distinct database/files credential files. KMS encryption context binds the
-  installation, lane, account, node, backup, model, purpose and context digest.
-- The database and files workers alone receive their matching KMS identity and private
-  plaintext work volume. Storage receives no KMS credential. It reads only published,
+- Database and files source lanes create chunked BSE1 v2 envelopes with
+  AES-256-GCM-SIV, canonical authenticated context, a random object UUID and a
+  per-artifact data key. Readable headers omit the backup UUID and plaintext/context
+  digests; the decrypting lane proves both private digests from the authenticated
+  encrypted terminal record before publishing plaintext. The
+  stock production policy requires independent strict local-file keyrings whose
+  authenticated wraps bind the installation, lane, account, node, backup, model,
+  purpose, context digest and active key ID.
+- The database and files workers alone receive their matching keyring and private
+  plaintext work volume. Storage receives no root key. It reads only published,
   validated BSE1 bytes through source-specific read-only transfer mounts and keeps its
   own ciphertext materialization private.
 - Restore reverses that boundary: storage writes one target-lane fenced ciphertext
@@ -334,8 +431,8 @@ role can read every secret deliberately granted to that role.
   `10004:10004`, and commits an installation-bound layout-v3 witness. The legacy shared
   work volume must be empty and is never mounted by a runtime role.
 
-These are current source controls, not new live release evidence. External IAM/key-policy
-review, denied-cross-lane KMS calls, key-loss/rotation, tamper/swap, provider and full
+These are current source controls, not new live release evidence. Keyring backup/custody,
+denied-cross-lane unwraps, key-loss/rotation, tamper/swap, provider and full
 restore tests must pass for the exact release before the original encryption/staging
 blockers can be closed operationally.
 
@@ -423,12 +520,25 @@ blockers can be closed operationally.
 - `install.sh` refuses root and `sudo`, accepts only a full 40-character commit, uses
   an isolated HTTPS Git process, verifies the object database, and requires its own
   bytes to match the selected commit.
-- It explicitly builds the commit-tagged `db`, `app`, and `app-egress-guard` images.
-  Stock services use `pull_policy: never`, so a missing local image fails rather than
-  silently substituting registry content.
+- It explicitly builds the commit-tagged `db`, `app`, `app-egress-guard`, and hardened
+  `rabbitmq` derivative from the base Compose model only. The 3.13/4.2 compatibility
+  derivatives remain on-demand, wrapper-attested migration images. The wrapper fixes
+  build inputs and supplies `--pull --no-cache`; startup supplies `--no-build` where
+  Compose supports it and `--pull never` for every create/up/run path. Because Compose
+  `run` has no `--no-build` switch, the wrapper first requires that one-off's exact local
+  image reference and immutable ID to exist; a missing tag is refused instead of being
+  implicitly rebuilt from ordinary cache.
+  Every local service must retain `pull_policy: never`, so a missing local image fails
+  rather than silently substituting registry content.
 - It does not upgrade a checkout in place and does not provision the host.
 - Install paths, parents, checkout files, `.env`, secrets, overrides, and resource
   ownership are validated before mutation.
+- An approved Compose override may change only the canonical `backup_storage` volume to
+  the exact local `type=none,o=bind,device=<bounded absolute path>` contract. Base and
+  combined renders must have identical complete service graphs, top-level objects and
+  every other volume. Docker's realized volume option map must then exactly equal that
+  reviewed device. Service, dependency, entrypoint, privilege, host-mount, port, image,
+  build, network and pull-policy mutations are rejected before a container is created.
 - A stable random installation ID labels containers, networks, volumes, and an empty
   sentinel volume. Exact-name inventory prevents Compose from adopting a foreign or
   unlabeled resource that label-only discovery would miss.
@@ -446,8 +556,10 @@ blockers can be closed operationally.
   mount, group or provisioning path.
 - Secret migration is atomic and fail-closed. Existing secret values are preserved,
   moved to files, and blanked from `.env` without being printed.
-- RabbitMQ generation transitions, legacy-project adoption, runtime overrides,
-  deletion, and additional Compose files require narrow, value-bearing gates.
+- RabbitMQ generation transitions, legacy-project/node-host adoption, runtime overrides,
+  deletion, and additional Compose files require narrow, value-bearing gates. A stopped
+  legacy broker requires local-build `--legacy-rabbitmq-node-host HOST --skip-start`;
+  signed-release mode rejects legacy adoption and transition flags before Docker mutation.
 - The wrapper rejects privilege, entrypoint, environment, volume, port, build,
   orphan-removal, image-removal, and volume-deletion escape routes unless the exact
   reviewed maintenance operation is explicitly authorized.
@@ -767,10 +879,11 @@ Critical findings. The immediately prior Alpine 3.22.2 candidate reported 17 Hig
 current claim. This candidate scan is useful remediation evidence, not a substitute for
 scanning and signing the exact release image.
 
-Grype alone reported `CVE-2026-14456` in RabbitMQ's bundled `/opt/openssl`; Trivy did not.
-The issue affects OpenSSL QUIC server listener allocation. BackupSheep does not expose or
-use OpenSSL QUIC in RabbitMQ, which materially reduces reachability, but this is not a
-waiver. Track the vendor image and rebuild when a reviewed fix is available.
+At this historical evidence cut, Grype alone reported `CVE-2026-14456` in RabbitMQ's
+bundled `/opt/openssl`; Trivy did not. QUIC was not exposed, which reduced reachability
+but did not waive the finding. The 2026-08-30 candidate supersedes that runtime with
+OpenSSL 3.5.8 and proves the library loaded by Erlang, while retaining the scanner-
+coverage disagreement as a reason to use both runtime attestation and multiple scanners.
 
 Exact amd64 evidence hashes:
 
@@ -853,8 +966,12 @@ summary is retained. The current PR's exact-SHA execution remains authoritative.
 Repository secret scanning, push protection, Dependabot updates and private vulnerability
 reporting are enabled. Provider validity checks and non-provider secret patterns remained
 disabled when requested through the GitHub API, so they are treated as a platform/account
-capability gap rather than silently claimed as active. Current-tree scanning also does
-not close the historical Google credential incident described below.
+capability gap rather than silently claimed as active. The separate historical Google-key
+incident is closed: on 2026-08-29 provider validation returned `REQUEST_DENIED` because the
+key was invalid, and GitHub secret-scanning alert 1 was resolved as `revoked`. The alert's
+resolution record also states that current `main`, `develop` and candidate tips contain no
+matching key. This closure does not erase historical copies or substitute for retrospective
+usage and billing review.
 
 Two real issues found during that review were remediated rather than allowlisted:
 
@@ -928,22 +1045,14 @@ be read as current-candidate deployment evidence.
 
 ### Critical
 
-1. **A historically committed Google API key remains an open credential incident.**
-   GitHub secret scanning identifies one publicly leaked Google API key introduced in
-   2024. The unused helper that contained it is absent from the current main, develop and
-   candidate tips, but deleting source does not revoke a credential and public forks
-   retain historical copies. The Google Cloud owner must revoke or rotate the key,
-   inspect its restrictions, usage, audit/billing records and downstream dependencies,
-   and then resolve the GitHub alert as revoked. A history rewrite may reduce casual
-   discovery only after revocation; it cannot erase existing clones or forks.
-2. **The new artifact-custody and staging boundary is implemented but not
-   release-proven.** The original demo/digests do not include BSE1, the KMS policy boundary or
+1. **The new artifact-custody and staging boundary is implemented but not
+   release-proven.** The original demo/digests do not include BSE1, the local-file keyring boundary or
    private layout v3. Do not treat the old 2,298-test run as closure. Cut and attest an
    exact release, exercise the fresh installer and existing-volume migration, prove
-   denied cross-lane KMS calls and filesystem access, and run tamper, tenant/context-swap,
+   denied cross-lane unwraps and filesystem access, and run tamper, tenant/context-swap,
    rotation, key-loss, provider-upload and authenticated restore-before-write tests.
-3. **A source-lane compromise remains high-impact by design.** Database/files workers
-   must temporarily read the plaintext they collect and hold their own KMS identity.
+2. **A source-lane compromise remains high-impact by design.** Database/files workers
+   must temporarily read the plaintext they collect and hold their own root-key access.
    Stock egress now denies outward traffic, but a role must receive some network path to
    perform Internet-dependent work. A remote-code-execution flaw in one of those lanes
    can abuse whatever source/provider path that role legitimately receives. Exact
@@ -971,16 +1080,17 @@ be read as current-candidate deployment evidence.
    guard's retained `NET_ADMIN` capability remains a component requiring hardening and
    monitoring.
 3. **A granted process can read its own secrets.** Per-lane DB, broker, signing, SSH and
-   KMS files prevent casual cross-role sharing, but file mounts do not protect a secret
-   from code executing in the role that legitimately receives it. Integrate short-lived
-   external identity where feasible and exercise rotation/revocation.
+   artifact keyring files prevent casual cross-role sharing, but file mounts do not protect
+   a root key from code executing in its legitimate source role. Keep that role's egress
+   narrow and exercise key backup, rotation and recovery.
 4. **No portable volume byte/inode quotas or guaranteed encryption.** A job or attacker
    can fill Docker storage, and named-volume confidentiality depends on the host.
    Require capacity/inode alarms, retention controls, filesystem/project quotas where
    supported, encrypted storage, and documented emergency recovery.
-5. **Unsigned local image distribution.** Inputs are pinned and builds are evidenced,
-   but release consumers do not yet verify a signed image, SBOM, provenance statement,
-   or transparency-log record tied to a protected release commit.
+5. **Local-build mode remains unsigned.** Inputs are pinned and builds are evidenced,
+   while the signed-release consumer verifies the image signature, SBOM, provenance,
+   transparency-log record and protected-commit manifest before use. Publication and
+   independent acceptance evidence for an exact signed release remain pending.
 6. **Provider and restore behavior remains held.** Core health does not prove provider
    mutation, duplicate avoidance, crash reconciliation, destination integrity, or
    restoration. Keep operations off until durable work and provider ownership are
@@ -989,23 +1099,19 @@ be read as current-candidate deployment evidence.
    SAML/OIDC SSO policy, SCIM deprovisioning, governed break-glass access, scoped
    selector-verifier API credentials, and immutable off-host audit evidence remain
    incomplete or unproven.
-8. **WordPress transport is held, not a core release blocker.** The repository now
-   contains an authenticated POST-only protocol-v2 client and plugin, including
-   UUID-scoped download ownership checks, but it does not yet have deployed compatibility
-   evidence. Enterprise/BSE1 mode omits WordPress and Basecamp from capability lists and
-   refuses their connection, schedule, request, outbox and worker mutation paths even
-   when legacy feature flags are true. A release for the supported source families can
-   therefore proceed without silently enabling this protocol. Before enabling WordPress,
-   release the matching plugin, rotate keys, and prove URLs, logs and backup-file
-   ownership stay clean end to end.
-9. **WordPress/Basecamp BSE1 recovery remains intentionally unavailable.** Direct archive
-   download correctly fails closed for encrypted artifacts, and those source families
-   still lack an authenticated plaintext-export or automatic-restore path. Existing rows
-   remain visible for retention and investigation, while new enterprise protection is
-   blocked before mutation or dispatch. Treat this as a feature acceptance gate for
-   those two families, not as recovery coverage; do not advertise or re-enable them until
-   an exact-lane export/restore workflow is implemented, authorization-tested and
-   rehearsed end to end.
+8. **WordPress has been retired from the product.** Runtime models, routes, tasks,
+   connector/plugin code, UI, configuration, packaging and current product documentation
+   are removed. The retirement migration disables historical schedules, nodes,
+   connections and the integration while deliberately retaining the old database tables
+   and columns for non-destructive upgrades. Runtime database lanes have no access to
+   those retained tables.
+9. **Basecamp BSE1 recovery remains intentionally unavailable.** Direct archive download
+   correctly fails closed for encrypted artifacts, and Basecamp still lacks an
+   authenticated plaintext-export or automatic-restore path. Existing rows remain visible
+   for retention and investigation, while new enterprise protection is blocked before
+   mutation or dispatch. Treat this as a feature acceptance gate, not as recovery
+   coverage; do not advertise or re-enable it until an exact-lane export/restore workflow
+   is implemented, authorization-tested and rehearsed end to end.
 
 ### Medium and operational
 
@@ -1013,8 +1119,10 @@ be read as current-candidate deployment evidence.
    are an accepted single-host exception, not suitable across an untrusted boundary.
 2. RabbitMQ and the new egress guards' capability boundaries must be demonstrated after
    the exact demo/production rollout with their matching volume/network witnesses.
-3. Grype/Trivy disagree on the RabbitMQ OpenSSL QUIC issue. QUIC is not exposed, but the
-   pinned vendor image must be rescanned and updated when a reviewed fix lands.
+3. Grype/Trivy disagreed on the RabbitMQ bundled-OpenSSL QUIC issue. The 2026-08-30
+   candidate pins the reviewed OpenSSL 3.5.8 vendor rebuild and attests the library loaded
+   by Erlang. Exact release images still require both fresh scans and runtime attestation;
+   either control alone has already demonstrated a coverage gap.
 4. At-least-once outbox delivery can duplicate a notification after an unknown publish
    outcome; consumers need durable idempotency.
 5. The image contains SSH and several database client families required for supported
@@ -1025,32 +1133,40 @@ be read as current-candidate deployment evidence.
    is test-proven but not live-proven on that root-owned path.
 8. GitHub provider validity checks and non-provider secret patterns remain disabled at
    the repository capability layer. Core secret scanning and push protection are active,
-   but provider-side revocation and the strict repository CI scan remain necessary.
+   so future incidents still require independent provider-side validation and the strict
+   repository CI scan.
+9. GitHub's default `main` branch reports 43 open Dependabot alerts: 1 Critical, 28 High,
+   12 Moderate and 2 Low. The `develop` candidate pins the currently alerted Python
+   dependencies at patched versions and no longer contains the alerted historical console
+   lockfile path, but that does not close alerts on the default branch. Promote a verified
+   release to `main` or remediate it independently before representing the default branch
+   as enterprise-ready.
 
 ## Enterprise remediation order
 
 ### P0 — before claiming enterprise protection for sensitive backups
 
-1. Revoke or rotate the historically exposed Google API key at the provider, review
-   restrictions, use, audit and billing evidence, update any legitimate dependent
-   workload, and resolve the repository alert only after provider-side revocation is
-   proven.
-2. Cut an exact release and run the complete tests, CodeQL/source/secret scans and image
-   scans; publish signed multi-architecture images, SBOMs and provenance tied to the
-   protected commit.
-3. Exercise the exact-ref installer on a fresh user-owned host and the fail-closed v3
-   migration on a recoverable existing-volume copy. Inspect every resulting mount,
-   identity, capability, healthcheck, restart policy and egress namespace.
-4. Review the AWS IAM/key policies and prove allowed same-lane plus denied cross-lane KMS
-   operations, BSE1 context/tamper/swap rejection, key-wrap rotation and key-loss
-   recovery. Keep the old key until every durable envelope is rewrapped and rehearsed.
-5. Prove storage and Local Storage contain BSE1 ciphertext only, source lanes cannot
+1. Cut an exact release and run the complete tests, CodeQL/source/secret scans and image
+   scans. Publish signed AMD64 images, SBOMs and provenance tied to the protected commit
+   only after the retained V2 trust contract is converted and reviewed atomically.
+2. Exercise the exact-ref installer on a fresh user-owned host and the fail-closed v3
+   migration on a recoverable existing-volume copy. Include the exact drained stock
+   RabbitMQ 3.13.7 source, isolated UID conversion, 4.2.9 feature/Khepri gate, 4.3.5
+   canonical commit, and crash retry from every P313/A313,
+   P42/`source-clean`/`target-ready`/A42, and P43/`target-ready`/A43 boundary. Include
+   absent and genuine narrowly admitted stale-PID same-version recovery at each applicable
+   source/target checkpoint. Inspect every resulting mount, identity, capability,
+   healthcheck, restart policy and egress namespace.
+3. Prove allowed same-lane plus denied cross-lane unwraps, BSE1 context/tamper/swap
+   rejection, key-wrap rotation and key-loss recovery. Keep every old key until database
+   evidence shows no active envelope uses it and recovery is rehearsed.
+4. Prove storage and Local Storage contain BSE1 ciphertext only, source lanes cannot
    mount `/backups`, and no role can read or mutate another lane's private/transfer data.
-6. Put database/files lanes in reviewed egress `allowlist` mode (or a controlled proxy)
+5. Put database/files lanes in reviewed egress `allowlist` mode (or a controlled proxy)
    before sensitive operation, without broadening the exact internal DB/broker tuples.
-7. Deploy and retain evidence for generation-3 database identity, generation-2 RabbitMQ
+6. Deploy and retain evidence for generation-3 database identity, generation-2 RabbitMQ
    identity and generation-3 signed-task/replay enforcement.
-8. Run provider-specific backup, restore, crash, retry, duplicate and unknown-outcome
+7. Run provider-specific backup, restore, crash, retry, duplicate and unknown-outcome
    reconciliation gates with fresh ownership evidence.
 
 ### P1 — production hardening
@@ -1064,14 +1180,13 @@ be read as current-candidate deployment evidence.
 5. Add immutable off-host audit export and alerting for auth abuse, preflight changes,
    unexpected task publishers, outbound destinations, disk growth, queue age, and
    container restarts.
-6. Complete enterprise identity, API credential, invite, and WordPress compatibility
-   work.
+6. Complete enterprise identity, API credential, and invite work.
 
 ### P2 — continuous assurance
 
 - Rescan exact digests on every build and on vulnerability-database refresh.
 - Re-run the full suite and hostile build-context tests after Dockerfile/Compose changes.
-- Test cgroup v1/v2, amd64/arm64, Docker Engine upgrades, reboot/restart behavior, and
+- Test cgroup v1/v2 on AMD64, Docker Engine upgrades, reboot/restart behavior, and
   supported PostgreSQL/RabbitMQ upgrade paths.
 - Offer host guidance for rootless Docker, AppArmor/SELinux, firewalling, encryption,
   quotas, log shipping, and daemon protection without silently changing the host.
@@ -1081,16 +1196,11 @@ be read as current-candidate deployment evidence.
 For a fresh installation, use an unprivileged Docker-authorized account and a user-owned
 directory. Stock installation requires Docker Engine 28 or newer and Compose 2.33.1 or
 newer; it does not modify the host. Inspect the installer downloaded from the same exact
-reviewed commit. Supply a resolved symmetric KMS key ARN, its region/allowlist and two
-different canonical user-owned mode-`0400` or `0600` AWS credential files whose IAM
-policies enforce the matching database/files encryption context:
+reviewed commit. The installer generates independent database/files local-file keyrings;
+no external artifact-key credential is required:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
-ARTIFACT_KMS_KEY_ARN='<resolved-symmetric-kms-key-arn>'
-ARTIFACT_KMS_REGION='<aws-region>'
-DATABASE_KMS_CREDENTIALS_FILE='<canonical-private-database-lane-credentials-file>'
-FILES_KMS_CREDENTIALS_FILE='<different-canonical-private-files-lane-credentials-file>'
 curl -fSLo install.sh \
   "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
 less install.sh
@@ -1099,12 +1209,7 @@ chmod 700 install.sh
   --ref "${COMMIT}" \
   --domain backups.example.com \
   --install-dir "$HOME/.local/share/backupsheep" \
-  --project-name backupsheep \
-  --artifact-kms-key-id "${ARTIFACT_KMS_KEY_ARN}" \
-  --artifact-kms-region "${ARTIFACT_KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${ARTIFACT_KMS_KEY_ARN}" \
-  --artifact-kms-database-aws-credentials-file "${DATABASE_KMS_CREDENTIALS_FILE}" \
-  --artifact-kms-files-aws-credentials-file "${FILES_KMS_CREDENTIALS_FILE}"
+  --project-name backupsheep
 ```
 
 Do not add `--enable-operations` during initial installation. Review credentials,
@@ -1156,8 +1261,9 @@ state, or installation-identity witness. Follow
   validation.
 - The rollback bundle was validated for integrity/decryption/listing. A full destructive
   rollback rehearsal was not performed on the live demo after the final deployment.
-- Current demo server inspection and rollout were blocked by SSH public-key rejection;
-  the current candidate therefore has no live-demo containment or migration proof.
+- The earlier demo rollout attempt was blocked by SSH public-key rejection. Access has
+  since been restored, but the current candidate still has no live-demo containment or
+  RabbitMQ migration proof until its exact merged revision is deployed and inspected.
 - Host reverse-proxy, daemon, firewall, MAC, patching, encryption, and rootless posture
   are explicitly outside this Docker-owned boundary.
 
@@ -1169,10 +1275,10 @@ resource-exhaustion attacks. The original demo deployment and regression evidenc
 that historical conclusion. The current candidate adds materially stronger artifact,
 identity, staging and egress boundaries plus fail-closed project-name, output-redaction,
 exception and source-scan controls. Its exact PR checks are the repository evidence cut;
-they are not signed-release, provider, KMS or live-deployment evidence.
+they are not signed-release, provider, key-custody or live-deployment evidence.
 
 Enterprise use should remain conditional, not marketed as attack-proof. The historical
-Google key must first be revoked and investigated. Exact-release proof of external-KMS
+Google key must first be revoked and investigated. Exact-release proof of local-file
 BSE1, per-lane identities/staging/egress, signed provenance, deployed containment and
 real provider/restore/chaos proof must also close before BackupSheep can credibly claim
 enterprise-grade protection for high-value backup data.

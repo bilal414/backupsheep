@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from promote_release_images import _fetch_and_verify_index, _oras
+from promote_release_images import _fetch_and_verify_index, _oras, _repository_tags
 from verify_release import (
     MAX_CONTROL_FILE_BYTES,
     ReleaseVerificationError,
@@ -44,14 +44,16 @@ def stage(
             artifacts_dir, image["oci_index"]["file"], f"{image_name} retained OCI index"
         )
         expected_indexes[image_name] = expected_path
-        if not _fetch_and_verify_index(
-            oras,
-            reference,
-            expected_path,
-            image["digest"],
-            allow_not_found=True,
-        ):
+        tags = _repository_tags(oras, image["official_repository"])
+        if staging_tag not in tags:
             missing.add(image_name)
+        else:
+            _fetch_and_verify_index(
+                oras,
+                reference,
+                expected_path,
+                image["digest"],
+            )
 
     for image_name, image in manifest["images"].items():
         staging_reference = f"{image['official_repository']}:{staging_tag}"

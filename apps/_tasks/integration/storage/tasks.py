@@ -80,12 +80,18 @@ from apps._tasks.artifact_encryption import (
     materialize_local_restore_ciphertext_handoff,
     storage_upload_artifact,
 )
+from apps._tasks.artifact_deletion import (
+    DELETION_ORIGIN_KEY,
+    build_deletion_origin,
+    validate_deletion_origin,
+)
 from apps._tasks.integration.storage.lease import (
     DurableStorageUploadLease,
     StorageCleanupNotEligible,
     StorageUploadAlreadyComplete,
     StorageUploadLeaseBusy,
     StorageUploadLeaseLost,
+    StorageUploadTerminalState,
 )
 from apps._tasks.integration.storage.s3_verified import (
     S3MultipartCleanupNotEligible,
@@ -106,8 +112,9 @@ from apps._tasks.integration.storage.s3_cleanup import (
 from apps.console.backup.models import (
     CoreWebsiteBackup,
     CoreDatabaseBackup,
-    CoreWordPressBackup, CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints,
-    CoreWordPressBackupStoragePoints, CoreBasecampBackup,
+    CoreWebsiteBackupStoragePoints,
+    CoreDatabaseBackupStoragePoints,
+    CoreBasecampBackup,
     CoreBasecampBackupStoragePoints,
     CoreDatabaseRestore,
     CoreWebsiteRestore,
@@ -213,7 +220,6 @@ _STORAGE_NOT_FOUND_CODES = {"404", "NoSuchBucket", "NoSuchKey", "NotFound"}
 _STORAGE_POINT_MODELS = {
     "website": CoreWebsiteBackupStoragePoints,
     "database": CoreDatabaseBackupStoragePoints,
-    "wordpress": CoreWordPressBackupStoragePoints,
     "basecamp": CoreBasecampBackupStoragePoints,
 }
 _STORAGE_POINT_MODEL_KEYS = {
@@ -222,13 +228,11 @@ _STORAGE_POINT_MODEL_KEYS = {
 _BACKUP_MODELS = {
     "website": CoreWebsiteBackup,
     "database": CoreDatabaseBackup,
-    "wordpress": CoreWordPressBackup,
     "basecamp": CoreBasecampBackup,
 }
 _BACKUP_POINT_RELATIONS = {
     "website": "stored_website_backups",
     "database": "stored_database_backups",
-    "wordpress": "stored_wordpress_backups",
     "basecamp": "stored_basecamp_backups",
 }
 _LOCAL_RESTORE_MODELS = {
@@ -529,13 +533,43 @@ def _claim_storage_point_delete(model_key, point_id, owner):
         if point is None:
             return None, "missing"
         if point.status == point.Status.DELETE_COMPLETED:
+            metadata = dict(point.metadata or {})
+            metadata.pop(DELETION_ORIGIN_KEY, None)
+            metadata.pop("_deletion_claim", None)
+            point.metadata = metadata
+            point.upload_lease_owner = ""
+            point.upload_lease_token = None
+            point.upload_lease_expires_at = None
+            point.upload_heartbeat_at = None
+            point.save(
+                update_fields=[
+                    "metadata",
+                    "upload_lease_owner",
+                    "upload_lease_token",
+                    "upload_lease_expires_at",
+                    "upload_heartbeat_at",
+                    "modified",
+                ]
+            )
             return None, "deleted"
         if _lease_is_live(point.upload_lease_expires_at, now):
             return None, "busy"
 
         metadata = dict(point.metadata or {})
-        prior_claim = dict(metadata.get("_deletion_claim") or {})
-        previous_status = prior_claim.get("previous_status", int(point.status))
+        validated_origin = validate_deletion_origin(point)
+        if validated_origin is not None:
+            _custody, previous_status = validated_origin
+        else:
+            if DELETION_ORIGIN_KEY in metadata or point.status in {
+                point.Status.DELETE_REQUESTED,
+                point.Status.DELETE_FAILED,
+            }:
+                return None, "invalid_origin"
+            previous_status = int(point.status)
+            metadata[DELETION_ORIGIN_KEY] = build_deletion_origin(
+                point,
+                previous_status,
+            )
         metadata["_deletion_claim"] = {
             "owner": owner,
             "token": str(token),
@@ -593,18 +627,22 @@ def _delete_one_storage_point(model_key, point_id, owner):
         ):
             return "busy"
         metadata = dict(current.metadata or {})
-        claim = dict(metadata.pop("_deletion_claim", {}) or {})
+        metadata.pop("_deletion_claim", None)
         protected = bool(metadata.get("deletion_protection"))
         if deleted:
+            metadata.pop(DELETION_ORIGIN_KEY, None)
             current.status = current.Status.DELETE_COMPLETED
             outcome = "deleted"
         elif protected:
-            try:
-                previous_status = int(claim.get("previous_status"))
-            except (TypeError, ValueError):
-                previous_status = int(current.Status.UPLOAD_COMPLETE)
-            current.status = previous_status
-            outcome = "protected"
+            validated_origin = validate_deletion_origin(current)
+            if validated_origin is None:
+                current.status = current.Status.DELETE_FAILED
+                outcome = "pending"
+            else:
+                _custody, previous_status = validated_origin
+                metadata.pop(DELETION_ORIGIN_KEY, None)
+                current.status = previous_status
+                outcome = "protected"
         else:
             if current.status == current.Status.DELETE_REQUESTED:
                 current.status = current.Status.DELETE_FAILED
@@ -1241,10 +1279,7 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
         backup = CoreDatabaseBackup.objects.get(id=backup_id)
         stored_backup = backup.stored_database_backups.get(id=stored_backup_id)
     elif node.type == CoreNode.Type.SAAS:
-        if node.connection.integration.code == "wordpress":
-            backup = CoreWordPressBackup.objects.get(id=backup_id)
-            stored_backup = backup.stored_wordpress_backups.get(id=stored_backup_id)
-        elif node.connection.integration.code == "basecamp":
+        if node.connection.integration.code == "basecamp":
             backup = CoreBasecampBackup.objects.get(id=backup_id)
             stored_backup = backup.stored_basecamp_backups.get(id=stored_backup_id)
         else:
@@ -1270,6 +1305,8 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
             # idempotent finalizer if the broker is temporarily unavailable.
             capture_exception(finalizer_error)
         return
+    except StorageUploadTerminalState:
+        return
     except StorageUploadLeaseBusy as error:
         raise self.retry(
             countdown=error.retry_after,
@@ -1291,10 +1328,10 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     log_file.write(f"{storage_type_name}: {stored_backup.storage.name} \n")
 
     try:
-        # In BSE1 mode this context materializes only authenticated-header,
-        # ledger-matched ciphertext into storage's private volume.  The .zip
-        # suffix is retained solely for compatibility with existing adapters;
-        # remote objects contain BSE1 bytes and are never decrypted here.
+        # In BSE1 mode this context materializes only structurally validated,
+        # ledger-matched ciphertext into storage's private volume. New artifacts
+        # use their random envelope UUID and the .bse1 suffix; storage workers
+        # never receive or publish plaintext here.
         with storage_upload_artifact(
             backup,
             legacy_verifier=verify_and_commit_source_artifact,
@@ -1695,9 +1732,7 @@ def finalize_backup(self, node_id, backup_id):
     elif node.type == CoreNode.Type.DATABASE:
         backup = CoreDatabaseBackup.objects.get(id=backup_id)
     elif node.type == CoreNode.Type.SAAS:
-        if node.connection.integration.code == "wordpress":
-            backup = CoreWordPressBackup.objects.get(id=backup_id)
-        elif node.connection.integration.code == "basecamp":
+        if node.connection.integration.code == "basecamp":
             backup = CoreBasecampBackup.objects.get(id=backup_id)
         else:
             raise TaskParamsNotProvided()
@@ -1707,11 +1742,7 @@ def finalize_backup(self, node_id, backup_id):
     relation_name = {
         CoreNode.Type.WEBSITE: "stored_website_backups",
         CoreNode.Type.DATABASE: "stored_database_backups",
-        CoreNode.Type.SAAS: (
-            "stored_wordpress_backups"
-            if node.connection.integration.code == "wordpress"
-            else "stored_basecamp_backups"
-        ),
+        CoreNode.Type.SAAS: "stored_basecamp_backups",
     }[node.type]
 
     # Lock both the backup row and all of its storage points so an early or duplicate
@@ -1916,11 +1947,7 @@ def finalize_backup(self, node_id, backup_id):
                     model_key = (
                         "website"
                         if node.type == CoreNode.Type.WEBSITE
-                        else (
-                            "wordpress"
-                            if node.connection.integration.code == "wordpress"
-                            else "basecamp"
-                        )
+                        else "basecamp"
                     )
                     cleanup_files_ciphertext_fence.apply_async(
                         args=[model_key, backup.pk]

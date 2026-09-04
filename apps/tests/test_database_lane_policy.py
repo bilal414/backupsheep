@@ -1,5 +1,13 @@
+from unittest import mock
+
 from django.test import SimpleTestCase
 
+from backupsheep import database_lane_probe
+from backupsheep.artifact_crypto.envelope import (
+    ALGORITHM,
+    DEFAULT_CHUNK_SIZE,
+    FORMAT_VERSION,
+)
 from backupsheep.database_lane_policy import (
     ARTIFACT_LEDGER_TABLES,
     BEAT_TABLES,
@@ -23,6 +31,7 @@ from backupsheep.database_lane_policy import (
     MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
     MIGRATION_TABLE,
     REPLAY_TABLE,
+    RETIRED_TABLES,
     RESULT_TABLES,
     RLS_COMMAND_POLICY,
     RLS_POLICY,
@@ -35,6 +44,96 @@ from backupsheep.database_lane_policy import (
     STORAGE_CONFIG_TABLES,
     UNUSED_WORKER_TABLES,
 )
+
+
+class DatabaseLaneProbeSqlAllowlistTests(SimpleTestCase):
+    def test_artifact_fixture_tracks_the_current_envelope_format(self):
+        cursor = mock.Mock()
+        cursor.fetchone.side_effect = [(11,), (12,), (13,), (14,)]
+
+        fixture = database_lane_probe._insert_artifact_fixture(
+            cursor,
+            model_name="coredatabasebackup",
+            suffix="da",
+        )
+
+        self.assertEqual(
+            fixture,
+            {"execution": 12, "envelope": 13, "key_wrap": 14},
+        )
+        envelope_parameters = cursor.execute.call_args_list[2].args[1]
+        self.assertEqual(envelope_parameters[1], FORMAT_VERSION)
+        self.assertEqual(envelope_parameters[2], ALGORITHM)
+        self.assertEqual(envelope_parameters[3], DEFAULT_CHUNK_SIZE)
+
+    def test_exact_retired_tables_use_literal_denial_probes(self):
+        self.assertEqual(
+            frozenset(database_lane_probe._RETIRED_TABLE_READ_SQL),
+            RETIRED_TABLES,
+        )
+        connection = object()
+        expected = mock.Mock()
+        with mock.patch.object(database_lane_probe, "_expect_denied", expected):
+            for table_name in sorted(RETIRED_TABLES):
+                with self.subTest(table_name=table_name):
+                    expected.reset_mock()
+                    database_lane_probe._expect_retired_table_read_denied(
+                        connection,
+                        table_name,
+                        lane="files",
+                    )
+                    expected.assert_called_once_with(
+                        connection,
+                        database_lane_probe._RETIRED_TABLE_READ_SQL[table_name],
+                        label=f"files retired table read {table_name}",
+                    )
+
+    def test_hostile_or_unknown_retired_table_never_reaches_sql_executor(self):
+        expected = mock.Mock()
+        with mock.patch.object(database_lane_probe, "_expect_denied", expected):
+            with self.assertRaisesRegex(
+                database_lane_probe.LaneProbeError,
+                "unreviewed",
+            ):
+                database_lane_probe._expect_retired_table_read_denied(
+                    object(),
+                    "core_wordpress; SELECT pg_sleep(30); --",
+                    lane="files",
+                )
+            with self.assertRaisesRegex(
+                database_lane_probe.LaneProbeError,
+                "unreviewed",
+            ):
+                database_lane_probe._expect_retired_table_read_denied(
+                    object(),
+                    ["core_wordpress"],
+                    lane="files",
+                )
+
+        expected.assert_not_called()
+
+    def test_retired_table_policy_drift_fails_before_sql_execution(self):
+        expected = mock.Mock()
+        drifted = RETIRED_TABLES | {"core_unreviewed_retired_table"}
+        with (
+            mock.patch.object(database_lane_probe, "_expect_denied", expected),
+            mock.patch.object(
+                database_lane_probe,
+                "RETIRED_TABLES",
+                drifted,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                database_lane_probe.LaneProbeError,
+                "out of sync",
+            ):
+                database_lane_probe._expect_retired_table_read_denied(
+                    object(),
+                    "core_auth_wordpress",
+                    lane="files",
+                )
+
+        expected.assert_not_called()
 
 
 class DatabaseLanePolicyTests(SimpleTestCase):
@@ -95,7 +194,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             "core_auth_aws",
             "core_auth_database",
             "core_auth_website",
-            "core_auth_wordpress",
             "core_cloud_restore",
             "core_aws_backup",
             "core_notification_slack",
@@ -119,7 +217,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             "core_database_restore",
             "core_website_backup",
             "core_website_restore",
-            "core_wordpress_backup",
             "core_basecamp_backup",
         ):
             with self.subTest(table=table):
@@ -274,7 +371,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
         for table in (
             "core_auth_basecamp",
             "core_auth_website",
-            "core_auth_wordpress",
         ):
             with self.subTest(table=table):
                 self.assertNotIn(table, database)
@@ -283,7 +379,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             "core_basecamp_backup",
             "core_website_backup",
             "core_website_restore",
-            "core_wordpress_backup",
         ):
             self.assertNotIn(table, database)
         for table in (
@@ -312,7 +407,6 @@ class DatabaseLanePolicyTests(SimpleTestCase):
             "files": {
                 "core_basecamp_backup_mtm_storage_points",
                 "core_website_backup_mtm_storage_points",
-                "core_wordpress_backup_mtm_storage_points",
             },
         }
         for lane, tables in point_tables.items():
@@ -327,11 +421,16 @@ class DatabaseLanePolicyTests(SimpleTestCase):
                     )
         for table in point_tables["database"] | point_tables["files"]:
             self.assertEqual(LANE_TABLE_POLICY["storage"][table], DML)
-        for table in ("core_basecamp", "core_database", "core_website", "core_wordpress"):
+        for table in ("core_basecamp", "core_database", "core_website"):
             self.assertEqual(
                 LANE_TABLE_POLICY["storage"][table],
                 frozenset({"SELECT", "DELETE"}),
             )
+
+    def test_retired_tables_are_inaccessible_to_every_runtime_identity(self):
+        for lane, policy in LANE_TABLE_POLICY.items():
+            with self.subTest(lane=lane):
+                self.assertTrue(RETIRED_TABLES.isdisjoint(policy))
 
     def test_managed_ssh_intent_is_row_and_column_isolated(self):
         self.assertEqual(

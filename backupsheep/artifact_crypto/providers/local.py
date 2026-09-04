@@ -2,7 +2,7 @@
 
 This provider is useful for deterministic unit and local integration tests.  It
 must never be accepted by enterprise policy because its root wrapping key lives
-inside the application configuration rather than an external KMS/HSM boundary.
+inside the application configuration rather than a protected file boundary.
 """
 
 from __future__ import annotations

@@ -267,7 +267,6 @@ class IOSAPIContractTests(BaseTestCase):
             "apps.api.v1.backup.upcloud.serializers": ("CoreUpCloudBackupSerializer", "upcloud"),
             "apps.api.v1.backup.vultr.serializers": ("CoreVultrBackupSerializer", "vultr"),
             "apps.api.v1.backup.website.serializers": ("CoreWebsiteBackupSerializer", "website"),
-            "apps.api.v1.backup.wordpress.serializers": ("CoreWordPressBackupSerializer", "wordpress"),
         }
         for module_name, (class_name, source) in serializers.items():
             serializer = getattr(import_module(module_name), class_name)()

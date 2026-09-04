@@ -11,7 +11,7 @@ from django.utils.text import slugify
 from apps.console.account.models import CoreAccountGroup
 from apps.console.backup.models import CoreWebsiteBackup
 from apps.console.member.models import CoreMemberAccount
-from apps.console.node.models import CoreNode, CoreSchedule, CoreWordPress
+from apps.console.node.models import CoreBasecamp, CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
@@ -235,19 +235,22 @@ class SourceDetailEnterpriseTests(BaseTestCase):
         BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=True,
         BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="bse1",
         BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=False,
-        WORDPRESS_INTEGRATION_ENABLED=True,
+        BASECAMP_INTEGRATION_ENABLED=True,
     )
     def test_recovery_incomplete_source_has_no_dead_schedule_editor(self):
         connection = factories.make_connection(
-            self.account, self.member, code="wordpress"
+            self.account, self.member, code="basecamp"
         )
         node = CoreNode.objects.create(
             connection=connection,
             type=CoreNode.Type.SAAS,
-            name="legacy-wordpress",
+            name="recovery-incomplete-basecamp",
             added_by=self.member,
         )
-        CoreWordPress.objects.create(node=node, name="Legacy WordPress")
+        CoreBasecamp.objects.create(
+            node=node,
+            name="Recovery-incomplete Basecamp",
+        )
         schedule = factories.make_schedule(node, self.member)
 
         response = self.client.get(f"/console/nodes/{node.id}/")

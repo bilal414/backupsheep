@@ -3,20 +3,20 @@
     {
       "finding_sha256": "0999cc03ddc17614db90af2c22d22d0c8f2c2e8444ab37d785df46a9da6c6579",
       "id": "DS-0017",
-      "reason": "The reported APT update is paired with authenticated apt-get downloads whose package versions, archive hashes, metadata, and repackaged payload hashes are verified before use.",
+      "reason": "The reported APT update runs only in authenticated builder stages. Ubuntu runtime packages come from a fixed signed AMD64 snapshot with exact versions, imported clients are bound to reviewed archive and payload hashes, and the final image installs the verified closure offline.",
       "severity": "HIGH",
       "status": "FAIL",
       "target": "Dockerfile",
-      "target_sha256": "7040710907571e1b472c70b9d90d14edccc0dd9db366ac0eeb39ae335611762a"
+      "target_sha256": "3ac14ece8f6e887c192efa72efb711b8771179fadb385b4ce2e71ac38b1d7357"
     },
     {
-      "finding_sha256": "d63aab39cd66efda6cdce44afc349590c893f1afbfa3c33b33f78e85f80b57c6",
+      "finding_sha256": "2fef229054b3d84e89962c7d8c5c1cf8ad73ac7d5d62f16072f95108e8ec2b6f",
       "id": "DS-0002",
       "reason": "Root is used only to bootstrap the nftables policy; the entrypoint immediately drops to UID 10020 and retains only NET_ADMIN for the no-secret policy reconciler.",
       "severity": "HIGH",
       "status": "FAIL",
       "target": "Dockerfile.egress",
-      "target_sha256": "d0cc5e9162a6619b90f67dbf66d491535221a2339f5f34f9243e7f2164745d22"
+      "target_sha256": "e633355612cc22a051cbeb2444d5200936ed35669f01e932c186dbf5d95b1514"
     }
   ],
   "scanner": {

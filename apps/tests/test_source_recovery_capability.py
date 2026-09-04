@@ -11,29 +11,27 @@ from rest_framework.test import APIClient
 
 from apps._tasks import backup_dispatch
 from apps._tasks.integration.basecamp import backup_basecamp
-from apps._tasks.integration.wordpress import backup_wordpress
 from apps.api.v1.mobile.views import MobileBootstrapView
 from apps.api.v1.saas.basecamp.serializers import CoreBasecampReadSerializer
-from apps.api.v1.saas.wordpress.serializers import CoreWordPressReadSerializer
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.backup.models import (
+    CoreBackupRequest,
     CoreBasecampBackup,
     CoreBasecampBackupStoragePoints,
-    CoreBackupRequest,
-    CoreWordPressBackup,
-    CoreWordPressBackupStoragePoints,
 )
 from apps.console.connection.models import CoreAuthBasecamp, CoreAWSRegion
-from apps.console.node.models import CoreBasecamp, CoreNode, CoreWordPress
+from apps.console.node.models import CoreBasecamp, CoreNode
 from apps.console.setting.models import CoreSiteSettings
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
 from backupsheep.source_recovery_policy import (
+    RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
     SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
     SourceRecoveryUnavailable,
     available_backup_endpoints,
     require_source_backup_creation,
     source_backup_creation_available,
+    source_recovery_unavailable_message,
 )
 from utils.middleware import OnboardingMiddleware
 
@@ -43,7 +41,6 @@ ENTERPRISE_POLICY = {
     "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE": "bse1",
     "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE": False,
     # A deployment flag must never override the enterprise recovery gate.
-    "WORDPRESS_INTEGRATION_ENABLED": True,
     "BASECAMP_INTEGRATION_ENABLED": True,
 }
 
@@ -51,27 +48,42 @@ LEGACY_COMPATIBILITY_POLICY = {
     "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE": False,
     "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE": "legacy-only",
     "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE": True,
-    "WORDPRESS_INTEGRATION_ENABLED": True,
     "BASECAMP_INTEGRATION_ENABLED": True,
 }
 
 
 class SourceRecoveryPolicyTests(SimpleTestCase):
+    def test_retired_source_message_does_not_promise_runtime_inspection(self):
+        self.assertEqual(
+            source_recovery_unavailable_message("wordpress"),
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
+        self.assertNotIn(
+            "remain available for inspection",
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
+        self.assertIn(
+            "retained for controlled operator audit or migration",
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
+        with self.assertRaises(SourceRecoveryUnavailable) as raised:
+            require_source_backup_creation("wordpress")
+        self.assertEqual(
+            str(raised.exception.detail),
+            RETIRED_SOURCE_UNAVAILABLE_MESSAGE,
+        )
+        self.assertEqual(raised.exception.get_codes(), "source_recovery_unavailable")
+
     @override_settings(**ENTERPRISE_POLICY)
-    def test_enterprise_mode_blocks_both_families_even_when_flags_are_true(self):
-        for code in ("wordpress", "basecamp"):
-            with self.subTest(code=code):
-                self.assertFalse(source_backup_creation_available(code))
-                with self.assertRaises(SourceRecoveryUnavailable) as raised:
-                    require_source_backup_creation(code)
-                self.assertEqual(str(raised.exception.detail), SOURCE_RECOVERY_UNAVAILABLE_MESSAGE)
-                self.assertEqual(
-                    raised.exception.get_codes(), "source_recovery_unavailable"
-                )
+    def test_enterprise_mode_blocks_basecamp_even_when_flag_is_true(self):
+        self.assertFalse(source_backup_creation_available("basecamp"))
+        with self.assertRaises(SourceRecoveryUnavailable) as raised:
+            require_source_backup_creation("basecamp")
+        self.assertEqual(str(raised.exception.detail), SOURCE_RECOVERY_UNAVAILABLE_MESSAGE)
+        self.assertEqual(raised.exception.get_codes(), "source_recovery_unavailable")
 
     @override_settings(**LEGACY_COMPATIBILITY_POLICY)
     def test_explicit_legacy_compatibility_mode_is_available(self):
-        self.assertTrue(source_backup_creation_available("wordpress"))
         self.assertTrue(source_backup_creation_available("basecamp"))
         self.assertTrue(source_backup_creation_available("website"))
 
@@ -91,31 +103,29 @@ class SourceRecoveryPolicyTests(SimpleTestCase):
             },
             {
                 **LEGACY_COMPATIBILITY_POLICY,
-                "WORDPRESS_INTEGRATION_ENABLED": False,
+                "BASECAMP_INTEGRATION_ENABLED": False,
             },
             {
                 **LEGACY_COMPATIBILITY_POLICY,
                 # Policy settings must already be parsed booleans. A direct
                 # string override cannot accidentally enable the family.
-                "WORDPRESS_INTEGRATION_ENABLED": "true",
+                "BASECAMP_INTEGRATION_ENABLED": "true",
             },
         )
         for settings_override in cases:
             with self.subTest(settings_override=settings_override):
                 with override_settings(**settings_override):
-                    self.assertFalse(source_backup_creation_available("wordpress"))
+                    self.assertFalse(source_backup_creation_available("basecamp"))
 
     @override_settings(**ENTERPRISE_POLICY)
-    def test_public_capability_list_omits_unrecoverable_families(self):
+    def test_public_capability_list_omits_unrecoverable_family(self):
         self.assertEqual(
-            available_backup_endpoints(
-                ("database", "wordpress", "basecamp", "website")
-            ),
+            available_backup_endpoints(("database", "basecamp", "website")),
             ["database", "website"],
         )
 
     @override_settings(**ENTERPRISE_POLICY)
-    def test_mobile_bootstrap_does_not_advertise_blocked_endpoints(self):
+    def test_mobile_bootstrap_does_not_advertise_blocked_endpoint(self):
         account = mock.Mock(id=11, name="Infrastructure")
         membership = mock.Mock(primary=True)
         memberships = mock.Mock()
@@ -139,7 +149,6 @@ class SourceRecoveryPolicyTests(SimpleTestCase):
             response = MobileBootstrapView().get(request)
 
         endpoints = response.data["capabilities"]["backup_endpoints"]
-        self.assertNotIn("wordpress", endpoints)
         self.assertNotIn("basecamp", endpoints)
         self.assertIn("website", endpoints)
 
@@ -156,85 +165,67 @@ class EnterpriseSourceRecoveryBoundaryTests(BaseTestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
         self.client.force_login(self.user)
-        self.nodes = {
-            "wordpress": self._make_source("wordpress"),
-            "basecamp": self._make_source("basecamp"),
-        }
-
-    def _make_source(self, code):
-        connection = factories.make_connection(self.account, self.member, code=code)
-        node = CoreNode.objects.create(
+        connection = factories.make_connection(
+            self.account,
+            self.member,
+            code="basecamp",
+        )
+        self.node = CoreNode.objects.create(
             connection=connection,
             type=CoreNode.Type.SAAS,
-            name=f"existing-{code}",
+            name="existing-basecamp",
             added_by=self.member,
         )
-        if code == "wordpress":
-            CoreWordPress.objects.create(node=node, name="Existing WordPress")
-        else:
-            CoreBasecamp.objects.create(
-                node=node,
-                name="Existing Basecamp",
-                projects=[],
-                all_projects=False,
-            )
-        return node
+        self.source = CoreBasecamp.objects.create(
+            node=self.node,
+            name="Existing Basecamp",
+            projects=[],
+            all_projects=False,
+        )
 
     def test_connection_creation_and_backup_api_refuse_before_mutation(self):
         with mock.patch.object(backup_dispatch.current_app, "send_task") as send_task:
-            for code, node in self.nodes.items():
-                with self.subTest(code=code, boundary="connection"):
-                    response = self.client.post(
-                        f"/api/v1/connections/{code}/", {}, format="json"
-                    )
-                    self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-                    self.assertEqual(
-                        response.json()["detail"], SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
-                    )
+            response = self.client.post(
+                "/api/v1/connections/basecamp/", {}, format="json"
+            )
+            self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(
+                response.json()["detail"], SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+            )
 
-                with self.subTest(code=code, boundary="backup"):
-                    response = self.client.post(
-                        f"/api/v1/nodes/{node.id}/take_snapshot/",
-                        {"storage_point_ids": [999999]},
-                        format="json",
-                    )
-                    self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-                    self.assertEqual(
-                        response.json()["detail"], SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
-                    )
+            response = self.client.post(
+                f"/api/v1/nodes/{self.node.id}/take_snapshot/",
+                {"storage_point_ids": [999999]},
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(
+                response.json()["detail"], SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+            )
 
         self.assertFalse(CoreBackupRequest.objects.exists())
         send_task.assert_not_called()
 
     def test_direct_outbox_and_replayed_worker_bypasses_fail_before_backup_rows(self):
-        task_by_family = {
-            "wordpress": backup_wordpress,
-            "basecamp": backup_basecamp,
-        }
         with mock.patch.object(backup_dispatch.current_app, "send_task") as send_task:
-            for code, node in self.nodes.items():
-                with self.subTest(code=code, boundary="outbox"):
-                    with self.assertRaises(SourceRecoveryUnavailable):
-                        backup_dispatch.create_backup_request(
-                            node=node,
-                            storage_ids=[],
-                            requested_by=self.member,
-                            trigger=CoreBackupRequest.Trigger.ON_DEMAND,
-                            idempotency_key=f"blocked-{code}",
-                        )
-
-                with self.subTest(code=code, boundary="worker"):
-                    with self.assertRaises(SourceRecoveryUnavailable):
-                        task_by_family[code].run(node_id=node.id)
+            with self.assertRaises(SourceRecoveryUnavailable):
+                backup_dispatch.create_backup_request(
+                    node=self.node,
+                    storage_ids=[],
+                    requested_by=self.member,
+                    trigger=CoreBackupRequest.Trigger.ON_DEMAND,
+                    idempotency_key="blocked-basecamp",
+                )
+            with self.assertRaises(SourceRecoveryUnavailable):
+                backup_basecamp.run(node_id=self.node.id)
 
         self.assertFalse(CoreBackupRequest.objects.exists())
-        self.assertFalse(self.nodes["wordpress"].wordpress.backups.exists())
-        self.assertFalse(self.nodes["basecamp"].basecamp.backups.exists())
+        self.assertFalse(self.source.backups.exists())
         send_task.assert_not_called()
 
     def test_disabled_basecamp_does_not_decrypt_or_refresh_oauth_credentials(self):
         auth = CoreAuthBasecamp.objects.create(
-            connection=self.nodes["basecamp"].connection,
+            connection=self.node.connection,
             access_token=b"encrypted-access-canary",
             refresh_token=b"encrypted-refresh-canary",
             identity_id="existing-identity",
@@ -251,7 +242,7 @@ class EnterpriseSourceRecoveryBoundaryTests(BaseTestCase):
         post.assert_not_called()
 
     @override_settings(**LEGACY_COMPATIBILITY_POLICY)
-    def test_explicit_compatibility_gate_matches_usable_legacy_download_paths(self):
+    def test_explicit_compatibility_gate_matches_legacy_download_path(self):
         storage = factories.make_storage(self.account, self.member, code="aws_s3")
         aws_s3 = storage.storage_aws_s3
         encryption_key = self.account.get_encryption_key()
@@ -261,24 +252,14 @@ class EnterpriseSourceRecoveryBoundaryTests(BaseTestCase):
         aws_s3.save(
             update_fields=("access_key", "secret_key", "region", "modified")
         )
-        storage_points = {
-            "wordpress": CoreWordPressBackupStoragePoints.objects.create(
-                backup=CoreWordPressBackup.objects.create(
-                    wordpress=self.nodes["wordpress"].wordpress,
-                    uuid=f"legacy-{uuid.uuid4().hex}",
-                ),
-                storage=storage,
-                storage_file_id="legacy/wordpress.zip",
+        storage_point = CoreBasecampBackupStoragePoints.objects.create(
+            backup=CoreBasecampBackup.objects.create(
+                basecamp=self.source,
+                uuid=f"legacy-{uuid.uuid4().hex}",
             ),
-            "basecamp": CoreBasecampBackupStoragePoints.objects.create(
-                backup=CoreBasecampBackup.objects.create(
-                    basecamp=self.nodes["basecamp"].basecamp,
-                    uuid=f"legacy-{uuid.uuid4().hex}",
-                ),
-                storage=storage,
-                storage_file_id="legacy/basecamp.zip",
-            ),
-        }
+            storage=storage,
+            storage_file_id="legacy/basecamp.zip",
+        )
         s3_client = mock.Mock()
         s3_client.head_object.return_value = {}
         s3_client.generate_presigned_url.return_value = (
@@ -289,69 +270,48 @@ class EnterpriseSourceRecoveryBoundaryTests(BaseTestCase):
             "apps.console.backup.models.bounded_boto3_client",
             return_value=s3_client,
         ):
-            for code, storage_point in storage_points.items():
-                with self.subTest(code=code):
-                    download_url = storage_point.generate_download_url()
-                    self.assertTrue(source_backup_creation_available(code))
-                    self.assertTrue(storage_point.direct_download_permitted())
-                    self.assertEqual(
-                        download_url, "https://download.example.test/legacy"
-                    )
+            download_url = storage_point.generate_download_url()
 
-    def test_old_pending_outbox_rows_are_terminalized_without_dispatch_or_deletion(self):
-        requests = []
-        for code, node in self.nodes.items():
-            requests.append(
-                CoreBackupRequest.objects.create(
-                    request_key=f"old-{code}-{uuid.uuid4().hex}",
-                    task_id=uuid.uuid4().hex,
-                    task_name=node.backup_task_name(),
-                    node=node,
-                    payload={"node_id": node.id, "storage_ids": []},
-                    next_dispatch_at=timezone.now(),
-                )
-            )
+        self.assertTrue(source_backup_creation_available("basecamp"))
+        self.assertTrue(storage_point.direct_download_permitted())
+        self.assertEqual(download_url, "https://download.example.test/legacy")
+
+    def test_old_pending_outbox_row_is_terminalized_without_dispatch_or_deletion(self):
+        request = CoreBackupRequest.objects.create(
+            request_key=f"old-basecamp-{uuid.uuid4().hex}",
+            task_id=uuid.uuid4().hex,
+            task_name=self.node.backup_task_name(),
+            node=self.node,
+            payload={"node_id": self.node.id, "storage_ids": []},
+            next_dispatch_at=timezone.now(),
+        )
 
         with mock.patch.object(backup_dispatch.current_app, "send_task") as send_task:
-            for request in requests:
-                self.assertFalse(backup_dispatch.publish_backup_request(request.id))
+            self.assertFalse(backup_dispatch.publish_backup_request(request.id))
 
-        for request in requests:
-            request.refresh_from_db()
-            self.assertEqual(request.status, CoreBackupRequest.Status.CANCELLED)
-            self.assertEqual(request.last_error_code, "SOURCE_RECOVERY_UNAVAILABLE")
-            self.assertEqual(
-                request.last_error_message, SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
-            )
+        request.refresh_from_db()
+        self.assertEqual(request.status, CoreBackupRequest.Status.CANCELLED)
+        self.assertEqual(request.last_error_code, "SOURCE_RECOVERY_UNAVAILABLE")
+        self.assertEqual(
+            request.last_error_message, SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+        )
         send_task.assert_not_called()
+        self.assertEqual(CoreBasecampReadSerializer(self.source).data["id"], self.source.id)
 
-        # Existing source rows remain readable for investigation and retention.
-        wordpress = self.nodes["wordpress"].wordpress
-        basecamp = self.nodes["basecamp"].basecamp
-        self.assertEqual(CoreWordPressReadSerializer(wordpress).data["id"], wordpress.id)
-        self.assertEqual(CoreBasecampReadSerializer(basecamp).data["id"], basecamp.id)
-
-    def test_console_and_api_choice_lists_hide_blocked_families(self):
+    def test_console_and_api_choice_lists_hide_blocked_family(self):
         response = self.client.get(reverse("console:setup:integration_select"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        content = response.content.decode()
-        self.assertNotIn('id="wordpress"', content)
-        self.assertNotIn('id="basecamp"', content)
+        self.assertNotIn('id="basecamp"', response.content.decode())
 
         response = self.client.get(reverse("console:node:index"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         content = response.content.decode()
-        self.assertEqual(content.count("Complete recovery unavailable"), 2)
-        for node in self.nodes.values():
-            self.assertNotIn(f'data-node-id="{node.id}"', content)
+        self.assertEqual(content.count("Complete recovery unavailable"), 1)
+        self.assertNotIn(f'data-node-id="{self.node.id}"', content)
 
         with mock.patch(
             "apps.console.connection.models.CoreConnectionLocation.refresh_local_ip_addresses"
         ):
-            for code in self.nodes:
-                with self.subTest(code=code):
-                    response = self.client.get(
-                        f"/api/v1/connections/{code}/endpoints/"
-                    )
-                    self.assertEqual(response.status_code, status.HTTP_200_OK)
-                    self.assertEqual(response.json(), [])
+            response = self.client.get("/api/v1/connections/basecamp/endpoints/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), [])

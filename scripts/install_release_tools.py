@@ -140,6 +140,7 @@ def install(policy: dict[str, Any], destination: Path, names: list[str]) -> None
     _atomic_write(destination / "empty-bandit.ini", b"[bandit]\n", 0o600)
     _atomic_write(destination / "empty-bandit.yaml", b"{}\n", 0o600)
     _atomic_write(destination / "empty-syft.yaml", b"{}\n", 0o600)
+    _atomic_write(destination / "empty-grype.yaml", b"{}\n", 0o600)
     _atomic_write(destination / "empty-trivy.yaml", b"{}\n", 0o600)
     # Trivy's secret scanner has a separate, repository-discoverable config
     # path. Passing an explicit config prevents a checkout trivy-secret.yaml

@@ -1,5 +1,6 @@
 """Static supply-chain and least-privilege contracts for the application image."""
 
+import ast
 from pathlib import Path
 from unittest import TestCase
 
@@ -52,6 +53,94 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertEqual(self.dockerfile.count(UBUNTU_IMAGE), 1)
         self.assertIn("COPY --from=python-runtime /usr/local /usr/local", self.runtime)
 
+    def test_artifact_kms_authority_closure_has_no_aws_sdk_dependency(self):
+        provider_root = ROOT / "backupsheep" / "artifact_crypto" / "providers"
+        provider_files = {path.name for path in provider_root.glob("*.py")}
+        self.assertEqual(
+            provider_files,
+            {"__init__.py", "base.py", "local.py", "local_file.py", "registry.py"},
+        )
+
+        factory_path = ROOT / "apps" / "_tasks" / "artifact_encryption.py"
+        settings_path = ROOT / "backupsheep" / "settings.py"
+        crypto_root = ROOT / "backupsheep" / "artifact_crypto"
+        # This is the complete authority-bearing closure: the production factory,
+        # its settings selector, and every artifact-crypto implementation module.
+        # Shared ledger models imported by the factory are deliberately outside
+        # this boundary; they retain generic SDK imports for optional AWS backup
+        # integrations but cannot select or execute an artifact key provider.
+        kms_authority_paths = [
+            factory_path,
+            settings_path,
+            *sorted(crypto_root.rglob("*.py")),
+        ]
+        findings = []
+        for path in kms_authority_paths:
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            relative_path = str(path.relative_to(ROOT))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported = [alias.name.lower() for alias in node.names]
+                    if any(
+                        name == "boto3"
+                        or name.startswith("boto3.")
+                        or name == "botocore"
+                        or name.startswith("botocore.")
+                        or "aws_kms" in name
+                        for name in imported
+                    ):
+                        findings.append((relative_path, node.lineno, "AWS SDK import"))
+                elif isinstance(node, ast.ImportFrom):
+                    imported_from = str(node.module or "").lower()
+                    if (
+                        imported_from == "boto3"
+                        or imported_from.startswith("boto3.")
+                        or imported_from == "botocore"
+                        or imported_from.startswith("botocore.")
+                        or "aws_kms" in imported_from
+                    ):
+                        findings.append((relative_path, node.lineno, "AWS SDK import"))
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    literal = node.value.strip().lower()
+                    if literal in {"aws-kms", "aws_kms"}:
+                        findings.append((relative_path, node.lineno, "AWS KMS literal"))
+                    elif literal in {"boto3", "botocore"} or literal.startswith(
+                        ("boto3.", "botocore.")
+                    ):
+                        findings.append((relative_path, node.lineno, "AWS SDK literal"))
+                elif isinstance(node, ast.Call):
+                    services = list(node.args[:1])
+                    services.extend(
+                        keyword.value
+                        for keyword in node.keywords
+                        if keyword.arg == "service_name"
+                    )
+                    callable_name = (
+                        node.func.attr
+                        if isinstance(node.func, ast.Attribute)
+                        else node.func.id
+                        if isinstance(node.func, ast.Name)
+                        else ""
+                    )
+                    if (
+                        callable_name in {"client", "create_client"}
+                        and any(
+                            isinstance(service, ast.Constant)
+                            and isinstance(service.value, str)
+                            and service.value.strip().lower() == "kms"
+                            for service in services
+                        )
+                    ):
+                        findings.append((relative_path, node.lineno, "KMS client"))
+
+        self.assertEqual(findings, [])
+        factory_source = factory_path.read_text(encoding="utf-8")
+        self.assertIn("LocalFileKeyProvider", factory_source)
+        settings_source = settings_path.read_text(encoding="utf-8")
+        self.assertNotIn('"aws-kms"', settings_source)
+        self.assertIn('"local-file"', settings_source)
+
     def test_python_dependencies_are_built_then_installed_offline(self):
         self.assertIn("AS python-wheels", self.dockerfile)
         self.assertIn("python -m pip --isolated wheel", self.dockerfile)
@@ -85,6 +174,23 @@ class RuntimeImageHardeningTests(TestCase):
             self.runtime,
         )
         self.assertIn("/usr/local/bin/pip3.14", self.runtime)
+        for launcher in (
+            "cli.exe",
+            "cli-32.exe",
+            "cli-64.exe",
+            "cli-arm64.exe",
+            "gui.exe",
+            "gui-32.exe",
+            "gui-64.exe",
+            "gui-arm64.exe",
+        ):
+            with self.subTest(setuptools_launcher=launcher):
+                self.assertIn(launcher, self.runtime)
+        self.assertIn(
+            "find /usr/local/lib/python3.14/site-packages/setuptools \\",
+            self.runtime,
+        )
+        self.assertIn("-type f -name '*.exe' -print -quit", self.runtime)
 
     def test_database_clients_are_version_pinned_and_authenticated(self):
         expected_packages = (
@@ -105,10 +211,10 @@ class RuntimeImageHardeningTests(TestCase):
             '"libmariadb3=1:11.8.6-5ubuntu0.1"',
             '"libncurses6=6.6+20251231-1"',
             '"libpq5=18.6-0ubuntu0.26.04.1"',
-            '"libssl3t64=3.5.5-1ubuntu3.4"',
+            '"libssl3t64=3.5.5-1ubuntu3.5"',
             '"openssh-client=1:10.2p1-2ubuntu3.5"',
-            '"openssl=3.5.5-1ubuntu3.4"',
-            '"openssl-provider-legacy=3.5.5-1ubuntu3.4"',
+            '"openssl=3.5.5-1ubuntu3.5"',
+            '"openssl-provider-legacy=3.5.5-1ubuntu3.5"',
             '"tzdata=2026c-0ubuntu0.26.04.1"',
         )
         for package in security_updates:
@@ -116,17 +222,18 @@ class RuntimeImageHardeningTests(TestCase):
                 self.assertIn(package, self.dockerfile)
 
         self.assertEqual(self.dockerfile.count("3.5.5-1ubuntu3.3"), 0)
+        self.assertEqual(self.dockerfile.count("3.5.5-1ubuntu3.4"), 0)
         self.assertEqual(
-            self.dockerfile.count("libssl3t64 (= 3.5.5-1ubuntu3.4)"), 3
+            self.dockerfile.count("libssl3t64 (= 3.5.5-1ubuntu3.5)"), 3
         )
         self.assertIn(
-            "assert_package libssl3t64 3.5.5-1ubuntu3.4", self.dockerfile
+            "assert_package libssl3t64 3.5.5-1ubuntu3.5", self.dockerfile
         )
         self.assertIn(
-            "assert_package openssl 3.5.5-1ubuntu3.4", self.dockerfile
+            "assert_package openssl 3.5.5-1ubuntu3.5", self.dockerfile
         )
         self.assertIn(
-            "assert_package openssl-provider-legacy 3.5.5-1ubuntu3.4",
+            "assert_package openssl-provider-legacy 3.5.5-1ubuntu3.5",
             self.dockerfile,
         )
 
@@ -137,6 +244,65 @@ class RuntimeImageHardeningTests(TestCase):
         )
         self.assertIn('dpkg-deb --fsys-tarfile "$mariadb_archive"', self.dockerfile)
         self.assertIn("tar -xOf - ./usr/bin/mariadb-dump", self.dockerfile)
+
+    def test_ubuntu_runtime_closure_uses_only_the_reviewed_amd64_snapshot(self):
+        stage = self.dockerfile.split(
+            "FROM ubuntu-runtime-base AS ubuntu-runtime-packages\n", 1
+        )[1].split("\n\nFROM ubuntu-runtime-base AS runtime", 1)[0]
+        for expected in (
+            "snapshot_id='20260831T131500Z'",
+            "https://snapshot.ubuntu.com/ubuntu/${snapshot_id}/",
+            "Suites: resolute resolute-updates resolute-security",
+            "Components: main universe",
+            "Architectures: amd64",
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg",
+            "APT::Update::Error-Mode=any",
+            "snapshot_apt_retry()",
+            'while [ "$snapshot_attempt" -le 4 ]; do',
+            '1) sleep 15',
+            '2) sleep 30',
+            '3) sleep 60',
+            '4) return "$snapshot_status"',
+            'if [ "$snapshot_status" -ge 126 ]; then',
+            "snapshot_apt_retry apt-get -o APT::Update::Error-Mode=any update",
+            'snapshot_apt_retry apt-get download "mariadb-client=1:11.8.6-5ubuntu0.1"',
+            "snapshot_apt_retry env DEBIAN_FRONTEND=noninteractive",
+            "apt-get indextargets --format '$(URI)'",
+            'test "$(dpkg --print-architecture)" = amd64',
+            "Ubuntu metadata escaped the reviewed snapshot:",
+            "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
+            "RUN --mount=from=python-runtime,source=/etc/ssl/certs/ca-certificates.crt",
+            "Acquire::https::CaInfo",
+            'Acquire::Retries "3"',
+            'Acquire::https::Timeout "30"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, stage)
+        self.assertEqual(stage.count("snapshot_apt_retry "), 3)
+        self.assertIn("else \\\n                snapshot_status=$?;", stage)
+        self.assertNotIn("|| true", stage)
+        self.assertIn(
+            "rm -f \\\n        /etc/apt/apt.conf.d/98backupsheep-snapshot-retries",
+            stage,
+        )
+        self.assertIn('com.backupsheep.ubuntu.snapshot="20260831T131500Z"', self.runtime)
+        self.assertNotIn("archive.ubuntu.com", stage)
+        self.assertNotIn("security.ubuntu.com", stage)
+        self.assertNotIn("arm64", stage)
+        for forbidden in (
+            "trusted=yes",
+            "AllowUnauthenticated",
+            "Check-Valid-Until",
+            "Verify-Peer",
+            "Verify-Host",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, stage)
+        self.assertIn("test ! -e /etc/apt/sources.list", self.runtime)
+        self.assertIn(
+            "find /etc/apt/sources.list.d -mindepth 1 -maxdepth 1",
+            self.runtime,
+        )
         self.assertNotIn(
             'dpkg-deb --extract "$mariadb_archive"', self.dockerfile
         )
@@ -412,6 +578,8 @@ class RuntimeImageHardeningTests(TestCase):
         for excluded in ("install.sh", "docs", "scripts", ".git", "apps/tests"):
             with self.subTest(excluded=excluded):
                 self.assertNotIn(f"COPY {excluded}", self.runtime)
+        self.assertNotIn("scripts/release_transition.py", self.runtime)
+        self.assertNotIn("/usr/local/lib/backupsheep-release", self.runtime)
 
     def test_static_assets_are_built_offline_as_non_root(self):
         collect = "python manage.py collectstatic --noinput --clear"
@@ -524,13 +692,23 @@ class RuntimeImageHardeningTests(TestCase):
             self.entrypoint,
         )
         self.assertIn(
-            "database_kms_credentials='/run/secrets/artifact_kms_database_aws_credentials'",
+            "database_artifact_keyring='/run/secrets/artifact_local_file_database_keyring'",
             self.entrypoint,
         )
         self.assertIn(
-            "files_kms_credentials='/run/secrets/artifact_kms_files_aws_credentials'",
+            "files_artifact_keyring='/run/secrets/artifact_local_file_files_keyring'",
             self.entrypoint,
         )
+        self.assertIn("artifact_keyring_is_read_only_mount()", self.entrypoint)
+        self.assertIn('matches == 1 && protected == 1', self.entrypoint)
+        self.assertIn(
+            "for (option_index = 1; option_index <= count; option_index++)",
+            self.entrypoint,
+        )
+        self.assertNotIn("for (index = 1; index <= count; index++)", self.entrypoint)
+        self.assertIn("artifact_keyring_metadata_is_safe", self.entrypoint)
+        self.assertIn("stat -c '%a:%h'", self.entrypoint)
+        self.assertNotIn("stat -c '%u:%g:%a:%h' \"$artifact_keyring\"", self.entrypoint)
         self.assertIn(
             "AWS instance-metadata credentials must be disabled",
             self.entrypoint,
@@ -540,7 +718,7 @@ class RuntimeImageHardeningTests(TestCase):
             self.entrypoint,
         )
         self.assertIn(
-            "$runtime_role must not mount an artifact-KMS credential secret",
+            "$runtime_role must not mount an artifact keyring",
             self.entrypoint,
         )
         self.assertIn("prepare_private_dir /run/backupsheep", self.entrypoint)
@@ -554,6 +732,10 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertIn("Docker init and a private PID namespace", self.entrypoint)
         self.assertIn("the Docker control socket must not be mounted", self.entrypoint)
         self.assertIn("python /code/manage.py docker_preflight", self.entrypoint)
+        self.assertIn(
+            "migrate|migrate_and_verify_artifact_provider|docker_preflight",
+            self.entrypoint,
+        )
         self.assertIn(
             "[ \"$3\" = 'backupsheep.database_identity' ]",
             self.entrypoint,

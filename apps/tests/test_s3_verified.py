@@ -11,7 +11,9 @@ from botocore.exceptions import ClientError
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
+from apps._tasks.artifact_encryption import StorageArtifactIdentity
 from apps._tasks.integration.storage.s3_verified import (
+    ARTIFACT_METADATA,
     BACKUP_METADATA,
     MULTIPART_METADATA,
     S3MultipartCleanupNotEligible,
@@ -78,6 +80,8 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
         backup_id = f"backup-{uuid.uuid4().hex}"
         self.point = SimpleNamespace(
             backup=SimpleNamespace(
+                pk=42,
+                id=42,
                 uuid=backup_id,
                 uuid_str=backup_id,
                 attempt_no=1,
@@ -148,6 +152,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
         key="backups/failed-multipart.zip",
         upload_id="owned-upload",
         phase="uploading",
+        ownership_marker="42",
     ):
         operation_started_at = (timezone.now() - timedelta(minutes=10)).isoformat()
         operation_marker = "owned-multipart-operation"
@@ -161,7 +166,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
                 "bucket": "test-bucket",
                 "expected_bucket_owner": "",
                 "object_key": key,
-                "ownership_marker": "42",
+                "ownership_marker": ownership_marker,
                 "sha256": "a" * 64,
                 "size_bytes": 10,
                 "multipart": {
@@ -188,6 +193,124 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             }
         }
         return key, upload_id, operation_started_at
+
+    @staticmethod
+    def _bse_identity():
+        identifier = "12345678-1234-4abc-8def-1234567890ab"
+        return StorageArtifactIdentity(
+            identifier=identifier,
+            filename=f"{identifier}.bse1",
+            artifact_format="bse1",
+            ownership_marker=f"bse2:{identifier}",
+            content_type="application/octet-stream",
+        )
+
+    def test_encrypted_upload_exposes_only_opaque_artifact_metadata(self):
+        artifact = self._bse_identity()
+        payload = b"private encrypted artifact bytes"
+        self.payload = payload
+        self.sha256 = hashlib.sha256(payload).hexdigest()
+        local_path = f"_storage/{artifact.filename}"
+        with open(local_path, "wb") as source:
+            source.write(payload)
+        self.addCleanup(
+            lambda: os.path.exists(local_path) and os.remove(local_path)
+        )
+        client = mock.MagicMock()
+        client.head_object.side_effect = [
+            _not_found(),
+            {
+                "ContentLength": len(payload),
+                "ETag": '"provider-etag"',
+                "VersionId": "version-1",
+                "Metadata": {
+                    ARTIFACT_METADATA: artifact.ownership_marker,
+                    "backupsheep-sha256": self.sha256,
+                    "backupsheep-bytes": str(len(payload)),
+                },
+            },
+        ]
+
+        with mock.patch(
+            "apps._tasks.integration.storage.s3_verified.validate_storage_object_key",
+            return_value=artifact,
+        ):
+            upload_verified_s3(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                key=f"backups/{artifact.filename}",
+                local_path=local_path,
+            )
+
+        sent = client.put_object.call_args.kwargs
+        self.assertEqual(sent["Key"], f"backups/{artifact.filename}")
+        self.assertEqual(sent["ContentType"], "application/octet-stream")
+        self.assertEqual(
+            sent["Metadata"],
+            {
+                ARTIFACT_METADATA: artifact.ownership_marker,
+                "backupsheep-sha256": self.sha256,
+                "backupsheep-bytes": str(len(payload)),
+            },
+        )
+        visible = repr({key: value for key, value in sent.items() if key != "Body"})
+        self.assertNotIn(self.point.backup.uuid_str, visible)
+        self.assertNotIn(BACKUP_METADATA, visible)
+
+    def test_encrypted_upload_rejects_caller_metadata_before_write(self):
+        artifact = self._bse_identity()
+        payload = b"private encrypted artifact bytes"
+        local_path = f"_storage/{artifact.filename}"
+        with open(local_path, "wb") as source:
+            source.write(payload)
+        self.addCleanup(
+            lambda: os.path.exists(local_path) and os.remove(local_path)
+        )
+        client = mock.MagicMock()
+        client.head_object.side_effect = _not_found()
+
+        with mock.patch(
+            "apps._tasks.integration.storage.s3_verified.validate_storage_object_key",
+            return_value=artifact,
+        ), self.assertRaisesRegex(
+            S3ObjectIntegrityError, "provider-visible arguments"
+        ):
+            upload_verified_s3(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                key=f"backups/{artifact.filename}",
+                local_path=local_path,
+                extra_args={
+                    "Metadata": {BACKUP_METADATA: self.point.backup.uuid_str}
+                },
+            )
+
+        client.put_object.assert_not_called()
+        client.create_multipart_upload.assert_not_called()
+
+    def test_encrypted_cleanup_uses_the_persisted_opaque_marker(self):
+        artifact = self._bse_identity()
+        key, upload_id, initiated = self._owned_cleanup_state(
+            key=f"backups/{artifact.filename}",
+            ownership_marker=artifact.ownership_marker,
+        )
+        client = self._cleanup_client(key, upload_id, initiated)
+
+        with mock.patch(
+            "apps._tasks.integration.storage.s3_verified.validate_storage_object_key",
+            return_value=artifact,
+        ):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+            )
+
+        intent = self.point.metadata["s3_object"]["multipart_cleanup"]["intent"]
+        self.assertEqual(intent["ownership_marker"], artifact.ownership_marker)
+        self.assertNotEqual(intent["ownership_marker"], str(self.point.backup_id))
 
     def _cleanup_client(self, key, upload_id, initiated):
         client = mock.MagicMock()

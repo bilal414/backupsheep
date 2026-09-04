@@ -2,6 +2,7 @@ from botocore.config import Config
 
 from apps._tasks.exceptions import StorageIDriveUploadFailedError
 from apps._tasks.integration.storage.s3_verified import upload_verified_s3
+from apps._tasks.artifact_encryption import storage_artifact_identity
 from apps._tasks.integration.storage.vultr import _safe_upload_exception
 from apps.api.v1.utils.api_helpers import bs_decrypt
 from apps.api.v1.utils.boto import bounded_boto3_client
@@ -34,14 +35,19 @@ def storage_idrive(stored_backup):
         prefix = idrive.prefix or ""
         if prefix and not prefix.endswith("/"):
             prefix += "/"
-        key = f"{prefix}{stored_backup.backup.node.name_slug}/{stored_backup.backup.uuid}.zip"
+        artifact_identity = storage_artifact_identity(stored_backup.backup)
+        key = (
+            f"{prefix}{stored_backup.backup.node.name_slug}/{artifact_identity.filename}"
+            if artifact_identity.artifact_format == "legacy_zip"
+            else f"{prefix}{artifact_identity.filename}"
+        )
 
         upload_verified_s3(
             stored_backup,
             client=_s3_client(idrive, storage.account.get_encryption_key()),
             bucket=idrive.bucket_name,
             key=key,
-            local_path=f"_storage/{stored_backup.backup.uuid}.zip",
+            local_path=f"_storage/{artifact_identity.filename}",
             metadata_key=IDRIVE_OBJECT_METADATA_KEY,
             supports_checksum=False,
         )

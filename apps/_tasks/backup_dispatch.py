@@ -18,10 +18,10 @@ from django.db.models import Q
 from django.utils import timezone
 from sentry_sdk import capture_exception
 from backupsheep.source_recovery_policy import (
-    RECOVERY_INCOMPLETE_SOURCE_FAMILIES,
-    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
-    source_backup_creation_available,
+    SOURCE_CREATION_POLICY_FAMILIES,
     require_source_backup_creation,
+    source_backup_creation_available,
+    source_recovery_unavailable_message,
 )
 
 
@@ -86,7 +86,7 @@ def _backup_request_ineligible_q():
     )
     unavailable_families = [
         code
-        for code in RECOVERY_INCOMPLETE_SOURCE_FAMILIES
+        for code in SOURCE_CREATION_POLICY_FAMILIES
         if not source_backup_creation_available(code)
     ]
     if unavailable_families:
@@ -374,7 +374,9 @@ def publish_backup_request(request_id, *, force=False):
                 else "REQUEST_INELIGIBLE"
             )
             request.last_error_message = (
-                SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+                source_recovery_unavailable_message(
+                    request.node.connection.integration.code
+                )
                 if request.last_error_code == "SOURCE_RECOVERY_UNAVAILABLE"
                 else _SAFE_INELIGIBLE_REQUEST
             )

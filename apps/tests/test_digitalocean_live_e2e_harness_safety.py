@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import stat
 import tempfile
 from contextlib import ExitStack, redirect_stdout
@@ -1797,6 +1798,32 @@ class DigitalOceanNativeVolumeVerifierMethodTests(TestCase):
             scope=self.team_uuid,
         )
         self.harness.ledger = mock.Mock()
+
+    def test_native_volume_key_material_files_are_private_and_reusable(self):
+        if shutil.which("ssh-keygen") is None:
+            self.skipTest("ssh-keygen is required for native-volume key tests")
+
+        key_directory = Path(self.temporary.name) / "mode-test-keys"
+        created = harness_module._ensure_native_volume_key_material(
+            key_directory,
+            run_id=self.run_id,
+            team_uuid=self.team_uuid,
+        )
+
+        self.assertEqual(stat.S_IMODE(key_directory.stat().st_mode), 0o700)
+        for filename in harness_module.NATIVE_VOLUME_KEY_FILES:
+            key_file = key_directory / filename
+            self.assertTrue(key_file.is_file())
+            self.assertFalse(key_file.is_symlink())
+            self.assertEqual(stat.S_IMODE(key_file.stat().st_mode), 0o600)
+
+        reused = harness_module._ensure_native_volume_key_material(
+            key_directory,
+            run_id=self.run_id,
+            team_uuid=self.team_uuid,
+        )
+        self.assertEqual(reused["client_fingerprint"], created["client_fingerprint"])
+        self.assertEqual(reused["host_fingerprint"], created["host_fingerprint"])
 
     def _witnessed_verifier(self):
         droplet = {

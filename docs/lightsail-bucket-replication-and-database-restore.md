@@ -126,7 +126,7 @@ Focused test command, after creating the manual Compose configuration and protec
 `.secrets` files from the installation guide:
 
 ```bash
-./backupsheep-compose build db app app-egress-guard
+./backupsheep-compose build db app app-egress-guard rabbitmq
 ./backupsheep-compose --allow-reviewed-runtime-overrides --profile operations run --rm --no-deps -e DJANGO_SERVER=test --entrypoint python \
   worker-cloud manage.py test \
   apps.tests.test_lightsail_relational_database \

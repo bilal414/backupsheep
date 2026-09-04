@@ -329,7 +329,7 @@ These ranges require interviews and pilot evidence before publication.
 
 - [ ] Dedicated-cell isolation demonstrated.
 - [ ] Idempotent provisioner passes 20 fault-injected lifecycles.
-- [ ] Scoped credentials, KMS separation, MFA, and support audit pass.
+- [ ] Scoped credentials, lane-separated keyring custody, MFA, and support audit pass.
 - [ ] Ten staged upgrades pass.
 - [ ] Three clean-environment DR drills pass.
 - [ ] Customer export/deletion path works.

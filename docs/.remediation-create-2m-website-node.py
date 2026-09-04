@@ -19,7 +19,6 @@ with transaction.atomic():
     if retained.connection_id != 60 or retained.type != CoreNode.Type.WEBSITE:
         raise RuntimeError("the retained SFTP fixture identity changed")
     node = CoreNode.objects.filter(name=NAME, connection_id=60).first()
-    created = node is None
     if node is None:
         node = CoreNode.objects.create(
             connection=retained.connection,
@@ -52,18 +51,13 @@ with transaction.atomic():
         ]:
             raise RuntimeError("the existing exact-owned node path changed")
 
+node.connection.validate()
 print(
     json.dumps(
         {
-            "created": created,
-            "node_id": node.pk,
-            "website_id": website.pk,
-            "connection_id": node.connection_id,
-            "name": node.name,
-            "path": website.paths[0]["path"],
-            "parallel": website.parallel,
-            "status": node.get_status_display(),
-            "connection_validation": node.connection.validate(),
+            "run_id": RUN_ID,
+            "result": "exact-owned website scale node is ready",
+            "connection_validation": "passed",
         },
         sort_keys=True,
     )

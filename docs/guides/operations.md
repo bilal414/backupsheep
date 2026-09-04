@@ -30,7 +30,7 @@ silently substitute a registry image when a reviewed local image is missing:
 
 ```bash
 cd /opt/backupsheep
-./backupsheep-compose build db app app-egress-guard
+./backupsheep-compose build db app app-egress-guard rabbitmq
 ./backupsheep-compose up --detach --no-build --no-deps --force-recreate \
   app-egress-guard app
 ./backupsheep-compose ps --all
@@ -153,8 +153,13 @@ To inspect queue pressure:
 
 ```bash
 ./backupsheep-compose exec -T rabbitmq \
-  rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers durable
+  rabbitmqctl -q -p backupsheep list_queues \
+  name messages_ready messages_unacknowledged consumers durable --silent
 ```
+
+The stock application is pinned to the `backupsheep` virtual host. An unqualified
+`list_queues` reads RabbitMQ's `/` virtual host and is not evidence about this Compose
+project's queue pressure.
 
 To inspect Celery work across all connected workers:
 
@@ -169,6 +174,12 @@ backup row is complete or lost.
 
 ## Planned maintenance
 
+This abbreviated flow is only for maintenance that does not require an application/schema
+upgrade or an application-consistent snapshot. Those changes must follow the full
+[upgrade stable-cut sequence](upgrades.md#before-the-change), including quiescing the app
+with Beat before the first drain inspection and rechecking durable/broker state after all
+workers stop.
+
 1. Announce the window and prevent new user-triggered work if required.
 2. Pause schedules in the console, or stop Beat:
 
@@ -180,7 +191,7 @@ backup row is complete or lost.
 4. Allow long provider mutations, dumps, uploads and restores to reach a safe terminal
    state when the maintenance objective permits.
 5. Back up the database and configuration.
-6. Apply the host/application change.
+6. Apply the reviewed host/operational change.
 7. Start the complete stack and verify migrations, dependencies and workers.
 8. Re-enable schedules/Beat and watch the first recovery sweep and scheduled run.
 
@@ -235,7 +246,7 @@ guard.
 | --- | --- | --- |
 | Provider snapshots wait | `worker-cloud`, `cloud`/`default` queues, provider API | Restore worker/broker connectivity; let durable polling resume |
 | Database dumps wait | `worker-database`, disk, source network/client version | Free capacity or correct source connectivity; preserve the row for retry |
-| Website/WordPress/Basecamp waits | `worker-files`, work volume, source network/account-scoped SSH approval | Fix source/approval/capacity, then observe retry |
+| Website/Basecamp waits | `worker-files`, work volume, source network/account-scoped SSH approval | Fix source/approval/capacity, then observe retry |
 | Completed dump is not offsite | `worker-storage`, `storage` queue, destination validation | Restore upload capacity/credentials; do not delete the work artifact |
 | Logs/notifications lag | `worker-logs`, `logs` queue, email/channel provider | Scale or repair that lane; backup execution can continue independently |
 

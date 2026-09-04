@@ -13,6 +13,7 @@ from unittest import mock
 from cryptography.fernet import Fernet
 from django.test import SimpleTestCase
 
+from apps._tasks.artifact_encryption import StorageArtifactIdentity
 from apps._tasks.integration.storage import azure, google_cloud
 from apps._tasks.integration.storage import tasks as storage_tasks
 
@@ -126,6 +127,7 @@ class _GCSBlob:
         self.upload_calls = 0
         self.always_lose_upload_response = False
         self.remote_content_override = None
+        self.delete_calls = []
 
     def upload_from_filename(self, filename, **kwargs):
         self.upload_calls += 1
@@ -145,6 +147,13 @@ class _GCSBlob:
             else self.content
         )
 
+    def reload(self, **kwargs):
+        return None
+
+    def delete(self, **kwargs):
+        self.delete_calls.append(dict(kwargs))
+        self.bucket.objects.pop(self.name, None)
+
 
 class _GCSBucket:
     def __init__(self):
@@ -161,7 +170,7 @@ class _GCSBucket:
             if not prefix or key.startswith(prefix)
         ]
 
-    def blob(self, key):
+    def blob(self, key, **_kwargs):
         value = self.objects.get(key)
         if value is None and self.upload_blob is not None and self.upload_blob.name == key:
             value = self.upload_blob
@@ -225,6 +234,8 @@ class _AzureBlobClient:
         self.lose_commit_response = False
         self.remote_content_override = None
         self.foreign_metadata = None
+        self.content_settings = None
+        self.delete_calls = []
 
     @property
     def properties(self):
@@ -259,6 +270,7 @@ class _AzureBlobClient:
 
     def commit_block_list(self, block_list, **kwargs):
         self.commit_calls += 1
+        self.content_settings = kwargs.get("content_settings")
         content = b"".join(self.uncommitted[str(item.id)] for item in block_list)
         self.committed = {
             "content": content,
@@ -275,12 +287,18 @@ class _AzureBlobClient:
             content = (self.committed or {}).get("content", b"")
         return _Downloader(content)
 
+    def delete_blob(self, **kwargs):
+        self.delete_calls.append(dict(kwargs))
+        self.committed = None
+
 
 class _AzureService:
     def __init__(self, blob_client):
         self.blob_client = blob_client
+        self.requests = []
 
     def get_blob_client(self, **kwargs):
+        self.requests.append(dict(kwargs))
         return self.blob_client
 
 
@@ -310,11 +328,103 @@ class _AdapterFixtureMixin:
         storage = _AzureStorage(service)
         return blob_client, service, _Point(self._backup(), storage)
 
+    def _bse_identity(self):
+        identifier = "12345678-1234-4abc-8def-1234567890ab"
+        return StorageArtifactIdentity(
+            identifier=identifier,
+            filename=f"{identifier}.bse1",
+            artifact_format="bse1",
+            ownership_marker=f"bse2:{identifier}",
+            content_type="application/octet-stream",
+        )
+
+    def _write_bse_fixture(self, artifact):
+        path = os.path.join("_storage", artifact.filename)
+        with open(path, "wb") as source:
+            source.write(self.payload)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
 
 class GoogleCloudHardeningTests(_AdapterFixtureMixin, SimpleTestCase):
     def _run(self, point, client):
         with mock.patch.object(google_cloud.gc_storage, "Client", return_value=client):
             return google_cloud.storage_google_cloud(point)
+
+    def test_encrypted_object_key_and_metadata_are_opaque(self):
+        artifact = self._bse_identity()
+        self._write_bse_fixture(artifact)
+        bucket, client, point = self._gcs_point()
+
+        with mock.patch.object(
+            google_cloud, "storage_artifact_identity", return_value=artifact
+        ), mock.patch.object(
+            google_cloud, "validate_storage_object_key", return_value=artifact
+        ):
+            self._run(point, client)
+
+        key = f"backups/{artifact.filename}"
+        remote = bucket.objects[key]
+        self.assertEqual(point.storage_file_id, key)
+        self.assertEqual(remote.content_type, "application/octet-stream")
+        self.assertEqual(
+            remote.metadata,
+            {
+                "backupsheep_namespace": google_cloud.NAMESPACE,
+                "backupsheep_sha256": self.checksum,
+                "backupsheep_bytes": str(len(self.payload)),
+                "backupsheep_artifact_id": artifact.ownership_marker,
+            },
+        )
+        visible = repr({"key": key, "metadata": remote.metadata})
+        self.assertNotIn(self.identifier, visible)
+        self.assertNotIn("test-node", visible)
+        self.assertNotIn(".zip", visible)
+        self.assertNotIn("backupsheep_backup_uuid", visible)
+
+    def test_encrypted_delete_uses_only_durable_opaque_identity(self):
+        artifact = self._bse_identity()
+        self._write_bse_fixture(artifact)
+        bucket, client, point = self._gcs_point()
+
+        with mock.patch.object(
+            google_cloud, "storage_artifact_identity", return_value=artifact
+        ), mock.patch.object(
+            google_cloud, "validate_storage_object_key", return_value=artifact
+        ):
+            self._run(point, client)
+            state = point.metadata[google_cloud.STATE_KEY]
+            # The production SDK exposes the immutable generation as a numeric
+            # string.  Most upload-only fixtures use a descriptive sentinel.
+            state["generation"] = "7"
+            bucket.upload_blob.generation = "7"
+            point.committed_integrity_identity = lambda: {
+                "sha256": self.checksum,
+                "size_bytes": len(self.payload),
+            }
+            point.committed_version_id = lambda: state["generation"]
+            with mock.patch.object(
+                google_cloud, "_storage_client", return_value=client
+            ):
+                self.assertTrue(
+                    google_cloud.delete_owned_google_cloud_object(point)
+                )
+
+        key = f"backups/{artifact.filename}"
+        deleted = bucket.upload_blob
+        self.assertEqual(point.storage_file_id, key)
+        self.assertNotIn(key, bucket.objects)
+        self.assertEqual(len(deleted.delete_calls), 1)
+        visible = repr(
+            {
+                "key": key,
+                "marker": state["ownership_marker"],
+                "delete": deleted.delete_calls,
+            }
+        )
+        self.assertNotIn(self.identifier, visible)
+        self.assertNotIn("test-node", visible)
+        self.assertNotIn(".zip", visible)
 
     def test_lost_upload_response_adopts_one_owned_object(self):
         bucket, client, point = self._gcs_point()
@@ -478,6 +588,75 @@ class GoogleCloudHardeningTests(_AdapterFixtureMixin, SimpleTestCase):
 class AzureHardeningTests(_AdapterFixtureMixin, SimpleTestCase):
     def _run(self, point):
         return azure.storage_azure(point)
+
+    def test_encrypted_object_key_and_metadata_are_opaque(self):
+        artifact = self._bse_identity()
+        self._write_bse_fixture(artifact)
+        blob, service, point = self._azure_point()
+
+        with mock.patch.object(
+            azure, "storage_artifact_identity", return_value=artifact
+        ), mock.patch.object(
+            azure, "validate_storage_object_key", return_value=artifact
+        ):
+            self._run(point)
+
+        key = f"backups/{artifact.filename}"
+        self.assertEqual(service.requests[-1]["blob"], key)
+        self.assertEqual(point.storage_file_id, key)
+        self.assertEqual(
+            blob.committed["metadata"],
+            {
+                "backupsheep_namespace": azure.NAMESPACE,
+                "backupsheep_sha256": self.checksum,
+                "backupsheep_bytes": str(len(self.payload)),
+                "backupsheep_artifact_id": artifact.ownership_marker,
+            },
+        )
+        self.assertEqual(
+            blob.content_settings.content_type, "application/octet-stream"
+        )
+        visible = repr(
+            {"key": service.requests[-1]["blob"], "metadata": blob.committed["metadata"]}
+        )
+        self.assertNotIn(self.identifier, visible)
+        self.assertNotIn("test-node", visible)
+        self.assertNotIn(".zip", visible)
+        self.assertNotIn("backupsheep_backup_uuid", visible)
+
+    def test_encrypted_delete_uses_only_durable_opaque_identity(self):
+        artifact = self._bse_identity()
+        self._write_bse_fixture(artifact)
+        blob, _service, point = self._azure_point()
+
+        with mock.patch.object(
+            azure, "storage_artifact_identity", return_value=artifact
+        ), mock.patch.object(
+            azure, "validate_storage_object_key", return_value=artifact
+        ):
+            self._run(point)
+            state = point.metadata[azure.STATE_KEY]
+            point.committed_integrity_identity = lambda: {
+                "sha256": self.checksum,
+                "size_bytes": len(self.payload),
+            }
+            point.committed_version_id = lambda: state["version_id"]
+            self.assertTrue(azure.delete_owned_azure_blob(point))
+
+        key = f"backups/{artifact.filename}"
+        self.assertEqual(point.storage_file_id, key)
+        self.assertIsNone(blob.committed)
+        self.assertEqual(len(blob.delete_calls), 1)
+        visible = repr(
+            {
+                "key": key,
+                "marker": state["ownership_marker"],
+                "delete": blob.delete_calls,
+            }
+        )
+        self.assertNotIn(self.identifier, visible)
+        self.assertNotIn("test-node", visible)
+        self.assertNotIn(".zip", visible)
 
     def test_lost_commit_response_adopts_owned_blob(self):
         blob, _service, point = self._azure_point()

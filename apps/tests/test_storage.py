@@ -26,15 +26,12 @@ from apps.console.backup.models import (
     CoreDatabaseBackupStoragePoints,
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
-    CoreWordPressBackup,
-    CoreWordPressBackupStoragePoints,
 )
 from apps.console.connection.models import CoreDoSpacesRegion
 from apps.console.node.models import (
     CoreBasecamp,
     CoreDatabase,
     CoreNode,
-    CoreWordPress,
 )
 from apps.console.storage.models import (
     CoreStorage,
@@ -94,11 +91,6 @@ def make_category_backup_point(member, storage, *, category, size, status=None):
         backup_model = CoreDatabaseBackup
         point_model = CoreDatabaseBackupStoragePoints
         source_field = "database"
-    elif category == "wordpress":
-        source = CoreWordPress.objects.create(node=node, name="wordpress-source")
-        backup_model = CoreWordPressBackup
-        point_model = CoreWordPressBackupStoragePoints
-        source_field = "wordpress"
     elif category == "basecamp":
         source = CoreBasecamp.objects.create(node=node, name="basecamp-source")
         backup_model = CoreBasecampBackup
@@ -392,9 +384,6 @@ class StorageCostSummaryTests(BaseTestCase):
             self.member, storage, category="database", size=200
         )
         make_category_backup_point(
-            self.member, storage, category="wordpress", size=300
-        )
-        make_category_backup_point(
             self.member, storage, category="basecamp", size=400
         )
 
@@ -418,11 +407,11 @@ class StorageCostSummaryTests(BaseTestCase):
         other_point.backup.size = 600
         other_point.backup.save(update_fields=["size", "modified"])
 
-        # The storage lookup plus one grouped query for each of website,
-        # database, WordPress, and Basecamp stays constant as destinations grow.
+        # The storage lookup plus one grouped query for each of website, database,
+        # and Basecamp stays constant as destinations grow.
         with CaptureQueriesContext(connection) as captured:
             summary = CoreStorage.cost_summary_for_account(self.account)
-        self.assertLessEqual(len(captured), 5)
+        self.assertLessEqual(len(captured), 4)
 
         destination = next(
             item
@@ -440,11 +429,11 @@ class StorageCostSummaryTests(BaseTestCase):
             "stored_bytes": 200,
         })
         self.assertEqual(destination["categories"]["saas"], {
-            "source_count": 2,
-            "backup_count": 2,
-            "stored_bytes": 700,
+            "source_count": 1,
+            "backup_count": 1,
+            "stored_bytes": 400,
         })
-        self.assertEqual(destination["stored_bytes"], 1000)
+        self.assertEqual(destination["stored_bytes"], 700)
         self.assertEqual(
             sum(
                 category["stored_bytes"]
@@ -476,9 +465,9 @@ class StorageCostSummaryTests(BaseTestCase):
         self.assertEqual(storage_row.stats_database_count, 1)
         self.assertEqual(storage_row.stats_database_backup_count, 1)
         self.assertEqual(storage_row.stats_database_size, 200)
-        self.assertEqual(storage_row.stats_wordpress_count, 2)
-        self.assertEqual(storage_row.stats_wordpress_backup_count, 2)
-        self.assertEqual(storage_row.stats_wordpress_size, 700)
+        self.assertEqual(storage_row.stats_saas_count, 1)
+        self.assertEqual(storage_row.stats_saas_backup_count, 1)
+        self.assertEqual(storage_row.stats_saas_size, 400)
 
 
 class LocalStorageModelTests(BaseTestCase):
@@ -745,7 +734,7 @@ class LocalStorageDownloadViewTests(BaseTestCase):
             BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
         ):
             self.client.force_login(self.user)
-            for family in ("website", "database", "wordpress", "basecamp"):
+            for family in ("website", "database", "basecamp"):
                 with self.subTest(family=family):
                     payload = f"{family}-bytes".encode()
                     point = self._make_family_point_with_file(
@@ -1008,3 +997,28 @@ class S3ImmutabilityFollowupTests(BaseTestCase):
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("configured together", str(serializer.errors))
+
+    def test_serializer_never_exposes_provider_exception_text(self):
+        from apps.api.v1.storage.aws_s3.serializers import CoreStorageAWSS3WriteSerializer
+        from apps.console.connection.models import CoreAWSRegion
+
+        canary = "aws-provider-secret-canary"
+        aws_s3 = self._protected_storage().storage_aws_s3
+        region_id = aws_s3.region_id or CoreAWSRegion.objects.first().id
+        serializer = CoreStorageAWSS3WriteSerializer(
+            instance=aws_s3,
+            data={
+                "access_key": "access",
+                "secret_key": "secret",
+                "bucket_name": "test-bucket",
+                "region": region_id,
+            },
+            context={"encryption_key": self.account.get_encryption_key()},
+        )
+
+        with mock.patch.object(
+            CoreStorageAWSS3, "validate", side_effect=ValueError(canary)
+        ):
+            self.assertFalse(serializer.is_valid())
+        self.assertNotIn(canary, str(serializer.errors))
+        self.assertIn("Unable to authenticate", str(serializer.errors))

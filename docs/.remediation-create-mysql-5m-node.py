@@ -29,7 +29,6 @@ with transaction.atomic():
         integration=source_connection.integration,
         name=NAME,
     ).first()
-    connection_created = connection is None
     if connection is None:
         connection = CoreConnection.objects.create(
             account=source_connection.account,
@@ -76,7 +75,6 @@ with transaction.atomic():
         raise RuntimeError("the existing exact-owned MySQL scale connection changed")
 
     node = CoreNode.objects.filter(connection=connection, name=NAME).first()
-    node_created = node is None
     if node is None:
         node = CoreNode.objects.create(
             connection=connection,
@@ -107,22 +105,13 @@ with transaction.atomic():
             option_mongodb=None,
         )
 
-validation = connection.validate(check_errors=True, raise_exp=True)
+connection.validate(check_errors=True, raise_exp=True)
 print(
     json.dumps(
         {
-            "connection_created": connection_created,
-            "connection_id": connection.pk,
-            "node_created": node_created,
-            "node_id": node.pk,
-            "database_id": node.database.pk,
-            "name": node.name,
-            "host": connection.auth_database.host,
-            "port": connection.auth_database.port,
-            "database_name": connection.auth_database.database_name,
-            "use_ssl": connection.auth_database.use_ssl,
-            "option_skip_opt": node.database.option_skip_opt,
-            "validation": validation,
+            "run_id": RUN_ID,
+            "result": "exact-owned MySQL scale node is ready",
+            "validation": "passed",
         },
         sort_keys=True,
     )

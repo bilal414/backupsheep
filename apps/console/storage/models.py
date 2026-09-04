@@ -46,6 +46,45 @@ def _read_validation_url(url):
             close()
 
 
+class S3StorageConfigurationError(ValueError):
+    """Typed, bounded S3 configuration error safe for an API response."""
+
+    MESSAGES = {
+        "OBJECT_LOCK_PAIR_REQUIRED": (
+            "Object Lock mode and retention days must be configured together."
+        ),
+        "OBJECT_LOCK_RETENTION_INVALID": (
+            "Object Lock retention must be at least one day."
+        ),
+        "EXPECTED_BUCKET_OWNER_INVALID": (
+            "Expected bucket owner must be a 12-digit AWS account ID."
+        ),
+        "LIFECYCLE_PAIR_REQUIRED": (
+            "Lifecycle transition days and storage class must be configured together."
+        ),
+        "LIFECYCLE_DAYS_INVALID": (
+            "Lifecycle transition must be at least one day."
+        ),
+        "LIFECYCLE_PREFIX_REQUIRED": (
+            "A folder prefix is required before BackupSheep can manage an S3 "
+            "lifecycle rule."
+        ),
+        "OBJECT_LOCK_NOT_ENABLED": (
+            "S3 Object Lock is not enabled for this bucket. Enable it before "
+            "configuring retention."
+        ),
+    }
+    DEFAULT_MESSAGE = "The S3 storage configuration is invalid."
+
+    def __init__(self, code):
+        self.code = str(code or "INVALID_CONFIGURATION")
+        super().__init__(self.public_message(self.code))
+
+    @classmethod
+    def public_message(cls, code):
+        return cls.MESSAGES.get(str(code or ""), cls.DEFAULT_MESSAGE)
+
+
 class CoreStorageType(models.Model):
     code = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=64)
@@ -662,17 +701,17 @@ class CoreStorageAWSS3(TimeStampedModel):
         lifecycle_class = data.get("lifecycle_storage_class") or ""
 
         if bool(mode) != bool(retain_days):
-            raise ValueError("Object Lock mode and retention days must be configured together.")
+            raise S3StorageConfigurationError("OBJECT_LOCK_PAIR_REQUIRED")
         if retain_days is not None and retain_days < 1:
-            raise ValueError("Object Lock retention must be at least one day.")
+            raise S3StorageConfigurationError("OBJECT_LOCK_RETENTION_INVALID")
         if expected_bucket_owner and (not expected_bucket_owner.isdigit() or len(expected_bucket_owner) != 12):
-            raise ValueError("Expected bucket owner must be a 12-digit AWS account ID.")
+            raise S3StorageConfigurationError("EXPECTED_BUCKET_OWNER_INVALID")
         if bool(transition_days) != bool(lifecycle_class):
-            raise ValueError("Lifecycle transition days and storage class must be configured together.")
+            raise S3StorageConfigurationError("LIFECYCLE_PAIR_REQUIRED")
         if transition_days is not None and transition_days < 1:
-            raise ValueError("Lifecycle transition must be at least one day.")
+            raise S3StorageConfigurationError("LIFECYCLE_DAYS_INVALID")
         if transition_days and not (data.get("prefix") or ""):
-            raise ValueError("A folder prefix is required before BackupSheep can manage an S3 lifecycle rule.")
+            raise S3StorageConfigurationError("LIFECYCLE_PREFIX_REQUIRED")
 
     def validate(self, data=None, raise_exp=None):
         import time
@@ -691,9 +730,7 @@ class CoreStorageAWSS3(TimeStampedModel):
             )
             configuration = response.get("ObjectLockConfiguration") or {}
             if configuration.get("ObjectLockEnabled") != "Enabled":
-                raise ValueError(
-                    "S3 Object Lock is not enabled for this bucket. Enable it before configuring retention."
-                )
+                raise S3StorageConfigurationError("OBJECT_LOCK_NOT_ENABLED")
             s3_client.head_bucket(Bucket=values["bucket_name"], **owner_kwargs)
             return True
 
@@ -2391,17 +2428,12 @@ class CoreStorage(TimeStampedModel):
     # Counts
     stats_website_count = models.BigIntegerField(null=True)
     stats_database_count = models.BigIntegerField(null=True)
-    stats_wordpress_count = models.BigIntegerField(null=True)
     # Backups
     stats_website_backup_count = models.BigIntegerField(null=True)
     stats_database_backup_count = models.BigIntegerField(null=True)
-    stats_wordpress_backup_count = models.BigIntegerField(null=True)
     # Size
     stats_website_size = models.BigIntegerField(null=True)
     stats_database_size = models.BigIntegerField(null=True)
-    stats_wordpress_size = models.BigIntegerField(null=True)
-    # Delete this later
-    stat_wordpress_size = models.BigIntegerField(null=True)
     # Protection and pricing are destination-level settings. Pricing is deliberately
     # explicit: provider rates vary by region, agreement, and storage class.
     is_air_gapped = models.BooleanField(default=False)
@@ -2485,7 +2517,6 @@ class CoreStorage(TimeStampedModel):
             CoreBasecampBackupStoragePoints,
             CoreDatabaseBackupStoragePoints,
             CoreWebsiteBackupStoragePoints,
-            CoreWordPressBackupStoragePoints,
         )
 
         storages = {
@@ -2529,12 +2560,6 @@ class CoreStorage(TimeStampedModel):
                 "backup__database__node_id",
                 "backup__database__node__name",
                 "database",
-            ),
-            (
-                CoreWordPressBackupStoragePoints,
-                "backup__wordpress__node_id",
-                "backup__wordpress__node__name",
-                "saas",
             ),
             (
                 CoreBasecampBackupStoragePoints,
@@ -2770,9 +2795,11 @@ class CoreStorage(TimeStampedModel):
 
 
 class CoreStorageLocal(TimeStampedModel):
-    """'Local Storage' backend: backups are kept as plain zip files on a disk path of
-    this BackupSheep server. `path` is an optional subdirectory under
-    settings.LOCAL_STORAGE_ROOT (''/None = the root itself)."""
+    """Store encrypted BSE1 artifacts below the configured local disk root.
+
+    ``path`` is an optional subdirectory under ``settings.LOCAL_STORAGE_ROOT``;
+    an empty value selects the root itself.
+    """
 
     storage = models.OneToOneField(
         "CoreStorage", related_name="storage_local", on_delete=models.CASCADE

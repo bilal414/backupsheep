@@ -191,7 +191,7 @@ screen if the backend remains one schedule per node.
 Purpose: source/provider access and discovery.
 
 Examples: AWS, DigitalOcean, UpCloud, Oracle Cloud, SSH/SFTP, database server,
-WordPress, Basecamp.
+and Basecamp.
 
 Each connection shows validation state, last validation, accessible workload count,
 scope/region, backup server, affected findings, and actions allowed by permissions.

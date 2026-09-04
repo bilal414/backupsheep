@@ -2028,7 +2028,7 @@
                         throw new Error('The secure download link was rejected. Please prepare it again.');
                     }
 
-                    const localDownloadPath = /^\/api\/v1\/storage\/local\/file\/(?:website|database|wordpress|basecamp)\/[1-9][0-9]*\/$/;
+                    const localDownloadPath = /^\/api\/v1\/storage\/local\/file\/(?:website|database|basecamp)\/[1-9][0-9]*\/$/;
                     if (value.startsWith('/')) {
                         if (!localDownloadPath.test(value)) {
                             throw new Error('The secure download link was rejected. Please prepare it again.');

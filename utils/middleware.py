@@ -189,6 +189,7 @@ class OnboardingMiddleware(object):
                 pass
             elif not (
                 path == "/healthz/"
+                or path in {"/.well-known/security.txt", "/security.txt"}
                 or path.startswith(onboarding)
                 or path.startswith(settings.STATIC_URL)
             ):

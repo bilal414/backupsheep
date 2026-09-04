@@ -19,6 +19,10 @@ from google.cloud import storage as gc_storage
 from requests import exceptions as requests_exceptions
 
 from apps._tasks.exceptions import StorageGoogleCloudUploadFailedError
+from apps._tasks.artifact_encryption import (
+    storage_artifact_identity,
+    validate_storage_object_key,
+)
 from apps._tasks.integration.storage.s3_verified import (
     S3ObjectIntegrityError,
     S3UploadReconciliationRequired,
@@ -35,7 +39,7 @@ from apps.console.connection.models import (
 STATE_KEY = "google_cloud_object"
 CHECKSUM_ALGORITHM = "sha256"
 NAMESPACE = "backupsheep-v1"
-OBJECT_CONTENT_TYPE = "application/zip"
+OBJECT_CONTENT_TYPE = "application/octet-stream"
 CHUNK_SIZE = 8 * 1024 * 1024
 MAX_PROVIDER_ATTEMPTS = 3
 SAFE_UPLOAD = "Google Cloud Storage could not verify the backup upload. Please retry."
@@ -257,8 +261,7 @@ def _provider_call(operation, function, *args, stored_backup=None, **kwargs):
 
 
 def _backup_identifier(stored_backup):
-    backup = stored_backup.backup
-    value = str(getattr(backup, "uuid_str", None) or getattr(backup, "uuid", ""))
+    value = storage_artifact_identity(stored_backup.backup).identifier
     if (
         not value
         or value in {".", ".."}
@@ -408,13 +411,19 @@ def _status(stored_backup, name):
     return getattr(getattr(stored_backup, "Status", None), name, None)
 
 
-def _marker_values(identifier, identity):
-    return {
+def _marker_values(artifact_identity, identity):
+    values = {
         "backupsheep_namespace": NAMESPACE,
-        "backupsheep_backup_uuid": identifier,
         "backupsheep_sha256": identity["sha256"],
         "backupsheep_bytes": str(identity["size_bytes"]),
     }
+    if not hasattr(artifact_identity, "artifact_format"):
+        values["backupsheep_backup_uuid"] = str(artifact_identity)
+    elif artifact_identity.artifact_format == "bse1":
+        values["backupsheep_artifact_id"] = artifact_identity.ownership_marker
+    else:
+        values["backupsheep_backup_uuid"] = artifact_identity.identifier
+    return values
 
 
 def _blob_value(blob, name, default=None):
@@ -436,6 +445,8 @@ def _owned_blob(blob, key, markers, *, stored_backup=None):
         raise GoogleCloudOwnershipFailure(stored_backup=stored_backup)
     metadata = _blob_metadata(blob)
     if any(metadata.get(str(name).lower()) != str(value) for name, value in markers.items()):
+        raise GoogleCloudOwnershipFailure(stored_backup=stored_backup)
+    if "backupsheep_artifact_id" in markers and "backupsheep_backup_uuid" in metadata:
         raise GoogleCloudOwnershipFailure(stored_backup=stored_backup)
     return blob
 
@@ -619,13 +630,16 @@ def _resumable_upload(
     from google.resumable_media.requests import ResumableUpload
 
     storage = stored_backup.storage
+    content_type = str(state.get("content_type") or "")
+    if content_type not in {"application/octet-stream", "application/zip"}:
+        raise GoogleCloudOwnershipFailure(stored_backup=stored_backup)
     session_url = _unseal_session(storage, state.get("session"))
     resumed = bool(session_url)
     if not session_url:
         session_url = _provider_call(
             "create resumable session",
             blob.create_resumable_upload_session,
-            content_type=OBJECT_CONTENT_TYPE,
+            content_type=content_type,
             size=identity["size_bytes"],
             client=storage_client,
             timeout=_timeout(),
@@ -664,7 +678,7 @@ def _resumable_upload(
         with open(local_filename, "rb") as source:
             upload._stream = source
             upload._total_bytes = identity["size_bytes"]
-            upload._content_type = OBJECT_CONTENT_TYPE
+            upload._content_type = content_type
             if resumed:
                 try:
                     upload.recover(transport)
@@ -806,7 +820,8 @@ def delete_owned_google_cloud_object(stored_backup):
         or (committed_version and committed_version != generation)
     ):
         raise GoogleCloudOwnershipFailure(stored_backup=stored_backup)
-    markers = _marker_values(stored_backup.backup.uuid_str, expected)
+    artifact_identity = validate_storage_object_key(stored_backup.backup, object_key)
+    markers = _marker_values(artifact_identity, expected)
     if dict(state.get("ownership_marker") or {}) != markers:
         raise GoogleCloudOwnershipFailure(stored_backup=stored_backup)
     try:
@@ -884,14 +899,19 @@ def delete_owned_google_cloud_object(stored_backup):
 def storage_google_cloud(stored_backup):
     """Upload/adopt one deterministic GCS object and commit verified evidence."""
     try:
-        identifier = _backup_identifier(stored_backup)
-        node_slug = _node_slug(stored_backup)
-        local_filename = os.path.join("_storage", f"{identifier}.zip")
+        artifact_identity = storage_artifact_identity(stored_backup.backup)
+        identifier = artifact_identity.identifier
+        local_filename = os.path.join("_storage", artifact_identity.filename)
         config = stored_backup.storage.storage_google_cloud
         prefix = str(config.prefix or "")
         if prefix and not prefix.endswith("/"):
             prefix += "/"
-        object_key = f"{prefix}{node_slug}/{identifier}.zip"
+        object_key = (
+            f"{prefix}{_node_slug(stored_backup)}/{artifact_identity.filename}"
+            if artifact_identity.artifact_format == "legacy_zip"
+            else f"{prefix}{artifact_identity.filename}"
+        )
+        validate_storage_object_key(stored_backup.backup, object_key)
         metadata, state = _state(stored_backup)
         persisted_key = str(state.get("object_key") or stored_backup.storage_file_id or object_key)
         if persisted_key != object_key:
@@ -908,7 +928,8 @@ def storage_google_cloud(stored_backup):
                 "sha256": identity["sha256"],
                 "size_bytes": identity["size_bytes"],
                 "checksum_algorithm": CHECKSUM_ALGORITHM,
-                "ownership_marker": _marker_values(identifier, identity),
+                "ownership_marker": _marker_values(artifact_identity, identity),
+                "content_type": artifact_identity.content_type,
             }
         )
         markers = dict(state["ownership_marker"])
@@ -946,7 +967,7 @@ def storage_google_cloud(stored_backup):
             stored_backup=stored_backup,
         )
         blob.metadata = dict(markers)
-        blob.content_type = OBJECT_CONTENT_TYPE
+        blob.content_type = artifact_identity.content_type
         # The client automatically switches to a resumable upload for large
         # files; setting chunk_size makes chunk boundaries deterministic.  The
         # generation precondition prevents a race from overwriting another
@@ -974,7 +995,7 @@ def storage_google_cloud(stored_backup):
                     "upload object",
                     blob.upload_from_filename,
                     local_filename,
-                    content_type=OBJECT_CONTENT_TYPE,
+                    content_type=artifact_identity.content_type,
                     if_generation_match=0,
                     timeout=_timeout(),
                     retry=None,

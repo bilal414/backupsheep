@@ -23,8 +23,9 @@ from apps.api.v1.utils.oauth_security import (
     validated_https_endpoint,
 )
 from backupsheep.source_recovery_policy import (
-    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
+    RETIRED_SOURCE_FAMILIES,
     source_backup_creation_available,
+    source_recovery_unavailable_message,
 )
 
 
@@ -58,7 +59,6 @@ SOURCE_OBJECT_CODES_BY_INTEGRATION = {
     "upcloud": frozenset({"cloud", "volume"}),
     "vultr": frozenset({"cloud", "volume", "vultr_database"}),
     "website": frozenset({"objects"}),
-    "wordpress": frozenset({"objects"}),
 }
 
 
@@ -117,9 +117,6 @@ class IntegrationSelectView(LoginRequiredMixin, TemplateView):
         context["protected_source_count"] = visible_nodes(member).count()
         context["can_manage_integrations"] = can_manage_integrations
         context["can_manage_storage"] = can_manage_storage
-        context["wordpress_source_protection_available"] = (
-            source_backup_creation_available("wordpress")
-        )
         context["basecamp_source_protection_available"] = (
             source_backup_creation_available("basecamp")
         )
@@ -144,8 +141,17 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
         i_name = self.request.GET.get("i_name")
         member = self.request.user.member
 
-        if CoreIntegration.objects.filter(code=integration_code).exists():
-            integration = CoreIntegration.objects.get(code=integration_code)
+        if integration_code in RETIRED_SOURCE_FAMILIES:
+            return redirect("console:setup:integration_select")
+
+        if CoreIntegration.objects.filter(
+            code=integration_code,
+            enabled=True,
+        ).exists():
+            integration = CoreIntegration.objects.get(
+                code=integration_code,
+                enabled=True,
+            )
             source_protection_available = source_backup_creation_available(
                 integration.code
             )
@@ -153,7 +159,7 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
                 source_protection_available
             )
             context["source_recovery_unavailable_message"] = (
-                SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+                source_recovery_unavailable_message(integration.code)
             )
 
             if source_protection_available and integration.code == "basecamp" and member_has_perm(
@@ -389,7 +395,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                 for field_name, category_name in (
                     ("website", "website"),
                     ("database", "database"),
-                    ("wordpress", "saas"),
+                    ("saas", "saas"),
                 ):
                     usage = categories.get(category_name, {})
                     setattr(
@@ -539,15 +545,22 @@ class IntegrationCreateNodeView(LoginRequiredMixin, TemplateView):
         connection_id = self.kwargs.get("connection_id")
         object_code = self.kwargs.get("object_code")
 
-        integration = get_object_or_404(CoreIntegration, code=integration_code)
-        _require_supported_source_object_code(integration.code, object_code)
-
         if not source_backup_creation_available(integration_code):
-            messages.error(request, SOURCE_RECOVERY_UNAVAILABLE_MESSAGE)
+            messages.error(
+                request,
+                source_recovery_unavailable_message(integration_code),
+            )
             return redirect(
                 "console:setup:integration_open",
                 integration_code=integration_code,
             )
+
+        integration = get_object_or_404(
+            CoreIntegration,
+            code=integration_code,
+            enabled=True,
+        )
+        _require_supported_source_object_code(integration.code, object_code)
 
         member = self.request.user.member
 
@@ -591,9 +604,16 @@ class IntegrationModifyNodeView(LoginRequiredMixin, TemplateView):
         node_id = self.kwargs.get("node_id")
         object_code = self.kwargs.get("object_code")
 
+        if integration_code in RETIRED_SOURCE_FAMILIES:
+            return redirect("console:setup:integration_select")
+
         member = self.request.user.member
 
-        integration = get_object_or_404(CoreIntegration, code=integration_code)
+        integration = get_object_or_404(
+            CoreIntegration,
+            code=integration_code,
+            enabled=True,
+        )
         _require_supported_source_object_code(integration.code, object_code)
 
         query = Q(

@@ -17,6 +17,14 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from prepare_trivy_db import (  # noqa: E402
+    TrivyDBError,
+    load_evidence as load_trivy_db_evidence,
+    load_lock as load_trivy_db_lock,
+)
+
 MAX_POLICY_BYTES = 64 * 1024
 MAX_REPORT_BYTES = 128 * 1024 * 1024
 MAX_TARGET_BYTES = 4 * 1024 * 1024
@@ -30,11 +38,21 @@ EXPECTED_CONFIG_TARGETS = {
     "Dockerfile",
     "Dockerfile.egress",
     "Dockerfile.postgres",
+    "Dockerfile.rabbitmq",
+    "Dockerfile.rabbitmq-legacy-source",
+    "Dockerfile.rabbitmq-upgrade",
+    "Dockerfile.release-verifier",
+    "deploy/ci/Dockerfile.postgres-runtime-source",
 }
 EXPECTED_VULNERABILITY_MISCONFIGURATION_IDENTITIES = {
     ("Dockerfile", "config", "dockerfile"),
     ("Dockerfile.egress", "config", "dockerfile"),
     ("Dockerfile.postgres", "config", "dockerfile"),
+    ("Dockerfile.rabbitmq", "config", "dockerfile"),
+    ("Dockerfile.rabbitmq-legacy-source", "config", "dockerfile"),
+    ("Dockerfile.rabbitmq-upgrade", "config", "dockerfile"),
+    ("Dockerfile.release-verifier", "config", "dockerfile"),
+    ("deploy/ci/Dockerfile.postgres-runtime-source", "config", "dockerfile"),
     ("package-lock.json", "lang-pkgs", "npm"),
     ("requirements.txt", "lang-pkgs", "pip"),
 }
@@ -957,6 +975,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--repository-root", type=Path, required=True)
     parser.add_argument("--source-revision", required=True)
+    parser.add_argument("--trivy-db-lock", type=Path, required=True)
+    parser.add_argument("--trivy-db-evidence", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
@@ -992,8 +1012,26 @@ def main(argv: list[str] | None = None) -> int:
             "all_severity_secrets": _sha256(secret_report_bytes),
             "high_critical_vulnerability_misconfiguration": _sha256(report_bytes),
         }
+        trivy_db_lock, trivy_db_lock_sha256 = load_trivy_db_lock(
+            arguments.trivy_db_lock
+        )
+        trivy_db_evidence, trivy_db_evidence_sha256 = load_trivy_db_evidence(
+            arguments.trivy_db_evidence,
+            trivy_db_lock,
+            trivy_db_lock_sha256,
+        )
+        summary["trivy_database"] = {
+            "db_sha256": trivy_db_evidence["db_sha256"],
+            "evidence_sha256": trivy_db_evidence_sha256,
+            "layer_digest": trivy_db_evidence["layer_digest"],
+            "lock_sha256": trivy_db_lock_sha256,
+            "manifest_digest": trivy_db_evidence["manifest_digest"],
+            "next_update": trivy_db_evidence["next_update"],
+            "repository": trivy_db_evidence["repository"],
+            "updated_at": trivy_db_evidence["updated_at"],
+        }
         _write_private_json(arguments.summary, summary)
-    except (OSError, SourceScanError) as error:
+    except (OSError, SourceScanError, TrivyDBError) as error:
         print(f"source scan validation failed: {error}", file=sys.stderr)
         return 1
     print(

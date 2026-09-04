@@ -22,7 +22,7 @@ DOWNLOAD_PREPARATION_STATES = frozenset(
 
 _LOCAL_DOWNLOAD_PATH = re.compile(
     r"/api/v1/storage/local/file/"
-    r"(?:website|database|wordpress|basecamp)/[1-9][0-9]*/"
+    r"(?:website|database|basecamp)/[1-9][0-9]*/"
 )
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.IGNORECASE)
 _MAX_TARGET_LENGTH = 32 * 1024

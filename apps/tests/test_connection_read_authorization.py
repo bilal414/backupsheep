@@ -22,7 +22,6 @@ from apps.api.v1.connection.upcloud.views import CoreUpCloudView
 from apps.api.v1.connection.views import CoreConnectionView
 from apps.api.v1.connection.vultr.views import CoreVultrView
 from apps.api.v1.connection.website.views import CoreWebsiteView
-from apps.api.v1.connection.wordpress.views import CoreWordPressView
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.account.models import CoreAccountGroup
 from apps.console.connection.models import CoreAuthDatabase, CoreIntegration
@@ -50,7 +49,6 @@ PROVIDER_CONNECTION_VIEWS = (
     ("upcloud", CoreUpCloudView),
     ("vultr", CoreVultrView),
     ("website", CoreWebsiteView),
-    ("wordpress", CoreWordPressView),
 )
 
 

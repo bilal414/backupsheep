@@ -12,7 +12,13 @@ from apps._tasks.helper.tasks import _local_upload_is_active
 from apps._tasks.integration.storage.lease import (
     DurableStorageUploadLease,
     StorageCleanupNotEligible,
+    StorageUploadDeletePending,
     StorageUploadLeaseBusy,
+    StorageUploadTerminalState,
+)
+from apps._tasks.artifact_deletion import (
+    DELETION_ORIGIN_KEY,
+    build_deletion_origin,
 )
 from apps._tasks.integration.storage.tasks import (
     _mark_storage_upload_started,
@@ -23,6 +29,7 @@ from apps.console.backup.models import (
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
     StoragePointLeaseLostError,
+    _cancel_storage_point_uploads,
 )
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
@@ -115,6 +122,90 @@ class StorageExecutionLeaseTests(BaseTestCase):
         point.refresh_from_db()
         self.assertEqual(point.upload_attempt_count, 1)
         self.assertEqual(point.upload_lease_owner, first.owner)
+
+    def test_upload_claim_refuses_deletion_status_or_origin(self):
+        _backup, point = self._point()
+        origin = build_deletion_origin(point, int(point.Status.UPLOAD_READY))
+        point.metadata = {DELETION_ORIGIN_KEY: origin}
+        for status in (
+            point.Status.DELETE_REQUESTED,
+            point.Status.DELETE_FAILED,
+            point.Status.DELETE_COMPLETED,
+        ):
+            point.status = status
+            point.save(update_fields=["status", "metadata", "modified"])
+            with self.subTest(status=status), self.assertRaises(
+                StorageUploadDeletePending
+            ):
+                DurableStorageUploadLease(point, task_id="stale-upload").claim()
+            point.refresh_from_db()
+            self.assertEqual(point.upload_attempt_count, 0)
+            self.assertEqual(point.status, status)
+
+        point.status = point.Status.UPLOAD_READY
+        point.save(update_fields=["status", "modified"])
+        with self.assertRaises(StorageUploadDeletePending):
+            DurableStorageUploadLease(point, task_id="origin-owned").claim()
+        point.refresh_from_db()
+        self.assertEqual(point.upload_attempt_count, 0)
+
+    def test_upload_claim_refuses_cancelled_and_terminal_failures_until_retry(self):
+        _backup, point = self._point()
+        for status in (
+            point.Status.CANCELLED,
+            point.Status.UPLOAD_FAILED,
+            point.Status.UPLOAD_FAILED_STORAGE_LIMIT,
+            point.Status.UPLOAD_FAILED_FILE_NOT_FOUND,
+            point.Status.UPLOAD_TIME_LIMIT_REACHED,
+            point.Status.STORAGE_VALIDATION_FAILED,
+        ):
+            point.__class__.objects.filter(pk=point.pk).update(status=status)
+            with self.subTest(status=status), self.assertRaises(
+                StorageUploadTerminalState
+            ):
+                DurableStorageUploadLease(point, task_id="delayed-upload").claim()
+            point.refresh_from_db()
+            self.assertEqual(point.upload_attempt_count, 0)
+            self.assertEqual(point.status, status)
+
+        point.__class__.objects.filter(pk=point.pk).update(
+            status=point.Status.UPLOAD_RETRY
+        )
+        retry = DurableStorageUploadLease(point, task_id="authorized-retry")
+        retry.claim()
+        self.addCleanup(retry.release)
+        point.refresh_from_db()
+        self.assertEqual(point.upload_attempt_count, 1)
+        self.assertEqual(point.status, point.Status.UPLOAD_IN_PROGRESS)
+
+    def test_stale_cancellation_preserves_provider_boundary_evidence(self):
+        _backup, point = self._point()
+        stale = point.__class__.objects.get(pk=point.pk)
+        lease = DurableStorageUploadLease(point, task_id="provider-delivery")
+        claimed = lease.claim()
+        self.addCleanup(lease.release)
+        claimed.storage_file_id = "provider/object.bse1"
+        claimed.metadata["provider_state"] = {
+            "phase": "outcome-pending",
+            "object_key": "provider/object.bse1",
+        }
+        claimed.save()
+        token = claimed.upload_lease_token
+
+        with mock.patch("apps.console.backup.models.app.control.revoke") as revoke:
+            _cancel_storage_point_uploads([stale])
+
+        point.refresh_from_db()
+        self.assertEqual(point.status, point.Status.CANCELLED)
+        self.assertEqual(point.upload_attempt_count, 1)
+        self.assertEqual(point.upload_lease_token, token)
+        self.assertEqual(point.storage_file_id, "provider/object.bse1")
+        self.assertEqual(
+            point.metadata["provider_state"]["phase"],
+            "outcome-pending",
+        )
+        self.assertIn("_upload_execution", point.metadata)
+        revoke.assert_called_once_with("provider-delivery", terminate=True)
 
     def test_source_ready_parent_moves_only_after_storage_claim_boundary(self):
         backup, point = self._point()

@@ -22,7 +22,6 @@ def get_backup_models():
     from ..backup.models import (
         CoreWebsiteBackup,
         CoreDatabaseBackup,
-        CoreWordPressBackup,
         CoreBasecampBackup,
         CoreDigitalOceanBackup,
         CoreHetznerBackup,
@@ -42,7 +41,6 @@ def get_backup_models():
     return (
         (CoreWebsiteBackup, "website"),
         (CoreDatabaseBackup, "database"),
-        (CoreWordPressBackup, "wordpress"),
         (CoreBasecampBackup, "basecamp"),
         (CoreDigitalOceanBackup, "digitalocean"),
         (CoreHetznerBackup, "hetzner"),
@@ -206,7 +204,6 @@ class CoreAccount(TimeStampedModel):
         from ..utils.models import UtilBackup
         from django.db.models import Sum
         from ..backup.models import CoreDatabaseBackupStoragePoints
-        from ..backup.models import CoreWordPressBackupStoragePoints
         from django.db.models import Count, Q
 
         storage_used = 0
@@ -241,18 +238,6 @@ class CoreAccount(TimeStampedModel):
             )
             storage_used += (
                 CoreDatabaseBackupStoragePoints.objects.filter(query_db)
-                .aggregate(Sum("backup__size"))
-                .get("backup__size__sum", 0)
-                or 0
-            )
-
-        # WordPress Storage
-        if not database_only:
-            query_wp = query & Q(
-                status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE
-            )
-            storage_used += (
-                CoreWordPressBackupStoragePoints.objects.filter(query_wp)
                 .aggregate(Sum("backup__size"))
                 .get("backup__size__sum", 0)
                 or 0
@@ -313,10 +298,6 @@ class CoreAccount(TimeStampedModel):
             query &= ~Q(status=CoreNode.Status.PAUSED)
 
         return CoreNode.objects.filter(query).count()
-
-    def get_node_count_wordpress(self):
-        from ..node.models import CoreNode
-        return CoreNode.objects.filter(type=CoreNode.Type.SAAS, connection__account=self).count()
 
     def get_node_count_website(self):
         from ..node.models import CoreNode

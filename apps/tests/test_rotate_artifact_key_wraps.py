@@ -1,4 +1,4 @@
-"""Safety tests for resumable external-KMS data-key rewrapping."""
+"""Safety tests for resumable local-file data-key rewrapping."""
 
 import hashlib
 import io
@@ -24,17 +24,15 @@ from apps.tests.base import BaseTestCase
 from backupsheep.artifact_crypto import ArtifactContext, WrappedDataKey
 
 
-SOURCE_KEY = "arn:aws:kms:us-east-1:123456789012:key/source-key"
-DESTINATION_KEY = "arn:aws:kms:us-east-1:123456789012:key/destination-key"
+SOURCE_KEY = "lfk-11111111111111111111111111111111"
+DESTINATION_KEY = "lfk-22222222222222222222222222222222"
 INSTALLATION_ID = "a" * 64
-THIRD_KEY = "arn:aws:kms:us-east-1:123456789012:key/unexpected-key"
+THIRD_KEY = "lfk-33333333333333333333333333333333"
 
 
 @override_settings(
     BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="bse1",
-    BACKUPSHEEP_ARTIFACT_KEY_PROVIDER="aws-kms",
-    BACKUPSHEEP_ARTIFACT_KMS_REGION="us-east-1",
-    BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS=(SOURCE_KEY, DESTINATION_KEY),
+    BACKUPSHEEP_ARTIFACT_KEY_PROVIDER="local-file",
     BACKUPSHEEP_INSTALLATION_ID=INSTALLATION_ID,
 )
 class ArtifactKeyWrapRotationTests(BaseTestCase):
@@ -79,7 +77,7 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         key_wrap = CoreBackupKeyWrap.objects.create(
             envelope=envelope,
             generation=1,
-            provider=CoreBackupKeyWrap.Provider.AWS_KMS,
+            provider=CoreBackupKeyWrap.Provider.LOCAL_FILE,
             wrapping_key_id=wrapping_key,
             wrapped_data_key=wrapped,
             wrapped_key_sha256=hashlib.sha256(wrapped).hexdigest(),
@@ -89,8 +87,7 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
 
     def _arguments(self, *, apply=False):
         values = {
-            "expected_source_key_arn": SOURCE_KEY,
-            "destination_key_arn": DESTINATION_KEY,
+            "expected_source_key_id": SOURCE_KEY,
             "installation_id_witness": INSTALLATION_ID,
             "lane": "files",
             "limit": 100,
@@ -98,16 +95,17 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         }
         return values
 
-    def test_default_plan_is_read_only_and_does_not_construct_provider(self):
+    def test_default_plan_is_read_only_after_validating_keyring(self):
         envelope, original = self._active_envelope()
         output = io.StringIO()
+        provider = self.mock_provider(b"unused")
         with mock.patch.object(
             rotation,
             "_configured_provider",
-            side_effect=AssertionError("dry-run constructed a provider"),
+            return_value=nullcontext(provider),
         ):
             call_command("rotate_artifact_key_wraps", stdout=output, **self._arguments())
-        self.assertIn("no KMS or database mutation", output.getvalue())
+        self.assertIn("no keyring or database mutation", output.getvalue())
         envelope.refresh_from_db()
         original.refresh_from_db()
         self.assertEqual(envelope.get_active_key_wrap().pk, original.pk)
@@ -118,21 +116,31 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         output = io.StringIO()
         arguments = self._arguments()
         arguments["lane"] = "database"
-        call_command("rotate_artifact_key_wraps", stdout=output, **arguments)
-        self.assertIn("lane=database selected=0", output.getvalue())
+        provider = self.mock_provider(b"unused", lane="database")
+        with mock.patch.object(
+            rotation,
+            "_configured_provider",
+            return_value=nullcontext(provider),
+        ):
+            call_command("rotate_artifact_key_wraps", stdout=output, **arguments)
+        self.assertIn(
+            f"lane=database source={SOURCE_KEY} destination={DESTINATION_KEY} "
+            "selected=0",
+            output.getvalue(),
+        )
 
     def test_shared_provider_factory_context_is_entered_and_closed(self):
         provider = mock.Mock()
-        provider.name = "aws-kms"
-        provider.external = True
+        provider.name = "local-file"
         provider.enterprise_eligible = True
+        provider.lane = "files"
         manager = mock.MagicMock()
         manager.__enter__.return_value = provider
         with mock.patch(
             "apps._tasks.artifact_encryption._configured_provider",
             return_value=manager,
         ) as provider_factory:
-            with rotation._configured_provider() as observed:
+            with rotation._configured_provider(lane="files") as observed:
                 self.assertIs(observed, provider)
         provider_factory.assert_called_once_with()
         manager.__enter__.assert_called_once_with()
@@ -169,14 +177,14 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         with mock.patch.object(
             rotation,
             "_configured_provider",
-            side_effect=lambda: nullcontext(provider),
+            side_effect=lambda **_kwargs: nullcontext(provider),
         ) as provider_factory:
             call_command(
                 "rotate_artifact_key_wraps",
                 stdout=output,
                 **self._arguments(apply=True),
             )
-        provider_factory.assert_called_once_with()
+        provider_factory.assert_called_once_with(lane="files")
         self.assertIn("rotated=1", output.getvalue())
         self.assertEqual(
             envelope.get_active_key_wrap().wrapping_key_id,
@@ -187,7 +195,7 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         with mock.patch.object(
             rotation,
             "_configured_provider",
-            side_effect=lambda: nullcontext(provider),
+            side_effect=lambda **_kwargs: nullcontext(provider),
         ):
             call_command(
                 "rotate_artifact_key_wraps",
@@ -200,7 +208,7 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
     def test_provider_failure_rolls_back_without_pending_or_retired_state(self):
         envelope, original = self._active_envelope()
         provider = self.mock_provider(b"unused")
-        provider.rewrap_data_key.side_effect = RuntimeError("kms unavailable")
+        provider.rewrap_data_key.side_effect = RuntimeError("keyring unavailable")
         with self.assertRaisesRegex(CommandError, "no database state changed"):
             rotation._rotate_one(
                 envelope.pk,
@@ -232,15 +240,20 @@ class ArtifactKeyWrapRotationTests(BaseTestCase):
         with self.assertRaisesRegex(CommandError, "installation identity"):
             rotation._validated_rotation_scope(
                 source_key=SOURCE_KEY,
-                destination_key=DESTINATION_KEY,
                 witness="b" * 64,
+                lane="files",
             )
 
     @staticmethod
-    def mock_provider(ciphertext):
+    def mock_provider(ciphertext, *, lane="files"):
         provider = mock.Mock()
+        provider.name = "local-file"
+        provider.enterprise_eligible = True
+        provider.lane = lane
+        provider.active_key_id = DESTINATION_KEY
+        provider.key_ids = (DESTINATION_KEY, SOURCE_KEY)
         provider.rewrap_data_key.return_value = WrappedDataKey(
-            provider_name="aws-kms",
+            provider_name="local-file",
             wrapping_key_id=DESTINATION_KEY,
             ciphertext=ciphertext,
         )

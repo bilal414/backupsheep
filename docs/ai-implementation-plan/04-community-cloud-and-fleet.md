@@ -281,7 +281,8 @@ Before paying customers enter credentials:
 Acceptance:
 
 - A restored cell can decrypt intended credentials using recovered key material.
-- Database-only compromise does not reveal the KMS-held wrapping secret.
+- Database-only compromise does not reveal either externally recovered, lane-scoped
+  local-file wrapping keyring.
 - Support staff cannot read provider credentials or backup content through normal tooling.
 - Emergency access expires automatically and produces an immutable audit event.
 - Independent penetration test has no unresolved critical/high issue before GA.
@@ -424,7 +425,7 @@ require a deliberate legal/procurement decision.
 | --- | --- |
 | Architecture | Two cells prove database/broker/volume/secret isolation; control-plane shutdown has no core impact. |
 | Provisioning | 20 fault-injected lifecycles create no duplicates/orphans and fail closed on ambiguous ownership. |
-| Security | Key separation/KMS, scoped tokens, MFA, telemetry scrubbing, support access, and penetration test pass. |
+| Security | Lane-key separation and independent keyring custody, scoped tokens, MFA, telemetry scrubbing, support access, and penetration test pass. |
 | Upgrade | 10 staged upgrades with process/host kills preserve logical executions and provider-operation identity. |
 | DR | 3 clean-environment recoveries meet measured RPO/RTO and decrypt intended configuration. |
 | Product beta | At least 5 active design partners complete onboarding, backup, and restore/rehearsal workflows with sustainable support load. |

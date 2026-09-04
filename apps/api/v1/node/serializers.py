@@ -164,8 +164,6 @@ class CoreNodeSerializer(serializers.ModelSerializer):
             return {"name": "vultr_database", "id": obj.vultr_database.id}
         elif hasattr(obj, "website"):
             return {"name": "website", "id": obj.website.id}
-        elif hasattr(obj, "wordpress"):
-            return {"name": "wordpress", "id": obj.wordpress.id}
         elif hasattr(obj, "vultr"):
             return {"name": "vultr", "id": obj.vultr.id}
         elif hasattr(obj, "aws_rds"):

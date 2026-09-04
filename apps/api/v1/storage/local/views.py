@@ -104,7 +104,6 @@ class LocalStorageFileDownloadView(APIView):
         from apps.console.backup.models import (
             CoreWebsiteBackupStoragePoints,
             CoreDatabaseBackupStoragePoints,
-            CoreWordPressBackupStoragePoints,
             CoreBasecampBackupStoragePoints,
         )
 
@@ -123,10 +122,6 @@ class LocalStorageFileDownloadView(APIView):
                 CoreDatabaseBackupStoragePoints,
                 "backup__database__node",
             ),
-            "wordpress": (
-                CoreWordPressBackupStoragePoints,
-                "backup__wordpress__node",
-            ),
             "basecamp": (
                 CoreBasecampBackupStoragePoints,
                 "backup__basecamp__node",
@@ -138,7 +133,7 @@ class LocalStorageFileDownloadView(APIView):
                 raise Http404
             candidates = (selected,)
         else:
-            # Legacy URLs did not identify the table, even though all four
+            # Legacy URLs did not identify the table, even though the remaining
             # storage-point tables have independent integer primary keys. Keep
             # unambiguous bookmarks working, but fail closed if an ID collides.
             candidates = tuple(family_models.values())

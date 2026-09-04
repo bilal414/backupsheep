@@ -11,6 +11,7 @@ from backupsheep.database_identity import (
     _ensure_application_role,
     _connect,
     _read_secret,
+    _revoke_default_privileges,
     main,
 )
 from backupsheep.database_lane_policy import LANES
@@ -102,6 +103,41 @@ class DatabaseIdentityConfigurationTests(TestCase):
                 self.environment(), secret_root=self.secret_root
             )
 
+    def test_configuration_rejects_system_and_malformed_database_names(self):
+        for database_name in (
+            "",
+            "postgres",
+            "template0",
+            "template1",
+            "Tenant",
+            "tenant-name",
+            "ténant",
+            "1tenant",
+            " tenant",
+            "tenant ",
+            "a" * 64,
+        ):
+            with self.subTest(database_name=database_name):
+                environment = self.environment()
+                environment["DB_NAME"] = database_name
+                with self.assertRaisesRegex(
+                    ProvisioningError,
+                    "non-system lowercase PostgreSQL database identifier",
+                ):
+                    IdentityConfiguration.from_environment(
+                        environment, secret_root=self.secret_root
+                    )
+
+    def test_configuration_accepts_stock_database_identifier_shape(self):
+        for database_name in ("backupsheep", "_backupsheep", "tenant_1", "a" * 63):
+            with self.subTest(database_name=database_name):
+                environment = self.environment()
+                environment["DB_NAME"] = database_name
+                configuration = IdentityConfiguration.from_environment(
+                    environment, secret_root=self.secret_root
+                )
+                self.assertEqual(configuration.database, database_name)
+
     def test_configuration_rejects_a_redirected_bootstrap_endpoint(self):
         environment = self.environment()
         environment["DB_HOST"] = "attacker.example"
@@ -170,6 +206,78 @@ class DatabaseIdentityConfigurationTests(TestCase):
                 _read_secret(str(hardlink), "hardlink", root=self.secret_root)
         finally:
             outside.unlink(missing_ok=True)
+
+
+class DatabasePrivilegeBoundaryTests(TestCase):
+    class RecordingCursor:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, parameters=None):
+            self.queries.append((str(query), parameters))
+
+    def test_default_revokes_cover_global_and_schema_local_privileges(self):
+        cursor = self.RecordingCursor()
+        config = mock.Mock(migrator_user="backupsheep_migrator")
+
+        _revoke_default_privileges(
+            cursor,
+            config,
+            ("backupsheep_app", "backupsheep_runtime"),
+        )
+
+        rendered = [query for query, parameters in cursor.queries if parameters is None]
+        self.assertEqual(len(rendered), 24)
+        self.assertEqual(
+            sum("IN SCHEMA public" in query for query in rendered),
+            12,
+        )
+        self.assertEqual(
+            sum("IN SCHEMA public" not in query for query in rendered),
+            12,
+        )
+        self.assertEqual(sum("FROM PUBLIC" in query for query in rendered), 8)
+        for object_type in ("TABLES", "SEQUENCES", "FUNCTIONS", "TYPES"):
+            with self.subTest(object_type=object_type):
+                self.assertEqual(
+                    sum(f"SQL('{object_type}')" in query for query in rendered),
+                    6,
+                )
+        for grantee in ("backupsheep_app", "backupsheep_runtime"):
+            with self.subTest(grantee=grantee):
+                self.assertEqual(
+                    sum(f"Identifier('{grantee}')" in query for query in rendered),
+                    8,
+                )
+
+    def test_effective_routine_type_and_default_acls_are_validated(self):
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "backupsheep"
+            / "database_identity.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "COALESCE(\n                  procedure.proacl,\n"
+            "                  pg_catalog.acldefault('f', procedure.proowner)",
+            source,
+        )
+        self.assertIn(
+            "COALESCE(type.typacl, pg_catalog.acldefault('T', type.typowner))",
+            source,
+        )
+        self.assertIn('sql.SQL("REVOKE USAGE ON TYPE {} FROM PUBLIC")', source)
+        self.assertIn('"<global>",\n            "f",', source)
+        self.assertIn('"<global>",\n            "T",', source)
+        self.assertIn("defaults.defaclobjtype::text", source)
+        self.assertIn(
+            "LEFT JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) acl ON true",
+            source,
+        )
+        self.assertNotIn(
+            "CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) acl",
+            source,
+        )
 
 
 class ExistingDatabaseRoleSafetyTests(TestCase):

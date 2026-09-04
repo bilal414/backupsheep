@@ -1,4 +1,3 @@
-import json
 from datetime import timedelta
 
 import boto3
@@ -14,12 +13,12 @@ from apps.api.v1.utils.api_helpers import bs_decrypt
 from apps.console.backup.models import (
     CoreWebsiteBackup,
     CoreDatabaseBackup,
-    CoreWordPressBackup,
 )
 from apps.console.node.models import CoreNode, CoreServerStatus
 from apps.console.storage.models import CoreStorage
 from django.core.cache import cache
 from apps._tasks.integration.storage.s3_verified import upload_verified_s3
+from apps._tasks.artifact_encryption import storage_artifact_identity
 from apps.api.v1.utils.boto import bounded_boto3_client
 
 
@@ -45,14 +44,14 @@ def _s3_client(aws_s3, encryption_key):
 
 def storage_aws_s3(stored_backup):
     try:
-        local_zip = f"_storage/{stored_backup.backup.uuid}.zip"
+        artifact_identity = storage_artifact_identity(stored_backup.backup)
+        local_zip = f"_storage/{artifact_identity.filename}"
         storage = stored_backup.storage
-        backup = stored_backup.backup
         encryption_key = storage.account.get_encryption_key()
         aws_s3 = storage.storage_aws_s3
         prefix = aws_s3.prefix
 
-        file_name = f"{stored_backup.backup.uuid}.zip"
+        file_name = artifact_identity.filename
         s3_client = _s3_client(aws_s3, encryption_key)
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):
@@ -61,46 +60,8 @@ def storage_aws_s3(stored_backup):
         else:
             aws_key = file_name
 
-        metadata = {
-            "account": storage.account.id,
-            "backup": backup.id,
-            "backup_type": backup.get_type_display().lower(),
-            "schedule": backup.schedule.id if backup.schedule else "",
-        }
-
-        if hasattr(backup, "database"):
-            metadata.update(
-                {
-                    "node": backup.database.node.id,
-                    "type": backup.database.node.get_type_display(),
-                    "database": backup.database.id,
-                    "connection": backup.database.node.connection.id,
-                }
-            )
-        elif hasattr(backup, "website"):
-            metadata.update(
-                {
-                    "node": backup.website.node.id,
-                    "type": backup.website.node.get_type_display(),
-                    "website": backup.website.id,
-                    "connection": backup.website.node.connection.id,
-                }
-            )
-        elif hasattr(backup, "wordpress"):
-            metadata.update(
-                {
-                    "node": backup.wordpress.node.id,
-                    "type": backup.wordpress.node.get_type_display(),
-                    "wordpress": backup.wordpress.id,
-                    "connection": backup.wordpress.node.connection.id,
-                }
-            )
-
-        metadata_new = json.loads(json.dumps(metadata), parse_int=str)
-
         extra_args = {
             "StorageClass": "STANDARD",
-            "Metadata": metadata_new,
         }
         if aws_s3.expected_bucket_owner:
             extra_args["ExpectedBucketOwner"] = aws_s3.expected_bucket_owner

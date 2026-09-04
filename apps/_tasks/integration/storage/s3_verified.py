@@ -21,10 +21,16 @@ from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from apps._tasks.artifact_encryption import validate_storage_object_key
+
 
 SHA256_METADATA = "backupsheep-sha256"
 SIZE_METADATA = "backupsheep-bytes"
-BACKUP_METADATA = "backupsheep-backup-id"
+ARTIFACT_METADATA = "backupsheep-artifact-id"
+LEGACY_BACKUP_METADATA = "backupsheep-backup-id"
+# Compatibility export for legacy tests/callers. New encrypted writes select the
+# artifact marker explicitly through ``_ownership_metadata_key``.
+BACKUP_METADATA = LEGACY_BACKUP_METADATA
 MULTIPART_METADATA = "backupsheep-multipart-id"
 S3_MIN_MULTIPART_PART_SIZE = 5 * 1024 * 1024
 S3_MAX_MULTIPART_PART_SIZE = 5 * 1024 ** 3
@@ -32,6 +38,22 @@ S3_MAX_OBJECT_SIZE = 5 * 1024 ** 4
 S3_MULTIPART_ALIGNMENT = 1024 * 1024
 NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound", "NoSuchBucket"}
 NO_UPLOAD_CODES = {"NoSuchUpload", "404", "NotFound"}
+_ALLOWED_UPLOAD_EXTRA_ARGS = frozenset(
+    {
+        "ExpectedBucketOwner",
+        "ObjectLockMode",
+        "ObjectLockRetainUntilDate",
+        "StorageClass",
+    }
+)
+
+
+def _ownership_metadata_key(ownership_marker):
+    return (
+        ARTIFACT_METADATA
+        if str(ownership_marker or "").startswith("bse2:")
+        else LEGACY_BACKUP_METADATA
+    )
 
 _AUTH_CODES = {
     "accessdenied",
@@ -734,7 +756,16 @@ def verified_head(
         if _error_code(error) in NOT_FOUND_CODES:
             return None
         raise
-    marker = _metadata_value(head, BACKUP_METADATA)
+    artifact_marker = _metadata_value(head, ARTIFACT_METADATA)
+    legacy_marker = _metadata_value(head, LEGACY_BACKUP_METADATA)
+    if str(expected_ownership_marker).startswith("bse2:"):
+        if legacy_marker is not None or _metadata_value(head, "backup") is not None:
+            raise S3ObjectIntegrityError(
+                "Object storage returned ambiguous legacy and encrypted ownership markers."
+            )
+        marker = artifact_marker
+    else:
+        marker = legacy_marker
     if marker != str(expected_ownership_marker):
         raise S3ObjectIntegrityError(
             "Object storage returned an object owned by a different backup."
@@ -1008,7 +1039,10 @@ def _require_cleanup_bindings(
         _cleanup_not_eligible(
             "Multipart cleanup has no exact object, upload, and operation identity."
         )
-    if str(state.get("ownership_marker") or "") != str(stored_backup.backup_id):
+    expected_ownership_marker = validate_storage_object_key(
+        stored_backup.backup, key
+    ).ownership_marker
+    if str(state.get("ownership_marker") or "") != expected_ownership_marker:
         _cleanup_not_eligible(
             "Multipart cleanup belongs to a different backup ownership marker."
         )
@@ -1266,7 +1300,7 @@ def cleanup_owned_multipart_upload(
             "bucket": bucket,
             "object_key": key,
             "upload_id": upload_id,
-            "ownership_marker": str(stored_backup.backup_id),
+            "ownership_marker": str(state["ownership_marker"]),
             "operation_marker": operation_marker,
         }
         if not existing_intent.get("complete") or any(
@@ -1379,7 +1413,7 @@ def cleanup_owned_multipart_upload(
         "expected_bucket_owner": str(expected_owner or ""),
         "object_key": key,
         "upload_id": upload_id,
-        "ownership_marker": str(stored_backup.backup_id),
+        "ownership_marker": str(state["ownership_marker"]),
         "operation_marker": operation_marker,
         "initiated_at": initiated.isoformat(),
         "owner_id": owner_id,
@@ -1838,7 +1872,9 @@ def _create_or_adopt_multipart(
         )
     create_args = dict(create_args)
     metadata = dict(create_args.get("Metadata") or {})
-    metadata[BACKUP_METADATA] = str(expected_ownership_marker)
+    metadata[_ownership_metadata_key(expected_ownership_marker)] = str(
+        expected_ownership_marker
+    )
     metadata[MULTIPART_METADATA] = str(expected_multipart_marker)
     create_args["Metadata"] = metadata
     if expected_owner:
@@ -2464,6 +2500,11 @@ def upload_verified_s3(
     worker crash can continue rather than starting another upload.
     """
 
+    artifact_identity = validate_storage_object_key(stored_backup.backup, key)
+    if os.path.basename(os.fspath(local_path)) != artifact_identity.filename:
+        raise S3ObjectIntegrityError(
+            "The local upload path is not bound to its artifact identity."
+        )
     identity = file_identity(local_path)
     metadata, state = _state(stored_backup, metadata_key)
     state_was_empty = not state
@@ -2483,7 +2524,8 @@ def upload_verified_s3(
     # also preserves restorable objects created by older BackupSheep versions whose
     # prefix policy differed from the current storage configuration.
     key = state.get("object_key") or stored_backup.storage_file_id or key
-    expected_ownership_marker = str(stored_backup.backup_id)
+    artifact_identity = validate_storage_object_key(stored_backup.backup, key)
+    expected_ownership_marker = artifact_identity.ownership_marker
     persisted_marker = str(state.get("ownership_marker") or "")
     if not state_was_empty and persisted_marker != expected_ownership_marker:
         raise S3ObjectIntegrityError(
@@ -2611,16 +2653,19 @@ def upload_verified_s3(
             )
 
         args = dict(extra_args or {})
+        unexpected_args = set(args) - _ALLOWED_UPLOAD_EXTRA_ARGS
+        if unexpected_args:
+            raise S3ObjectIntegrityError(
+                "The object upload contains unsupported provider-visible arguments."
+            )
         user_metadata = {
-            str(k): str(v) for k, v in dict(args.pop("Metadata", {}) or {}).items()
+            SHA256_METADATA: identity["sha256"],
+            SIZE_METADATA: str(identity["size_bytes"]),
+            _ownership_metadata_key(
+                expected_ownership_marker
+            ): expected_ownership_marker,
         }
-        user_metadata.update(
-            {
-                SHA256_METADATA: identity["sha256"],
-                SIZE_METADATA: str(identity["size_bytes"]),
-                BACKUP_METADATA: str(stored_backup.backup_id),
-            }
-        )
+        args["ContentType"] = artifact_identity.content_type
         args["Metadata"] = user_metadata
         threshold = int(
             getattr(settings, "S3_MULTIPART_THRESHOLD_BYTES", 8 * 1024 * 1024)

@@ -115,3 +115,12 @@ class StaticAnalysisGateTests(TestCase):
         self.assertTrue(
             all(item["review"] in policy["reviews"] for item in policy["reviewed_findings"])
         )
+        self.assertIn(
+            {
+                "fingerprint": "ceecc80ede2dee5f13b65e3e406887d3010fddb39382c9d58bacf0c5255efac7",
+                "path": "scripts/collect_release_transition.py",
+                "review": "release-transition-container-tmpfs",
+                "test_id": "B108",
+            },
+            policy["reviewed_findings"],
+        )

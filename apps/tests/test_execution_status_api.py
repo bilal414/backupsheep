@@ -1,5 +1,6 @@
 """Public execution-status serializer contract and redaction tests."""
 
+import hashlib
 import json
 import uuid
 from datetime import timedelta
@@ -17,7 +18,9 @@ from apps.api.v1.backup.website.serializers import (
 from apps.api.v1.backup.serializers import _execution_phase, _safe_provider_status
 from apps.console.backup.models import (
     CoreBackupArtifact,
+    CoreBackupEncryptionEnvelope,
     CoreBackupExecution,
+    CoreBackupKeyWrap,
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
     CoreWebsiteRestore,
@@ -449,7 +452,7 @@ class ExecutionStatusApiTests(BaseTestCase):
     def test_backup_list_bulk_loads_execution_rows(self):
         first = self._backup()
         second = self._backup()
-        self._execution(first)
+        first_execution = self._execution(first)
         self._execution(second, phase="polling")
         first_storage = factories.make_storage(
             self.account,
@@ -472,6 +475,39 @@ class ExecutionStatusApiTests(BaseTestCase):
             backup=second,
             storage=second_storage,
             status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_RETRY,
+        )
+        envelope = CoreBackupEncryptionEnvelope.objects.create(
+            execution=first_execution,
+            context_canonical_json="{}",
+            context_sha256="a" * 64,
+            header_sha256="b" * 64,
+            plaintext_sha256="c" * 64,
+            ciphertext_byte_count=1,
+            status=CoreBackupEncryptionEnvelope.Status.ACTIVE,
+            sealed_at=timezone.now(),
+        )
+        wrapped_key = b"bulk-list-wrapped-key"
+        CoreBackupKeyWrap.objects.create(
+            envelope=envelope,
+            provider=CoreBackupKeyWrap.Provider.LOCAL_DEVELOPMENT,
+            wrapping_key_id="local-development-test-key",
+            wrapped_data_key=wrapped_key,
+            wrapped_key_sha256=hashlib.sha256(wrapped_key).hexdigest(),
+            status=CoreBackupKeyWrap.Status.ACTIVE,
+            activated_at=timezone.now(),
+        )
+        CoreBackupArtifact.objects.create(
+            backup_content_type=ContentType.objects.get_for_model(
+                first,
+                for_concrete_model=False,
+            ),
+            backup_object_id=first.pk,
+            storage=first_storage,
+            role=CoreBackupArtifact.Role.DESTINATION,
+            artifact_format=CoreBackupArtifact.Format.BSE1,
+            encryption_envelope=envelope,
+            idempotency_key="encrypted-destination",
+            object_key=f"{envelope.uuid}.bse1",
         )
 
         with CaptureQueriesContext(connection) as captured:
@@ -502,6 +538,8 @@ class ExecutionStatusApiTests(BaseTestCase):
         self.assertEqual(len(point_phase_queries), 1)
         self.assertEqual(data[0]["execution_status"]["phase"], "source_ready")
         self.assertEqual(data[1]["execution_status"]["phase"], "retrying")
+        self.assertFalse(data[0]["stored_backups"][0]["direct_download_permitted"])
+        self.assertTrue(data[1]["stored_backups"][0]["direct_download_permitted"])
 
     def test_every_provider_backup_serializer_exposes_the_same_status_field(self):
         serializers = {
@@ -521,7 +559,6 @@ class ExecutionStatusApiTests(BaseTestCase):
             "apps.api.v1.backup.vultr": "CoreVultrBackupSerializer",
             "apps.api.v1.backup.vultr_database": "CoreVultrDatabaseBackupSerializer",
             "apps.api.v1.backup.website": "CoreWebsiteBackupSerializer",
-            "apps.api.v1.backup.wordpress": "CoreWordPressBackupSerializer",
         }
         for module_name, class_name in serializers.items():
             with self.subTest(serializer=class_name):

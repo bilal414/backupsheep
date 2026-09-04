@@ -13,10 +13,6 @@ from apps.api.v1.backup.database.views import CoreDatabaseBackupView
 from apps.api.v1.backup.database.serializers import (
     CoreDatabaseBackupStoragePointsSerializer,
 )
-from apps.api.v1.backup.wordpress.serializers import (
-    CoreWordPressBackupStoragePointsSerializer,
-)
-from apps.api.v1.backup.wordpress.views import CoreWordPressBackupView
 from apps.api.v1.backup.website.serializers import (
     CoreWebsiteBackupStoragePointsSerializer,
 )
@@ -28,18 +24,18 @@ from apps.console.backup.models import (
     CoreDatabaseBackupStoragePoints,
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
-    CoreWordPressBackup,
-    CoreWordPressBackupStoragePoints,
 )
 from apps.console.node.models import (
     CoreBasecamp,
     CoreDatabase,
     CoreNode,
-    CoreWordPress,
 )
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
+
+
+BACKUP_FAMILIES = ("website", "database", "basecamp")
 
 
 @override_settings(
@@ -113,12 +109,6 @@ class BackupDownloadEligibilityTests(BaseTestCase):
             view_class = CoreDatabaseBackupView
         else:
             source_model, backup_model, point_model, view_class = {
-                "wordpress": (
-                    CoreWordPress,
-                    CoreWordPressBackup,
-                    CoreWordPressBackupStoragePoints,
-                    CoreWordPressBackupView,
-                ),
                 "basecamp": (
                     CoreBasecamp,
                     CoreBasecampBackup,
@@ -170,7 +160,7 @@ class BackupDownloadEligibilityTests(BaseTestCase):
         return view(request, pk=backup.pk)
 
     def test_complete_uploaded_copy_with_object_id_can_generate_download(self):
-        for family in ("website", "database", "wordpress", "basecamp"):
+        for family in BACKUP_FAMILIES:
             with self.subTest(family=family):
                 view_class, backup, point = self._case(family)
                 with mock.patch.object(
@@ -188,7 +178,7 @@ class BackupDownloadEligibilityTests(BaseTestCase):
                 generate.assert_called_once_with()
 
     def test_exact_local_stream_target_is_allowed_for_each_backup_family(self):
-        for family in ("website", "database", "wordpress", "basecamp"):
+        for family in BACKUP_FAMILIES:
             with self.subTest(family=family):
                 view_class, backup, point = self._case(family)
                 expected = (
@@ -217,7 +207,7 @@ class BackupDownloadEligibilityTests(BaseTestCase):
             "https://download.invalid:99999/archive.zip",
         )
 
-        for family in ("website", "database", "wordpress", "basecamp"):
+        for family in BACKUP_FAMILIES:
             for unsafe_target in unsafe_targets:
                 with self.subTest(family=family, target=unsafe_target):
                     view_class, backup, point = self._case(family)
@@ -236,11 +226,10 @@ class BackupDownloadEligibilityTests(BaseTestCase):
                     generate.assert_called_once_with()
 
     def test_incomplete_backup_or_copy_never_reaches_download_provider(self):
-        for family in ("website", "database", "wordpress", "basecamp"):
+        for family in BACKUP_FAMILIES:
             point_model = {
                 "website": CoreWebsiteBackupStoragePoints,
                 "database": CoreDatabaseBackupStoragePoints,
-                "wordpress": CoreWordPressBackupStoragePoints,
                 "basecamp": CoreBasecampBackupStoragePoints,
             }[family]
             invalid_cases = (
@@ -282,7 +271,7 @@ class BackupDownloadEligibilityTests(BaseTestCase):
     def test_hidden_backup_remains_scoped_as_not_found(self):
         _other_account, _other_member, other_user = factories.make_account()
 
-        for family in ("website", "database", "wordpress", "basecamp"):
+        for family in BACKUP_FAMILIES:
             with self.subTest(family=family):
                 view_class, backup, point = self._case(family)
                 with mock.patch.object(
@@ -303,7 +292,7 @@ class BackupDownloadEligibilityTests(BaseTestCase):
     def test_provider_failure_remains_generic(self):
         provider_detail = "credential=provider-secret-canary"
 
-        for family in ("website", "database", "wordpress", "basecamp"):
+        for family in BACKUP_FAMILIES:
             with self.subTest(family=family):
                 view_class, backup, point = self._case(family)
                 with mock.patch.object(
@@ -325,11 +314,10 @@ class BackupDownloadEligibilityTests(BaseTestCase):
         serializers = {
             "website": CoreWebsiteBackupStoragePointsSerializer,
             "database": CoreDatabaseBackupStoragePointsSerializer,
-            "wordpress": CoreWordPressBackupStoragePointsSerializer,
             "basecamp": CoreBasecampBackupStoragePointsSerializer,
         }
         with override_settings(BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=True):
-            for family in ("website", "database", "wordpress", "basecamp"):
+            for family in BACKUP_FAMILIES:
                 with self.subTest(family=family):
                     view_class, backup, point = self._case(family)
                     self.assertFalse(

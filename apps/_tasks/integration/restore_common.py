@@ -51,10 +51,13 @@ from apps._tasks.integration.backup._archive import (
 )
 from apps._tasks.artifact_encryption import (
     ArtifactPipelineError,
+    _handoff_timestamp,
     local_restore_phase_task_id,
     restore_ciphertext_handoff_identity,
     restore_encryption_plan,
+    storage_artifact_identity,
     unseal_downloaded_artifact,
+    validate_storage_object_key,
 )
 
 # (connect, read) timeout for the download URL fetch; 1 MiB stream chunks.
@@ -420,27 +423,6 @@ def _local_source_path(storage_file_id):
     return target
 
 
-def _restore_backup_uuid(stored_backup):
-    value = str(
-        getattr(stored_backup.backup, "uuid_str", None)
-        or getattr(stored_backup.backup, "uuid", "")
-        or ""
-    )
-    if (
-        not value
-        or value in {".", ".."}
-        or "\x00" in value
-        or "/" in value
-        or "\\" in value
-        or os.path.basename(value) != value
-    ):
-        raise _SafeProviderRestoreError(
-            "INVALID_BACKUP_ID",
-            "stored backup provider state contains an invalid backup identity.",
-        )
-    return value
-
-
 def _restore_node_slug(stored_backup):
     value = str(getattr(stored_backup.backup.node, "name_slug", "") or "")
     if (
@@ -456,6 +438,31 @@ def _restore_node_slug(stored_backup):
             "stored backup provider state contains an invalid provider path.",
         )
     return value
+
+
+def _restore_artifact_identity(stored_backup, *, object_key=None):
+    """Resolve and, when applicable, bind one opaque provider object name.
+
+    New encrypted restores get their public identity only from the durable source
+    envelope ledger.  The backup UUID/node slug reconstruction below remains
+    reachable solely when ``storage_artifact_identity`` has selected the explicit
+    legacy-ZIP mode.
+    """
+
+    try:
+        identity = storage_artifact_identity(stored_backup.backup)
+        if object_key is not None:
+            validate_storage_object_key(stored_backup.backup, object_key)
+    except (ArtifactPipelineError, TypeError, ValueError) as error:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_OWNERSHIP_MISMATCH",
+            "the committed provider path is not bound to this encrypted artifact.",
+        ) from error
+    return identity
+
+
+def _legacy_artifact_identity(identity):
+    return str(getattr(identity, "artifact_format", "")) == "legacy_zip"
 
 
 def _destination_ledger_exists(stored_backup):
@@ -1066,7 +1073,7 @@ def _dropbox_client(stored_backup):
         raise _safe_provider_failure("Dropbox", error) from None
 
 
-def _validate_dropbox_metadata(entry, state, expected, backup_uuid):
+def _validate_dropbox_metadata(entry, state, expected, artifact_identity):
     if entry is None:
         raise _safe_provider_failure("Dropbox", status=404)
     provider_id = str(
@@ -1085,7 +1092,7 @@ def _validate_dropbox_metadata(entry, state, expected, backup_uuid):
             "Dropbox returned a different object identity for this backup.",
         )
     expected_path = _normalise_remote_path(state["provider_path"], absolute=True)
-    if expected_path != f"/{backup_uuid}.zip":
+    if expected_path != f"/{artifact_identity.filename}":
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             "Dropbox backup path is not the deterministic BackupSheep destination.",
@@ -1127,7 +1134,9 @@ def _validate_dropbox_metadata(entry, state, expected, backup_uuid):
             "INTEGRITY_MISMATCH",
             "Dropbox backup content metadata does not match the committed record.",
         )
-    if state.get("ownership_marker") != f"backupsheep:{backup_uuid}":
+    if state.get("ownership_marker") != (
+        f"backupsheep:{artifact_identity.identifier}"
+    ):
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             "Dropbox backup ownership metadata is not valid for this backup.",
@@ -1136,7 +1145,10 @@ def _validate_dropbox_metadata(entry, state, expected, backup_uuid):
 
 
 def _dropbox_download(stored_backup, dest_zip_path, expected, state):
-    backup_uuid = _restore_backup_uuid(stored_backup)
+    artifact_identity = _restore_artifact_identity(
+        stored_backup,
+        object_key=state["provider_path"],
+    )
     client = _dropbox_client(stored_backup)
     provider_id = state["provider_id"]
     if stored_backup.storage_file_id not in (None, "") and str(
@@ -1148,7 +1160,7 @@ def _dropbox_download(stored_backup, dest_zip_path, expected, state):
         )
     try:
         initial = client.files_get_metadata(provider_id)
-        _validate_dropbox_metadata(initial, state, expected, backup_uuid)
+        _validate_dropbox_metadata(initial, state, expected, artifact_identity)
 
         downloader = getattr(client, "files_download", None)
         if not callable(downloader):
@@ -1177,12 +1189,14 @@ def _dropbox_download(stored_backup, dest_zip_path, expected, state):
             )
         download_metadata, response = downloaded
         _validate_dropbox_metadata(
-            download_metadata, state, expected, backup_uuid
+            download_metadata, state, expected, artifact_identity
         )
         try:
             def _verify_final():
                 final = client.files_get_metadata(provider_id)
-                _validate_dropbox_metadata(final, state, expected, backup_uuid)
+                _validate_dropbox_metadata(
+                    final, state, expected, artifact_identity
+                )
 
             _materialize_provider_stream(
                 _response_chunks(response),
@@ -1288,11 +1302,26 @@ def _pcloud_download(stored_backup, dest_zip_path, expected, state):
     adapter, config, token = _pcloud_config_and_token(stored_backup)
     provider_id = state["provider_id"]
     provider_path = _normalise_remote_path(state["provider_path"], absolute=True)
-    expected_path = f"/{_restore_node_slug(stored_backup)}/{_restore_backup_uuid(stored_backup)}.zip"
+    artifact_identity = _restore_artifact_identity(
+        stored_backup,
+        object_key=provider_path,
+    )
+    expected_path = (
+        f"/{_restore_node_slug(stored_backup)}/{artifact_identity.filename}"
+        if _legacy_artifact_identity(artifact_identity)
+        else f"/{artifact_identity.filename}"
+    )
     if provider_path != expected_path:
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             "pCloud backup path is not the deterministic BackupSheep destination.",
+        )
+    if state.get("ownership_marker") != (
+        f"backupsheep:{artifact_identity.identifier}"
+    ):
+        raise _SafeProviderRestoreError(
+            "PROVIDER_OWNERSHIP_MISMATCH",
+            "pCloud backup ownership metadata is not valid for this artifact.",
         )
     if stored_backup.storage_file_id not in (None, "") and str(
         stored_backup.storage_file_id
@@ -1407,10 +1436,21 @@ def _google_drive_item(client, provider_id):
     return item
 
 
-def _validate_google_item(item, state, expected, backup_uuid, node_slug):
+def _validate_google_item(
+    item,
+    state,
+    expected,
+    artifact_identity,
+    *,
+    node_slug=None,
+):
     from apps._tasks.integration.storage import google_drive as google_adapter
 
-    if state.get("ownership_marker") not in (None, "", f"backupsheep:{backup_uuid}"):
+    if state.get("ownership_marker") not in (
+        None,
+        "",
+        f"backupsheep:{artifact_identity.identifier}",
+    ):
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             "Google Drive backup ownership metadata is not valid for this backup.",
@@ -1420,13 +1460,23 @@ def _validate_google_item(item, state, expected, backup_uuid, node_slug):
             "PROVIDER_OWNERSHIP_MISMATCH",
             "Google Drive returned a different object identity for this backup.",
         )
-    expected_path = f"BackupSheep/{node_slug}/{backup_uuid}.zip"
-    if state["provider_path"] != expected_path or item.get("name") != f"{backup_uuid}.zip":
+    expected_path = (
+        f"BackupSheep/{node_slug}/{artifact_identity.filename}"
+        if _legacy_artifact_identity(artifact_identity)
+        else f"BackupSheep/{artifact_identity.filename}"
+    )
+    if (
+        state["provider_path"] != expected_path
+        or item.get("name") != artifact_identity.filename
+    ):
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             "Google Drive returned a different object path for this backup.",
         )
-    if item.get("trashed") is True or item.get("mimeType") != google_adapter.ZIP_MIME:
+    if (
+        item.get("trashed") is True
+        or item.get("mimeType") != artifact_identity.content_type
+    ):
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             "Google Drive returned an object that is not the committed backup.",
@@ -1439,7 +1489,7 @@ def _validate_google_item(item, state, expected, backup_uuid, node_slug):
             "Google Drive returned a backup from a different folder.",
         )
     markers = google_adapter._marker_values(
-        backup_uuid,
+        artifact_identity,
         expected,
         role="backup",
         node_slug=node_slug,
@@ -1492,8 +1542,25 @@ def _google_drive_download(stored_backup, dest_zip_path, expected, state):
 
         storage_config = stored_backup.storage.storage_google_drive
         client = storage_config.get_client()
-        backup_uuid = _restore_backup_uuid(stored_backup)
-        node_slug = _restore_node_slug(stored_backup)
+        artifact_identity = _restore_artifact_identity(
+            stored_backup,
+            object_key=state["provider_path"],
+        )
+        node_slug = (
+            _restore_node_slug(stored_backup)
+            if _legacy_artifact_identity(artifact_identity)
+            else None
+        )
+        expected_path = (
+            f"BackupSheep/{node_slug}/{artifact_identity.filename}"
+            if node_slug is not None
+            else f"BackupSheep/{artifact_identity.filename}"
+        )
+        if state["provider_path"] != expected_path:
+            raise _SafeProviderRestoreError(
+                "PROVIDER_STATE_CONFLICT",
+                "Google Drive path disagrees with its encrypted artifact identity.",
+            )
         if stored_backup.storage_file_id not in (None, "") and str(
             stored_backup.storage_file_id
         ) != state["provider_id"]:
@@ -1502,7 +1569,13 @@ def _google_drive_download(stored_backup, dest_zip_path, expected, state):
                 "Google Drive storage identity disagrees with its committed provider ID.",
             )
         item = _google_drive_item(client, state["provider_id"])
-        _validate_google_item(item, state, expected, backup_uuid, node_slug)
+        _validate_google_item(
+            item,
+            state,
+            expected,
+            artifact_identity,
+            node_slug=node_slug,
+        )
         media_url = (
             f"{google_adapter.DRIVE_API}/files/"
             f"{quote(state['provider_id'], safe='')}?alt=media"
@@ -1517,7 +1590,13 @@ def _google_drive_download(stored_backup, dest_zip_path, expected, state):
         try:
             def _verify_final():
                 final = _google_drive_item(client, state["provider_id"])
-                _validate_google_item(final, state, expected, backup_uuid, node_slug)
+                _validate_google_item(
+                    final,
+                    state,
+                    expected,
+                    artifact_identity,
+                    node_slug=node_slug,
+                )
 
             _materialize_provider_stream(
                 _response_chunks(response),
@@ -1537,8 +1616,8 @@ def _google_drive_download(stored_backup, dest_zip_path, expected, state):
         raise _safe_provider_failure("Google Drive", error) from None
 
 
-def _object_marker_values(provider_adapter, backup_uuid, expected):
-    markers = provider_adapter._marker_values(backup_uuid, expected)
+def _object_marker_values(provider_adapter, artifact_identity, expected):
+    markers = provider_adapter._marker_values(artifact_identity, expected)
     if not isinstance(markers, dict) or not markers:
         raise _SafeProviderRestoreError(
             "MALFORMED_PROVIDER_STATE",
@@ -1547,11 +1626,16 @@ def _object_marker_values(provider_adapter, backup_uuid, expected):
     return {str(key): str(value) for key, value in markers.items()}
 
 
-def _exact_object_key(stored_backup, config):
+def _exact_object_key(stored_backup, config, artifact_identity):
     prefix = str(getattr(config, "prefix", "") or "")
     if prefix and not prefix.endswith("/"):
         prefix += "/"
-    return f"{prefix}{_restore_node_slug(stored_backup)}/{_restore_backup_uuid(stored_backup)}.zip"
+    if _legacy_artifact_identity(artifact_identity):
+        return (
+            f"{prefix}{_restore_node_slug(stored_backup)}/"
+            f"{artifact_identity.filename}"
+        )
+    return f"{prefix}{artifact_identity.filename}"
 
 
 def _sdk_value(value, name, default=None):
@@ -1629,9 +1713,19 @@ def _google_cloud_download(stored_backup, dest_zip_path, expected, state):
         from apps._tasks.integration.storage import google_cloud as google_adapter
 
         config = stored_backup.storage.storage_google_cloud
-        object_key = _exact_object_key(stored_backup, config)
+        object_key = str(state["provider_path"])
+        artifact_identity = _restore_artifact_identity(
+            stored_backup,
+            object_key=object_key,
+        )
+        expected_object_key = _exact_object_key(
+            stored_backup,
+            config,
+            artifact_identity,
+        )
         if (
-            state["provider_id"] != object_key
+            object_key != expected_object_key
+            or state["provider_id"] != object_key
             or state["provider_path"] != object_key
             or str(state.get("object_key") or "") != object_key
             or str(stored_backup.storage_file_id or "") != object_key
@@ -1640,8 +1734,11 @@ def _google_cloud_download(stored_backup, dest_zip_path, expected, state):
                 "PROVIDER_STATE_CONFLICT",
                 "Google Cloud Storage identity disagrees with its committed object key.",
             )
-        backup_uuid = _restore_backup_uuid(stored_backup)
-        markers = _object_marker_values(google_adapter, backup_uuid, expected)
+        markers = _object_marker_values(
+            google_adapter,
+            artifact_identity,
+            expected,
+        )
         generation = str(state.get("generation") or state.get("version_id") or "")
         metageneration = str(state.get("metageneration") or "")
         try:
@@ -1777,9 +1874,19 @@ def _azure_download(stored_backup, dest_zip_path, expected, state):
         from apps._tasks.integration.storage import azure as azure_adapter
 
         config = stored_backup.storage.storage_azure
-        object_key = _exact_object_key(stored_backup, config)
+        object_key = str(state["provider_path"])
+        artifact_identity = _restore_artifact_identity(
+            stored_backup,
+            object_key=object_key,
+        )
+        expected_object_key = _exact_object_key(
+            stored_backup,
+            config,
+            artifact_identity,
+        )
         if (
-            state["provider_id"] != object_key
+            object_key != expected_object_key
+            or state["provider_id"] != object_key
             or state["provider_path"] != object_key
             or str(state.get("object_key") or "") != object_key
             or str(stored_backup.storage_file_id or "") != object_key
@@ -1797,7 +1904,7 @@ def _azure_download(stored_backup, dest_zip_path, expected, state):
             )
         markers = _object_marker_values(
             azure_adapter,
-            _restore_backup_uuid(stored_backup),
+            artifact_identity,
             expected,
         )
         service = config.get_client()
@@ -1879,8 +1986,20 @@ def _onedrive_item(storage_config, provider_id):
     return item
 
 
-def _validate_onedrive_item(item, state, expected, backup_uuid, node_slug, drive_id):
-    if state.get("ownership_marker") not in (None, "", f"backupsheep:{backup_uuid}"):
+def _validate_onedrive_item(
+    item,
+    state,
+    expected,
+    artifact_identity,
+    drive_id,
+    *,
+    node_slug=None,
+):
+    from apps._tasks.integration.storage import onedrive as onedrive_adapter
+
+    persisted_marker = state.get("ownership_marker")
+    expected_state_marker = f"backupsheep:{artifact_identity.identifier}"
+    if persisted_marker not in (None, "", expected_state_marker):
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             "OneDrive backup ownership metadata is not valid for this backup.",
@@ -1891,16 +2010,20 @@ def _validate_onedrive_item(item, state, expected, backup_uuid, node_slug, drive
             "PROVIDER_OWNERSHIP_MISMATCH",
             "OneDrive returned a different object identity for this backup.",
         )
-    expected_path = f"backupsheep/{node_slug}/{backup_uuid}.zip"
-    if state["provider_path"] != expected_path or item.get("name") != f"{backup_uuid}.zip":
+    expected_path = (
+        f"backupsheep/{node_slug}/{artifact_identity.filename}"
+        if _legacy_artifact_identity(artifact_identity)
+        else f"backupsheep/{artifact_identity.filename}"
+    )
+    if (
+        state["provider_path"] != expected_path
+        or item.get("name") != artifact_identity.filename
+    ):
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             "OneDrive returned a different object path for this backup.",
         )
-    marker = (
-        f"BackupSheep backup uuid={backup_uuid};"
-        f"sha256={expected['sha256']};bytes={expected['size_bytes']}"
-    )
+    marker = onedrive_adapter._marker(artifact_identity, expected)
     description = item.get("description")
     if description not in (None, ""):
         # A nonempty Graph description is authoritative. Business tenants may
@@ -1969,8 +2092,15 @@ def _validate_onedrive_item(item, state, expected, backup_uuid, node_slug, drive
 def _onedrive_download(stored_backup, dest_zip_path, expected, state):
     try:
         storage_config = stored_backup.storage.storage_onedrive
-        backup_uuid = _restore_backup_uuid(stored_backup)
-        node_slug = _restore_node_slug(stored_backup)
+        artifact_identity = _restore_artifact_identity(
+            stored_backup,
+            object_key=state["provider_path"],
+        )
+        node_slug = (
+            _restore_node_slug(stored_backup)
+            if _legacy_artifact_identity(artifact_identity)
+            else None
+        )
         drive_id = str(storage_config.drive_id)
         if stored_backup.storage_file_id not in (None, "") and str(
             stored_backup.storage_file_id
@@ -1981,7 +2111,12 @@ def _onedrive_download(stored_backup, dest_zip_path, expected, state):
             )
         item = _onedrive_item(storage_config, state["provider_id"])
         _validate_onedrive_item(
-            item, state, expected, backup_uuid, node_slug, drive_id
+            item,
+            state,
+            expected,
+            artifact_identity,
+            drive_id,
+            node_slug=node_slug,
         )
         endpoint = str(settings.MS_GRAPH_ENDPOINT).rstrip("/")
         content_url = (
@@ -2003,7 +2138,12 @@ def _onedrive_download(stored_backup, dest_zip_path, expected, state):
             def _verify_final():
                 final = _onedrive_item(storage_config, state["provider_id"])
                 _validate_onedrive_item(
-                    final, state, expected, backup_uuid, node_slug, drive_id
+                    final,
+                    state,
+                    expected,
+                    artifact_identity,
+                    drive_id,
+                    node_slug=node_slug,
                 )
 
             _materialize_provider_stream(
@@ -2170,9 +2310,16 @@ def _s3_compatible_state(stored_backup, expected, provider_code):
             "PROVIDER_STATE_CONFLICT",
             "the committed object key disagrees with the storage point.",
         )
+    artifact_identity = _restore_artifact_identity(
+        stored_backup,
+        object_key=object_key,
+    )
 
     ownership_marker = str(state.get("ownership_marker") or "")
-    if not ownership_marker or ownership_marker != str(stored_backup.backup_id):
+    if (
+        not ownership_marker
+        or ownership_marker != artifact_identity.ownership_marker
+    ):
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             f"the committed {S3_COMPATIBLE_PROVIDER_LABELS[provider_code]} object is not owned by this backup.",
@@ -2345,7 +2492,24 @@ def _validate_s3_compatible_head(
         str(key).lower(): str(value)
         for key, value in metadata.items()
     }
-    if normalized.get("backupsheep-backup-id") != state["ownership_marker"]:
+    ownership_marker = str(state["ownership_marker"])
+    artifact_marker = normalized.get("backupsheep-artifact-id")
+    legacy_marker = normalized.get("backupsheep-backup-id")
+    if ownership_marker.startswith("bse2:"):
+        if legacy_marker is not None or normalized.get("backup") is not None:
+            raise _SafeProviderRestoreError(
+                "PROVIDER_OWNERSHIP_MISMATCH",
+                f"the committed {provider} object has ambiguous ownership metadata.",
+            )
+        remote_marker = artifact_marker
+    else:
+        if artifact_marker is not None:
+            raise _SafeProviderRestoreError(
+                "PROVIDER_OWNERSHIP_MISMATCH",
+                f"the committed {provider} object has ambiguous ownership metadata.",
+            )
+        remote_marker = legacy_marker
+    if remote_marker != ownership_marker:
         raise _SafeProviderRestoreError(
             "PROVIDER_OWNERSHIP_MISMATCH",
             f"the committed {provider} object is not owned by this backup.",
@@ -2555,6 +2719,7 @@ def _idrive_s3_state(stored_backup, expected):
             "PROVIDER_STATE_CONFLICT",
             "the committed object key disagrees with the storage point.",
         )
+    _restore_artifact_identity(stored_backup, object_key=object_key)
 
     state_checksum = _normalise_sha256(state.get("sha256"))
     try:
@@ -2898,6 +3063,7 @@ def _aws_s3_download(stored_backup, dest_zip_path, expected):
             "INVALID_PROVIDER_PATH",
             "the committed AWS S3 object key is invalid.",
         )
+    _restore_artifact_identity(stored_backup, object_key=object_key)
     try:
         storage_config = stored_backup.storage.storage_aws_s3
         values = storage_config._connection_values()
@@ -3099,10 +3265,51 @@ def _mark_local_restore_ciphertext_authenticated(restore, encryption_plan):
         "status"
     ) not in {"ready", "authenticated"}:
         raise RestoreError("the local restore handoff witness changed during decryption.")
+    try:
+        allowed_fields = set(expected) | {"status", "ready_at"}
+        if state["status"] == "authenticated":
+            allowed_fields.add("authenticated_at")
+        if set(state) != allowed_fields:
+            raise ArtifactPipelineError(
+                "The local restore handoff contains unreviewed evidence fields."
+            )
+        observed_at = timezone.now()
+        ready_at, ready_time = _handoff_timestamp(state, "ready_at")
+        authenticated_at = state.get("authenticated_at")
+        if state["status"] == "authenticated":
+            authenticated_at, authenticated_time = _handoff_timestamp(
+                state, "authenticated_at"
+            )
+            if authenticated_time < ready_time:
+                raise ArtifactPipelineError(
+                    "The restore handoff authentication predates ciphertext readiness."
+                )
+            if authenticated_time > observed_at:
+                raise ArtifactPipelineError(
+                    "The restore handoff authentication is in the future."
+                )
+        else:
+            if authenticated_at is not None:
+                raise ArtifactPipelineError(
+                    "A ready restore handoff contains an uncommitted authentication witness."
+                )
+            authenticated_at = observed_at.isoformat()
+            _, authenticated_time = _handoff_timestamp(
+                {"authenticated_at": authenticated_at}, "authenticated_at"
+            )
+            if authenticated_time < ready_time:
+                raise ArtifactPipelineError(
+                    "The restore handoff authentication clock predates ciphertext readiness."
+                )
+    except ArtifactPipelineError:
+        raise RestoreError(
+            "the local restore handoff timestamp witness is invalid."
+        ) from None
     metadata["local_restore_ciphertext_handoff"] = {
         **expected,
         "status": "authenticated",
-        "authenticated_at": timezone.now().isoformat(),
+        "ready_at": ready_at,
+        "authenticated_at": authenticated_at,
     }
     restore.execution_metadata = metadata
     restore.save(update_fields=["execution_metadata", "modified"])

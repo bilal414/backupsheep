@@ -20,8 +20,8 @@ from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
 from backupsheep.source_recovery_policy import (
-    SOURCE_RECOVERY_UNAVAILABLE_MESSAGE,
     source_backup_creation_available,
+    source_recovery_unavailable_message,
 )
 
 
@@ -667,7 +667,9 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
             )
         )
         context["source_recovery_unavailable_message"] = (
-            SOURCE_RECOVERY_UNAVAILABLE_MESSAGE
+            source_recovery_unavailable_message(
+                node.connection.integration.code
+            )
         )
         return context
 

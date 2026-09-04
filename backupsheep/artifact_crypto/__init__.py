@@ -1,10 +1,11 @@
 """Public interface for BackupSheep backup-artifact envelope encryption."""
 
-from .context import ArtifactContext
+from .context import ArtifactContext, artifact_provider_policy_witness
 from .envelope import (
     ALGORITHM,
     DEFAULT_CHUNK_SIZE,
     FORMAT_VERSION,
+    AuthenticatedEnvelopeDescriptor,
     EnvelopeDescriptor,
     EnvelopeExpectation,
     SealedArtifact,
@@ -18,19 +19,18 @@ from .envelope import (
 )
 from .errors import *  # noqa: F403
 from .providers import (
-    AWSKMSConfig,
-    AWSKMSKeyProvider,
     KeyProvider,
     KeyProviderRegistry,
     LocalDevelopmentKeyProvider,
+    LocalFileKeyProvider,
     WrappedDataKey,
 )
 
 __all__ = [
     "ALGORITHM",
-    "AWSKMSConfig",
-    "AWSKMSKeyProvider",
     "ArtifactContext",
+    "AuthenticatedEnvelopeDescriptor",
+    "artifact_provider_policy_witness",
     "DEFAULT_CHUNK_SIZE",
     "EnvelopeDescriptor",
     "EnvelopeExpectation",
@@ -38,6 +38,7 @@ __all__ = [
     "KeyProvider",
     "KeyProviderRegistry",
     "LocalDevelopmentKeyProvider",
+    "LocalFileKeyProvider",
     "SealedArtifact",
     "WrappedDataKey",
     "decrypt_file",

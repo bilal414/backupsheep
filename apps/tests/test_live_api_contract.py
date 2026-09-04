@@ -22,7 +22,6 @@ BACKUP_CHART_ENDPOINTS = (
     "ovh_us",
     "upcloud",
     "vultr",
-    "wordpress",
 )
 
 

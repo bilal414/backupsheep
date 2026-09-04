@@ -1594,6 +1594,36 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
                 self.assertEqual(validated["node"]["name"], provider["_bs_name"])
                 self.assertEqual(validated["metadata"], provider)
 
+    def test_oracle_link_serializers_never_expose_provider_exception_text(self):
+        canary = "oracle-provider-secret-canary"
+        for serializer_class, object_type, resource_id in (
+            (
+                CoreCloudOracleWriteSerializer,
+                "cloud",
+                "ocid1.instance.test.secret-canary",
+            ),
+            (
+                CoreVolumeOracleWriteSerializer,
+                "volume",
+                "ocid1.volume.test.secret-canary",
+            ),
+        ):
+            with self.subTest(object_type=object_type), mock.patch(
+                f"{serializer_class.__module__}.discover_exact_oracle_object",
+                side_effect=OracleProviderError(canary),
+            ):
+                with self.assertRaises(serializers.ValidationError) as raised:
+                    serializer_class().validate(
+                        {
+                            "node": {"connection": self.connection},
+                            "unique_id": resource_id,
+                        }
+                    )
+
+            public_error = str(raised.exception)
+            self.assertNotIn(canary, public_error)
+            self.assertIn("terminal provider failure", public_error)
+
     def test_oracle_link_serializers_reject_a_non_oracle_connection(self):
         connection = factories.make_connection(
             self.account, self.member, code="digitalocean"

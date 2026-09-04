@@ -58,7 +58,6 @@ class MobileBootstrapView(APIView):
     BACKUP_ENDPOINTS = (
         "database",
         "website",
-        "wordpress",
         "basecamp",
         "digitalocean",
         "aws",

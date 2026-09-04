@@ -23,8 +23,14 @@ Before making an instance reachable from the internet:
       files; never collapse them into one runtime login;
 - [ ] preserve the distinct RabbitMQ bootstrap/per-lane passwords, queue ACLs and signed
       task keys; never replace them with one shared broker identity;
-- [ ] configure BSE1 with a resolved allowlisted AWS KMS key and two different
-      database/files credential identities; prove same-lane success and cross-lane denial;
+- [ ] preserve and independently back up both installer-generated local-file artifact
+      keyrings; accept that they are exportable software custody rather than non-exportable
+      HSM/KMS custody, and prove same-lane restore and cross-lane denial before enabling
+      operations;
+- [ ] on each exact database/files worker mount, run a disposable backup and isolated
+      data-verified restore under the real worker identity to prove Linux `O_TMPFILE` and
+      `linkat(AT_EMPTY_PATH)` support; container health alone does not prove anonymous
+      staging;
 - [ ] for existing broker data, prove the live RabbitMQ generation and complete the
       documented 3.13 -> 4.2 -> 4.3/Khepri gate; never invent the installer-owned
       `BACKUPSHEEP_RABBITMQ_DATA_GENERATION` witness (the proof requires exactly one
@@ -315,7 +321,7 @@ with `--require-hashes`. A changed or incomplete lock fails the build.
 
 Every locally built service family—application, database and egress guard—sets
 `pull_policy: never`. Manual deployments must
-run `./backupsheep-compose build db app app-egress-guard` at the exact reviewed commit
+run `./backupsheep-compose build db app app-egress-guard rabbitmq` at the exact reviewed commit
 before `up`; Compose fails instead of pulling a same-named registry image when any reviewed
 local build is absent. The verified installer performs the explicit builds automatically.
 
@@ -352,7 +358,7 @@ complete container isolation:
 
 | Volume | Purpose | Capacity concern |
 | --- | --- | --- |
-| `pgdata` | Accounts, encrypted credentials, schedules, backup/restore rows, durable execution and activity state | Database growth, transaction health and recovery |
+| `postgres_data_v1` | Accounts, encrypted credentials, schedules, backup/restore rows, durable execution and activity state | Database growth, transaction health and recovery |
 | `rabbitmq_data` | Durable queue messages | Queue backlog and broker disk alarms |
 | `database_workdir` | Private database dumps/restores and database run logs | Largest database operation plus reserve |
 | `files_workdir` | Private file-source work, website incremental caches and files run logs | Largest full website tree/archive plus persistent caches and reserve |

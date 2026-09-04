@@ -14,7 +14,7 @@ from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.account.models import CoreAccount
 from apps.console.connection.managed_ssh import acquire_managed_ssh_mutation_lock
 from apps.console.connection.models import CoreConnection, CoreIntegration, CoreConnectionLocation
-from apps.api.v1.utils.api_helpers import scoped_connections
+from apps.api.v1.utils.api_helpers import scoped_connections, visible_nodes
 from apps.api.v1.utils.api_permissions import MemberGroupPermissions
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
@@ -23,7 +23,10 @@ from .serializers import CoreConnectionSerializer
 from .view_helpers import connection_error_response
 from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
-from backupsheep.source_recovery_policy import require_source_backup_creation
+from backupsheep.source_recovery_policy import (
+    RETIRED_SOURCE_FAMILIES,
+    require_source_backup_creation,
+)
 
 
 def _log_activity(request, log_type, data):
@@ -49,7 +52,9 @@ class CoreConnectionView(viewsets.ModelViewSet):
     search_fields = all_fields
 
     def get_queryset(self):
-        return scoped_connections(self.request)
+        return scoped_connections(self.request).filter(
+            integration__enabled=True,
+        ).exclude(integration__code__in=RETIRED_SOURCE_FAMILIES)
 
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
@@ -175,7 +180,9 @@ class CoreConnectionView(viewsets.ModelViewSet):
             }
         }
 
-        for integration in CoreIntegration.objects.filter():
+        for integration in CoreIntegration.objects.filter(enabled=True).exclude(
+            code__in=RETIRED_SOURCE_FAMILIES
+        ):
             all_totals[integration.code] = {
                 "connections": connections.filter(integration=integration).count(),
                 "paused": connections.filter(

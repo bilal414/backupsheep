@@ -68,7 +68,6 @@ humanize==4.15.0
 shortuuid==1.0.13
 phonenumbers==9.0.30
 Pillow==12.3.0
-beautifulsoup4==4.14.3
 slack-sdk==3.42.0
 arrow==1.4.0
 croniter==6.2.2

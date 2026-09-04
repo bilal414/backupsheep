@@ -502,6 +502,17 @@ BEAT_TABLES = frozenset(
         "django_celery_beat_solarschedule",
     }
 )
+# Historical WordPress tables remain physically present so upgrades never destroy
+# customer backup metadata or encrypted credentials. The integration has no runtime
+# models or routes, and every long-lived database identity is denied all access.
+RETIRED_TABLES = frozenset(
+    {
+        "core_auth_wordpress",
+        "core_wordpress",
+        "core_wordpress_backup",
+        "core_wordpress_backup_mtm_storage_points",
+    }
+)
 IDENTITY_TABLES = frozenset(
     {
         "auth_group",
@@ -522,14 +533,15 @@ IDENTITY_TABLES = frozenset(
     }
 )
 PROVIDER_AUTH_TABLES = frozenset(
-    table for table in EXPECTED_TABLES if table.startswith("core_auth_")
+    table
+    for table in EXPECTED_TABLES - RETIRED_TABLES
+    if table.startswith("core_auth_")
 )
 LOCAL_SOURCE_AUTH_TABLES = frozenset(
     {
         "core_auth_basecamp",
         "core_auth_database",
         "core_auth_website",
-        "core_auth_wordpress",
     }
 )
 CLOUD_AUTH_TABLES = PROVIDER_AUTH_TABLES - LOCAL_SOURCE_AUTH_TABLES
@@ -552,6 +564,7 @@ SENSITIVE_TABLES = (
     | PROVIDER_AUTH_TABLES
     | STORAGE_CONFIG_TABLES
     | NOTIFICATION_SECRET_TABLES
+    | RETIRED_TABLES
     | {
         MANAGED_SSH_OPERATION_TABLE,
         SSH_HOST_KEY_APPROVAL_TABLE,
@@ -601,8 +614,6 @@ FILES_WRITES = LOCAL_OPERATIONAL_WRITES | frozenset(
         "core_website_backup",
         "core_website_backup_file",
         "core_website_restore",
-        "core_wordpress",
-        "core_wordpress_backup",
     }
 )
 
@@ -672,7 +683,7 @@ FILES_SOURCE_TABLES = frozenset(
     for table in EXPECTED_TABLES
     if any(
         table == prefix or table.startswith(prefix + "_")
-        for prefix in ("core_basecamp", "core_website", "core_wordpress")
+        for prefix in ("core_basecamp", "core_website")
     )
 )
 CLOUD_OPERATIONAL_TABLES = frozenset(
@@ -714,7 +725,6 @@ FILES_READS = (
     | {
         "core_auth_basecamp",
         "core_auth_website",
-        "core_auth_wordpress",
         MANAGED_SSH_OPERATION_TABLE,
         SSH_HOST_KEY_APPROVAL_TABLE,
     }
@@ -738,9 +748,6 @@ LOCAL_BACKUP_TABLES = frozenset(
         "core_website_backup_file",
         "core_website_backup_mtm_storage_points",
         "core_website_restore",
-        "core_wordpress",
-        "core_wordpress_backup",
-        "core_wordpress_backup_mtm_storage_points",
     }
 )
 LOCAL_BACKUP_WRITES = LOCAL_BACKUP_TABLES - frozenset(
@@ -748,7 +755,6 @@ LOCAL_BACKUP_WRITES = LOCAL_BACKUP_TABLES - frozenset(
         "core_basecamp",
         "core_database",
         "core_website",
-        "core_wordpress",
     }
 )
 STORAGE_COMMON_TABLES = frozenset(
@@ -859,10 +865,12 @@ LANE_TABLE_POLICY = MappingProxyType(
         "app": _with_table_privileges_many(
             _lane_policy(
                 EXPECTED_TABLES
+                - RETIRED_TABLES
                 - {REPLAY_TABLE}
                 - RESULT_TABLES
                 - INTERNAL_CONTROL_TABLES,
                 EXPECTED_TABLES
+                - RETIRED_TABLES
                 - RESULT_TABLES
                 - {
                     MANAGED_SSH_OPERATION_TABLE,
@@ -946,7 +954,6 @@ LANE_TABLE_POLICY = MappingProxyType(
                 "core_basecamp": {"SELECT", "DELETE"},
                 "core_database": {"SELECT", "DELETE"},
                 "core_website": {"SELECT", "DELETE"},
-                "core_wordpress": {"SELECT", "DELETE"},
             },
         ),
         "logs": _lane_policy(
@@ -1083,7 +1090,7 @@ LANE_COLUMN_UPDATE_POLICY = MappingProxyType(
 # cloud lane receives only its own execution records.
 LOCAL_DATABASE_MODELS = frozenset({"coredatabasebackup"})
 LOCAL_FILES_MODELS = frozenset(
-    {"corebasecampbackup", "corewebsitebackup", "corewordpressbackup"}
+    {"corebasecampbackup", "corewebsitebackup"}
 )
 CLOUD_BACKUP_MODELS = frozenset(
     {
@@ -1510,6 +1517,8 @@ for _lane, _policy in LANE_TABLE_POLICY.items():  # pragma: no branch - invarian
             raise RuntimeError(
                 f"database lane {_lane} has invalid privileges for {_table}"
             )
+    if set(_policy) & RETIRED_TABLES:  # pragma: no cover
+        raise RuntimeError(f"database lane {_lane} can access a retired table")
 if set(EXPECTED_ROUTINE_ATTRIBUTES) != set(EXPECTED_ROUTINES):  # pragma: no cover
     raise RuntimeError("database routine attributes do not cover exact inventory")
 for _table, _lanes in RLS_COMMAND_POLICY.items():  # pragma: no branch - invariant

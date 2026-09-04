@@ -326,7 +326,7 @@ class ConnectionSetupTemplateResilienceTests(SimpleTestCase):
             "updateDBTypeAndVersion", "resumeConnection"
         )
         endpoints_source = self.method_source("getEndpoints", "getAWSRegions")
-        regions_source = self.method_source("getAWSRegions", "getWordPressKey")
+        regions_source = self.method_source("getAWSRegions", "toggleEndpointDropdown")
         for source in (
             validate_source,
             metadata_source,

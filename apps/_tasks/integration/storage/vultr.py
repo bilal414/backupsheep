@@ -3,6 +3,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from dataclasses import dataclass
 
 from apps._tasks.exceptions import StorageVultrUploadFailedError
+from apps._tasks.artifact_encryption import storage_artifact_identity
 from apps._tasks.integration.storage.s3_verified import (
     S3ObjectIntegrityError,
     S3UploadOutcomePending,
@@ -341,7 +342,8 @@ def _s3_client(storage, encryption_key):
 
 def storage_vultr(stored_backup):
     try:
-        local_zip = f"_storage/{stored_backup.backup.uuid}.zip"
+        artifact_identity = storage_artifact_identity(stored_backup.backup)
+        local_zip = f"_storage/{artifact_identity.filename}"
         storage = stored_backup.storage
         encryption_key = storage.account.get_encryption_key()
         vultr = storage.storage_vultr
@@ -349,7 +351,7 @@ def storage_vultr(stored_backup):
         prefix = vultr.prefix or ""
         if prefix and not prefix.endswith("/"):
             prefix += "/"
-        key = f"{prefix}{stored_backup.backup.uuid}.zip"
+        key = f"{prefix}{artifact_identity.filename}"
 
         upload_verified_s3(
             stored_backup,

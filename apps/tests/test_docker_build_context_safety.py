@@ -39,7 +39,9 @@ class DockerBuildContextSafetyTests(TestCase):
         for forbidden_allow in (
             "!**",
             "!docs/**",
+            "!scripts/",
             "!scripts/**",
+            "!scripts/release_transition.py",
             "!.git/**",
             "!install.sh",
         ):

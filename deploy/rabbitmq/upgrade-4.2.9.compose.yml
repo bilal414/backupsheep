@@ -1,5 +1,82 @@
 # Temporary compatibility hop for an existing RabbitMQ 3.13 data volume.
 # Read docs/guides/rabbitmq-upgrade.md and complete every gate before using this overlay.
 services:
+  rabbitmq-uid-transition:
+    image: "${BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE:-backupsheep-rabbitmq-upgrade:local}"
+    pull_policy: never
+    labels:
+      com.backupsheep.installation-id: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+    user: "0:0"
+    privileged: false
+    read_only: true
+    init: false
+    cgroup: private
+    ipc: private
+    pids_limit: 32
+    mem_limit: 64m
+    memswap_limit: 64m
+    mem_swappiness: 0
+    cpus: "0.25"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "unattested"
+      BACKUPSHEEP_RABBITMQ_NODE_HOST: "${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-uid-transition"]
+    volumes:
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        volume:
+          nocopy: true
+      - ./deploy/rabbitmq/uid-transition.sh:/usr/local/bin/backupsheep-rabbitmq-uid-transition:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
+    network_mode: none
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+      nofile:
+        soft: 128
+        hard: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+        max-file: "${DOCKER_LOG_MAX_FILE:-5}"
+    restart: "no"
+
   rabbitmq:
-    image: rabbitmq:4.2.9-alpine@sha256:f093e74d14814d28e3d52e7dee5873ab8e8c2e671e9e11019654bd3443183095
+    image: "${BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE:-backupsheep-rabbitmq-upgrade:local}"
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq-upgrade
+    pull_policy: never
+    # The ordinary entrypoint accepts only an already-attested 4.3 volume. This
+    # exact overlay is the sole reviewed way to open an unattested legacy volume
+    # under the 4.2 compatibility image.
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-entrypoint", "transition"]
+    environment:
+      BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET: "4.2"
+    secrets: !reset []
+    volumes: !override
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        volume:
+          nocopy: true
+      - ./deploy/rabbitmq/90-legacy-source.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro
+      - ./deploy/rabbitmq/entrypoint.sh:/usr/local/bin/backupsheep-rabbitmq-entrypoint:ro
+      - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
+    depends_on: !reset {}
+    networks: !reset []
+    network_mode: none
+    restart: "no"

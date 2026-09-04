@@ -20,8 +20,6 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from kombu import Connection
 
-from backupsheep.artifact_crypto import AWSKMSConfig, AWSKMSKeyProvider
-
 from backupsheep.celery_security import (
     CONSUMER_QUEUES,
     LANES,
@@ -39,6 +37,7 @@ from backupsheep.database_identity import (
     assert_database_lane_contract,
 )
 from backupsheep.database_lane_policy import LANES as DATABASE_LANES
+from backupsheep.artifact_crypto import artifact_provider_policy_witness
 
 
 EXPECTED_UID = 10001
@@ -432,8 +431,30 @@ def _assert_artifact_encryption_boundary(*, environment, runtime_settings):
         errors.append("artifact encryption mode is not BSE1")
     if runtime_settings.BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE is not True:
         errors.append("enterprise artifact policy is not active")
-    if runtime_settings.BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "aws-kms":
-        errors.append("artifact key custody is not AWS KMS")
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "local-file":
+        errors.append("artifact key custody is not the production local-file provider")
+    provider_generation = str(
+        getattr(
+            runtime_settings,
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION",
+            "",
+        )
+    )
+    provider_witness = str(
+        getattr(runtime_settings, "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS", "")
+    )
+    installation_id = str(
+        getattr(runtime_settings, "BACKUPSHEEP_INSTALLATION_ID", "")
+    )
+    expected_provider_witness = artifact_provider_policy_witness(
+        installation_id,
+        "1",
+    )
+    if provider_generation != "1" or not hmac.compare_digest(
+        provider_witness,
+        expected_provider_witness,
+    ):
+        errors.append("artifact key-provider generation is not sealed to this installation")
     if runtime_settings.BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE is not False:
         errors.append("legacy plaintext restore is enabled")
     if environment.get("BACKUPSHEEP_PLAINTEXT_ROOT", "/code/_storage") != "/code/_storage":
@@ -446,33 +467,86 @@ def _assert_artifact_encryption_boundary(*, environment, runtime_settings):
         != "/var/lib/backupsheep/transfer"
     ):
         errors.append("the ciphertext transfer root is not the stock container path")
-    try:
-        provider = AWSKMSKeyProvider(
-            AWSKMSConfig(
-                key_id=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_KEY_ID,
-                region_name=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_REGION,
-                allowed_key_ids=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS,
-                endpoint_url=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL,
-                connect_timeout_seconds=(
-                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS
-                ),
-                read_timeout_seconds=(
-                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS
-                ),
-                max_attempts=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS,
-                allow_insecure_endpoint=(
-                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT
-                ),
-            )
+    runtime_role = str(environment.get("BACKUPSHEEP_RUNTIME_ROLE") or "")
+    configured_keyring = str(
+        getattr(
+            runtime_settings,
+            "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH",
+            "",
         )
-        if provider.enterprise_eligible is not True:
-            errors.append("AWS KMS artifact configuration is not enterprise eligible")
-    except Exception:
-        errors.append("AWS KMS artifact configuration is invalid")
+    )
+    lane_keyrings = {
+        lane: Path(f"/run/secrets/artifact_local_file_{lane}_keyring")
+        for lane in ("database", "files")
+    }
+    if runtime_role in lane_keyrings:
+        expected_keyring = lane_keyrings[runtime_role]
+        opposite_lane = "files" if runtime_role == "database" else "database"
+        opposite_keyring = lane_keyrings[opposite_lane]
+        if configured_keyring != str(expected_keyring):
+            errors.append("the source role does not use its exact lane artifact keyring path")
+        if not expected_keyring.exists() or expected_keyring.is_symlink():
+            errors.append("the source role artifact keyring mount is absent or unsafe")
+        if opposite_keyring.exists() or opposite_keyring.is_symlink():
+            errors.append("the source role mounted the opposite artifact keyring")
+    else:
+        if configured_keyring:
+            errors.append("the non-source preflight role received an artifact keyring path")
+        for keyring_path in lane_keyrings.values():
+            if keyring_path.exists() or keyring_path.is_symlink():
+                errors.append("the non-source preflight role mounted an artifact keyring")
     if errors:
         raise CommandError(
             "Docker security preflight failed: " + "; ".join(errors)
         )
+
+
+def _assert_artifact_keyring_database_state(*, cursor, environment, runtime_settings):
+    """Prove the source lane retains every database-referenced wrapping key."""
+
+    runtime_role = str(environment.get("BACKUPSHEEP_RUNTIME_ROLE") or "")
+    if runtime_role not in {"database", "files"}:
+        return
+
+    from backupsheep.artifact_crypto.providers import LocalFileKeyProvider
+
+    provider = None
+    try:
+        provider = LocalFileKeyProvider(
+            runtime_settings.BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH,
+            lane=runtime_role,
+            installation_id=runtime_settings.BACKUPSHEEP_INSTALLATION_ID,
+        )
+        retained_key_ids = set(provider.key_ids)
+        # Row-level security limits this query to the authenticated source lane.
+        # Retired generations are intentionally excluded; active, pending and
+        # manual-review wraps must all remain recoverable before new work starts.
+        cursor.execute(
+            """
+            SELECT DISTINCT wrapping_key_id
+            FROM core_backup_key_wrap
+            WHERE provider = %s AND status <> %s
+            """,
+            ["local-file", "retired"],
+        )
+        referenced_key_ids = {
+            str(row[0]) for row in cursor.fetchall() if row and row[0]
+        }
+        if not referenced_key_ids.issubset(retained_key_ids):
+            raise CommandError(
+                "Docker security preflight failed: the source artifact keyring "
+                "is missing a non-retired database-referenced key"
+            )
+    except CommandError:
+        raise
+    except Exception as error:
+        raise CommandError(
+            "Docker security preflight failed: artifact keyring/database "
+            "consistency could not be verified"
+        ) from error
+    finally:
+        if provider is not None:
+            provider.destroy()
 
 
 class Command(BaseCommand):
@@ -561,6 +635,11 @@ class Command(BaseCommand):
                     environment=os.environ,
                     runtime_settings=settings,
                 )
+                _assert_artifact_keyring_database_state(
+                    cursor=cursor,
+                    environment=os.environ,
+                    runtime_settings=settings,
+                )
             _assert_no_pending_migrations(MigrationExecutor(connection))
         except CommandError:
             raise
@@ -577,7 +656,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 "Docker security preflight passed: immutable non-root runtime, "
-                "file-backed secrets, external-KMS BSE1 artifact custody, "
+                "file-backed secrets, lane-scoped BSE1 artifact custody, "
                 "least-privilege database identity, applied migrations, database, "
                 "and broker verified."
             )

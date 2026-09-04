@@ -12341,35 +12341,6 @@ class CoreDatabase(TimeStampedModel):
         )
 
 
-class CoreWordPress(TimeStampedModel):
-    class Include(models.IntegerChoices):
-        FULL = 1, "Full (Database + Files)"
-        DATABASE = 2, "Only Database"
-        FILES = 3, "Only Files"
-
-    include = models.IntegerField(choices=Include.choices, default=Include.FULL)
-    node = models.OneToOneField(
-        "CoreNode", related_name="wordpress", on_delete=models.CASCADE
-    )
-    name = models.CharField(max_length=255)
-    notes = models.TextField(null=True, blank=True)
-
-    class Meta:
-        db_table = "core_wordpress"
-
-    def create_snapshot(self, backup):
-        require_source_backup_creation("wordpress")
-        from apps._tasks.integration.backup.wordpress import snapshot_wordpress
-        from ..backup.models import CoreWordPressBackupStoragePoints
-        return _resume_local_backup(
-            backup,
-            self.node,
-            snapshot_wordpress,
-            "stored_wordpress_backups",
-            CoreWordPressBackupStoragePoints.Status,
-        )
-
-
 class CoreBasecamp(TimeStampedModel):
     node = models.OneToOneField(
         "CoreNode", related_name="basecamp", on_delete=models.CASCADE
@@ -12905,10 +12876,11 @@ class CoreNode(TimeStampedModel):
             return "database"
         if self.type == self.Type.WEBSITE:
             return "website"
-        if self.type == self.Type.SAAS:
-            integration_code = self.connection.integration.code
-            if integration_code in {"wordpress", "basecamp"}:
-                return integration_code
+        if (
+            self.type == self.Type.SAAS
+            and self.connection.integration.code == "basecamp"
+        ):
+            return "basecamp"
         return None
 
     @staticmethod

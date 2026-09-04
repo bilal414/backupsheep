@@ -16,9 +16,14 @@ from apps._tasks.integration.storage.tasks import (
     _claim_backup_deletion,
     _claim_storage_point_delete,
     _delete_backup_requested_id,
+    _delete_one_storage_point,
     _delete_storage_requested_id,
     resume_requested_storage_deletions,
     _validate_local_storage_id,
+)
+from apps._tasks.artifact_deletion import (
+    build_deletion_origin,
+    validate_deletion_origin,
 )
 from apps._tasks.helper.tasks import (
     _delete_requested_node,
@@ -481,6 +486,183 @@ class LocalStorageDeleteConcurrencyTests(TransactionTestCase):
             self.point.upload_lease_owner, "crashed-after-mutation"
         )
         self.assertTrue(self.point.upload_lease_token)
+        self.assertEqual(
+            validate_deletion_origin(self.point),
+            ("committed-object", int(self.point.Status.UPLOAD_COMPLETE)),
+        )
+
+    def test_failed_no_object_delete_retains_origin_for_safe_recovery(self):
+        self.point.status = self.point.Status.UPLOAD_READY
+        self.point.storage_file_id = None
+        self.point.metadata = {}
+        self.point.save(
+            update_fields=["status", "storage_file_id", "metadata", "modified"]
+        )
+
+        with mock.patch.object(
+            CoreWebsiteBackupStoragePoints,
+            "soft_delete",
+            autospec=True,
+            return_value=False,
+        ):
+            result = _delete_one_storage_point(
+                "website",
+                self.point.pk,
+                "failed-no-object-delete",
+            )
+
+        self.assertEqual(result, "pending")
+        self.point.refresh_from_db()
+        self.assertEqual(self.point.status, self.point.Status.DELETE_FAILED)
+        self.assertEqual(
+            validate_deletion_origin(self.point),
+            ("no-object", int(self.point.Status.UPLOAD_READY)),
+        )
+
+    def test_expired_failed_no_object_claim_can_be_reclaimed_after_crash(self):
+        self.point.status = self.point.Status.UPLOAD_READY
+        self.point.storage_file_id = None
+        self.point.metadata = {}
+        self.point.save(
+            update_fields=["status", "storage_file_id", "metadata", "modified"]
+        )
+        first_token, result = _claim_storage_point_delete(
+            "website",
+            self.point.pk,
+            "crashed-no-object-delete",
+        )
+        self.assertIsNotNone(first_token)
+        self.assertEqual(result, "claimed")
+
+        self.point.refresh_from_db()
+        self.point.status = self.point.Status.DELETE_FAILED
+        self.point.upload_lease_expires_at = timezone.now() - timedelta(seconds=1)
+        self.point.save(
+            update_fields=["status", "upload_lease_expires_at", "modified"]
+        )
+        self.assertEqual(
+            validate_deletion_origin(self.point),
+            ("no-object", int(self.point.Status.UPLOAD_READY)),
+        )
+
+        replacement_token, result = _claim_storage_point_delete(
+            "website",
+            self.point.pk,
+            "replacement-delete",
+        )
+        self.assertIsNotNone(replacement_token)
+        self.assertNotEqual(replacement_token, first_token)
+        self.assertEqual(result, "claimed")
+        self.point.refresh_from_db()
+        self.assertEqual(self.point.status, self.point.Status.DELETE_REQUESTED)
+        self.assertEqual(self.point.upload_lease_owner, "replacement-delete")
+        self.assertEqual(
+            validate_deletion_origin(self.point),
+            ("no-object", int(self.point.Status.UPLOAD_READY)),
+        )
+
+    def test_stale_claim_without_origin_is_refused_unchanged(self):
+        self.point.status = self.point.Status.DELETE_FAILED
+        self.point.metadata = {
+            "_deletion_claim": {
+                "previous_status": int(self.point.Status.UPLOAD_COMPLETE),
+            }
+        }
+        self.point.save(update_fields=["status", "metadata", "modified"])
+
+        token, result = _claim_storage_point_delete(
+            "website",
+            self.point.pk,
+            "stale-claim-retry",
+        )
+
+        self.assertIsNone(token)
+        self.assertEqual(result, "invalid_origin")
+        self.point.refresh_from_db()
+        self.assertIsNone(validate_deletion_origin(self.point))
+        self.assertEqual(
+            self.point.metadata["_deletion_claim"]["previous_status"],
+            int(self.point.Status.UPLOAD_COMPLETE),
+        )
+
+    def test_tampered_deletion_origin_is_refused_before_provider_mutation(self):
+        origin = build_deletion_origin(
+            self.point,
+            int(self.point.Status.UPLOAD_COMPLETE),
+        )
+        origin["custody"] = "no-object"
+        self.point.metadata = {"_artifact_deletion_origin": origin}
+        self.point.save(update_fields=["metadata", "modified"])
+
+        token, result = _claim_storage_point_delete(
+            "website",
+            self.point.pk,
+            "tampered-origin",
+        )
+
+        self.assertIsNone(token)
+        self.assertEqual(result, "invalid_origin")
+        self.point.refresh_from_db()
+        self.assertEqual(self.point.status, self.point.Status.UPLOAD_COMPLETE)
+        self.assertEqual(self.point.upload_attempt_count, 0)
+
+    def test_protected_delete_restores_only_validated_origin(self):
+        self.point.metadata = {"deletion_protection": True}
+        self.point.save(update_fields=["metadata", "modified"])
+        with mock.patch.object(
+            CoreWebsiteBackupStoragePoints,
+            "soft_delete",
+            autospec=True,
+            return_value=False,
+        ):
+            result = _delete_one_storage_point(
+                "website",
+                self.point.pk,
+                "protected-delete",
+            )
+
+        self.assertEqual(result, "protected")
+        self.point.refresh_from_db()
+        self.assertEqual(self.point.status, self.point.Status.UPLOAD_COMPLETE)
+        self.assertIsNone(validate_deletion_origin(self.point))
+
+    def test_terminal_delete_replay_scrubs_crash_gap_state_without_provider_io(self):
+        token = uuid.uuid4()
+        origin = build_deletion_origin(
+            self.point,
+            int(self.point.Status.UPLOAD_COMPLETE),
+        )
+        self.point.status = self.point.Status.DELETE_COMPLETED
+        self.point.metadata = {
+            "_artifact_deletion_origin": origin,
+            "_deletion_claim": {
+                "owner": "crashed-after-provider-delete",
+                "token": str(token),
+                "previous_status": int(self.point.Status.UPLOAD_COMPLETE),
+            },
+        }
+        self.point.upload_lease_owner = "crashed-after-provider-delete"
+        self.point.upload_lease_token = token
+        self.point.upload_lease_expires_at = timezone.now() + timedelta(hours=1)
+        self.point.upload_heartbeat_at = timezone.now()
+        self.point.save()
+
+        replay_token, result = _claim_storage_point_delete(
+            "website",
+            self.point.pk,
+            "recovery-replay",
+        )
+
+        self.assertIsNone(replay_token)
+        self.assertEqual(result, "deleted")
+        self.point.refresh_from_db()
+        self.assertEqual(self.point.status, self.point.Status.DELETE_COMPLETED)
+        self.assertNotIn("_artifact_deletion_origin", self.point.metadata)
+        self.assertNotIn("_deletion_claim", self.point.metadata)
+        self.assertEqual(self.point.upload_lease_owner, "")
+        self.assertIsNone(self.point.upload_lease_token)
+        self.assertIsNone(self.point.upload_lease_expires_at)
+        self.assertIsNone(self.point.upload_heartbeat_at)
 
     def test_storage_wide_delete_mutates_only_one_point_outside_transaction(self):
         _second_backup, second_point = _website_point(self.member, self.storage)

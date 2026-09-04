@@ -114,7 +114,6 @@ class IntegrationEnterpriseTemplateContractTests(SimpleTestCase):
             "selectedAuth.api_token",
             "selectedAuth.secret_key",
             "selectedAuth.password",
-            "selectedAuth.http_pass",
         ):
             with self.subTest(binding=binding):
                 tag = re.search(

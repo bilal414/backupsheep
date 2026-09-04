@@ -29,6 +29,14 @@
 
 ## Features
 
+BackupSheep's stock self-hosted artifact encryption is local and does not require
+AWS KMS, AWS credentials, or an AWS account. The installer creates separate,
+installation-bound keyrings for database and file backups. The current runtime providers
+are `local-file` for production and `local-development` for development/test only;
+`aws-kms` remains solely as a historical migration/rollback identifier and cannot be
+selected by the current runtime. AWS remains optional only when an operator chooses an
+AWS source, storage destination, or Amazon SES email integration.
+
 ### Backup anything
 
 | Source | Details |
@@ -36,7 +44,7 @@
 | **Websites / files** | FTPS, SFTP, SSH, and explicit opt-in legacy FTP. Include/exclude rules (regex + glob), parallel transfers, all key types (Ed25519/ECDSA/RSA, incl. passphrase-protected), server-side tar transport for SSH sources. Plain FTP is disabled by default because it exposes credentials and backup data. |
 | **Databases** | MySQL (bundled Oracle MySQL 8.4 client), MariaDB, PostgreSQL (version-matched `pg_dump` 14–18). Direct TCP or SSH tunnel, all databases or per-table selection, stored procedures, SSL/TLS. |
 | **Cloud servers & volumes** | DigitalOcean, AWS (EC2, RDS, Lightsail), Hetzner, Vultr, UpCloud, Oracle Cloud, Google Cloud, OVH (CA/EU/US) — provider-native snapshots. |
-| **SaaS apps** | WordPress, Basecamp. |
+| **SaaS apps** | Basecamp. |
 
 ### Incremental website backups
 
@@ -52,9 +60,9 @@ Or stick with classic **Full mode** — every file, every time.
 Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, DigitalOcean Spaces, Google Cloud
 Storage, Google Drive, Azure Blob, Dropbox, OneDrive, pCloud, IDrive e2, IBM COS,
 Oracle, Scaleway, Linode, Vultr, UpCloud, Exoscale, Filebase, IONOS, Leviia, RackCorp,
-Tencent COS, Alibaba OSS — plus **Local Storage**: keep backups as plain zip files on
-the BackupSheep server's own disk (or any bind-mounted path/NFS). Push every backup to
-several destinations at once.
+Tencent COS, Alibaba OSS — plus **Local Storage**: keep encrypted `.bse1` backup
+artifacts on the BackupSheep server's own disk (or any bind-mounted path/NFS). Push
+every backup to several destinations at once.
 
 ### Immutable S3 archives and lifecycle controls
 
@@ -148,32 +156,13 @@ includes the exact verified-install commands. Unattended root cloud-init install
 intentionally disabled; host provisioning remains the operator's responsibility. This is
 the preferred path for durable local archives and independently scalable worker pools.
 
-### Render
+### Managed one-click platforms
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/bilal414/backupsheep/tree/main)
-
-The Render Blueprint deploys the web console, one all-queue Celery worker, Beat, managed
-PostgreSQL, and a private RabbitMQ service with persistent storage. Enter a private
-onboarding token during setup, then use external object storage for backups—**Local
-Storage** is not suitable for this PaaS deployment. See the [Render guide](docs/render.md)
-for its sizing and worker limitations.
-
-### Heroku
-
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/bilal414/backupsheep/tree/main)
-
-The Heroku button provisions PostgreSQL, CloudAMQP's **RabbitMQ** Little Lemur plan, and
-separate web, worker, and Beat processes. Enter an onboarding token and the app's public
-hostname during setup; use external object storage for backup archives. See the
-[Heroku guide](docs/heroku.md) for its limits and production sizing.
-
-### Railway
-
-Railway requires a published multi-service template before it can issue a Deploy on Railway
-button. The repository includes the versioned service configurations and exact template
-publication steps in the [Railway guide](docs/railway.md). It provisions web, worker, Beat,
-PostgreSQL, and a private RabbitMQ service in one project; use external object storage for
-backup archives.
+BackupSheep does not ship Render, Heroku, or Railway one-click templates. Their
+monolithic worker and shared-environment models cannot satisfy the production lane,
+file-keyring, filesystem, and identity boundaries. Use the verified Docker installer on
+a VM, or the documented split-process non-Docker deployment contract; do not adapt an old
+one-click manifest for production.
 
 ### Manual Docker Compose install
 

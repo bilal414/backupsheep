@@ -8,14 +8,17 @@ instructions are in the [verified installation guide](guides/installation.md).
 The BackupSheep installer manages only its application checkout, configuration, secret
 files, images, containers, networks and named volumes. It does **not** install Git or
 Docker, add package repositories, enable or restart services, edit Docker daemon
-configuration, open a firewall, change kernel settings, create host users, or require
-root. The host operator must provide and secure:
+configuration, open a firewall, change kernel settings, or create host users. The
+default mode is non-root; an explicit root-owned mode is available for a host that keeps
+its existing rootful Docker daemon behind `sudo`. The host operator must provide and
+secure:
 
 - Git and Bash;
 - Docker Engine 28.0.0 or newer;
 - Docker Compose 2.33.1 or newer;
-- access to the intended Docker daemon;
-- a user-owned installation path and sufficient CPU, memory and storage;
+- access to the intended Docker daemon through the chosen invoking identity;
+- an installation path owned by that same effective UID and sufficient CPU, memory and
+  storage;
 - host/network/TLS policy, monitoring, patching and recovery.
 
 ## Verified installer
@@ -25,10 +28,6 @@ mutable remote script into a privileged shell:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
-KMS_KEY_ARN='arn:aws:kms:us-east-1:123456789012:key/<reviewed-key-id>'
-KMS_REGION='us-east-1'
-KMS_DATABASE_CREDENTIALS='/absolute/protected/kms-database.credentials'
-KMS_FILES_CREDENTIALS='/absolute/protected/kms-files.credentials'
 curl -fSLo install.sh \
   "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
 less install.sh
@@ -37,20 +36,49 @@ chmod 700 install.sh
   --ref "${COMMIT}" \
   --install-dir "$HOME/.local/share/backupsheep" \
   --project-name backupsheep \
-  --domain backups.example.com \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
+  --domain backups.example.com
 ```
 
-The KMS credential inputs must be distinct canonical, user-owned mode-`0400`/`0600`
-files for separate database/files AWS identities with matching encryption-context policy.
+The installer generates independent database/files artifact keyrings locally; no external
+key service, AWS account, or AWS credential is required for artifact encryption. AWS
+credentials remain optional only for a configured AWS source, storage destination, or
+Amazon SES email integration. Back up both keyrings before enabling work.
 
-Run it as the same unprivileged user that is already authorized for the intended Docker
-daemon. The installer refuses root and `sudo`; it does not provision or reconfigure the
-host.
+By default, run it as the same unprivileged user that is already authorized for the
+intended Docker daemon. Root and `sudo` remain refused unless the operator supplies the
+explicit `--allow-root-install` flag. This does not provision or reconfigure the host.
+
+For an existing rootful daemon intentionally accessible only through root, first place
+the reviewed installer in a protected root-owned directory, then run the root-owned copy
+explicitly:
+
+```bash
+sudo install -d -o root -g root -m 0700 /root/backupsheep-install
+sudo install -o root -g root -m 0700 ./install.sh \
+  /root/backupsheep-install/install.sh
+sudo -H /root/backupsheep-install/install.sh \
+  --allow-root-install \
+  --ref "${COMMIT}" \
+  --install-dir /opt/backupsheep \
+  --project-name backupsheep \
+  --domain backups.example.com
+```
+
+The installer creates both lane keyrings inside its protected root-owned secret
+directory and never places root-key material in arguments or environment variables.
+Back up their exact bytes with PostgreSQL before enabling operations, as shown in the
+full [verified installation guide](guides/installation.md#explicit-rootful-daemon-mode).
+The installer and wrapper never use `SUDO_USER` or `chown`: the checkout, configuration,
+secrets, override and mutation lock remain owned by the real effective invoker. Every
+later root-owned wrapper command must also run as UID 0 and begin with the approval flag:
+
+```bash
+sudo -H /opt/backupsheep/backupsheep-compose --allow-root-install ps --all
+```
+
+The flag changes only host-side installation ownership and Docker access. It does not
+change the reviewed non-root user, capability or filesystem configuration inside any
+long-lived container.
 
 The installer fetches that exact commit from the canonical HTTPS repository, verifies
 the checkout and its own bytes, creates protected file-backed secrets, explicitly builds
@@ -109,11 +137,6 @@ credentials and durable recovery/queue state before explicitly enabling operatio
   --install-dir "$HOME/.local/share/backupsheep" \
   --project-name backupsheep \
   --domain backups.example.com \
-  --artifact-kms-key-id "${KMS_KEY_ARN}" \
-  --artifact-kms-region "${KMS_REGION}" \
-  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
-  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
-  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --enable-operations
 ```
 
@@ -125,7 +148,7 @@ automatic rollback.
 
 The installer writes `.env` as mode `0600` and `.secrets` as a mode `0700` directory.
 The Django key, database bootstrap/migrator/per-lane passwords, RabbitMQ
-bootstrap/per-lane passwords, task-signing material, KMS lane credentials and onboarding
+bootstrap/per-lane passwords, task-signing material, artifact lane keyrings and onboarding
 token are separate mode-`0444` files inside it. Directory traversal protection keeps them
 private on the host while Docker mounts each individual file read-only only in its granted
 role. Their direct `.env` keys remain blank, so values do not appear in Compose-expanded

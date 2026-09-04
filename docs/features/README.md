@@ -22,7 +22,7 @@ using or operating the self-hosted console.
 
 | Area | What BackupSheep implements |
 | --- | --- |
-| Protected sources | Cloud servers, cloud volumes, provider-managed databases and data services, logical MySQL/MariaDB/PostgreSQL dumps, website files, WordPress, and Basecamp |
+| Protected sources | Cloud servers, cloud volumes, provider-managed databases and data services, logical MySQL/MariaDB/PostgreSQL dumps, website files, and Basecamp |
 | Backup placement | Provider-native snapshots or recovery points for cloud resources; one or more configured storage destinations for locally produced archives |
 | Automation | Cron and fixed-rate schedules in the console, one-time schedules through the API, on-demand runs, retention by count, and optional S3-backed air-gapped-copy enforcement |
 | Operations | A scoped dashboard, source inventory, run history, durable execution status, retry and reconciliation state, activity logs, cancellation, deletion, and authenticated restore actions where applicable; the rendered transfer surface is not backed by a complete current server action/task |
@@ -36,11 +36,11 @@ using or operating the self-hosted console.
   It does not certify that every provider region, plan, engine version, or
   credential policy has been tested in your environment.
 - Cloud backups remain in the source provider unless a feature explicitly
-  describes replication. Website, logical database, WordPress, and Basecamp
+  describes replication. Website, logical database, and Basecamp
   backups are archives uploaded to selected BackupSheep storage destinations.
 - Automatic in-console restore is not universal. The exact matrix is documented in
   [Restores](restores.md). Direct browser/ZIP download is disabled for current BSE1
-  artifacts, and WordPress/Basecamp do not yet have an authenticated plaintext-export or
+  artifacts, and Basecamp does not yet have an authenticated plaintext-export or
   automatic-restore workflow.
 - Backup and restore correctness depends on the database, scheduler, workers,
   broker, required command-line clients, configured credentials, and provider
