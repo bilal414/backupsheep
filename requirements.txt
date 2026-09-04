@@ -3,7 +3,7 @@ setuptools==83.0.0
 
 # Django and REST Framework
 Django==6.0.8
-djangorestframework==3.17.1
+djangorestframework==3.17.2
 djangorestframework-datatables==0.7.2
 django-filter==25.2
 django-user-agents==0.4.0
