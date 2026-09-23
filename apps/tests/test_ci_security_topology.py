@@ -292,10 +292,13 @@ class CISecurityTopologyContractTests(TestCase):
         for required in (
             "docker pull --platform linux/amd64",
             "test \"$(docker image inspect --format '{{.Architecture}}' \"$image\")\" = amd64",
-            "Generate SBOMs and reject HIGH or CRITICAL findings in exact images",
+            "Generate SBOMs and scan exact images for HIGH or CRITICAL findings",
             "rabbitmq-legacy-source\t$TEST_RABBITMQ_LEGACY_SOURCE_IMAGE",
             "deploy/ci/validate-image-scan.py",
             "Retain exact-image SBOM and vulnerability evidence",
+            # Findings are advisory outside release tags, but every image is scanned.
+            'scan_failures+=("$image_kind")',
+            'case "$GITHUB_REF" in refs/tags/*) exit 1 ;; esac',
         ):
             with self.subTest(required=required):
                 self.assertIn(required, regression_gate)

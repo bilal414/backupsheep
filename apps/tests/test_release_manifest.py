@@ -1004,11 +1004,22 @@ class ReleaseManifestContractTests(ReleaseFixtureMixin, TestCase):
             "CVE-2026-42792",
             "CVE-2026-49759",
             "CVE-2026-55737",
+            "CVE-2026-55951",
             "CVE-2026-55952",
             "CVE-2026-55953",
             "CVE-2026-58227",
             "CVE-2026-59250",
             "CVE-2026-59251",
+            "CVE-2026-66357",
+            "CVE-2026-66835",
+            "CVE-2026-69664",
+            "CVE-2026-70399",
+            "CVE-2026-71380",
+            "CVE-2026-73270",
+            "CVE-2026-73276",
+            "CVE-2026-73812",
+            "CVE-2026-74835",
+            "CVE-2026-75538",
         }
         vex_path = "/private/evidence/rabbitmq-legacy-source.openvex.json"
         vex_policy = json.loads(

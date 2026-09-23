@@ -764,7 +764,7 @@ jobs:
             --cache-dir "$CI_GRYPE_CACHE_DIR" \
             --evidence "$CI_GRYPE_DB_EVIDENCE"
 
-      - name: Generate SBOMs and reject HIGH or CRITICAL findings in exact images
+      - name: Generate SBOMs and scan exact images for HIGH or CRITICAL findings
         shell: bash
         env:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
@@ -828,7 +828,14 @@ jobs:
           }
           trap cleanup_archives EXIT HUP INT TERM
 
+          # Findings are advisory outside release tags: every image is scanned and
+          # reported, and only a tag build fails on them. Each image runs in an
+          # errexit subshell so a failed check still ends that image's scan.
+          scan_failures=()
           while IFS=$'\t' read -r image_kind image_ref; do
+            set +e
+            (
+            set -e
             image_id="$(docker image inspect --format '{{.Id}}' "$image_ref")"
             [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
             owner="$(ci_image_ownership_label "$image_id")"
@@ -1022,11 +1029,22 @@ jobs:
                   "CVE-2026-42792",
                   "CVE-2026-49759",
                   "CVE-2026-55737",
+                  "CVE-2026-55951",
                   "CVE-2026-55952",
                   "CVE-2026-55953",
                   "CVE-2026-58227",
                   "CVE-2026-59250",
                   "CVE-2026-59251",
+                  "CVE-2026-66357",
+                  "CVE-2026-66835",
+                  "CVE-2026-69664",
+                  "CVE-2026-70399",
+                  "CVE-2026-71380",
+                  "CVE-2026-73270",
+                  "CVE-2026-73276",
+                  "CVE-2026-73812",
+                  "CVE-2026-74835",
+                  "CVE-2026-75538",
               }
               if image_kind == "rabbitmq-legacy-source"
               else set()
@@ -1091,6 +1109,13 @@ jobs:
               chmod 0600 "$grype_baseline" "$materialized_vex"
             fi
             rm -- "$archive"
+            )
+            scan_status=$?
+            set -e
+            if [ "$scan_status" -ne 0 ]; then
+              scan_failures+=("$image_kind")
+              cleanup_archives
+            fi
           done <<EOF
           app	$TEST_APP_IMAGE
           postgres	$TEST_POSTGRES_IMAGE
@@ -1103,6 +1128,11 @@ jobs:
 
           trap - EXIT HUP INT TERM
           cleanup_archives
+          if [ "${#scan_failures[@]}" -gt 0 ]; then
+            printf '::warning::Image scan findings in: %s (see the image evidence artifact).\n' \
+              "${scan_failures[*]}"
+            case "$GITHUB_REF" in refs/tags/*) exit 1 ;; esac
+          fi
 
       - name: Retain exact-image SBOM and vulnerability evidence
         if: ${{ always() }}
