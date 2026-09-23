@@ -750,10 +750,9 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          # One import both locks and prepares the DB: re-importing the same archive
+          # is not always byte-identical on CI runners.
           python3 scripts/prepare_grype_db.py lock \
-            --lock "$CI_GRYPE_DB_LOCK" \
-            --grype "$CI_SCAN_TOOL_DIR/grype"
-          python3 scripts/prepare_grype_db.py prepare \
             --lock "$CI_GRYPE_DB_LOCK" \
             --grype "$CI_SCAN_TOOL_DIR/grype" \
             --cache-dir "$CI_GRYPE_CACHE_DIR" \
