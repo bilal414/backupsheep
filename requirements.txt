@@ -1,5 +1,5 @@
 # Core Python packages
-setuptools==83.0.0
+setuptools==84.0.0
 
 # Django and REST Framework
 Django==6.0.8
