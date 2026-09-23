@@ -6,7 +6,7 @@ legacy-node adoption, and `backupsheep-compose` rejects every RabbitMQ transitio
 To retain data while moving to a signed release, restore a separately verified recovery
 set into another fresh signed project and preserve the old project unchanged.
 
-The steady-state target is BackupSheep's patched RabbitMQ 4.3.5 derivative, rooted in an
+The steady-state target is BackupSheep's patched RabbitMQ 4.3.6 derivative, rooted in an
 exact digest-pinned upstream image. It **must not be started directly** on a 3.13 data
 directory. The upstream compatibility class is 3.13.x to 4.2.x and then
 4.3.x; this repository narrows those hops to the exact patch releases below. The only
@@ -14,8 +14,15 @@ in-place path implemented here is:
 
 1. inspect and reopen the exact old node with the pinned 3.13.7 source image;
 2. convert only the broker volume's UID/GID and start pinned 4.2.9;
-3. enable every 4.2 feature flag, including Khepri, then start pinned 4.3.5;
+3. enable every 4.2 feature flag, including Khepri, then start pinned 4.3.6;
 4. prove the canonical 4.3 model before committing the installer-owned generation.
+
+An installation already on the committed 4.3 generation needs none of these hops for a
+4.3 patch release: `install.sh` accepts a live broker on the prior pinned patch (4.3.5)
+or the current one (4.3.6), and Compose recreates it from the new image on the same data
+volume. Finish any in-progress 3.13/4.2/4.3 transition, and let `backupsheep-compose up`
+clear a completed transition's record, with the release that started it before
+updating: a recorded 4.3.5 transition is not valid under the 4.3.6 release.
 
 RabbitMQ's [feature-flag guidance](https://www.rabbitmq.com/docs/feature-flags) remains
 the upstream compatibility contract. The wrapper adds stricter BackupSheep identity,
@@ -25,10 +32,10 @@ fresh or migration state. Invoking a transition overlay with raw `docker compose
 the wrapper's protected evidence and is unsupported.
 
 Every compatibility broker is intentionally disposable and isolated: the 3.13.7,
-4.2.9, and transition-mode 4.3.5 services have `network_mode: none`, no Compose
+4.2.9, and transition-mode 4.3.6 services have `network_mode: none`, no Compose
 networks, no mounted secrets, no enabled RabbitMQ plugins, no dependent services, and
 `restart: "no"`. They can communicate only over their own loopback interface while the
-wrapper drives the vendor CLI with `docker exec`. Only the final, re-attested 4.3.5
+wrapper drives the vendor CLI with `docker exec`. Only the final, re-attested 4.3.6
 canonical service regains the private product networks and RabbitMQ bootstrap secret.
 
 RabbitMQ 4.2.9 remains in the affected range for multiple upstream advisories,
@@ -41,7 +48,7 @@ to 4.2.9. BackupSheep therefore does not represent 4.2.9 as vulnerability-free. 
 transition disables every plugin (including Web
 STOMP and Prometheus), mounts no secret, has no network namespace connectivity, accepts
 only a drained single-node data set, and exists only long enough to enable and attest
-feature flags and Khepri before the 4.3.5 hop. These controls make the cited remote
+feature flags and Khepri before the 4.3.6 hop. These controls make the cited remote
 plugin path unreachable within the supported migration command, but they do not erase
 the upstream advisory. Rebase this derivative and its exact attestations to 4.2.10 or a
 later supported 4.2 patch as soon as an official image is available. An operator who
@@ -70,7 +77,7 @@ reviewed blue-green export/import or restore. Do not delete an extra tree merely
 the in-place predicate pass.
 
 `BACKUPSHEEP_RABBITMQ_NODE_HOST` permanently retains the selected node identity through
-3.13.7, 4.2.9, 4.3.5, and steady state. Changing it can make RabbitMQ open a new Mnesia
+3.13.7, 4.2.9, 4.3.6, and steady state. Changing it can make RabbitMQ open a new Mnesia
 database beside the real one. Never hand-edit it after installation.
 
 ## Protected transition state
@@ -90,9 +97,9 @@ configuration hash. Its only valid progress states are:
 | source-clean 4.2 | `source-clean:3.13.7:4.2.9` | exact 3.13.7 source was cleanly stopped and inspected; source detachment and idempotent UID conversion are authorized |
 | target-ready 4.2 | `target-ready:3.13.7:4.2.9` | UID conversion, detachment and exact 4.2 clean-layout inspection passed; exact 4.2 target creation/recovery is authorized |
 | A42 | `attested:4.2.9:4.2.9` | exact healthy 4.2.9 target with every feature flag and Khepri enabled was proved |
-| P43 | `prepared:4.2.9:4.3.5` | exact attested 4.2.9 source with all flags/Khepri enabled may take the 4.3 hop |
-| target-ready 4.3 | `target-ready:4.2.9:4.3.5` | exact 4.2.9 source was cleanly stopped and inspected; source detachment and exact 4.3 target creation/recovery are authorized |
-| A43 | `attested:4.3.5:4.3.5` | exact healthy 4.3.5 transition target was proved |
+| P43 | `prepared:4.2.9:4.3.6` | exact attested 4.2.9 source with all flags/Khepri enabled may take the 4.3 hop |
+| target-ready 4.3 | `target-ready:4.2.9:4.3.6` | exact 4.2.9 source was cleanly stopped and inspected; source detachment and exact 4.3 target creation/recovery are authorized |
+| A43 | `attested:4.3.6:4.3.6` | exact healthy 4.3.6 transition target was proved |
 
 The broker-writable pending/final record in `rabbitmq_data` is only a secondary completion
 witness. It never authorizes recreation, repair, or a generation commit by itself. After
@@ -307,7 +314,7 @@ docker exec --user rabbitmq "${RABBIT_42_CONTAINERS}" \
   list_feature_flags name stability state
 ```
 
-### 7. Run the 4.3.5 hop and canonical commit
+### 7. Run the 4.3.6 hop and canonical commit
 
 ```bash
 bs_compose --allow-rabbitmq-generation-transition=4.3 \
@@ -318,8 +325,8 @@ Do not add a 4.3 overlay. The wrapper injects the exact
 `deploy/rabbitmq/transition-4.3.compose.yml`, proves A42 and the live 4.2 source, writes
 P43, cleanly stops and inspects that exact source, then writes `target-ready`. The stopped
 source may still exist at that checkpoint. After source removal and full volume
-detachment, it starts only the exact networkless, secretless, plugin-free 4.3.5
-transition target. It requires healthy 4.3.5, required flags, enabled Khepri, the retained
+detachment, it starts only the exact networkless, secretless, plugin-free 4.3.6
+transition target. It requires healthy 4.3.6, required flags, enabled Khepri, the retained
 node host, and the exact image/model before writing A43. It then finalizes the secondary
 volume witness, force-recreates the canonical base model without transition mode,
 repeats the full attestation (including the zero-enabled-plugin check), commits `.env`

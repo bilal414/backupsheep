@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove the exact RabbitMQ 3.13.7 -> 4.2.9 -> 4.3.5 local migration path.
+# Prove the exact RabbitMQ 3.13.7 -> 4.2.9 -> 4.3.6 local migration path.
 # All resources are private, labeled, collision-checked, bounded, and disposable.
 set -euo pipefail
 
@@ -744,7 +744,7 @@ assert_feature_flags "$upgrade_container" all enabled
 assert_migration_message "$upgrade_container"
 stop_cleanly "$upgrade_container"
 
-# Complete the real 4.3.5 data migration and prove the persistent message again.
+# Complete the real 4.3.6 data migration and prove the persistent message again.
 docker run --detach --pull never \
     "${common_labels[@]}" \
     "${common_broker_limits[@]}" \
@@ -765,7 +765,7 @@ docker run --detach --pull never \
     --entrypoint /bin/sh \
     "$target_image" /usr/local/bin/backupsheep-rabbitmq-entrypoint transition >/dev/null
 assert_container_identity "$target_container" "$target_image_id" 100:101
-wait_for_broker "$target_container" 4.3.5
+wait_for_broker "$target_container" 4.3.6
 assert_feature_flags "$target_container" required enabled
 assert_migration_message "$target_container"
 kill_abruptly "$target_container"
@@ -789,11 +789,11 @@ docker run --detach --pull never \
     --env "BACKUPSHEEP_INSTALLATION_ID=$installation_id" \
     --env BACKUPSHEEP_RABBITMQ_DATA_GENERATION=unattested \
     --env BACKUPSHEEP_RABBITMQ_TRANSITION_TARGET=4.3 \
-    --env BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.3.5 \
+    --env BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.3.6 \
     --entrypoint /bin/sh \
     "$target_image" /usr/local/bin/backupsheep-rabbitmq-entrypoint transition >/dev/null
 assert_container_identity "$target_container" "$target_image_id" 100:101
-wait_for_broker "$target_container" 4.3.5
+wait_for_broker "$target_container" 4.3.6
 assert_feature_flags "$target_container" required enabled
 assert_migration_message "$target_container"
 
@@ -859,7 +859,7 @@ docker run --detach --pull never \
     --entrypoint /bin/sh \
     "$target_image" /usr/local/bin/backupsheep-rabbitmq-entrypoint >/dev/null
 assert_container_identity "$steady_container" "$target_image_id" 100:101
-wait_for_broker "$steady_container" 4.3.5
+wait_for_broker "$steady_container" 4.3.6
 
 # Only the canonical steady broker regains the private product network. Run the
 # real least-privilege provisioner here, never against a transition broker whose
@@ -968,4 +968,4 @@ done
 stop_cleanly "$steady_container"
 
 printf '%s\n' \
-    'RabbitMQ exact 3.13.7 -> 4.2.9 -> 4.3.5 migration, three same-version crash recoveries, persistent message, Khepri, witness, and final topology verified.'
+    'RabbitMQ exact 3.13.7 -> 4.2.9 -> 4.3.6 migration, three same-version crash recoveries, persistent message, Khepri, witness, and final topology verified.'

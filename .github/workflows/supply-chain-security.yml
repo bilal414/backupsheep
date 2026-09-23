@@ -684,7 +684,7 @@ jobs:
           test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$TEST_RELEASE_VERIFIER_IMAGE")" = '["/ko-app/cosign"]'
           docker run --rm --pull never --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
-            --entrypoint rabbitmqctl "$TEST_RABBITMQ_IMAGE" version | grep -Fxq '4.3.5'
+            --entrypoint rabbitmqctl "$TEST_RABBITMQ_IMAGE" version | grep -Fxq '4.3.6'
           docker run --rm --pull never --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
             --entrypoint rabbitmqctl "$TEST_RABBITMQ_UPGRADE_IMAGE" version | grep -Fxq '4.2.9'

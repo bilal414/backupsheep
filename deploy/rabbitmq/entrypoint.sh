@@ -34,7 +34,7 @@ case "$entrypoint_mode" in
             || { printf '%s\n' 'RabbitMQ transition requires the exact unattested generation state.' >&2; exit 1; }
         case "$transition_target" in
             4.2) expected_runtime_version=4.2.9 ;;
-            4.3) expected_runtime_version=4.3.5 ;;
+            4.3) expected_runtime_version=4.3.6 ;;
             *) printf '%s\n' 'RabbitMQ transition target is invalid.' >&2; exit 1 ;;
         esac
         # Prove that this is an owned, non-empty legacy volume before invoking

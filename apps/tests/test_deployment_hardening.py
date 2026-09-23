@@ -160,13 +160,13 @@ class DeploymentHardeningContractTests(TestCase):
     def test_bundled_rabbitmq_derivatives_patch_exact_upstream_runtimes(self):
         expected = {
             "Dockerfile.rabbitmq": (
-                "rabbitmq:4.3.5-alpine@sha256:"
-                "290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240",
-                'runtime-generation="4.3.5-alpine3.23-openssl3.5.8-v2"',
+                "rabbitmq:4.3.6-alpine@sha256:"
+                "2531fe16e1cb4ec4086d3eaa63118c8f074dd98620d55f022f453a397b18f037",
+                'runtime-generation="4.3.6-alpine3.23-openssl3.5.8-v2"',
             ),
             "Dockerfile.rabbitmq-upgrade": (
                 "rabbitmq:4.2.9-alpine@sha256:"
-                "b2e69a138ea46106d0336bf8741187cac59031b778517d9ed2c9740f139dfa5a",
+                "b5c3420a9bf1066be2a01edf5bafbe846fc7a23e9f7cc5b36c04421d1eeb5af0",
                 'runtime-generation="4.2.9-alpine3.23-openssl3.5.8-v2"',
             ),
         }
