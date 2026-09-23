@@ -162,9 +162,9 @@ class CISecurityTopologyContractTests(TestCase):
             "scripts/prepare_trivy_db.py verify",
             '--lock "$CI_TRIVY_DB_LOCK"',
             "scripts/prepare_grype_db.py lock",
-            "scripts/prepare_grype_db.py prepare",
             "scripts/prepare_grype_db.py verify",
             '--lock "$CI_GRYPE_DB_LOCK"',
+            '--cache-dir "$CI_GRYPE_CACHE_DIR"',
             '"$CI_SCAN_DIR/grype-db-lock.json" <<\'PY\'',
             'docker image save --output "$archive" "$image_id"',
             'owner="$(ci_image_ownership_label "$image_id")"',
@@ -219,6 +219,9 @@ class CISecurityTopologyContractTests(TestCase):
         # Committed locks expire within days; recurring scans lock the current DBs.
         self.assertNotIn("deploy/trivy-db-lock.json", gate)
         self.assertNotIn("deploy/grype-db-lock.json", gate)
+        # The lock step's import is the prepared cache; a second import of the same
+        # archive is not always byte-identical on CI runners.
+        self.assertNotIn("scripts/prepare_grype_db.py prepare", gate)
         self.assertIn('test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"', gate)
         self.assertNotIn("legacy-source-otp26.openvex.json", gate)
         self.assertGreaterEqual(gate.count('vex "$materialized_vex"'), 1)
