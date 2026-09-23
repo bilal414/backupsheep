@@ -153,7 +153,10 @@ sizes/hashes, and the database timestamps. Release builds use the reviewed
 pushes, and the weekly schedule) instead run `scripts/prepare_trivy_db.py lock` at the
 start of each run, which records the database currently published under `:2` in a
 run-scoped lock. A committed lock expires at the database's `NextUpdate`, about a day
-after it is built, so it would fail every later run. The pinned
+after it is built, so it would fail every later run. Because current data regularly
+surfaces upstream CVEs that have no fix yet, the recurring exact-image scan is advisory:
+it scans every image, retains the reports, and warns, while release-tag builds fail on
+any High/Critical finding. The pinned
 ORAS binary fetches the manifest and blob by those digests with an empty home and
 Docker configuration. `scripts/prepare_trivy_db.py` then rejects links, paths other
 than `trivy.db` and `metadata.json`, duplicate/archive-extension records, unexpected
