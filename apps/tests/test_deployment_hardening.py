@@ -602,10 +602,8 @@ raise SystemExit(99)
             "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true",
             "python bruno/scripts/validate_collection.py",
             "python docs/enterprise/tools/validate_docs.py",
-            'suite="apps.tests apps.console.onboarding '
-            '--exclude-tag=requires_host_git --noinput"',
-            "if ! python manage.py test $suite --parallel 3; then",
-            "python manage.py test $suite\n                exit 1",
+            "python manage.py test apps.tests apps.console.onboarding \\",
+            "--exclude-tag=requires_host_git --noinput",
             "Unexpected Git executable in the production application image.",
             "if: ${{ always() }}",
         ):
