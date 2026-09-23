@@ -600,18 +600,26 @@ raise SystemExit(99)
             "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=legacy-only",
             "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=false",
             "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true",
-            "apps.tests.test_installer_security",
-            "apps.tests.test_compose_wrapper_security",
-            "apps.tests.test_docker_preflight_command",
             "python bruno/scripts/validate_collection.py",
             "python docs/enterprise/tools/validate_docs.py",
-            "python manage.py test apps.tests apps.console.onboarding \\",
-            "--exclude-tag=requires_host_git --noinput",
+            'suite="apps.tests apps.console.onboarding '
+            '--exclude-tag=requires_host_git --noinput"',
+            "if ! python manage.py test $suite --parallel 3; then",
+            "python manage.py test $suite\n                exit 1",
             "Unexpected Git executable in the production application image.",
             "if: ${{ always() }}",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, gate)
+        # apps.tests already includes these modules; a separate pass only repeated
+        # their ~33 minutes of shell-driven tests.
+        for module in (
+            "apps.tests.test_installer_security",
+            "apps.tests.test_compose_wrapper_security",
+            "apps.tests.test_docker_preflight_command",
+        ):
+            with self.subTest(module=module):
+                self.assertNotIn(module, gate)
 
         self.assertNotIn("--network-alias database", gate)
         self.assertNotIn("--env DB_HOST=database", gate)
