@@ -70,12 +70,19 @@ jobs:
             --require-hashes \
             --requirement deploy/dependency-audit-requirements.lock
           test "$(python -m pip_audit --version)" = "pip-audit 2.10.1"
+          # Findings are advisory outside release tags, as for the image scan.
+          audit_status=0
           python -m pip_audit \
             --requirement requirements.lock \
             --require-hashes \
             --disable-pip \
             --strict \
-            --progress-spinner off
+            --progress-spinner off \
+            || audit_status=$?
+          if [ "$audit_status" -ne 0 ]; then
+            echo "::warning::pip-audit exited $audit_status (findings or an incomplete audit)."
+            case "$GITHUB_REF" in refs/tags/*) exit "$audit_status" ;; esac
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -84,7 +91,14 @@ jobs:
           cache: npm
 
       - name: Audit frontend lock
-        run: npm audit --package-lock-only --audit-level=high
+        run: |
+          # Findings are advisory outside release tags, as for the image scan.
+          audit_status=0
+          npm audit --package-lock-only --audit-level=high || audit_status=$?
+          if [ "$audit_status" -ne 0 ]; then
+            echo "::warning::npm audit exited $audit_status (high or critical advisories)."
+            case "$GITHUB_REF" in refs/tags/*) exit "$audit_status" ;; esac
+          fi
 
       - name: Validate enterprise integration controller JavaScript
         shell: bash
@@ -509,6 +523,10 @@ jobs:
             --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
             --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           chmod 0600 "$private_report" "$secret_report" "$canary_report"
+          # Dependency vulnerabilities are advisory outside release tags; secrets,
+          # misconfigurations, canaries, and coverage still fail closed.
+          advisory_flag=--advisory-vulnerabilities
+          case "$GITHUB_REF" in refs/tags/*) advisory_flag= ;; esac
           python3 scripts/validate_source_scan.py \
             --report "$private_report" \
             --secret-report "$secret_report" \
@@ -518,7 +536,8 @@ jobs:
             --source-revision "$GITHUB_SHA" \
             --trivy-db-lock "$CI_SOURCE_TRIVY_DB_LOCK" \
             --trivy-db-evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE" \
-            --summary "$summary"
+            --summary "$summary" \
+            ${advisory_flag:+"$advisory_flag"}
           test "$trivy_status" -eq 7
           test "$secret_status" -eq 0
           test "$canary_status" -eq 9

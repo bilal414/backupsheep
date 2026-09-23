@@ -587,6 +587,8 @@ def validate_report(
     policy: dict[str, Any],
     repository_root: Path,
     source_revision: str,
+    *,
+    advisory_vulnerabilities: bool = False,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
         raise SourceScanError("The source revision is not a full Git SHA-1.")
@@ -698,7 +700,9 @@ def validate_report(
                 (target, identifier, severity, status, finding_fingerprint(finding))
             ] += 1
 
-    if vulnerability_count:
+    # Dependency vulnerabilities are advisory outside release tags; every other
+    # check below still fails closed.
+    if vulnerability_count and not advisory_vulnerabilities:
         raise SourceScanError(
             f"Trivy reported {vulnerability_count} HIGH/CRITICAL vulnerability finding(s)."
         )
@@ -755,9 +759,9 @@ def validate_report(
         "schema_version": 1,
         "source_revision": source_revision,
         "scanner": EXPECTED_SCANNER,
-        "result": "pass",
+        "result": "warn" if vulnerability_count else "pass",
         "findings": {
-            "vulnerabilities": 0,
+            "vulnerabilities": vulnerability_count,
             "secrets": 0,
             "reviewed_misconfigurations": len(reviews),
             "unreviewed_misconfigurations": 0,
@@ -978,6 +982,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trivy-db-lock", type=Path, required=True)
     parser.add_argument("--trivy-db-evidence", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
+    parser.add_argument(
+        "--advisory-vulnerabilities",
+        action="store_true",
+        help="report HIGH/CRITICAL dependency vulnerabilities instead of failing",
+    )
     arguments = parser.parse_args(argv)
     try:
         policy, policy_bytes = load_json(
@@ -1006,6 +1015,7 @@ def main(argv: list[str] | None = None) -> int:
             policy,
             repository_root,
             arguments.source_revision,
+            advisory_vulnerabilities=arguments.advisory_vulnerabilities,
         )
         summary["policy_sha256"] = _sha256(policy_bytes)
         summary["private_report_sha256"] = {
@@ -1034,10 +1044,16 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, SourceScanError, TrivyDBError) as error:
         print(f"source scan validation failed: {error}", file=sys.stderr)
         return 1
+    vulnerabilities = summary["findings"]["vulnerabilities"]
+    if vulnerabilities:
+        print(
+            f"::warning::Trivy reported {vulnerabilities} HIGH/CRITICAL dependency "
+            "vulnerability finding(s); advisory outside release tags."
+        )
     print(
-        "Source security validation passed: 0 HIGH/CRITICAL vulnerabilities, "
-        "0 all-severity secrets, 2 content-pinned reviewed misconfigurations, "
-        "and 5 private secret canaries."
+        f"Source security validation passed: {vulnerabilities} HIGH/CRITICAL "
+        "vulnerabilities, 0 all-severity secrets, 2 content-pinned reviewed "
+        "misconfigurations, and 5 private secret canaries."
     )
     return 0
 

@@ -244,7 +244,7 @@ class SourceScanGateTests(TestCase):
         self.temporary_directory.cleanup()
         super().tearDown()
 
-    def validate(self, report=None, policy=None, secret_report=None, canary_report=None):
+    def validate(self, report=None, policy=None, secret_report=None, canary_report=None, **options):
         return source_scan.validate_report(
             report if report is not None else self.report,
             secret_report if secret_report is not None else self.secret_report,
@@ -252,6 +252,7 @@ class SourceScanGateTests(TestCase):
             policy if policy is not None else self.policy,
             self.root,
             self.source_revision,
+            **options,
         )
 
     def test_exact_content_pinned_report_produces_only_zero_sensitive_evidence(self):
@@ -427,6 +428,27 @@ class SourceScanGateTests(TestCase):
         self.assertIn("1 all-severity secret", str(raised.exception))
         self.assertNotIn(secret_value, str(raised.exception))
         self.assertNotIn("private-key", str(raised.exception))
+
+    def test_advisory_mode_reports_vulnerabilities_but_still_fails_on_secrets(self):
+        vulnerable = copy.deepcopy(self.report)
+        vulnerable["Results"][0]["Vulnerabilities"] = [
+            {"VulnerabilityID": "CVE-2099-0001", "Severity": "HIGH"}
+        ]
+        summary = self.validate(vulnerable, advisory_vulnerabilities=True)
+        self.assertEqual(summary["result"], "warn")
+        self.assertEqual(summary["findings"]["vulnerabilities"], 1)
+        self.assertEqual(self.validate()["result"], "pass")
+
+        secret = copy.deepcopy(self.secret_report)
+        secret["Results"] = [
+            {
+                "Target": "private.txt",
+                "Class": "secret",
+                "Secrets": [{"RuleID": "private-key", "Match": "x", "Severity": "LOW"}],
+            }
+        ]
+        with self.assertRaisesRegex(source_scan.SourceScanError, "1 all-severity secret"):
+            self.validate(secret_report=secret, advisory_vulnerabilities=True)
 
     def test_markdown_and_default_skipped_medium_canaries_are_mandatory_and_private(self):
         missing_markdown = copy.deepcopy(self.canary_report)
@@ -655,6 +677,10 @@ class SourceScanGateTests(TestCase):
             '--secret-report "$secret_report"',
             '--canary-report "$canary_report"',
             '--trivy-db-lock "$CI_SOURCE_TRIVY_DB_LOCK"',
+            # Dependency vulnerabilities block only release tags.
+            "advisory_flag=--advisory-vulnerabilities",
+            'case "$GITHUB_REF" in refs/tags/*) advisory_flag= ;; esac',
+            '${advisory_flag:+"$advisory_flag"}',
             '--trivy-db-evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"',
             "deploy/source-scan-policy.json",
             'test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"',
@@ -683,6 +709,7 @@ class SourceScanGateTests(TestCase):
 class SourceScanInstallerContractTests(TestCase):
     def test_git_repository_contracts_run_only_in_the_git_enabled_static_job(self):
         expected_git_test_names = [
+            "test_advisory_mode_reports_vulnerabilities_but_still_fails_on_secrets",
             "test_any_vulnerability_or_secret_fails_without_echoing_secret_material",
             "test_duplicate_results_and_malformed_scanner_inventory_are_rejected",
             "test_exact_content_pinned_report_produces_only_zero_sensitive_evidence",
@@ -809,9 +836,14 @@ class SourceScanInstallerContractTests(TestCase):
             "--disable-pip",
             "--strict",
             "pip-audit 2.10.1",
+            # Audit findings are advisory outside release tags.
+            "--progress-spinner off \\\n            || audit_status=$?",
+            "npm audit --package-lock-only --audit-level=high || audit_status=$?",
+            'case "$GITHUB_REF" in refs/tags/*) exit "$audit_status" ;; esac',
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, dependency_job)
+        self.assertEqual(dependency_job.count('exit "$audit_status"'), 2)
         self.assertNotIn("pip-audit==2.10.1", dependency_job)
         self.assertNotIn("--requirement requirements.txt", dependency_job)
         requirements = [
