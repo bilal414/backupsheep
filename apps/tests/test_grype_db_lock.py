@@ -207,7 +207,7 @@ class GrypeDatabaseLockTests(TestCase):
             "checksum": checksum,
         }
 
-    def _resolve(self, root: Path, listing: dict, archive: bytes) -> dict:
+    def _resolve(self, root: Path, listing: dict, archive: bytes, **prepared) -> dict:
         def fake_download(url, output, *, maximum, expected_size=None):
             payload = json.dumps(listing).encode() if url.endswith("/latest.json") else archive
             output.write(payload)
@@ -235,11 +235,12 @@ class GrypeDatabaseLockTests(TestCase):
             prepare_grype_db.subprocess, "run", side_effect=fake_import
         ), mock.patch.object(
             prepare_grype_db, "_status_document", return_value=status
-        ):
+        ), mock.patch.object(prepare_grype_db, "_status"):
             return prepare_grype_db.resolve_lock(
                 root / "lock.json",
                 tool,
                 now=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+                **prepared,
             )
 
     def test_lock_records_the_latest_listing_in_a_form_prepare_accepts(self) -> None:
@@ -269,6 +270,32 @@ class GrypeDatabaseLockTests(TestCase):
             written, _ = prepare_grype_db._load(root / "lock.json", "resolved lock")
             self.assertEqual(written, lock)
             self.assertEqual(sorted(path.name for path in root.iterdir()), ["grype", "lock.json"])
+
+    def test_lock_can_keep_its_import_as_the_prepared_cache(self) -> None:
+        archive = b"latest-archive"
+        listing = self._latest_listing("sha256:" + hashlib.sha256(archive).hexdigest())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            evidence = root / "evidence.json"
+            with self.assertRaisesRegex(prepare_grype_db.GrypeDBError, "needs both"):
+                prepare_grype_db.resolve_lock(root / "lock.json", root / "grype", cache_dir=cache)
+            self._resolve(root, listing, archive, cache_dir=cache, evidence_path=evidence)
+            self.assertEqual((cache / "6" / "vulnerability.db").read_bytes(), b"d")
+            with mock.patch.object(prepare_grype_db, "_tool_version"), mock.patch.object(
+                prepare_grype_db, "_status"
+            ):
+                prepare_grype_db.verify(
+                    root / "lock.json",
+                    root / "grype",
+                    cache,
+                    evidence,
+                    now=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+                )
+            self.assertEqual(
+                sorted(path.name for path in root.iterdir()),
+                ["cache", "evidence.json", "grype", "lock.json"],
+            )
 
     def test_lock_refuses_an_archive_that_differs_from_its_published_checksum(self) -> None:
         listing = self._latest_listing("sha256:" + "0" * 64)

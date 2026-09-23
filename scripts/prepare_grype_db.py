@@ -336,10 +336,25 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
             pass
 
 
-def resolve_lock(lock_path: Path, grype: Path, *, now: datetime | None = None) -> dict[str, Any]:
-    """Write a lock for the v6 database Anchore currently publishes as latest."""
+def resolve_lock(
+    lock_path: Path,
+    grype: Path,
+    *,
+    cache_dir: Path | None = None,
+    evidence_path: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Write a lock for the v6 database Anchore currently publishes as latest.
+
+    With cache_dir and evidence_path, the import made for the lock also becomes
+    the prepared cache, exactly as prepare would record it.
+    """
     if lock_path.exists() or lock_path.is_symlink():
         raise GrypeDBError("refusing a pre-existing Grype DB lock path")
+    if (cache_dir is None) != (evidence_path is None):
+        raise GrypeDBError("a prepared lock needs both a cache directory and an evidence path")
+    if cache_dir is not None and (cache_dir.exists() or cache_dir.is_symlink()):
+        raise GrypeDBError("refusing a pre-existing Grype cache path")
     parent = lock_path.parent.resolve(strict=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{lock_path.name}.resolve-", dir=parent))
     try:
@@ -371,11 +386,11 @@ def resolve_lock(lock_path: Path, grype: Path, *, now: datetime | None = None) -
         if ARCHIVE_PATH.fullmatch(urllib.parse.urlsplit(url).path) is None:
             raise GrypeDBError("the latest Grype database listing does not name an official v6 archive")
 
-        cache_dir = staging / "cache"
+        staged_cache = staging / "cache"
         home = staging / "home"
-        cache_dir.mkdir(mode=0o700)
+        staged_cache.mkdir(mode=0o700)
         home.mkdir(mode=0o700)
-        env = _tool_env(cache_dir, home)
+        env = _tool_env(staged_cache, home)
         tool = grype.resolve(strict=True)
         _tool_version(tool, env, home)
         archive_path = staging / "archive.tar.zst"
@@ -404,8 +419,8 @@ def resolve_lock(lock_path: Path, grype: Path, *, now: datetime | None = None) -
         ):
             raise GrypeDBError("the imported Grype database status differs from the latest listing")
         built = _time(status.get("built"), "Grype DB status built")
-        database = cache_dir / "6" / "vulnerability.db"
-        import_metadata = cache_dir / "6" / "import.json"
+        database = staged_cache / "6" / "vulnerability.db"
+        import_metadata = staged_cache / "6" / "import.json"
         database_size = database.lstat().st_size
         import_metadata_size = import_metadata.lstat().st_size
         lock = {
@@ -430,6 +445,13 @@ def resolve_lock(lock_path: Path, grype: Path, *, now: datetime | None = None) -
         }
         _validate_lock(lock, now=now)
         _write_json(lock_path, lock)
+        if cache_dir is not None and evidence_path is not None:
+            # Keep this import: re-importing the same archive is not always
+            # byte-identical on CI runners, so a second import can miss the lock.
+            os.rename(staged_cache, cache_dir)
+            _record_prepared(
+                lock, lock_path.read_bytes(), grype, cache_dir, evidence_path, now=now
+            )
         return lock
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -471,16 +493,35 @@ def prepare(lock_path: Path, grype: Path, cache_dir: Path, evidence_path: Path) 
     finally:
         archive_path.unlink(missing_ok=True)
     home.rmdir()
+    _record_prepared(lock, lock_bytes, grype, cache_dir, evidence_path)
+
+
+def _record_prepared(
+    lock: dict[str, Any],
+    lock_bytes: bytes,
+    grype: Path,
+    cache_dir: Path,
+    evidence_path: Path,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Check an imported cache against its lock and write the preparation evidence."""
     _verify_cache(cache_dir, lock)
-    _status(grype.resolve(strict=True), env | {"HOME": str(cache_dir.parent)}, cache_dir.parent, lock, cache_dir)
-    prepared_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _status(
+        grype.resolve(strict=True),
+        _tool_env(cache_dir, cache_dir.parent),
+        cache_dir.parent,
+        lock,
+        cache_dir,
+    )
+    prepared_at = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
     evidence = {
         "schema_version": 1,
         "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
         "grype_version": GRYPE_VERSION,
         "prepared_at": prepared_at,
-        "archive_sha256": archive["sha256"],
-        "archive_size": archive["size"],
+        "archive_sha256": lock["archive"]["sha256"],
+        "archive_size": lock["archive"]["size"],
         "database_schema_version": lock["database"]["schema_version"],
         "database_built_at": lock["database"]["built_at"],
         "database_sha256": lock["database"]["sha256"],
@@ -554,9 +595,16 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     if arguments.mode != "lock" and (arguments.cache_dir is None or arguments.evidence is None):
         parser.error(f"{arguments.mode} requires --cache-dir and --evidence")
+    if arguments.mode == "lock" and (arguments.cache_dir is None) != (arguments.evidence is None):
+        parser.error("lock takes --cache-dir and --evidence together")
     try:
         if arguments.mode == "lock":
-            lock = resolve_lock(arguments.lock, arguments.grype)
+            lock = resolve_lock(
+                arguments.lock,
+                arguments.grype,
+                cache_dir=arguments.cache_dir,
+                evidence_path=arguments.evidence,
+            )
             print(
                 f"Locked Grype DB {lock['database']['schema_version']} "
                 f"(built {lock['database']['built_at']})."
