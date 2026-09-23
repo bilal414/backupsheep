@@ -145,10 +145,15 @@ files. Trivy also receives an explicit empty ignore file. Repository-local scann
 configuration, ignore files, update settings, and hidden fixed-only flags cannot silently
 weaken the gate. Release Grype scans are VEX-free and reject every ignored finding.
 
-The recurring source and exact-image gates do not let Trivy resolve or update its
-mutable default vulnerability database. `deploy/trivy-db-lock.json` records one reviewed
-`ghcr.io/aquasecurity/trivy-db` OCI manifest, its only layer, the compressed layer
-size/hash, both extracted file sizes/hashes, and the database timestamps. The pinned
+Trivy never resolves or updates its mutable default vulnerability database during a
+scan. Every scan uses a lock that records one `ghcr.io/aquasecurity/trivy-db` OCI
+manifest, its only layer, the compressed layer size/hash, both extracted file
+sizes/hashes, and the database timestamps. Release builds use the reviewed
+`deploy/trivy-db-lock.json`. The recurring source and exact-image gates (pull requests,
+pushes, and the weekly schedule) instead run `scripts/prepare_trivy_db.py lock` at the
+start of each run, which records the database currently published under `:2` in a
+run-scoped lock. A committed lock expires at the database's `NextUpdate`, about a day
+after it is built, so it would fail every later run. The pinned
 ORAS binary fetches the manifest and blob by those digests with an empty home and
 Docker configuration. `scripts/prepare_trivy_db.py` then rejects links, paths other
 than `trivy.db` and `metadata.json`, duplicate/archive-extension records, unexpected
@@ -158,10 +163,12 @@ and with offline scanning enabled. The cache is rehashed after every image scan,
 each retained source/image summary binds the lock, manifest, layer, database, and
 preparation evidence hashes.
 
-Grype uses a separate reviewed database and therefore supplies independent coverage.
-`deploy/grype-db-lock.json` binds one exact official v6 archive URL, archive size/hash,
-database schema/build/expiry, extracted database size/hash, and import metadata.
-`scripts/prepare_grype_db.py` refuses redirects, verifies the pinned Grype 0.116.1
+Grype uses a separate database and therefore supplies independent coverage. Its lock
+binds one exact official v6 archive URL, archive size/hash, database schema/build/expiry,
+extracted database size/hash, and import metadata. Release builds use the reviewed
+`deploy/grype-db-lock.json`; the recurring gates run `scripts/prepare_grype_db.py lock`,
+which records the archive Anchore currently lists in `latest.json` after checking it
+against the published checksum. `scripts/prepare_grype_db.py` refuses redirects, verifies the pinned Grype 0.116.1
 binary, imports the exact archive into a private cache, checks the only permitted cache
 members, and compares Grype's own database status with the lock. Scans disable database
 and application updates, reverify the cache after every image, and fail when the reviewed
@@ -173,10 +180,14 @@ against the protected database evidence, so a producer-authored report is never
 sufficient for signing.
 
 The upstream database artifact is digest-locked; this control does not claim that
-upstream signs it. A lock refresh is therefore a deliberate reviewed change, never an
-automatic acceptance of whatever `:2` points to:
+upstream signs it. Refreshing the committed release locks is therefore a deliberate
+reviewed change, never an automatic acceptance of whatever `:2` points to. Refresh them
+immediately before tagging a release, because the release workflow fails closed once
+either lock expires:
 
-1. Resolve the current official `trivy-db:2` manifest and review its raw OCI structure,
+1. Write candidates with `python3 scripts/prepare_trivy_db.py lock --lock <candidate>
+   --oras <pinned ORAS>` and `python3 scripts/prepare_grype_db.py lock --lock <candidate>
+   --grype <pinned Grype>`. Review the Trivy candidate's raw OCI structure,
    media types, creation time, single layer, and schema-2 metadata using the policy-
    pinned ORAS version and the official
    [Trivy database documentation](https://github.com/aquasecurity/trivy/blob/main/docs/guide/configuration/db.md)
@@ -194,7 +205,7 @@ and expires at `2026-09-05T01:11:59.298521783Z`. The Grype lock uses official
 archive checksum
 `3574269f1e15cc771bd8ea11a31f2e198c5e4cc546ae7d3187919c8f4822cb7a`
 and expires at `2026-09-08T06:30:55Z`. These locks are evidence for those bounded
-windows, not permanent vulnerability results.
+windows, not permanent vulnerability results, and only release builds read them.
 
 Every exact platform child must have:
 

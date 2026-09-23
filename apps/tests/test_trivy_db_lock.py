@@ -144,6 +144,39 @@ class TrivyDatabaseLockTests(TestCase):
                 now=self.now,
             )
 
+    def test_lock_records_the_published_tag_in_a_form_prepare_accepts(self):
+        resolved = self.root / "resolved-lock.json"
+        with mock.patch.object(trivy_db, "_run_oras", side_effect=self._fake_oras) as run:
+            lock = trivy_db.resolve_lock(
+                lock_path=resolved, oras_path=self.oras, now=self.now
+            )
+            self.assertEqual(
+                run.call_args_list[0].args[1][-1],
+                f"{trivy_db.EXPECTED_REPOSITORY}:{trivy_db.CURRENT_DB_TAG}",
+            )
+            self.assertEqual(lock, self.lock)
+            self.assertEqual(stat_mode(resolved), 0o600)
+            self.assertEqual(list(self.root.glob(".*resolve-*")), [])
+            trivy_db.prepare(
+                lock_path=resolved,
+                oras_path=self.oras,
+                cache_dir=self.cache,
+                evidence_path=self.evidence,
+                now=self.now,
+            )
+        self.assertEqual((self.cache / "db" / "trivy.db").read_bytes(), self.database_bytes)
+
+    def test_lock_refuses_a_published_db_past_its_next_update(self):
+        resolved = self.root / "stale-lock.json"
+        with mock.patch.object(trivy_db, "_run_oras", side_effect=self._fake_oras):
+            with self.assertRaisesRegex(trivy_db.TrivyDBError, "past its next update"):
+                trivy_db.resolve_lock(
+                    lock_path=resolved,
+                    oras_path=self.oras,
+                    now=datetime(2030, 1, 3, 10, 0, 0, tzinfo=timezone.utc),
+                )
+        self.assertFalse(resolved.exists())
+
     def test_archive_reader_rejects_links_even_when_the_layer_digest_is_locked(self):
         unsafe_layer = self.root / "unsafe.tar.gz"
         with tarfile.open(unsafe_layer, mode="w:gz") as archive:

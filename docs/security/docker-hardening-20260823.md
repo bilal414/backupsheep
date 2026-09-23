@@ -122,14 +122,16 @@ upgrade therefore fails closed until reviewed. No ignore file, ignored-unfixed
 relaxation or vulnerability allowlist was used.
 
 The current recurring source and exact-image gates additionally remove Trivy's mutable
-database download from the trusted scan path. They prepare only the exact
-manifest/layer/database in
-`deploy/trivy-db-lock.json`, using the hash-pinned ORAS tool with isolated credential
-state; validates the two-member archive without general extraction; runs Trivy with
-all database/check updates disabled and offline scanning enabled; and binds the lock
-and DB identity into every retained image summary. The prepared DB is rehashed after
-each scan. Freshness fails closed at the lock's exact `NextUpdate`, so a reviewer must
-verify and commit a new manifest, layer, extracted-file hashes, sizes, and timestamps.
+database download from the trusted scan path. At the start of each run they lock the
+database currently published under `trivy-db:2` (`scripts/prepare_trivy_db.py lock`),
+then prepare only that exact manifest/layer/database using the hash-pinned ORAS tool
+with isolated credential state. The preparation validates the two-member archive
+without general extraction, Trivy runs with all database/check updates disabled and
+offline scanning enabled, and the lock and DB identity are bound into every retained
+image summary. The prepared DB is rehashed after each scan, and freshness still fails
+closed at the lock's exact `NextUpdate`. Release builds use the reviewed
+`deploy/trivy-db-lock.json` instead, so before each release a reviewer must verify and
+commit a new manifest, layer, extracted-file hashes, sizes, and timestamps.
 The official artifact is digest locked but is not represented here as independently
 signed. See `docs/guides/signed-container-releases.md` for the refresh procedure and
 the current lock's bounded validity window.
