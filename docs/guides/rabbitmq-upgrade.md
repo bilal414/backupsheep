@@ -209,15 +209,17 @@ the volume. The source overlay remains `pull_policy: never`, so the resulting ru
 cannot be replaced by a registry pull.
 
 RabbitMQ 3.13.7's published compatibility ceiling is OTP 26.2.x. OTP 26 has no release
-containing fixes for eight later network/ETF advisories that Grype associates with the
-umbrella Erlang binary package. BackupSheep therefore does not call this derivative
-vulnerability-free. `deploy/rabbitmq/legacy-source-otp26.vex-policy.json` records the
-reviewed decision inputs for exactly those eight CVEs and exactly
+containing fixes for nineteen later network, ETF, and inets advisories that Grype
+associates with the umbrella Erlang binary package. BackupSheep therefore does not call
+this derivative vulnerability-free. `deploy/rabbitmq/legacy-source-otp26.vex-policy.json`
+records the reviewed decision inputs for exactly those nineteen CVEs and exactly
 `pkg:generic/erlang@26.2.5.21`. CI materializes the OpenVEX document only after the
 unsuppressed scan: its product tag and SHA-256 hash bind the statement to that exact
-legacy image manifest, with Erlang as the named subcomponent. The gate requires the
+legacy image manifest, with Erlang as the named subcomponent. The scan requires the
 ignored High/Critical set, package, version, image digest, and VEX rule to match
-exactly. Any additional ignored or active High/Critical finding fails.
+exactly, and flags any additional ignored or active High/Critical finding. Recurring CI
+reports image findings as warnings with the retained scan evidence; only release-tag
+builds fail on them.
 
 That decision depends on the enforced runtime model, not on the age of the software:
 the one-time source has `network_mode: none`, no mounted secrets, no enabled plugins,

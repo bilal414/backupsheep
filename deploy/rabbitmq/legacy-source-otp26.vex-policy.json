@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id_prefix": "https://backupsheep.com/security/openvex/legacy-rabbitmq-otp26",
   "author": "BackupSheep Security Team",
-  "timestamp": "2026-08-30T23:00:00Z",
+  "timestamp": "2026-09-23T12:00:00Z",
   "version": 1,
   "statements": [
     {
@@ -60,6 +60,83 @@
       "status": "not_affected",
       "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
       "impact_statement": "The one-time RabbitMQ 3.13 source has no network connectivity and makes no TLS client connections."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-55951"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none and no plugins, so its inets HTTP client cannot reach any server."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-66357"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-66835"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-69664"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-70399"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-71380"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-73270"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-73276"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-73812"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-74835"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source runs with network_mode none, no plugins or secrets, and never starts an inets httpd listener."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-75538"},
+      "component": "pkg:generic/erlang@26.2.5.21",
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The one-time RabbitMQ 3.13 source has no network connectivity, so no peer can connect to an Erlang TCP port."
     }
   ]
 }
