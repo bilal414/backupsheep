@@ -335,6 +335,7 @@ jobs:
           CI_SOURCE_SCAN_EVIDENCE_DIR: "${{ runner.temp }}/backupsheep-source-scan-evidence"
           CI_SOURCE_SCAN_CACHE_DIR: "${{ runner.temp }}/backupsheep-source-scan-cache"
           CI_SOURCE_SCAN_HOME: "${{ runner.temp }}/backupsheep-source-scan-home"
+          CI_SOURCE_TRIVY_DB_LOCK: "${{ runner.temp }}/backupsheep-source-trivy-db-lock.json"
           CI_SOURCE_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-source-trivy-db-evidence.json"
         run: |
           set -euo pipefail
@@ -348,6 +349,7 @@ jobs:
             "$CI_SOURCE_SCAN_EVIDENCE_DIR" \
             "$CI_SOURCE_SCAN_CACHE_DIR" \
             "$CI_SOURCE_SCAN_HOME" \
+            "$CI_SOURCE_TRIVY_DB_LOCK" \
             "$CI_SOURCE_TRIVY_DB_EVIDENCE"; do
             if [ -e "$path" ] || [ -L "$path" ]; then
               printf '%s\n' 'Refusing a pre-existing source-scan evidence path.' >&2
@@ -358,8 +360,12 @@ jobs:
             "$CI_SOURCE_SCAN_PRIVATE_DIR" \
             "$CI_SOURCE_SCAN_EVIDENCE_DIR" \
             "$CI_SOURCE_SCAN_HOME"
+          # Scan with the DB upstream publishes now; a committed lock expires within a day.
+          python3 scripts/prepare_trivy_db.py lock \
+            --lock "$CI_SOURCE_TRIVY_DB_LOCK" \
+            --oras "$CI_SOURCE_SCAN_TOOL_DIR/oras"
           python3 scripts/prepare_trivy_db.py prepare \
-            --lock deploy/trivy-db-lock.json \
+            --lock "$CI_SOURCE_TRIVY_DB_LOCK" \
             --oras "$CI_SOURCE_SCAN_TOOL_DIR/oras" \
             --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
             --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
@@ -403,7 +409,7 @@ jobs:
               . \
             || trivy_status=$?
           python3 scripts/prepare_trivy_db.py verify \
-            --lock deploy/trivy-db-lock.json \
+            --lock "$CI_SOURCE_TRIVY_DB_LOCK" \
             --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
             --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           if [ "$trivy_status" -ne 0 ] && [ "$trivy_status" -ne 7 ]; then
@@ -499,7 +505,7 @@ jobs:
           test -f "$canary_report"
           test ! -L "$canary_report"
           python3 scripts/prepare_trivy_db.py verify \
-            --lock deploy/trivy-db-lock.json \
+            --lock "$CI_SOURCE_TRIVY_DB_LOCK" \
             --cache-dir "$CI_SOURCE_SCAN_CACHE_DIR" \
             --evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"
           chmod 0600 "$private_report" "$secret_report" "$canary_report"
@@ -510,7 +516,7 @@ jobs:
             --policy deploy/source-scan-policy.json \
             --repository-root "$GITHUB_WORKSPACE" \
             --source-revision "$GITHUB_SHA" \
-            --trivy-db-lock deploy/trivy-db-lock.json \
+            --trivy-db-lock "$CI_SOURCE_TRIVY_DB_LOCK" \
             --trivy-db-evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE" \
             --summary "$summary"
           test "$trivy_status" -eq 7
@@ -710,41 +716,50 @@ jobs:
           grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-grype.yaml"
           test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"
 
-      - name: Prepare the exact reviewed Trivy vulnerability database
+      - name: Lock and prepare the current Trivy vulnerability database
         shell: bash
         env:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
           CI_TRIVY_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-trivy-cache"
+          CI_TRIVY_DB_LOCK: "${{ runner.temp }}/backupsheep-ci-trivy-db-lock.json"
           CI_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-trivy-db-evidence.json"
         run: |
           set -euo pipefail
           umask 077
+          # Scan with the DB upstream publishes now; a committed lock expires within a day.
+          python3 scripts/prepare_trivy_db.py lock \
+            --lock "$CI_TRIVY_DB_LOCK" \
+            --oras "$CI_SCAN_TOOL_DIR/oras"
           python3 scripts/prepare_trivy_db.py prepare \
-            --lock deploy/trivy-db-lock.json \
+            --lock "$CI_TRIVY_DB_LOCK" \
             --oras "$CI_SCAN_TOOL_DIR/oras" \
             --cache-dir "$CI_TRIVY_CACHE_DIR" \
             --evidence "$CI_TRIVY_DB_EVIDENCE"
           python3 scripts/prepare_trivy_db.py verify \
-            --lock deploy/trivy-db-lock.json \
+            --lock "$CI_TRIVY_DB_LOCK" \
             --cache-dir "$CI_TRIVY_CACHE_DIR" \
             --evidence "$CI_TRIVY_DB_EVIDENCE"
 
-      - name: Prepare the exact reviewed Grype vulnerability database
+      - name: Lock and prepare the current Grype vulnerability database
         shell: bash
         env:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
           CI_GRYPE_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-grype-cache"
+          CI_GRYPE_DB_LOCK: "${{ runner.temp }}/backupsheep-ci-grype-db-lock.json"
           CI_GRYPE_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-grype-db-evidence.json"
         run: |
           set -euo pipefail
           umask 077
+          python3 scripts/prepare_grype_db.py lock \
+            --lock "$CI_GRYPE_DB_LOCK" \
+            --grype "$CI_SCAN_TOOL_DIR/grype"
           python3 scripts/prepare_grype_db.py prepare \
-            --lock deploy/grype-db-lock.json \
+            --lock "$CI_GRYPE_DB_LOCK" \
             --grype "$CI_SCAN_TOOL_DIR/grype" \
             --cache-dir "$CI_GRYPE_CACHE_DIR" \
             --evidence "$CI_GRYPE_DB_EVIDENCE"
           python3 scripts/prepare_grype_db.py verify \
-            --lock deploy/grype-db-lock.json \
+            --lock "$CI_GRYPE_DB_LOCK" \
             --grype "$CI_SCAN_TOOL_DIR/grype" \
             --cache-dir "$CI_GRYPE_CACHE_DIR" \
             --evidence "$CI_GRYPE_DB_EVIDENCE"
@@ -755,9 +770,11 @@ jobs:
           CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
           CI_SCAN_DIR: "${{ runner.temp }}/backupsheep-ci-image-evidence"
           CI_TRIVY_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-trivy-cache"
+          CI_TRIVY_DB_LOCK: "${{ runner.temp }}/backupsheep-ci-trivy-db-lock.json"
           CI_TRIVY_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-trivy-db-evidence.json"
           CI_TRIVY_HOME: "${{ runner.temp }}/backupsheep-ci-trivy-home"
           CI_GRYPE_CACHE_DIR: "${{ runner.temp }}/backupsheep-ci-grype-cache"
+          CI_GRYPE_DB_LOCK: "${{ runner.temp }}/backupsheep-ci-grype-db-lock.json"
           CI_GRYPE_DB_EVIDENCE: "${{ runner.temp }}/backupsheep-ci-grype-db-evidence.json"
           CI_GRYPE_HOME: "${{ runner.temp }}/backupsheep-ci-grype-home"
         run: |
@@ -802,9 +819,9 @@ jobs:
           install -d -m 0700 "$CI_SCAN_DIR"
           install -d -m 0700 "$CI_TRIVY_HOME"
           install -d -m 0700 "$CI_GRYPE_HOME"
-          install -m 0600 deploy/trivy-db-lock.json "$CI_SCAN_DIR/trivy-db-lock.json"
+          install -m 0600 "$CI_TRIVY_DB_LOCK" "$CI_SCAN_DIR/trivy-db-lock.json"
           install -m 0600 "$CI_TRIVY_DB_EVIDENCE" "$CI_SCAN_DIR/trivy-db-evidence.json"
-          install -m 0600 deploy/grype-db-lock.json "$CI_SCAN_DIR/grype-db-lock.json"
+          install -m 0600 "$CI_GRYPE_DB_LOCK" "$CI_SCAN_DIR/grype-db-lock.json"
           install -m 0600 "$CI_GRYPE_DB_EVIDENCE" "$CI_SCAN_DIR/grype-db-evidence.json"
           cleanup_archives() {
             find "$CI_SCAN_DIR" -maxdepth 1 -type f -name '*.tar' -delete
@@ -949,11 +966,11 @@ jobs:
               || grype_status=$?
 
             python3 scripts/prepare_trivy_db.py verify \
-              --lock deploy/trivy-db-lock.json \
+              --lock "$CI_TRIVY_DB_LOCK" \
               --cache-dir "$CI_TRIVY_CACHE_DIR" \
               --evidence "$CI_TRIVY_DB_EVIDENCE"
             python3 scripts/prepare_grype_db.py verify \
-              --lock deploy/grype-db-lock.json \
+              --lock "$CI_GRYPE_DB_LOCK" \
               --grype "$CI_SCAN_TOOL_DIR/grype" \
               --cache-dir "$CI_GRYPE_CACHE_DIR" \
               --evidence "$CI_GRYPE_DB_EVIDENCE"
@@ -968,7 +985,8 @@ jobs:
               --trivy-db-evidence "$CI_SCAN_DIR/trivy-db-evidence.json" \
               --summary "$summary"
             python3 - \
-              "$grype_report" "$image_id" "$image_kind" "$materialized_vex" <<'PY'
+              "$grype_report" "$image_id" "$image_kind" "$materialized_vex" \
+              "$CI_SCAN_DIR/grype-db-lock.json" <<'PY'
           import sys
           from pathlib import Path
 
@@ -990,6 +1008,7 @@ jobs:
           expected_image_id = sys.argv[2]
           image_kind = sys.argv[3]
           vex_path = Path(sys.argv[4]) if sys.argv[4] else None
+          grype_lock_path = Path(sys.argv[5])
           report = _mapping(
               _load_json(report_path, maximum_bytes=MAX_EVIDENCE_FILE_BYTES),
               "Grype report",
@@ -1014,7 +1033,7 @@ jobs:
           )
           grype_lock = _mapping(
               _load_json(
-                  Path("deploy/grype-db-lock.json"),
+                  grype_lock_path,
                   maximum_bytes=MAX_CONTROL_FILE_BYTES,
               ),
               "Grype DB lock",

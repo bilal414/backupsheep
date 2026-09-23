@@ -157,12 +157,15 @@ class CISecurityTopologyContractTests(TestCase):
             "1\\.51\\.0",
             "0\\.74\\.0",
             "0\\.116\\.1",
+            "scripts/prepare_trivy_db.py lock",
             "scripts/prepare_trivy_db.py prepare",
             "scripts/prepare_trivy_db.py verify",
-            "deploy/trivy-db-lock.json",
+            '--lock "$CI_TRIVY_DB_LOCK"',
+            "scripts/prepare_grype_db.py lock",
             "scripts/prepare_grype_db.py prepare",
             "scripts/prepare_grype_db.py verify",
-            "deploy/grype-db-lock.json",
+            '--lock "$CI_GRYPE_DB_LOCK"',
+            '"$CI_SCAN_DIR/grype-db-lock.json" <<\'PY\'',
             'docker image save --output "$archive" "$image_id"',
             'owner="$(ci_image_ownership_label "$image_id")"',
             '[[ "$owner" == "$TEST_OWNERSHIP_VALUE" ]]',
@@ -213,6 +216,9 @@ class CISecurityTopologyContractTests(TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, gate)
         self.assertNotIn("--ignore-unfixed", gate)
+        # Committed locks expire within days; recurring scans lock the current DBs.
+        self.assertNotIn("deploy/trivy-db-lock.json", gate)
+        self.assertNotIn("deploy/grype-db-lock.json", gate)
         self.assertIn('test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"', gate)
         self.assertNotIn("legacy-source-otp26.openvex.json", gate)
         self.assertGreaterEqual(gate.count('vex "$materialized_vex"'), 1)

@@ -186,6 +186,89 @@ class GrypeDatabaseLockTests(TestCase):
                         now=verification_time,
                     )
 
+    @staticmethod
+    def _latest_listing(checksum: str) -> dict:
+        return {
+            "status": "active",
+            "schemaVersion": "v6.1.9",
+            "built": "2026-09-23T06:31:39Z",
+            "path": "vulnerability-db_v6.1.9_2026-09-23T00:31:12Z_1790145099.tar.zst",
+            "checksum": checksum,
+        }
+
+    def _resolve(self, root: Path, listing: dict, archive: bytes) -> dict:
+        def fake_download(url, output, *, maximum, expected_size=None):
+            payload = json.dumps(listing).encode() if url.endswith("/latest.json") else archive
+            output.write(payload)
+            return hashlib.sha256(payload).hexdigest(), len(payload)
+
+        def fake_import(command, *, cwd, env, check, timeout):
+            self.assertEqual(command[1:3], ["db", "import"])
+            schema = Path(env["GRYPE_DB_CACHE_DIR"]) / "6"
+            schema.mkdir()
+            (schema / "vulnerability.db").write_bytes(b"d")
+            (schema / "import.json").write_bytes(b"i")
+
+        tool = root / "grype"
+        tool.write_bytes(b"tool")
+        status = {
+            "schemaVersion": "v6.1.9",
+            "from": "manual import",
+            "built": listing["built"],
+            "path": "unused",
+            "valid": True,
+        }
+        with mock.patch.object(
+            prepare_grype_db, "_download", side_effect=fake_download
+        ), mock.patch.object(prepare_grype_db, "_tool_version"), mock.patch.object(
+            prepare_grype_db.subprocess, "run", side_effect=fake_import
+        ), mock.patch.object(
+            prepare_grype_db, "_status_document", return_value=status
+        ):
+            return prepare_grype_db.resolve_lock(
+                root / "lock.json",
+                tool,
+                now=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+            )
+
+    def test_lock_records_the_latest_listing_in_a_form_prepare_accepts(self) -> None:
+        archive = b"latest-archive"
+        archive_sha = hashlib.sha256(archive).hexdigest()
+        listing = self._latest_listing(f"sha256:{archive_sha}")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = self._resolve(root, listing, archive)
+            self.assertEqual(
+                lock["archive"],
+                {
+                    "url": (
+                        "https://grype.anchore.io/databases/v6/"
+                        f"{listing['path']}?checksum=sha256%3A{archive_sha}"
+                    ),
+                    "sha256": archive_sha,
+                    "size": len(archive),
+                },
+            )
+            self.assertEqual(lock["database"]["built_at"], "2026-09-23T06:31:39Z")
+            self.assertEqual(lock["database"]["valid_until"], "2026-09-28T06:31:39Z")
+            self.assertEqual(lock["database"]["sha256"], hashlib.sha256(b"d").hexdigest())
+            self.assertEqual(
+                lock["database"]["import_metadata_sha256"], hashlib.sha256(b"i").hexdigest()
+            )
+            written, _ = prepare_grype_db._load(root / "lock.json", "resolved lock")
+            self.assertEqual(written, lock)
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["grype", "lock.json"])
+
+    def test_lock_refuses_an_archive_that_differs_from_its_published_checksum(self) -> None:
+        listing = self._latest_listing("sha256:" + "0" * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                prepare_grype_db.GrypeDBError, "differs from its published checksum"
+            ):
+                self._resolve(root, listing, b"tampered-archive")
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["grype"])
+
     def test_cache_rejects_any_unreviewed_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "cache"

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Prepare and verify one hash-locked Grype vulnerability database."""
+"""Lock, prepare, and verify one hash-locked Grype vulnerability database."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -17,7 +19,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 MAX_CONTROL_BYTES = 64 * 1024
@@ -26,6 +28,12 @@ MAX_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 UTC_TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 GRYPE_VERSION = "0.116.1"
+DATABASE_BASE_URL = "https://grype.anchore.io/databases/v6"
+ARCHIVE_PATH = re.compile(
+    r"/databases/v6/vulnerability-db_v6\.[0-9]+\.[0-9]+_[0-9TZ:-]+_[0-9]+\.tar\.zst"
+)
+# Matches GRYPE_DB_MAX_ALLOWED_BUILT_AGE in _tool_env.
+MAX_BUILT_AGE = timedelta(days=5)
 
 
 class GrypeDBError(RuntimeError):
@@ -146,7 +154,7 @@ def _validate_lock(lock: dict[str, Any], *, now: datetime | None = None) -> dict
         or parsed.password is not None
         or parsed.port is not None
         or parsed.fragment
-        or not re.fullmatch(r"/databases/v6/vulnerability-db_v6\.[0-9]+\.[0-9]+_[0-9TZ:-]+_[0-9]+\.tar\.zst", parsed.path)
+        or ARCHIVE_PATH.fullmatch(parsed.path) is None
         or query != {"checksum": [f"sha256:{archive_sha}"]}
     ):
         raise GrypeDBError("lock.archive.url is not the exact official Grype v6 archive form")
@@ -157,7 +165,7 @@ def _validate_lock(lock: dict[str, Any], *, now: datetime | None = None) -> dict
         raise GrypeDBError("lock.database.schema_version is not a Grype v6 schema")
     built = _time(database["built_at"], "lock.database.built_at")
     valid_until = _time(database["valid_until"], "lock.database.valid_until")
-    if not built < valid_until or valid_until - built > timedelta(days=5):
+    if not built < valid_until or valid_until - built > MAX_BUILT_AGE:
         raise GrypeDBError("the Grype database freshness window is invalid")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     if current < built or current >= valid_until:
@@ -229,7 +237,7 @@ def _tool_version(grype: Path, env: dict[str, str], home: Path) -> None:
         raise GrypeDBError("the Grype binary does not match the reviewed version")
 
 
-def _status(grype: Path, env: dict[str, str], home: Path, lock: dict[str, Any], cache_dir: Path) -> None:
+def _status_document(grype: Path, env: dict[str, str], home: Path) -> Any:
     result = subprocess.run(
         [str(grype), "db", "status", "--output", "json"],
         cwd=home,
@@ -240,9 +248,13 @@ def _status(grype: Path, env: dict[str, str], home: Path, lock: dict[str, Any], 
         timeout=60,
     )
     try:
-        status_document = json.loads(result.stdout, object_pairs_hook=_pairs)
+        return json.loads(result.stdout, object_pairs_hook=_pairs)
     except json.JSONDecodeError as exc:
         raise GrypeDBError("Grype DB status is not valid JSON") from exc
+
+
+def _status(grype: Path, env: dict[str, str], home: Path, lock: dict[str, Any], cache_dir: Path) -> None:
+    status_document = _status_document(grype, env, home)
     expected_path = (cache_dir / "6" / "vulnerability.db").resolve(strict=True)
     if status_document != {
         "schemaVersion": lock["database"]["schema_version"],
@@ -275,9 +287,38 @@ def _verify_cache(cache_dir: Path, lock: dict[str, Any]) -> None:
         raise GrypeDBError("the Grype import metadata digest differs from the lock")
 
 
-def _write_evidence(path: Path, value: dict[str, Any]) -> None:
+def _download(
+    url: str, output: BinaryIO, *, maximum: int, expected_size: int | None = None
+) -> tuple[str, int]:
+    """Stream one exact-URL, bounded response into output and return its SHA-256."""
+    request = urllib.request.Request(url, headers={"User-Agent": "backupsheep-grype-db-lock/1"})
+    opener = urllib.request.build_opener(_NoRedirect)
+    digest = hashlib.sha256()
+    count = 0
+    with opener.open(request, timeout=120) as response:
+        if response.geturl() != url or response.status != 200:
+            raise GrypeDBError("the Grype database response identity is unexpected")
+        length = response.headers.get("Content-Length")
+        if (
+            length is None
+            or int(length) > maximum
+            or (expected_size is not None and int(length) != expected_size)
+        ):
+            raise GrypeDBError("the Grype database response size is missing or unexpected")
+        for chunk in iter(lambda: response.read(1024 * 1024), b""):
+            count += len(chunk)
+            if count > maximum:
+                raise GrypeDBError("the Grype database response exceeds its size bound")
+            digest.update(chunk)
+            output.write(chunk)
+    if count != int(length):
+        raise GrypeDBError("the Grype database response was truncated")
+    return digest.hexdigest(), count
+
+
+def _write_json(path: Path, value: dict[str, Any]) -> None:
     if path.exists() or path.is_symlink():
-        raise GrypeDBError("refusing a pre-existing Grype evidence path")
+        raise GrypeDBError("refusing a pre-existing Grype output path")
     path.parent.resolve(strict=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -295,6 +336,105 @@ def _write_evidence(path: Path, value: dict[str, Any]) -> None:
             pass
 
 
+def resolve_lock(lock_path: Path, grype: Path, *, now: datetime | None = None) -> dict[str, Any]:
+    """Write a lock for the v6 database Anchore currently publishes as latest."""
+    if lock_path.exists() or lock_path.is_symlink():
+        raise GrypeDBError("refusing a pre-existing Grype DB lock path")
+    parent = lock_path.parent.resolve(strict=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{lock_path.name}.resolve-", dir=parent))
+    try:
+        listing_payload = io.BytesIO()
+        _download(f"{DATABASE_BASE_URL}/latest.json", listing_payload, maximum=MAX_CONTROL_BYTES)
+        try:
+            listing = json.loads(listing_payload.getvalue(), object_pairs_hook=_pairs)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise GrypeDBError("the latest Grype database listing is not valid UTF-8 JSON") from exc
+        if not isinstance(listing, dict):
+            raise GrypeDBError("the latest Grype database listing must be a JSON object")
+        _exact(
+            listing,
+            {"status", "schemaVersion", "built", "path", "checksum"},
+            "latest Grype database listing",
+        )
+        checksum = listing["checksum"]
+        if (
+            listing["status"] != "active"
+            or not isinstance(checksum, str)
+            or not isinstance(listing["path"], str)
+        ):
+            raise GrypeDBError("the latest Grype database listing is not an active archive")
+        archive_sha = _sha(checksum.removeprefix("sha256:"), "latest listing checksum")
+        url = (
+            f"{DATABASE_BASE_URL}/{listing['path']}"
+            f"?checksum={urllib.parse.quote(checksum, safe='')}"
+        )
+        if ARCHIVE_PATH.fullmatch(urllib.parse.urlsplit(url).path) is None:
+            raise GrypeDBError("the latest Grype database listing does not name an official v6 archive")
+
+        cache_dir = staging / "cache"
+        home = staging / "home"
+        cache_dir.mkdir(mode=0o700)
+        home.mkdir(mode=0o700)
+        env = _tool_env(cache_dir, home)
+        tool = grype.resolve(strict=True)
+        _tool_version(tool, env, home)
+        archive_path = staging / "archive.tar.zst"
+        descriptor = os.open(
+            archive_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            archive_digest, archive_size = _download(url, output, maximum=MAX_ARCHIVE_BYTES)
+        if archive_digest != archive_sha:
+            raise GrypeDBError("the latest Grype database archive differs from its published checksum")
+        subprocess.run(
+            [str(tool), "db", "import", str(archive_path), "--quiet"],
+            cwd=home,
+            env=env,
+            check=True,
+            timeout=600,
+        )
+        status = _status_document(tool, env, home)
+        if (
+            not isinstance(status, dict)
+            or status.get("from") != "manual import"
+            or status.get("valid") is not True
+            or status.get("schemaVersion") != listing["schemaVersion"]
+        ):
+            raise GrypeDBError("the imported Grype database status differs from the latest listing")
+        built = _time(status.get("built"), "Grype DB status built")
+        database = cache_dir / "6" / "vulnerability.db"
+        import_metadata = cache_dir / "6" / "import.json"
+        database_size = database.lstat().st_size
+        import_metadata_size = import_metadata.lstat().st_size
+        lock = {
+            "schema_version": 1,
+            "archive": {"url": url, "sha256": archive_sha, "size": archive_size},
+            "database": {
+                "schema_version": status["schemaVersion"],
+                "built_at": status["built"],
+                "valid_until": (built + MAX_BUILT_AGE).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sha256": _hash_file(
+                    database, database_size, MAX_DATABASE_BYTES, "Grype database"
+                ),
+                "size": database_size,
+                "import_metadata_sha256": _hash_file(
+                    import_metadata,
+                    import_metadata_size,
+                    MAX_CONTROL_BYTES,
+                    "Grype import metadata",
+                ),
+                "import_metadata_size": import_metadata_size,
+            },
+        }
+        _validate_lock(lock, now=now)
+        _write_json(lock_path, lock)
+        return lock
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def prepare(lock_path: Path, grype: Path, cache_dir: Path, evidence_path: Path) -> None:
     lock_document, lock_bytes = _load(lock_path, "Grype DB lock")
     lock = _validate_lock(lock_document)
@@ -310,25 +450,16 @@ def prepare(lock_path: Path, grype: Path, cache_dir: Path, evidence_path: Path) 
     descriptor, archive_name = tempfile.mkstemp(prefix="grype-db.", suffix=".tar.zst", dir=cache_dir.parent)
     archive_path = Path(archive_name)
     try:
-        digest = hashlib.sha256()
-        count = 0
-        request = urllib.request.Request(archive["url"], headers={"User-Agent": "backupsheep-grype-db-lock/1"})
-        opener = urllib.request.build_opener(_NoRedirect)
-        with os.fdopen(descriptor, "wb") as output, opener.open(request, timeout=120) as response:
-            if response.geturl() != archive["url"] or response.status != 200:
-                raise GrypeDBError("the Grype database response identity is unexpected")
-            length = response.headers.get("Content-Length")
-            if length is None or int(length) != archive["size"]:
-                raise GrypeDBError("the Grype database response size differs from the lock")
-            for chunk in iter(lambda: response.read(1024 * 1024), b""):
-                count += len(chunk)
-                if count > MAX_ARCHIVE_BYTES:
-                    raise GrypeDBError("the Grype database archive exceeds its size bound")
-                digest.update(chunk)
-                output.write(chunk)
+        with os.fdopen(descriptor, "wb") as output:
+            archive_sha256, count = _download(
+                archive["url"],
+                output,
+                maximum=MAX_ARCHIVE_BYTES,
+                expected_size=archive["size"],
+            )
             output.flush()
             os.fsync(output.fileno())
-        if count != archive["size"] or digest.hexdigest() != archive["sha256"]:
+        if count != archive["size"] or archive_sha256 != archive["sha256"]:
             raise GrypeDBError("the downloaded Grype database archive differs from the lock")
         subprocess.run(
             [str(grype.resolve(strict=True)), "db", "import", str(archive_path), "--quiet"],
@@ -355,7 +486,7 @@ def prepare(lock_path: Path, grype: Path, cache_dir: Path, evidence_path: Path) 
         "database_sha256": lock["database"]["sha256"],
         "database_size": lock["database"]["size"],
     }
-    _write_evidence(evidence_path, evidence)
+    _write_json(evidence_path, evidence)
 
 
 def verify(
@@ -415,14 +546,22 @@ def verify(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "verify"))
+    parser.add_argument("mode", choices=("lock", "prepare", "verify"))
     parser.add_argument("--lock", type=Path, required=True)
     parser.add_argument("--grype", type=Path, required=True)
-    parser.add_argument("--cache-dir", type=Path, required=True)
-    parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--evidence", type=Path)
     arguments = parser.parse_args(argv)
+    if arguments.mode != "lock" and (arguments.cache_dir is None or arguments.evidence is None):
+        parser.error(f"{arguments.mode} requires --cache-dir and --evidence")
     try:
-        if arguments.mode == "prepare":
+        if arguments.mode == "lock":
+            lock = resolve_lock(arguments.lock, arguments.grype)
+            print(
+                f"Locked Grype DB {lock['database']['schema_version']} "
+                f"(built {lock['database']['built_at']})."
+            )
+        elif arguments.mode == "prepare":
             prepare(arguments.lock, arguments.grype, arguments.cache_dir, arguments.evidence)
         else:
             verify(arguments.lock, arguments.grype, arguments.cache_dir, arguments.evidence)

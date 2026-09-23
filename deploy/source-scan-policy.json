@@ -16,7 +16,7 @@
       "severity": "HIGH",
       "status": "FAIL",
       "target": "Dockerfile.egress",
-      "target_sha256": "e633355612cc22a051cbeb2444d5200936ed35669f01e932c186dbf5d95b1514"
+      "target_sha256": "be1a29c8f2b3101a6882d225ab7c3ef1338b8c18351d70d77c50fec905fd15bb"
     }
   ],
   "scanner": {

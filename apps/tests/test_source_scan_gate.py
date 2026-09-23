@@ -632,9 +632,10 @@ class SourceScanGateTests(TestCase):
             '--config "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.yaml"',
             '--secret-config "$CI_SOURCE_SCAN_TOOL_DIR/strict-trivy-secret.yaml"',
             '--ignorefile "$CI_SOURCE_SCAN_TOOL_DIR/empty-trivy.ignore"',
+            "scripts/prepare_trivy_db.py lock",
             "scripts/prepare_trivy_db.py prepare",
             "scripts/prepare_trivy_db.py verify",
-            "deploy/trivy-db-lock.json",
+            '--lock "$CI_SOURCE_TRIVY_DB_LOCK"',
             "--skip-db-update",
             "--skip-java-db-update",
             "--skip-check-update",
@@ -653,7 +654,7 @@ class SourceScanGateTests(TestCase):
             "python3 -m unittest apps.tests.test_source_scan_gate -v",
             '--secret-report "$secret_report"',
             '--canary-report "$canary_report"',
-            '--trivy-db-lock deploy/trivy-db-lock.json',
+            '--trivy-db-lock "$CI_SOURCE_TRIVY_DB_LOCK"',
             '--trivy-db-evidence "$CI_SOURCE_TRIVY_DB_EVIDENCE"',
             "deploy/source-scan-policy.json",
             'test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"',
@@ -664,7 +665,13 @@ class SourceScanGateTests(TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, static_job)
-        for forbidden in ("--skip-dirs", "--skip-files", "--ignore-policy"):
+        # The committed lock expires within a day; CI locks the current DB instead.
+        for forbidden in (
+            "--skip-dirs",
+            "--skip-files",
+            "--ignore-policy",
+            "deploy/trivy-db-lock.json",
+        ):
             self.assertNotIn(forbidden, static_job)
         artifact_step = static_job.split(
             "      - name: Retain zero-sensitive final-SHA source-scan evidence", 1

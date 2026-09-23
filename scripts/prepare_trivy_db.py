@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch and prepare the one reviewed, digest-locked Trivy vulnerability DB."""
+"""Lock, fetch, and prepare one digest-locked Trivy vulnerability DB."""
 
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ UTC_RE = re.compile(
     r"(?:\.[0-9]{1,9})?Z$"
 )
 EXPECTED_REPOSITORY = "ghcr.io/aquasecurity/trivy-db"
+# Upstream republishes the current schema-2 DB under this tag on every build.
+CURRENT_DB_TAG = "2"
 EXPECTED_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 EXPECTED_ARTIFACT_TYPE = "application/vnd.aquasec.trivy.config.v1+json"
 EXPECTED_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json"
@@ -601,6 +603,162 @@ def _write_exclusive_json(path: Path, document: dict[str, Any]) -> None:
             os.close(descriptor)
 
 
+def _current_layer_members(
+    layer_path: Path, layer: dict[str, Any]
+) -> tuple[dict[str, tuple[int, str]], bytes]:
+    """Hash the published DB files in memory; prepare re-checks the archive shape."""
+    layer_size = _integer(
+        layer.get("size"), "current Trivy DB layer size", minimum=1, maximum=MAX_LAYER_BYTES
+    )
+    layer_digest = _digest(layer.get("digest"), "current Trivy DB layer digest")
+    if _hash_regular(
+        layer_path,
+        expected_size=layer_size,
+        maximum_bytes=MAX_LAYER_BYTES,
+        label="current Trivy DB layer",
+    ) != layer_digest.removeprefix("sha256:"):
+        raise TrivyDBError("current Trivy DB layer bytes do not match its manifest")
+    limits = {"trivy.db": MAX_DATABASE_BYTES, "metadata.json": MAX_METADATA_BYTES}
+    members: dict[str, tuple[int, str]] = {}
+    metadata_payload = b""
+    try:
+        with tarfile.open(layer_path, mode="r:gz") as archive:
+            for member in archive:
+                name = member.name
+                if name not in limits or name in members or not member.isfile():
+                    raise TrivyDBError("current Trivy DB archive contains an unexpected member")
+                if member.size > limits[name]:
+                    raise TrivyDBError(f"current Trivy DB archive member is oversized: {name}")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise TrivyDBError(f"current Trivy DB archive member is unreadable: {name}")
+                digest = hashlib.sha256()
+                count = 0
+                with source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        count += len(chunk)
+                        if count > limits[name]:
+                            raise TrivyDBError(f"current Trivy DB archive member is oversized: {name}")
+                        digest.update(chunk)
+                        if name == "metadata.json":
+                            metadata_payload += chunk
+                if count != member.size:
+                    raise TrivyDBError(f"current Trivy DB archive member is truncated: {name}")
+                members[name] = (count, digest.hexdigest())
+    except (OSError, tarfile.TarError) as exc:
+        raise TrivyDBError(f"current Trivy DB layer is not a valid archive: {exc}") from exc
+    if set(members) != set(limits):
+        raise TrivyDBError("current Trivy DB archive must contain trivy.db and metadata.json")
+    return members, metadata_payload
+
+
+def resolve_lock(
+    *, lock_path: Path, oras_path: Path, now: datetime | None = None
+) -> dict[str, Any]:
+    """Write a lock for the DB currently published under the official schema tag."""
+    _validate_executable(oras_path)
+    lock_parent = _secure_existing_parent(lock_path, "Trivy DB lock")
+    lock_target = lock_parent / lock_path.name
+    if os.path.lexists(lock_target):
+        raise TrivyDBError("Trivy DB lock destination must not pre-exist")
+
+    staging = Path(tempfile.mkdtemp(prefix=f".{lock_path.name}.resolve-", dir=lock_parent))
+    try:
+        manifest_path = staging / "manifest.json"
+        layer_path = staging / EXPECTED_LAYER_TITLE
+        _run_oras(
+            oras_path,
+            [
+                "manifest",
+                "fetch",
+                "--output",
+                str(manifest_path),
+                f"{EXPECTED_REPOSITORY}:{CURRENT_DB_TAG}",
+            ],
+            staging,
+        )
+        manifest, manifest_payload = _load_json(
+            manifest_path,
+            maximum_bytes=MAX_MANIFEST_BYTES,
+            label="current Trivy DB manifest",
+        )
+        manifest = _object(manifest, "current Trivy DB manifest")
+        _exact_keys(
+            manifest,
+            {"schemaVersion", "mediaType", "artifactType", "config", "layers", "annotations"},
+            "current Trivy DB manifest",
+        )
+        layers = manifest["layers"]
+        if not isinstance(layers, list) or len(layers) != 1:
+            raise TrivyDBError("current Trivy DB manifest must have exactly one layer")
+        layer = _object(layers[0], "current Trivy DB layer")
+        annotations = _object(manifest["annotations"], "current Trivy DB manifest annotations")
+        _run_oras(
+            oras_path,
+            [
+                "blob",
+                "fetch",
+                "--output",
+                str(layer_path),
+                f"{EXPECTED_REPOSITORY}@{_digest(layer.get('digest'), 'current Trivy DB layer digest')}",
+            ],
+            staging,
+        )
+        members, metadata_payload = _current_layer_members(layer_path, layer)
+        try:
+            metadata = json.loads(
+                metadata_payload,
+                object_pairs_hook=_no_duplicate_keys,
+                parse_constant=_reject_constant,
+            )
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise TrivyDBError(f"current Trivy DB metadata is not valid UTF-8 JSON: {exc}") from exc
+        metadata = _object(metadata, "current Trivy DB metadata")
+        _exact_keys(
+            metadata,
+            {"Version", "NextUpdate", "UpdatedAt", "DownloadedAt"},
+            "current Trivy DB metadata",
+        )
+        lock = {
+            "schema_version": 1,
+            "repository": EXPECTED_REPOSITORY,
+            "manifest": {
+                "digest": "sha256:" + _sha256_bytes(manifest_payload),
+                "size": len(manifest_payload),
+                "media_type": manifest["mediaType"],
+                "artifact_type": manifest["artifactType"],
+                "created_at": annotations.get("org.opencontainers.image.created"),
+                "config": manifest["config"],
+                "layer": layer,
+            },
+            "database": {
+                "schema_version": metadata["Version"],
+                "updated_at": metadata["UpdatedAt"],
+                "next_update": metadata["NextUpdate"],
+                "downloaded_at": metadata["DownloadedAt"],
+                "metadata_sha256": members["metadata.json"][1],
+                "metadata_size": members["metadata.json"][0],
+                "db_sha256": members["trivy.db"][1],
+                "db_size": members["trivy.db"][0],
+            },
+        }
+        validate_lock_document(lock)
+        _validate_manifest(manifest_path, lock)
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is not None and current >= _timestamp(
+            metadata["NextUpdate"], "current Trivy DB next update"
+        ):
+            raise TrivyDBError(
+                "the currently published Trivy DB is past its next update time; "
+                "upstream has not published a newer build"
+            )
+        require_fresh(lock, now)
+        _write_exclusive_json(lock_target, lock)
+        return lock
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def prepare(
     *,
     lock_path: Path,
@@ -724,6 +882,11 @@ def verify_cache(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+    lock_parser = subparsers.add_parser(
+        "lock", help="write a lock for the DB currently published upstream"
+    )
+    lock_parser.add_argument("--lock", type=Path, required=True)
+    lock_parser.add_argument("--oras", type=Path, required=True)
     prepare_parser = subparsers.add_parser("prepare", help="fetch and prepare the locked DB")
     prepare_parser.add_argument("--lock", type=Path, required=True)
     prepare_parser.add_argument("--oras", type=Path, required=True)
@@ -735,7 +898,13 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser.add_argument("--evidence", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
-        if arguments.command == "prepare":
+        if arguments.command == "lock":
+            lock = resolve_lock(lock_path=arguments.lock, oras_path=arguments.oras)
+            print(
+                f"Locked Trivy DB {lock['manifest']['digest']} "
+                f"(updated {lock['database']['updated_at']})."
+            )
+        elif arguments.command == "prepare":
             prepare(
                 lock_path=arguments.lock,
                 oras_path=arguments.oras,
