@@ -4409,7 +4409,7 @@ class SecureComposeWrapperTests(TestCase):
                     self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "''"
                 )
 
-    def test_exact_435_reconciliation_records_witness_but_newer_43_is_not_downgraded(self):
+    def test_exact_436_reconciliation_records_witness_but_newer_43_is_not_downgraded(self):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
@@ -4428,7 +4428,7 @@ class SecureComposeWrapperTests(TestCase):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
-            server_version="4.3.6",
+            server_version="4.3.7",
             feature_flags=RABBITMQ_43_FEATURE_FLAGS,
         )
         self.clear_events()
