@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import requests
+from apps.api.v1.utils.http import requests
 from django.conf import settings
+from apps.console.vultr import vultr_request_timeout
 
 
 VULTR_DATABASE_API_TIMEOUT = (10, 60)
@@ -19,14 +20,90 @@ SUPPORTED_ENGINES = {"postgresql", "mysql", "mariadb", "valkey"}
 PITR_ENGINES = {"postgresql", "mysql", "mariadb"}
 
 
+VULTR_DATABASE_ERROR_MESSAGES = {
+    "auth_failed": "Vultr managed database authentication failed.",
+    "not_found": "Vultr could not find the managed database resource.",
+    "rate_limited": "Vultr rate-limited the managed database request; it will resume automatically.",
+    "timeout": "The Vultr managed database request timed out; its outcome is being reconciled.",
+    "transient_outage": "Vultr is temporarily unavailable; the managed database operation will resume.",
+    "malformed_response": "Vultr returned an invalid managed database response.",
+    "duplicate_candidates": "Multiple Vultr managed database resources matched; manual review is required.",
+    "unsupported": "The requested Vultr managed database operation is not supported.",
+    "terminal_failure": "Vultr rejected the managed database operation.",
+}
+
+
+def safe_vultr_database_message(category, status_code=None):
+    """Return an allowlisted message suitable for durable/user-visible state."""
+    message = VULTR_DATABASE_ERROR_MESSAGES.get(
+        str(category or "terminal_failure"),
+        VULTR_DATABASE_ERROR_MESSAGES["terminal_failure"],
+    )
+    if status_code is not None:
+        try:
+            return f"{message} (HTTP {int(status_code)})."
+        except (TypeError, ValueError):
+            pass
+    return message
+
+
+_SAFE_DATABASE_RECORD_KEYS = frozenset(
+    {
+        "id", "label", "name", "database_engine", "engine", "region", "plan",
+        "status", "state", "date", "time", "date_created", "created_at", "updated_at",
+        "latest_backup", "oldest_backup", "backup", "backups", "disk", "usage", "size",
+        "size_gb", "type", "source_id", "source_database_id", "database_id", "parent_id",
+        "job_id", "operation_id", "storage_bytes", "storageBytes", "version",
+    }
+)
+
+
+def safe_vultr_database_record(value, *, _depth=0):
+    """Keep provider metadata useful while excluding bodies and credentials."""
+    if _depth > 3:
+        return None
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text not in _SAFE_DATABASE_RECORD_KEYS:
+                continue
+            sanitized = safe_vultr_database_record(item, _depth=_depth + 1)
+            if sanitized is not None:
+                result[key_text] = sanitized
+        return result
+    if isinstance(value, list):
+        return [
+            sanitized
+            for item in value[:500]
+            if (sanitized := safe_vultr_database_record(item, _depth=_depth + 1)) is not None
+        ]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return str(value)[:512] if isinstance(value, str) else value
+    return None
+
+
 class VultrDatabaseError(Exception):
     """A provider error with a stable classification for polling/recovery."""
 
-    def __init__(self, message, *, category="terminal_failure", status_code=None, payload=None):
-        super().__init__(message)
+    def __init__(
+        self,
+        message,
+        *,
+        category="terminal_failure",
+        status_code=None,
+        payload=None,
+        retry_after=None,
+        unknown_outcome=False,
+    ):
         self.category = category
         self.status_code = status_code
-        self.payload = payload if isinstance(payload, dict) else {}
+        # Do not retain provider response bodies or exception text on an
+        # exception that may be written to a restore/backup row by a caller.
+        self.payload = {"status_code": status_code} if status_code is not None else {}
+        self.retry_after = retry_after
+        self.unknown_outcome = bool(unknown_outcome)
+        super().__init__(safe_vultr_database_message(category, status_code))
 
 
 class VultrDatabaseUnsupportedError(VultrDatabaseError):
@@ -84,6 +161,8 @@ class VultrManagedDatabaseClient:
         self.base_url = settings.VULTR_API.rstrip("/") + "/v2"
 
     def _request(self, method, path, *, params=None, body=None):
+        method = str(method or "GET").upper()
+        mutation = method in {"POST", "PUT", "PATCH", "DELETE"}
         try:
             response = requests.request(
                 method,
@@ -91,13 +170,26 @@ class VultrManagedDatabaseClient:
                 headers=self.auth.get_client(),
                 params=params,
                 json=body,
-                timeout=getattr(settings, "VULTR_API_TIMEOUT", VULTR_DATABASE_API_TIMEOUT),
+                timeout=vultr_request_timeout(),
                 verify=True,
             )
         except requests.RequestException as exc:
             raise VultrDatabaseError(
-                f"Vultr managed database API is temporarily unreachable: {exc}",
-                category="transient_outage",
+                None,
+                category=(
+                    "timeout" if isinstance(exc, requests.Timeout) else "transient_outage"
+                ),
+                unknown_outcome=mutation,
+            ) from exc
+        except Exception as exc:
+            # Auth/decryption/client setup failures must not escape with their
+            # provider/client text, and a failed mutating call is conservative.
+            name = exc.__class__.__name__.lower()
+            category = "auth_failed" if any(
+                marker in name for marker in ("auth", "credential", "permission")
+            ) else "terminal_failure"
+            raise VultrDatabaseError(
+                None, category=category, unknown_outcome=mutation
             ) from exc
 
         try:
@@ -106,20 +198,24 @@ class VultrManagedDatabaseClient:
                 payload = response.json() if getattr(response, "content", b"") else {}
             except (TypeError, ValueError) as exc:
                 raise VultrDatabaseError(
-                    "Vultr managed database API returned malformed JSON.",
-                    category="terminal_failure",
+                    None,
+                    category="malformed_response",
                     status_code=status_code,
+                    unknown_outcome=mutation,
                 ) from exc
 
             if not isinstance(payload, dict):
                 raise VultrDatabaseError(
-                    "Vultr managed database API returned a malformed response object.",
-                    category="terminal_failure",
+                    None,
+                    category="malformed_response",
                     status_code=status_code,
+                    unknown_outcome=mutation,
                 )
 
             if status_code >= 400:
-                if status_code == 404:
+                if status_code in (401, 403):
+                    category = "auth_failed"
+                elif status_code == 404:
                     category = "not_found"
                 elif status_code == 429:
                     category = "rate_limited"
@@ -127,14 +223,19 @@ class VultrManagedDatabaseClient:
                     category = "transient_outage"
                 else:
                     category = "terminal_failure"
-                message = payload.get("error") or payload.get("message") or getattr(
-                    response, "reason", "provider error"
-                )
                 raise VultrDatabaseError(
-                    f"Vultr managed database API returned HTTP {status_code}: {message}",
+                    None,
                     category=category,
                     status_code=status_code,
-                    payload=payload,
+                    retry_after=(
+                        (getattr(response, "headers", {}) or {}).get("Retry-After")
+                        if status_code == 429
+                        else None
+                    ),
+                    # A rate-limit/auth/not-found response is an explicit
+                    # rejection.  A 5xx response to a mutation may have been
+                    # accepted and therefore requires reconciliation.
+                    unknown_outcome=mutation and status_code >= 500,
                 )
             return payload
         finally:
@@ -202,12 +303,12 @@ class VultrManagedDatabaseClient:
                     "Vultr managed database API returned malformed backup metadata.",
                     category="terminal_failure",
                 )
-            return records
+            return [safe_vultr_database_record(record) for record in records]
         records = []
         for key in ("latest_backup", "oldest_backup", "backup"):
             value = payload.get(key)
             if isinstance(value, dict) and value not in records:
-                records.append(value)
+                records.append(safe_vultr_database_record(value))
         return records
 
     def discover_databases(self):
@@ -219,8 +320,8 @@ class VultrManagedDatabaseClient:
                     "Vultr managed database inventory contained a record without an id.",
                     category="terminal_failure",
                 )
-            detail = self.get_database(database_id)
-            usage = self.get_usage(database_id)
+            detail = safe_vultr_database_record(self.get_database(database_id))
+            usage = safe_vultr_database_record(self.get_usage(database_id))
             if not isinstance(detail, dict) or not isinstance(usage, dict):
                 raise VultrDatabaseError(
                     "Vultr managed database detail or usage response was malformed.",
@@ -248,7 +349,15 @@ class VultrManagedDatabaseClient:
         return discovered
 
     def fork_database(self, database_id, body):
-        return self._request("POST", f"/databases/{database_id}/fork", body=body)
+        try:
+            return self._request("POST", f"/databases/{database_id}/fork", body=body)
+        except VultrDatabaseError as error:
+            # A test double or an alternate client may raise a categorized
+            # transient error without setting the mutation fence. Treat it as
+            # unknown conservatively: never issue a second fork automatically.
+            if error.category in {"timeout", "transient_outage"}:
+                error.unknown_outcome = True
+            raise
 
 
 def provider_backup_id(record):

@@ -1,0 +1,34 @@
+meta {
+  name: GET /api/v1/nodes/{{resourceId}}/backup_request_status/
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/api/v1/nodes/{{resourceId}}/backup_request_status/
+  body: none
+  auth: none
+}
+
+params:query {
+  request_id: {{requestId}}
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-nodes-resourceid-backup-request-status`
+
+  Requires `Authorization: Token <key>`. Read-only request.
+
+  Django action: `apps.api.v1.node.views.CoreNodeView.backup_request_status`
+  Source: `apps/api/v1/node/views.py`
+}

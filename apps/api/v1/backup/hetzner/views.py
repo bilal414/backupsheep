@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from apps.api.v1.backup.hetzner.filters import CoreHetznerBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.hetzner.permissions import (
     CoreHetznerBackupViewPermissions,
 )
@@ -21,9 +22,11 @@ from apps.console.node.models import CoreNode
 from rest_framework import status
 
 
-class CoreHetznerBackupView(viewsets.ModelViewSet):
+class CoreHetznerBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreHetznerBackupViewPermissions)
     serializer_class = CoreHetznerBackupSerializer
+    backup_model = CoreHetznerBackup
+    backup_node_relation = "hetzner"
     all_fields = [f.name for f in CoreHetznerBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -33,16 +36,6 @@ class CoreHetznerBackupView(viewsets.ModelViewSet):
     ]
     filterset_class = CoreHetznerBackupFilter
     search_fields = all_fields
-
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(hetzner__node__connection__account=member.get_current_account())
-        query &= ~Q(hetzner__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreHetznerBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(hetzner__node__id=self.request.query_params.get("node"))
-        queryset = CoreHetznerBackup.objects.filter(query)
-        return queryset
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()

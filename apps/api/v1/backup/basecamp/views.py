@@ -12,6 +12,8 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
+from sentry_sdk import capture_exception
+from apps.api.v1.utils.boto import bounded_boto3_client
 
 from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
@@ -22,6 +24,7 @@ from apps._tasks.exceptions import (
     StoragePointError,
 )
 from apps.api.v1.backup.basecamp.filters import CoreBasecampBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.basecamp.permissions import (
     CoreBasecampBackupViewPermissions,
 )
@@ -31,12 +34,16 @@ from apps.api.v1.backup.basecamp.serializers import (
 )
 from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
-from apps.console.backup.models import CoreBasecampBackup
+from apps.console.backup.models import (
+    CoreBasecampBackup,
+    CoreBasecampBackupStoragePoints,
+)
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from rest_framework import status
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 def _log_activity(request, log_type, data):
@@ -47,9 +54,12 @@ def _log_activity(request, log_type, data):
         pass
 
 
-class CoreBasecampBackupView(viewsets.ModelViewSet):
+class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreBasecampBackupViewPermissions)
     serializer_class = CoreBasecampBackupSerializer
+    backup_model = CoreBasecampBackup
+    backup_node_relation = "basecamp"
+    backup_delete_model_key = "basecamp"
     all_fields = [f.name for f in CoreBasecampBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -60,20 +70,9 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
     filterset_class = CoreBasecampBackupFilter
     search_fields = all_fields
 
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(basecamp__node__connection__account=member.get_current_account())
-        query &= ~Q(basecamp__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreBasecampBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(basecamp__node__id=self.request.query_params.get("node"))
-        queryset = CoreBasecampBackup.objects.filter(query)
-        return queryset
-
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
-        instance.soft_delete()
-        return Response(status=status.HTTP_204_NO_CONTENT, data={})
+        return self.request_backup_delete(instance)
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, *args, **kwargs):
@@ -83,6 +82,7 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def retry(self, request, *args, **kwargs):
+        require_source_backup_creation("basecamp")
         instance = self.get_object()
         instance.retry()
         return Response(status=status.HTTP_202_ACCEPTED, data={})
@@ -91,11 +91,31 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
     def download(self, request, pk=None):
         storage_point_id = self.request.query_params.get("storage_point_id")
         if storage_point_id:
+            backup = self.get_object()
             try:
-                backup = self.get_object()
-                if backup.stored_basecamp_backups.filter(id=storage_point_id).exists():
-                    storage_point = backup.stored_basecamp_backups.get(id=storage_point_id)
-                    download_url = storage_point.generate_download_url()
+                storage_point = (
+                    backup.stored_basecamp_backups.filter(
+                        id=storage_point_id,
+                        backup__status=CoreBasecampBackup.Status.COMPLETE,
+                        status=CoreBasecampBackupStoragePoints.Status.UPLOAD_COMPLETE,
+                        storage_file_id__isnull=False,
+                    )
+                    .exclude(storage_file_id="")
+                    .first()
+                )
+                if storage_point is not None:
+                    if not storage_point.direct_download_permitted():
+                        return Response(
+                            {
+                                "code": "direct_download_not_permitted",
+                                "detail": (
+                                    "Direct browser download is unavailable for this protected artifact. "
+                                    "Use an authenticated restore or controlled export workflow."
+                                ),
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    download_url = storage_point.generate_browser_download_target()
                     _log_activity(
                         request,
                         CoreLog.Type.BACKUP,
@@ -112,10 +132,12 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
                         },
                     )
                     return Response({"url": download_url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
-                else:
-                    raise DownloadStoragePointNotFound()
+                raise DownloadStoragePointNotFound()
             except Exception as e:
-                raise DownloadStoragePointError(e.__str__())
+                capture_exception(e)
+                raise DownloadStoragePointError(
+                    "The backup download could not be prepared safely. Please retry."
+                )
         else:
             raise DownloadMissingParams()
 
@@ -131,7 +153,7 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
             access_key = settings.AWS_S3_ACCESS_KEY
             secret_key = settings.AWS_S3_SECRET_ACCESS_KEY
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3",
             endpoint_url=s3_endpoint,
             aws_access_key_id=access_key,
@@ -157,7 +179,10 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
             ).data
             return Response(storage_points, status=status.HTTP_200_OK)
         except Exception as e:
-            raise StoragePointError(e.__str__())
+            capture_exception(e)
+            raise StoragePointError(
+                "Backup storage points could not be loaded. Please retry."
+            )
 
     @action(detail=False)
     def highcharts(self, request):

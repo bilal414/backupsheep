@@ -1,0 +1,30 @@
+meta {
+  name: GET /api/v1/clouds/lightsail_bucket_replications/{{resourceId}}/
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/api/v1/clouds/lightsail_bucket_replications/{{resourceId}}/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-clouds-lightsail-bucket-replications-resourceid`
+
+  Requires `Authorization: Token <key>`. Read-only request.
+
+  Django action: `apps.api.v1.cloud.lightsail_bucket_replication.views.CoreLightsailBucketReplicationView.retrieve`
+  Source: `apps/api/v1/cloud/lightsail_bucket_replication/views.py`
+}

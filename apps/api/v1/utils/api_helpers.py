@@ -1,5 +1,7 @@
 from __future__ import print_function
+import datetime
 import random
+import time
 from cryptography.fernet import Fernet
 from django.conf import settings
 from django.contrib.sessions.middleware import SessionMiddleware
@@ -19,15 +21,14 @@ import json
 import boto3
 import urllib
 import urllib.parse
+# Plain FTP support is retained only behind the default-off ALLOW_INSECURE_FTP
+# compatibility gate; FTPS subclasses use the same standard-library module.
 import ftplib
 import ssl
-from urllib3.poolmanager import PoolManager
-from requests.adapters import HTTPAdapter
-import hashlib
-import hmac
-import base64
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account
+from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.boto import bounded_boto3_client
 
 
 def validate_crontab(cron_syntax, data=None):
@@ -72,14 +73,6 @@ def convert_to_utc(hour=None, timezone=None):
     utc_time = local_time.astimezone(pytz.UTC)
 
     return str(utc_time.hour)
-
-
-def get_md5_hash(string=None):
-    md5 = hashlib.md5()
-
-    md5.update(string)
-
-    return md5.hexdigest()
 
 
 def validate_email(email):
@@ -290,19 +283,69 @@ def does_service_exist(host, port):
 class FtpSession(ftplib.FTP):
     def __init__(self, host, userid, password, port):
         """Act like ftplib.FTP's constructor but connect to another port."""
+        if not settings.ALLOW_INSECURE_FTP:
+            raise RuntimeError(
+                "Plain FTP is disabled; use SFTP or FTPS, or explicitly enable "
+                "the legacy ALLOW_INSECURE_FTP compatibility setting."
+            )
         ftplib.FTP.__init__(self)
         self.connect(host, port, 10)
         self.login(userid, password)
 
 
 class FtpTlsSession(ftplib.FTP_TLS):
-    def __init__(self, host, userid, password, port):
+    def __init__(self, host, userid, password, port, *, context):
         """Act like ftplib.FTP's constructor but connect to another port."""
-        ftplib.FTP_TLS.__init__(self)
+        ftplib.FTP_TLS.__init__(self, context=context)
         self.connect(host, port, 10)
         self.login(userid, password)
         # Set up encrypted data connection.
         self.prot_p()
+
+
+class FtpImplicitTlsSession(ftplib.FTP_TLS):
+    """Implicit FTPS session whose control socket is TLS from connection start."""
+
+    def __init__(self, host, userid, password, port, *, context):
+        self._implicit_server_hostname = host
+        self._sock = None
+        ftplib.FTP_TLS.__init__(self, context=context)
+        self.connect(host, port, 10)
+        self.login(userid, password)
+        self.prot_p()
+
+    @property
+    def sock(self):
+        return self._sock
+
+    @sock.setter
+    def sock(self, value):
+        if value is not None and not isinstance(value, ssl.SSLSocket):
+            value = self.context.wrap_socket(
+                value,
+                server_hostname=self._implicit_server_hostname,
+            )
+        self._sock = value
+
+
+def ftp_tls_session_factory(*, verify_ssl=True, explicit=True):
+    """Return the ftputil session factory for one reviewed FTPS policy."""
+    context = ssl.create_default_context()
+    if not verify_ssl:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    session_class = FtpTlsSession if explicit else FtpImplicitTlsSession
+
+    def create_session(host, userid, password, port):
+        return session_class(
+            host,
+            userid,
+            password,
+            port,
+            context=context,
+        )
+
+    return create_session
 
 
 def zipdir(path, ziph):
@@ -403,10 +446,32 @@ def mkdir_p(path, add_bs_file=True):
 
 
 def get_error(error_text):
+    """Return a stable provider/worker message without exception text.
+
+    Provider SDK exceptions routinely embed signed URLs, account identifiers,
+    bearer tokens, request bodies, and database endpoints.  Older adapters call
+    this helper before constructing log-writing exceptions, so stringifying here
+    would turn a transient provider failure into a durable secret leak.
+    """
     try:
-        return str(error_text)
-    except:
-        return "n/a"
+        capture_exception(error_text)
+    except Exception:
+        pass
+    try:
+        from apps._tasks.integration.backup.errors import safe_backup_failure
+
+        failure = safe_backup_failure(error_text, stage="provider_operation")
+        if failure.code == "SOURCE_EXPORT_FAILED":
+            return (
+                "The provider operation failed. BackupSheep will retry or "
+                "reconcile it without exposing sensitive diagnostics."
+            )
+        return failure.detail
+    except Exception:
+        return (
+            "The provider operation failed. Secured diagnostics contain the "
+            "detailed cause."
+        )
 
 
 def get_all_files_in_directory(directory):
@@ -482,10 +547,6 @@ def bs_decrypt(ciphertext, key):
         return None
 
 
-def bs_encryption_convert(ciphertext, encryption_key):
-    return bs_encrypt(kms_decrypt(ciphertext), encryption_key)
-
-
 def s3_upload_files(single_file, bucket_name, access_key, secret_key, region_name, endpoint_url):
     try:
         session = boto3.Session(
@@ -540,26 +601,6 @@ def get_start_end_of_a_day(date_object):
     return day_start_end
 
 
-class ImplicitFTP_TLS(ftplib.FTP_TLS):
-    """FTP_TLS subclass that automatically wraps sockets in SSL to support implicit FTPS."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._sock = None
-
-    @property
-    def sock(self):
-        """Return the socket."""
-        return self._sock
-
-    @sock.setter
-    def sock(self, value):
-        """When modifying the socket, ensure that it is ssl wrapped."""
-        if value is not None and not isinstance(value, ssl.SSLSocket):
-            value = self.context.wrap_socket(value)
-        self._sock = value
-
-
 class CurrentMemberDefault:
     requires_context = True
 
@@ -591,16 +632,111 @@ def visible_nodes(member):
     """
     from apps.console.account.models import CoreAccountGroup
     from apps.console.node.models import CoreNode
+    from apps.api.v1.utils.api_permissions import active_current_membership
+    from backupsheep.source_recovery_policy import RETIRED_SOURCE_FAMILIES
 
-    account = member.get_current_account()
-    nodes = CoreNode.objects.filter(connection__account=account)
-    if account is None or member.is_primary_account:
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreNode.objects.none()
+    account = membership.account
+    nodes = CoreNode.objects.filter(
+        connection__account=account,
+        connection__integration__enabled=True,
+    ).exclude(connection__integration__code__in=RETIRED_SOURCE_FAMILIES)
+    if membership.primary:
         return nodes
-    account_groups = CoreAccountGroup.objects.filter(account=account, group__user=member.user)
+    account_groups = CoreAccountGroup.objects.filter(
+        account=account,
+        group__user=member.user,
+    )
     if account_groups.filter(nodes__isnull=True).exists():
         # At least one unrestricted group: full account-wide visibility.
         return nodes
     return nodes.filter(enrollments__in=account_groups).distinct()
+
+
+def visible_connections(member):
+    """Connections usable without revealing nodes outside group assignments.
+
+    Owners and members of an unrestricted account group retain the full
+    account connection list, including empty connections used to create a new
+    node. Restricted members see only connections already associated with one
+    of their visible nodes.
+    """
+    from apps.api.v1.utils.api_permissions import active_current_membership
+    from apps.console.account.models import CoreAccountGroup
+    from apps.console.connection.models import CoreConnection
+    from backupsheep.source_recovery_policy import RETIRED_SOURCE_FAMILIES
+
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreConnection.objects.none()
+    connections = CoreConnection.objects.filter(
+        account=membership.account,
+        integration__enabled=True,
+    ).exclude(integration__code__in=RETIRED_SOURCE_FAMILIES)
+    if membership.primary:
+        return connections
+
+    account_groups = CoreAccountGroup.objects.filter(
+        account=membership.account,
+        group__user=member.user,
+    )
+    if account_groups.filter(nodes__isnull=True).exists():
+        return connections
+    return connections.filter(nodes__in=visible_nodes(member)).distinct()
+
+
+def scoped_connections(request):
+    """Connections safe to expose through authenticated API reads.
+
+    Managing integrations is account-wide and grants the complete active
+    workspace connection set. Other members see only connections anchored to
+    one of their visible sources. This keeps empty or hidden credential-bearing
+    provider records out of otherwise safe list and retrieve actions.
+    """
+    from apps.api.v1.utils.api_permissions import (
+        active_current_membership,
+        member_has_perm,
+    )
+    from apps.console.connection.models import CoreConnection
+
+    try:
+        member = request.user.member
+    except AttributeError:
+        return CoreConnection.objects.none()
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreConnection.objects.none()
+
+    connections = CoreConnection.objects.filter(account=membership.account)
+    if member_has_perm(request, "integration_changes"):
+        return connections
+    return connections.filter(nodes__in=visible_nodes(member)).distinct()
+
+
+def provider_connections_for_action(request, action):
+    """Apply the stricter source-scope boundary to provider discovery.
+
+    Account integration managers may inspect empty connections in the account
+    register, but inventory discovery is a source-registration prerequisite.
+    It therefore uses the same visible-connection contract as node creation so
+    the UI, direct API, and write serializer cannot disagree.
+    """
+    if action != "objects":
+        return scoped_connections(request)
+
+    from apps.api.v1.utils.api_permissions import active_current_membership
+    from apps.console.connection.models import CoreConnection
+
+    try:
+        member = request.user.member
+    except AttributeError:
+        return CoreConnection.objects.none()
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreConnection.objects.none()
+    return visible_connections(member).filter(account=membership.account)
 
 
 class GenerateGroup:
@@ -753,10 +889,11 @@ def upload_snar_file(file_path, object_name, replace=None):
 def aws_s3_upload_log_file(file_path, object_name=None):
     """No-op in the self-hosted build.
 
-    Backup run logs and artefacts stay on the container's local _storage volume and are
-    pruned by the `delete_old_logs` task after LOG_RETENTION_DAYS; they are never uploaded
-    to any external (AWS/GCS) bucket. Kept as a no-op so the ~dozen backup helpers that
-    call it fire-and-forget need no changes.
+    Backup run logs and artefacts stay in the owning files, database, or storage
+    lane's private _storage volume. The lane-specific `delete_old_logs`,
+    `delete_old_database_logs`, or `delete_old_storage_logs` task prunes them after
+    LOG_RETENTION_DAYS; they are never uploaded to an external AWS/GCS bucket. Kept
+    as a no-op so existing backup helpers need no changes.
     """
     return
 
@@ -766,7 +903,7 @@ def aws_s3_create_presigned_url(bucket_name, object_name, expiration=3600):
         if bucket_name is None:
             bucket_name = settings.LOGS_S3_BUCKET
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3",
             # region_name="nyc3",
             endpoint_url=settings.LOGS_S3_ENDPOINT,
@@ -780,36 +917,11 @@ def aws_s3_create_presigned_url(bucket_name, object_name, expiration=3600):
         capture_exception(e)
 
 
-class Ssl23HttpAdapter(HTTPAdapter):
-    """ "Transport adapter" that allows us to use SSLv3."""
-
-    def init_poolmanager(self, connections, maxsize, block=False):
-        self.poolmanager = PoolManager(
-            num_pools=connections, maxsize=maxsize, block=block, ssl_version=ssl.PROTOCOL_SSLv3
-        )
-
-
-def make_digest(message, key):
-    key = bytes(key, "UTF-8")
-    message = bytes(message, "UTF-8")
-
-    digester = hmac.new(key, message, hashlib.sha1)
-    # signature1 = digester.hexdigest()
-    signature1 = digester.digest()
-    # print(signature1)
-
-    # signature2 = base64.urlsafe_b64encode(bytes(signature1, 'UTF-8'))
-    signature2 = base64.urlsafe_b64encode(signature1)
-    # print(signature2)
-
-    return str(signature2, "UTF-8")
-
-
 def assert_url_not_metadata(url, field="url"):
     """Block SSRF to cloud metadata / loopback / link-local from a user-supplied URL.
 
     This is intentionally narrow: a self-hosted install may legitimately back up a
-    WordPress site on a private LAN (RFC1918), so private ranges are allowed. What is
+    website on a private LAN (RFC1918), so private ranges are allowed. What is
     never a legitimate backup target is the loopback interface or the link-local range
     (169.254.0.0/16 / fe80::/10) that fronts the cloud instance metadata service
     (169.254.169.254, the GCP metadata host, etc.), so those are refused.
@@ -864,13 +976,12 @@ def ssrf_safe_get(url, max_redirects=5, **kwargs):
     compromised or malicious backup source could bounce the worker at the cloud metadata
     service (169.254.169.254), loopback, or other internal addresses — and the response
     body would be saved into the backup archive, exfiltrating internal data to whoever
-    downloads that backup (verified end-to-end against the WordPress download flow:
+    downloads that backup (verified end-to-end against a remote download flow:
     instance-role credentials landed in the attacker-owned backup archive).
 
     Redirects are followed manually here; each Location is validated before use, and
     credentials are not forwarded across hosts.
     """
-    import requests
     from urllib.parse import urljoin, urlparse
 
     kwargs["allow_redirects"] = False

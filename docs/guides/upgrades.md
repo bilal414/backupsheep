@@ -1,0 +1,586 @@
+# Upgrades and rollback
+
+Treat an application upgrade as a coordinated code, image and PostgreSQL schema change.
+The verified installer deliberately never changes an existing checkout to another commit;
+this runbook is the operator-controlled manual upgrade path. The `migrate` and security
+`preflight` one-shots must complete before the new app, workers or Beat can start.
+
+This runbook applies to local-build installations only. Signed-release installations do not
+support in-place upgrade or rollback: their consumer rejects stage/upgrade options before
+Docker or installation mutation. Move a signed deployment by restoring into another fresh,
+independently verified signed-release project while preserving the old project.
+
+## Before the change
+
+1. Read release notes and compare the exact current and target revisions.
+2. Verify the checkout has no unexplained changes:
+
+   **Pre-hardening identity gate:** before initializing the new wrapper, check whether
+   `.env` already has one stable 64-hex `BACKUPSHEEP_INSTALLATION_ID` and the project has
+   its matching `installation_identity` sentinel. If either is absent, do not run the
+   wrapper block below. Use the old exact model only for read-only inventory and a
+   controlled stop, check out the reviewed target, then run the mandatory installer
+   identity bootstrap shown in
+   [Upgrade to the exact reviewed commit](#upgrade-to-the-exact-reviewed-commit). For a
+   live 3.13 broker, continue directly with the
+   [RabbitMQ migration gate](rabbitmq-upgrade.md); for an old `compose down`, use its
+   linked explicit four-volume adoption branch.
+
+   For a root-owned installation, enter a protected root login shell (for example,
+   `sudo -H bash`) before this block, return to the exact installation directory and use
+   the root-owned `BS_COMPOSE` variant below for the complete change. Do not alternate
+   root and non-root commands or change ownership to make a command pass.
+
+   ```bash
+   cd /opt/backupsheep
+   git status --short --branch
+   git rev-parse HEAD
+
+   # Non-root installation owned by this effective UID:
+   BS_COMPOSE=("$PWD/backupsheep-compose")
+   # Root-owned installation from the protected root login shell; use instead:
+   # BS_COMPOSE=("$PWD/backupsheep-compose" --allow-root-install)
+   # If and only if this installation has a reviewed deployment override, add:
+   # BS_COMPOSE+=(--approved-compose-file "$PWD/docker-compose.override.yml")
+   bs_compose() { "${BS_COMPOSE[@]}" "$@"; }
+   bs_compose config --quiet
+   ```
+
+   Stop if the worktree is dirty or ownership of a file is unclear. Do not discard local
+   overrides or user changes. Review an existing override before adding the exact flag;
+   the wrapper refuses to ignore or auto-load it. Keep `BS_COMPOSE` and `bs_compose` in
+   this same maintenance shell for every command below. The shipped wrapper validates
+   private files and the final model, pins project/env/file selection, and removes ambient
+   interpolation, profile, Bake and orphan-removal controls.
+
+3. Record the exact 40-character target commit and current image/configuration provenance.
+   Preserve the existing 64-hex `BACKUPSHEEP_INSTALLATION_ID`; confirm the empty
+   `installation_identity` volume carries that same label and stop if Compose project,
+   path or resource ownership is ambiguous. Never rotate or copy the ID to make a foreign
+   project pass ownership checks.
+4. Use the console only as a pre-cut hint for active backups, uploads, deletes, restores and
+   replications. Record the corresponding durable request, backup-execution,
+   per-destination upload/delete and restore/replication rows, including non-terminal,
+   leased and reconciliation-required state, with a reviewed, secret-safe, read-only
+   PostgreSQL/report command. Preserve the exact command and result so it can be rerun after
+   workers stop without starting the app, Beat or a worker and without opening a broker
+   publisher or consumer. Celery delivery state is not a substitute for this ledger.
+5. Establish the intake cut before the first drain inspection. Stop the web app and Beat
+   together so neither an on-demand request nor a schedule can create new durable work.
+   Verify both are absent, then leave the five exact old-image workers running while already
+   accepted work drains:
+
+   ```bash
+   bs_compose --profile operations stop app beat
+   RUNNING_SERVICES="$(
+     bs_compose --profile operations ps --status running --services
+   )" || exit 1
+   RUNNING_INTAKE_SERVICES="$(
+     printf '%s\n' "${RUNNING_SERVICES}" | grep -E '^(app|beat)$' || true
+   )"
+   test -z "${RUNNING_INTAKE_SERVICES}"
+
+   bs_compose --profile operations exec -T worker-cloud celery -A backupsheep inspect active
+   bs_compose --profile operations exec -T worker-cloud celery -A backupsheep inspect reserved
+   bs_compose --profile operations exec -T worker-cloud celery -A backupsheep inspect scheduled
+
+   # Repeat the three inspections and the durable-row review until accepted work is
+   # terminal or explicitly reconciled. Then stop only the workers.
+   bs_compose --profile operations stop \
+     worker-cloud worker-database worker-files worker-storage worker-logs
+
+   RUNNING_SERVICES="$(
+     bs_compose --profile operations ps --status running --services
+   )" || exit 1
+   RUNNING_APPLICATION_SERVICES="$(
+     printf '%s\n' "${RUNNING_SERVICES}" |
+       grep -Ev '^(db|rabbitmq|app-egress-guard|cloud-egress-guard|database-egress-guard|files-egress-guard|storage-egress-guard|logs-egress-guard)$' || true
+   )"
+   test -z "${RUNNING_APPLICATION_SERVICES}"
+   ```
+
+   With the app, Beat and workers still stopped, rerun and record the exact durable-row
+   inventory from step 4. Stop if any request, backup execution, per-destination
+   upload/delete, restore or replication row changed unexpectedly or still requires
+   reconciliation. Only after that stable-cut durable-row recheck, run the following
+   fail-closed six-queue check:
+
+   ```bash
+   BROKER_QUEUE_STATE="$(bs_compose exec -T rabbitmq \
+     rabbitmqctl -q -p backupsheep list_queues \
+     name messages_ready messages_unacknowledged consumers --silent)"
+   printf '%s\n' "${BROKER_QUEUE_STATE}"
+   printf '%s\n' "${BROKER_QUEUE_STATE}" | awk '
+     NF == 0 { next }
+     NF != 4 || $1 !~ /^(default|cloud|database|files|storage|logs)$/ ||
+       seen[$1]++ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ ||
+       $4 !~ /^[0-9]+$/ { failed = 1; exit }
+     { count++; ready += $2; unacked += $3; consumers += $4 }
+     END {
+       if (failed || count != 6 || consumers != 0 || unacked != 0) exit 1
+       printf "ready=%d consumers=%d unacked=%d\n", ready, consumers, unacked
+     }
+   '
+   ```
+
+   The queue listing may still contain ready messages; record and preserve them for the
+   reviewed recovery path. The required invariant is exactly six known queues, zero
+   consumers and zero unacknowledged work. Do not restart the app, Beat or a worker between
+   the stable-cut durable/broker recheck and the recovery-set publication in step 6.
+   A Compose profile controls creation/selection, not the restart policy of an existing
+   container, so omitting `--profile operations` does not stop an old worker.
+
+6. Without restarting any service, use the [Disaster recovery](disaster-recovery.md#back-up-the-control-plane)
+   procedure to stage, validate and atomically publish one complete PostgreSQL,
+   configuration, secrets and exact-revision recovery set. Back up Local Storage and
+   critical work-volume material in the same stable cut. Then remove the complete
+   container/network topology so no guard can be replaced beneath an old namespace;
+   ordinary `down` preserves named data and identity volumes:
+
+   ```bash
+   bs_compose --profile operations down --timeout 300
+   ```
+
+   Never add `--volumes`.
+7. Confirm free disk for both old/new image layers and migration work.
+
+If the release changes the pinned RabbitMQ generation, stop here and follow the dedicated
+[RabbitMQ migration gate](rabbitmq-upgrade.md). `BACKUPSHEEP_RABBITMQ_DATA_GENERATION`
+is an installer-owned witness, not a version switch; never edit it to make an old volume
+appear migrated.
+
+See [Disaster recovery](disaster-recovery.md#back-up-the-control-plane) for the backup
+commands.
+
+## One-time legacy SSH trust and shared-identity retirement
+
+This gate applies to releases that used a global `known_hosts` file, an `ssh_trust` volume,
+or one managed private key across the app/database/files roles. Those artifacts are legacy
+rollback evidence only. The current release deliberately does not import them into its
+account-scoped approval ledger and does not reuse the shared private identity.
+
+The staging layout-v2 witness and dedicated `ssh_trust` volume existed only on the
+prerelease development line. Moving to layout v3 requires the explicit
+`migrate-empty-legacy-v3` intent; v2 is never treated as equivalent evidence. The
+installer accepts a develop-era trust volume only when its canonical project ownership,
+physical name and labels pass the complete resource validator. It leaves that volume
+detached for rollback evidence. The v3 provisioner has no trust mount or group, and the
+wrapper rejects every `--volume` override, so neither that volume nor an exported global
+trust file can be mounted or imported through the supported command path. Any ownership,
+name or label ambiguity stops the upgrade.
+
+1. Stop Beat, drain active SSH work, and stop every operations service. Create and verify
+   the normal encrypted control-plane rollback set. If policy requires retaining the old
+   global trust file or shared private key, copy it only into that encrypted, access-audited
+   rollback set without printing it. Do not copy either artifact into a current container,
+   database row, work volume, or current secret file. Leave any validated develop-era
+   `ssh_trust` volume detached until the approved rollback-retention period ends.
+2. Review the account count. Managed identities are supported only when the installation
+   contains exactly one account. For a multi-account installation, leave both managed-key
+   secret files empty and configure customer-supplied, account-scoped private keys instead.
+3. For an eligible single-account installation, create two new, distinct Ed25519 identities:
+   one for database SSH tunnels and one for files/SFTP. Store the private halves as
+   `.secrets/ssh_managed_database_private_key` and
+   `.secrets/ssh_managed_files_private_key`, each owner-owned, non-linked and mode `0444`
+   beneath the mode-`0700` secret directory. Never derive either new identity by copying or
+   converting the old shared key. The installer derives and canonicalizes the matching
+   `SSH_MANAGED_DATABASE_PUBLIC_KEY` and `SSH_MANAGED_FILES_PUBLIC_KEY` settings and refuses
+   non-Ed25519, mismatched or identical identities.
+4. Clear legacy `SSH_MANAGED_PRIVATE_KEY_PATH` and `SSH_MANAGED_PUBLIC_KEY` values. A
+   non-empty `.secrets/ssh_managed_private_key` is rejected because its account/lane scope
+   cannot be proven. After preserving approved rollback evidence, remove that legacy file;
+   the installer may retire only the exact empty, regular, single-link placeholder.
+5. Upgrade and start only the core. Existing SSH-managed connections are fenced pending.
+   For every SSH endpoint, use the signed-in preview, verify the displayed fingerprint over
+   an independent channel, and explicitly approve the exact account/host/port/key. A changed
+   key requires the explicit replacement flow. Stock Compose stores approvals and
+   append-only audit events in PostgreSQL; it has no trust volume or global `known_hosts`.
+6. Install only the database public key on database-tunnel sources and only the files public
+   key on SFTP/file sources. Verify that `worker-database` receives only its private source,
+   `worker-files` receives only its private source, the app receives neither, and each
+   operation creates then removes its exact mode-`0600` private-runtime trust file.
+7. Enable operations only after preflight, connection revalidation, and a disposable backup
+   and restore rehearsal pass. Retain or dispose of legacy rollback artifacts under the
+   organization's approved encrypted-media retention process.
+
+## One-time non-root volume migration to private staging layout v3
+
+Do not manually mount, classify, copy, relabel or recursively change ownership on the
+historical `backup_workdir`. It can contain mixed plaintext, credentials, partial artifacts
+and logs with no trustworthy lane marker. The v3 provisioner deliberately refuses to guess.
+
+Before checking out the reviewed target, stop and drain every provider operation as described
+above and create the verified encrypted rollback set. The historical `backup_workdir` must be
+empty. If it is not empty, keep operations disabled and quarantine or reconcile the entire
+volume under an approved incident/data-handling process; do not move its entries into a new
+lane volume. When constructing `INSTALL_ARGS` in the next section, append the one-time
+authorization alongside any required identity-migration arguments:
+
+```bash
+INSTALL_ARGS+=(--migrate-staging-layout)
+```
+
+The installer records the installation-bound `migrate-empty-legacy-v3` intent. Its networkless
+root one-shot first proves that `database_workdir`, `files_workdir`, `storage_workdir`, the two
+source-specific forward-transfer volumes and `restore_ciphertext_transfer` are dedicated and
+empty. It accepts a populated `backup_storage` only when that tree contains private regular
+files/directories with unambiguous historical-or-storage ownership, then assigns it solely to
+UID/GID `10004:10004`. It assigns each new private/transfer root its exact lane ownership and
+mode and commits a root-only durable v3 witness. A witnessed rerun verifies the layout; it does
+not repair drift.
+
+The prerelease v2 witness is never accepted as v3 evidence. A canonical develop-era
+`ssh_trust` volume may be validated and retained only as detached rollback evidence; no current
+runtime mounts it or imports its global trust data. Any ambiguous resource name, label,
+ownership, non-empty new target, or unsafe Local Storage tree stops the upgrade.
+
+## Upgrade to the exact reviewed commit
+
+Fetch only the reviewed commit, verify it is the requested object and detach the checkout.
+Do not pull a mutable branch or tag. Preserve `.env` and `.secrets`; stop if Git would
+overwrite or delete an unexplained local file. The exact target installer owns the atomic
+image-source update after checkout; do not edit one or more image fields in `.env` by hand.
+
+This release replaces the prerelease artifact key-provider model with two local-file
+keyrings. An existing installation that records a blank, development-only or retired
+provider may transition only through `--migrate-artifact-key-provider-empty`. The
+current runtime provider registry contains only production `local-file` and
+development/test-only `local-development`; the historical `aws-kms` identifier is
+recognized only by this migration/rollback gate and cannot be selected by current code.
+This is an exact-empty adoption, not a KMS decrypt/rewrap conversion. The
+`migrate` one-shot applies schema changes and then performs a fresh current-state query;
+it succeeds only when `CoreBackupEncryptionEnvelope` and `CoreBackupKeyWrap` each contain
+exactly zero rows, including orphan, retired, pending and manual-review rows;
+`CoreBackupArtifact` contains no `legacy_zip` row of any role; and all historical
+database/files backup and storage-point tables are empty:
+`core_website_backup`, `core_website_backup_mtm_storage_points`,
+`core_basecamp_backup`, `core_basecamp_backup_mtm_storage_points`,
+`core_database_backup`, `core_database_backup_mtm_storage_points`,
+`core_wordpress_backup`, and `core_wordpress_backup_mtm_storage_points`. The last two
+remain as retained database tables even after WordPress runtime removal. The unmanaged
+historical `core_hosting_backup` table must also be empty when it exists. A previously
+recorded schema migration cannot bypass this current-state proof. Any wrap, plaintext
+artifact, or unledgered historical backup/storage point blocks the transition: neither
+the installer nor migration invents a cryptographic conversion or silently retires a
+recorded backup.
+
+The same exact-empty boundary introduces internal BSE1 format version 2. Version 2 keeps
+the plaintext and context digests inside its authenticated encrypted terminal payload and
+uses an independent random envelope UUID for each `.bse1` object name. Version 1 is a
+prerelease format and is rejected rather than heuristically converted. The explicit
+legacy-only runtime keeps historical plaintext `.zip` read/delete naming only for records
+that have not entered the encrypted provider migration; new encrypted uploads never reuse
+those paths or their backup-UUID ownership metadata. A mixed, mismatched or ambiguous
+legacy/encrypted identity stops reconciliation and deletion.
+
+Migration `0049_local_file_artifact_key_provider` is immutable historical schema and may
+already have been applied by a prerelease installation; it continues to describe the
+format-v1 constraint it originally shipped with. Migration
+`0050_bse2_private_terminal_metadata` performs the format-v2 transition. Before changing
+the default or constraint in either direction, `0050` enumerates every envelope and wrap
+and refuses when even one orphan, pending, manual, retired, or otherwise unreferenced row
+exists. This makes an already-applied empty `0049` database upgrade safely while preventing
+schema history from being mistaken for proof that no v1 custody data exists. Do not fake,
+delete, or edit migration-history rows to bypass this gate.
+
+Preserve the old release, database, credentials, key service, legacy archive objects and
+ciphertext as encrypted rollback evidence. If any wrap or legacy record exists,
+restore/reseal, export, or explicitly retire it under the old release in a separately
+reviewed migration before trying again. Verify the corresponding remote/local object and
+retention evidence before retirement. A backup row without a BSE1 artifact ledger is not
+proof that no remote ZIP exists; it must be exported or retired under the old release too.
+Never edit provider names, artifact formats,
+generation or witness values in `.env` or PostgreSQL; labels do not transform wrapped key
+material.
+
+```bash
+TARGET_COMMIT='<40-character-reviewed-release-commit>'
+CURRENT_DOMAIN='<existing-public-hostname>'
+CURRENT_PROJECT='<existing-persisted-compose-project-name>'
+git fetch --no-tags --depth=1 origin "${TARGET_COMMIT}"
+test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "${TARGET_COMMIT}"
+git checkout --detach "${TARGET_COMMIT}"
+test "$(git rev-parse HEAD)" = "${TARGET_COMMIT}"
+
+# Non-root installation owned by this effective UID:
+INSTALLER=("$PWD/install.sh")
+# Root-owned installation from the protected `sudo -H bash` shell; use instead:
+# INSTALLER=("$PWD/install.sh" --allow-root-install)
+```
+
+The following `--skip-start` installer invocation is mandatory only for a pre-hardening
+deployment that requires one or more of its explicit adoption/migration gates. An
+already-hardened installation must skip this staging block and continue to the normal
+exact-release installer below.
+
+```bash
+# Mandatory once when upgrading a pre-hardening deployment with no installation
+# ID/sentinel. This proves the complete legacy resource inventory before creating only
+# the sentinel. It is expected to stop at the live 3.13/blank-generation RabbitMQ gate.
+INSTALL_ARGS=(
+  --local-build
+  --ref "${TARGET_COMMIT}"
+  --install-dir "$PWD"
+  --project-name "${CURRENT_PROJECT}"
+  --domain "${CURRENT_DOMAIN}"
+  --skip-start
+)
+# A retained Debian/UID-999 pgdata volume with exact identity generation 2 requires
+# both one-time flags in the same invocation:
+# INSTALL_ARGS+=(--migrate-postgres-runtime --migrate-database-identities)
+# A retained Debian/UID-999 pgdata volume already sealed at identity generation 3
+# requires only the runtime flag:
+# INSTALL_ARGS+=(--migrate-postgres-runtime)
+# A blank shared-superuser identity generation is intentionally unsupported by the
+# runtime migrator. Keep that project stopped/intact and create a clean install
+# directory under a new exact Compose project namespace; do not set either marker.
+# Existing pre-v3 staging layouts also require the one-time gate documented above:
+# INSTALL_ARGS+=(--migrate-staging-layout)
+# An installation without BACKUPSHEEP_EGRESS_POLICY_GENERATION=2 requires the
+# reviewed fail-closed reset documented below:
+# INSTALL_ARGS+=(--migrate-egress-policy)
+# An existing shared RabbitMQ login also requires the coordinated pending gate:
+# INSTALL_ARGS+=(--migrate-rabbitmq-identities)
+# A blank/development/retired artifact provider requires the exact-empty archive-inventory gate:
+# INSTALL_ARGS+=(--migrate-artifact-key-provider-empty)
+# If and only if the reviewed deployment override exists:
+# INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")
+"${INSTALLER[@]}" "${INSTALL_ARGS[@]}"
+# If old `compose down` left only the exact four legacy volumes, rerun that one
+# bootstrap with: --adopt-legacy-project "${CURRENT_PROJECT}"
+# The expected 3.13 refusal is valid only after every earlier selected gate passes.
+# STOP this runbook there and complete docs/guides/rabbitmq-upgrade.md. Do not execute
+# the normal already-hardened image-switch block below during that coordinated transition.
+```
+
+If the staging run used `--skip-start`, an artifact-provider transition intentionally
+remains at installation-bound generation `1-pending-empty`; web, workers, Beat and security
+preflight stay disabled. After completing any database/broker prerequisites, rerun the same
+installer arguments with `--skip-start` removed and keep
+`--migrate-artifact-key-provider-empty`. The installer starts only the core, waits for the
+fresh `migrate_and_verify_artifact_provider` proof, then seals generation `1` while
+retaining `.secrets/artifact_provider_transition_rollback` and any prior credential files.
+They are retired only after the rendered model, authenticated security preflight and
+healthy core succeed while operations remain disabled. The migration flag cannot be
+combined with `--enable-operations`. A failed/interrupted retry retains the
+installation-bound rollback policy, both generated keyrings and prior credentials
+byte-for-byte; keep operations down and retry with the same flag. After accepted cleanup,
+review the provider configuration and rerun without the migration flag and with
+`--enable-operations`; source-worker startup then proves the database/files keyring mount,
+lane and retained-key-ID boundaries. Preserve an independent encrypted off-host recovery
+copy even after successful cleanup. Do not invoke a long-lived service or edit pending
+metadata by hand.
+
+A crash can occur after generation `1` is activated but before local rollback/credential
+cleanup. In that state the protected `artifact_provider_transition_rollback` file remains,
+and the next installer run refuses ordinary startup. Keep operations disabled and rerun
+the same reviewed target with `--migrate-artifact-key-provider-empty`; the installer
+revalidates the rollback digest, sealed local-file database state, rendered model,
+authenticated preflight and healthy core before cleanup. Do not delete the marker or
+legacy credential files, edit generation/witness values, or rerun without the flag to
+force activation.
+
+Accepted installer cleanup retires only the validated local legacy credential files and
+rollback policy; it cannot revoke anything in AWS. As a separate post-retirement operator
+action, disable/revoke the legacy IAM access keys or role access, remove AWS KMS grants and
+key-policy permissions, and verify the remote identities no longer authorize use. Scope
+that action to the exact retired artifact-KMS principal; do not revoke credentials still
+used by an explicitly configured AWS source, storage destination, or Amazon SES. Do not
+disable or schedule deletion of a KMS key while any approved old-release rollback,
+retention, legal-hold, or recovery set still depends on it; key deletion is a separate
+destructive decision with its own evidence and approval.
+
+For an eligible generation-2 database, that pre-hardening bootstrap must stage every
+applicable database generation-3, staging-v3, RabbitMQ identity-generation-2 and
+task-auth-generation-3 transition in the same pending state. A blank shared-superuser
+database instead requires the separate fresh-project boundary described above. The
+[RabbitMQ migration guide](rabbitmq-upgrade.md) owns the exact
+3.13 -> 4.2 -> 4.3 wrapper validation and final installer reconciliation; do not splice
+the normal upgrade commands below into it.
+
+The egress flag is a one-time, availability-impacting authorization. It accepts only an
+older stock policy in which all six roles are uniformly public with blank lists, blank
+with blank lists, or deny with blank lists. It resets every role to `deny`, clears all
+address-only and generation-2 lists, and writes `BACKUPSHEEP_EGRESS_POLICY_GENERATION=2`.
+Internet-dependent operations will remain blocked until reviewed exact IPv4
+`CIDR:port`/IPv6 `[CIDR]:port` tuples and exact DNS names are configured. A mixed or
+customized legacy policy is never translated: preserve the old `.env` in the encrypted
+recovery copy, review its dependencies, manually reset all roles and lists to the stock
+deny state, and then authorize the migration. Do not reuse the flag after generation 2;
+the installer rejects it.
+
+For an installation already at staging layout v3, PostgreSQL storage generation
+`18-alpine-icu-v1`, PostgreSQL identity generation 3, RabbitMQ data generation 4.3,
+RabbitMQ identity generation 2, task-auth generation 3, egress-policy generation 2 and
+artifact-provider generation 1, continue with the exact target installer. If any state
+differs, stop and follow its dedicated migration runbook; never add a migration flag merely
+to make this command pass.
+
+The installer atomically binds all six local image references: application, PostgreSQL,
+egress, RabbitMQ, RabbitMQ upgrade and RabbitMQ legacy source. Each reference uses
+`TARGET_COMMIT`. The installer then
+holds the shared mutation lock while it removes the complete topology without volumes,
+builds the four steady-state images, runs provisioning, migration, sealing and preflight,
+and starts only the core. The two RabbitMQ migration derivatives remain build-on-demand.
+
+```bash
+INSTALL_ARGS=(
+  --local-build
+  --ref "${TARGET_COMMIT}"
+  --install-dir "$PWD"
+  --project-name "${CURRENT_PROJECT}"
+  --domain "${CURRENT_DOMAIN}"
+)
+# If and only if the reviewed deployment override exists:
+# INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")
+
+# Non-root installation owned by this effective UID:
+INSTALLER=("$PWD/install.sh")
+# Root-owned installation from the protected `sudo -H bash` shell; use instead:
+# INSTALLER=("$PWD/install.sh" --allow-root-install)
+
+# Deliberately omit --enable-operations for the core acceptance hold.
+"${INSTALLER[@]}" "${INSTALL_ARGS[@]}"
+
+TARGET_IMAGES=(
+  "backupsheep:${TARGET_COMMIT}"
+  "backupsheep-postgres:${TARGET_COMMIT}"
+  "backupsheep-egress:${TARGET_COMMIT}"
+  "backupsheep-rabbitmq:${TARGET_COMMIT}"
+)
+for TARGET_IMAGE in "${TARGET_IMAGES[@]}"; do
+  IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_IMAGE}")"
+  test -n "${IMAGE_ID}"
+  printf '%s %s\n' "${TARGET_IMAGE}" "${IMAGE_ID}"
+done
+unset IMAGE_ID TARGET_IMAGE
+```
+
+The app, migration, web, worker and Beat roles share the exact application image. The
+database, egress and RabbitMQ families use their matching exact-commit local images. Their
+`pull_policy: never` setting prevents a missing image from being silently replaced from a
+registry. Record all four steady-state image IDs in the deployment receipt.
+
+Compose's one-shot preflight is not the only startup check. The immutable image entrypoint
+re-validates the runtime and runs `docker_preflight` before each web, worker or Beat
+process, including a later automatic restart. Do not override the image entrypoint in the
+normal rollout. Preflight also requires Django's migration plan to contain no unapplied
+migrations; a refusal indicates a weakened or incomplete runtime/configuration that must
+be fixed, not bypassed.
+
+## Verify the core deployment
+
+```bash
+bs_compose --profile operations ps --all
+bs_compose logs --tail=200 \
+  rabbitmq-volume-init rabbitmq-provision staging-provision \
+  db-provision migrate db-seal preflight app-egress-guard app
+bs_compose exec -T app python manage.py check
+curl -fsS http://127.0.0.1:8000/healthz/
+curl -fsS "https://${CURRENT_DOMAIN}/healthz/"
+DB_CONTAINER="$(bs_compose ps -q db)"
+test -n "${DB_CONTAINER}"
+test "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+  "${DB_CONTAINER}")" = healthy
+bs_compose exec -T rabbitmq rabbitmq-diagnostics -q ping
+```
+
+The database assertion reuses the stock image's authenticated file-backed healthcheck;
+`pg_isready` alone only proves that a server is listening. Verify that `migrate`,
+`preflight` and every other one-shot exited `0`, `app` and its guard are healthy, the
+public request reached this deployment, and no operations container was started. Then:
+
+1. check login and the dashboard through the public HTTPS URL;
+2. inspect existing schedules, storage and source records;
+3. review durable recovery rows and queued broker messages before allowing any provider
+   mutation.
+
+`/healthz/` returning `ok` is not a database, broker, worker or provider acceptance test.
+
+## Resume provider operations explicitly
+
+Only after core acceptance and the durable recovery/queue review, force-recreate every
+exact guard/worker pair and then start the singleton scheduler:
+
+```bash
+bs_compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+bs_compose --profile operations up --detach --no-build --no-deps beat
+bs_compose --profile operations ps --all
+bs_compose --profile operations exec -T worker-cloud celery -A backupsheep inspect ping
+```
+
+These commands can resume queued or recoverable provider mutations immediately. There is
+no operations-only installer mode: rerunning the same installer with
+`--enable-operations` is supported, but it deliberately repeats the complete core
+down/build/migrate/preflight/start transaction before enabling workers and Beat. After
+operations are explicitly enabled, observe recovery of interrupted durable work, run a
+disposable on-demand backup and restore rehearsal for affected providers, and retain the
+pre-upgrade recovery set until the observation window closes.
+
+## Configuration changes between versions
+
+Compare the new `.env_sample` with the existing `.env` without printing secrets into logs.
+Add new non-secret/default keys deliberately and preserve existing values. Keep all direct
+stock secret values and the two legacy shared managed-key settings blank in `.env`, and
+validate the corresponding `.secrets` files; never copy them back into environment
+variables for convenience. Because settings also read
+`.env_sample` as defaults, a missing optional key may still boot, but that does not mean
+its production default was reviewed.
+
+Validate Compose with `bs_compose config --quiet`; do not publish the expanded
+configuration, which may contain credentials.
+
+## Rollback
+
+A container rollback alone is safe only when the older code supports the already-migrated
+schema. Do not assume Django migrations are reversible or that an older application can
+read a newer database.
+
+The reliable rollback unit is:
+
+- the previous code revision/image;
+- its exact `.env`, `.secrets` and deployment overrides;
+- the pre-upgrade PostgreSQL dump;
+- the matching Local Storage/work-volume state when the upgrade changed them.
+
+For a migration-related rollback:
+
+1. stop `app`, all workers and Beat;
+2. preserve the failed-upgrade database and logs for diagnosis;
+3. restore the pre-upgrade database into a clean/replacement instance;
+4. check out/build the recorded previous revision;
+5. restore matching configuration and volume data;
+6. start the stack and perform the full dependency and recovery verification.
+
+Do not run `migrate <app> <older-number>` against production merely to force a rollback;
+data migrations and application changes may not have a safe reverse path.
+
+## PostgreSQL major-version changes
+
+The stock image uses PostgreSQL 18.6 on Alpine 3.24, UID/GID `70:70`, ICU `und`, and the
+installation-witnessed `postgres_data_v1` volume. It never mounts the retired
+Debian/UID-999 `pgdata` volume. Follow the explicit
+[PostgreSQL Alpine/ICU migration gate](postgres-runtime-migration.md) for that one-time
+transition. The automatic gate accepts only exact witnessed generation-2 or
+generation-3 sources; blank shared-superuser sources require a clean installation
+directory and new Compose project namespace, with the old project retained offline.
+Other major-version or non-stock database changes require a separately
+reviewed logical dump/restore or supported `pg_upgrade` plan; never change an image tag
+against an old data directory. Rehearse on a copy and preserve the old volume and exact
+image until database verification and a restore test pass.
+
+## Upgrade completion record
+
+Record:
+
+- old and new commit/image identifiers;
+- backup artifact names and verification results;
+- migration exit and Django check result;
+- dependency/worker health results;
+- first successful backup and restore rehearsal after upgrade;
+- any deferred provider or accessibility checks;
+- rollback-set retention deadline.

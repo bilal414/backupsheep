@@ -1,0 +1,30 @@
+meta {
+  name: GET /api/v1/connections/vultr/endpoints/
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/v1/connections/vultr/endpoints/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-connections-vultr-endpoints`
+
+  Requires `Authorization: Token <key>`. Read-only request.
+
+  Django action: `apps.api.v1.connection.vultr.views.CoreVultrView.endpoints`
+  Source: `apps/api/v1/connection/vultr/views.py`
+}

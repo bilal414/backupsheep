@@ -1,0 +1,208 @@
+import errno
+import subprocess
+from unittest import mock
+
+from django.test import SimpleTestCase
+
+from apps._tasks.integration.backup.errors import (
+    BackupStageError,
+    safe_backup_failure,
+)
+from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
+from apps._tasks.exceptions import NodeBackupFailedError
+from apps.api.v1.utils.api_helpers import get_error
+from apps.console.vultr import record_provider_result
+
+
+class BackupErrorSafetyTests(SimpleTestCase):
+    def test_database_event_privilege_failure_is_actionable_and_not_retryable(self):
+        canary = "password=database-secret host=db.internal"
+
+        failure = safe_backup_failure(
+            RuntimeError(
+                "mysqldump: Couldn't execute 'show events': Access denied "
+                f"for user 'backup' ({canary})"
+            ),
+            stage="database_backup",
+        )
+
+        self.assertEqual(failure.code, "DATABASE_EVENT_PRIVILEGE_REQUIRED")
+        self.assertFalse(failure.retryable)
+        self.assertIn("EVENT privilege", failure.detail)
+        self.assertNotIn(canary, failure.detail)
+        self.assertNotIn("db.internal", failure.detail)
+
+    def test_database_event_privilege_public_detail_reclassifies_stably(self):
+        first = safe_backup_failure(
+            RuntimeError(
+                "mariadb-dump: Access denied; you need (at least one of) the "
+                "EVENT privilege(s) for this operation"
+            ),
+            stage="database_backup",
+        )
+        self.assertEqual(first.code, "DATABASE_EVENT_PRIVILEGE_REQUIRED")
+
+        second = safe_backup_failure(
+            RuntimeError(first.detail),
+            stage="backup",
+        )
+
+        self.assertEqual(second, first)
+
+    def test_secret_bearing_provider_error_is_never_returned(self):
+        canary = "Bearer live-token password=database-secret host=db.internal"
+
+        failure = safe_backup_failure(
+            RuntimeError(f"export command failed: {canary}"),
+            stage="database_backup",
+        )
+
+        self.assertEqual(failure.code, "SOURCE_EXPORT_FAILED")
+        self.assertNotIn(canary, failure.detail)
+        self.assertNotIn("live-token", failure.detail)
+        self.assertNotIn("db.internal", failure.detail)
+        self.assertTrue(failure.retryable)
+
+    def test_timeout_and_disk_full_are_distinguishable(self):
+        timeout = safe_backup_failure(TimeoutError("secret timeout URL"))
+        disk = safe_backup_failure(OSError("No space left on device /private/path"))
+
+        self.assertEqual(timeout.code, "BACKUP_TIMEOUT")
+        self.assertTrue(timeout.retryable)
+        self.assertEqual(disk.code, "WORKER_DISK_FULL")
+        self.assertTrue(disk.retryable)
+        self.assertNotIn("/private/path", disk.detail)
+
+    def test_website_stage_failures_have_stable_actionable_codes(self):
+        canary = "password=stage-secret /srv/customer/private"
+        cases = {
+            "website_mirror": "WEBSITE_MIRROR_FAILED",
+            "website_manifest": "WEBSITE_MANIFEST_FAILED",
+            "website_archive": "ARCHIVE_CREATION_FAILED",
+        }
+
+        for stage, code in cases.items():
+            with self.subTest(stage=stage):
+                failure = safe_backup_failure(
+                    BackupStageError(stage, RuntimeError(canary)),
+                    stage="website_backup",
+                )
+                self.assertEqual(failure.code, code)
+                self.assertTrue(failure.retryable)
+                self.assertNotIn("stage-secret", failure.detail)
+                self.assertNotIn("/srv/customer/private", failure.detail)
+
+    def test_path_and_inode_capacity_failures_are_distinguishable(self):
+        path = safe_backup_failure(
+            OSError(errno.ENAMETOOLONG, "secret path is too long"),
+            stage="website_manifest",
+        )
+        inode = safe_backup_failure(
+            RuntimeError(
+                "Not enough free inodes for website archive: need ~8, "
+                "have ~1 free /srv/private"
+            ),
+            stage="website_manifest",
+        )
+
+        self.assertEqual(path.code, "SOURCE_PATH_LIMIT_EXCEEDED")
+        self.assertFalse(path.retryable)
+        self.assertEqual(inode.code, "WORKER_INODE_EXHAUSTED")
+        self.assertTrue(inode.retryable)
+        self.assertNotIn("/srv/private", inode.detail)
+
+    def test_archive_subprocess_timeout_is_classified_as_timeout(self):
+        failure = safe_backup_failure(
+            subprocess.TimeoutExpired(["zip", "redacted"], 60),
+            stage="website_backup",
+        )
+
+        self.assertEqual(failure.code, "BACKUP_TIMEOUT")
+        self.assertTrue(failure.retryable)
+        self.assertNotIn("redacted", failure.detail)
+
+    def test_mysql_secure_transport_failure_is_terminal_and_actionable(self):
+        failure = safe_backup_failure(
+            RuntimeError(
+                "mysqldump: ERROR 3159: Connections using insecure transport are "
+                "prohibited while --require_secure_transport=ON; "
+                "password=never-return"
+            ),
+            stage="database_backup",
+        )
+
+        self.assertEqual(failure.code, "TLS_REQUIRED")
+        self.assertFalse(failure.retryable)
+        self.assertIn("SSL/TLS", failure.detail)
+        self.assertNotIn("never-return", failure.detail)
+
+    def test_website_special_member_is_terminal_and_path_safe(self):
+        failure = safe_backup_failure(
+            ArchiveSourcePolicyError(
+                "symlink", relative_path="private/customer/path"
+            ),
+            stage="website_backup",
+        )
+
+        self.assertEqual(failure.code, "SOURCE_SPECIAL_FILE_UNSUPPORTED")
+        self.assertFalse(failure.retryable)
+        self.assertIn("regular files and directories", failure.detail)
+        self.assertNotIn("private/customer/path", failure.detail)
+
+    def test_legacy_provider_error_helper_never_returns_exception_text(self):
+        canary = (
+            "https://api.example.invalid/object?X-Amz-Credential=secret-canary "
+            "Authorization=Bearer provider-token"
+        )
+
+        detail = get_error(RuntimeError(canary))
+
+        self.assertNotIn("secret-canary", detail)
+        self.assertNotIn("provider-token", detail)
+        self.assertNotIn("api.example.invalid", detail)
+        self.assertIn("provider operation failed", detail.lower())
+
+    def test_vultr_result_metadata_never_persists_exception_text(self):
+        canary = "Authorization=Bearer provider-token signed-url=secret-canary"
+
+        metadata = record_provider_result(
+            {},
+            classification="transient_provider_error",
+            status_code=503,
+            error=RuntimeError(canary),
+        )
+
+        serialized = str(metadata)
+        self.assertNotIn("provider-token", serialized)
+        self.assertNotIn("secret-canary", serialized)
+        self.assertEqual(
+            metadata["vultr_last_result"]["classification"],
+            "transient_provider_error",
+        )
+        self.assertIn("retry", metadata["vultr_last_result"]["message"].lower())
+
+    def test_node_backup_failure_never_persists_diagnostic_text(self):
+        canary = "password=db-secret signed-url=https://secret.invalid/object"
+        account = mock.Mock()
+        node = mock.Mock()
+        node.id = 42
+        node.name = "source"
+        node.connection.id = 7
+        node.connection.name = "connection"
+        node.connection.account = account
+
+        error = NodeBackupFailedError(
+            node,
+            backup_uuid="safe-backup-id",
+            attempt_no=1,
+            backup_type=1,
+            message=f"mysqldump failed: {canary}",
+        )
+
+        logged = account.create_log.call_args.args[0]
+        self.assertNotIn("db-secret", str(logged))
+        self.assertNotIn("secret.invalid", str(logged))
+        self.assertNotIn("db-secret", str(error.detail))
+        self.assertNotIn("secret.invalid", str(error.detail))
+        self.assertEqual(logged["error_code"], error.error_code)
+        self.assertEqual(logged["message"], error.public_message)

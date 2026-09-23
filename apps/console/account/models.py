@@ -1,6 +1,6 @@
 import time
 import uuid as uuid
-from django.db import models
+from django.db import models, transaction
 from django.db.models import UniqueConstraint, Q
 from model_utils.models import TimeStampedModel
 from django.contrib.auth.models import Group
@@ -22,7 +22,6 @@ def get_backup_models():
     from ..backup.models import (
         CoreWebsiteBackup,
         CoreDatabaseBackup,
-        CoreWordPressBackup,
         CoreBasecampBackup,
         CoreDigitalOceanBackup,
         CoreHetznerBackup,
@@ -42,7 +41,6 @@ def get_backup_models():
     return (
         (CoreWebsiteBackup, "website"),
         (CoreDatabaseBackup, "database"),
-        (CoreWordPressBackup, "wordpress"),
         (CoreBasecampBackup, "basecamp"),
         (CoreDigitalOceanBackup, "digitalocean"),
         (CoreHetznerBackup, "hetzner"),
@@ -89,13 +87,70 @@ class CoreAccount(TimeStampedModel):
     def uuid_str(self):
         return slugify(f"bs-a{self.id}")
 
-    def create_log(self, data=None):
-        from apps._tasks.helper.tasks import send_log_to_db
+    def create_log(
+        self,
+        data=None,
+        *,
+        email_event=None,
+        email_template=None,
+        log_type=None,
+    ):
+        """Persist one notification request without reading recipient identities.
 
+        Source and provider workers may write the non-secret activity row, but only
+        the logs lane can enumerate members or notification-channel credentials.
+        The broker wake-up therefore carries this row's integer id only.
+        """
+
+        from apps._tasks.helper.tasks import (
+            REVIEWED_NOTIFICATION_EMAILS,
+            send_log_to_db,
+        )
+        from apps.console.log.models import CoreLog
+        from backupsheep.celery_task_intent import notification_fanout_task_id
+
+        data = dict(data or {})
+        data.pop("notification_request", None)
+        data.pop("notification_fanout_status", None)
+        if email_event is not None or email_template is not None:
+            if REVIEWED_NOTIFICATION_EMAILS.get(str(email_template)) != str(email_event):
+                raise ValueError("email notification request is not reviewed")
+            data["notification_request"] = {
+                "version": 1,
+                "event": str(email_event),
+                "template": str(email_template),
+            }
         data["account_id"] = self.id
         data["created"] = int(time.time())
+        is_notification = (
+            data.get("sender_name") == "BackupSheep - Notification Bot"
+        )
+        if is_notification:
+            data["notification_fanout_status"] = "pending"
 
-        send_log_to_db(data)
+        def publish_log_id(log_id, task_id):
+            try:
+                send_log_to_db.apply_async(args=[log_id], task_id=task_id)
+            except Exception:
+                # The pending CoreLog request is the durable recovery witness.
+                # Broker/client exceptions can contain connection credentials, so
+                # do not send them (or this log's plaintext) to observability.
+                return
+
+        with transaction.atomic():
+            log = CoreLog.objects.create(
+                account_id=self.id,
+                type=log_type or CoreLog.Type.GENERIC,
+                data=data,
+            )
+            if is_notification:
+                fanout_task_id = notification_fanout_task_id(log.pk, log.data)
+                transaction.on_commit(
+                    lambda log_id=log.pk, task_id=fanout_task_id: publish_log_id(
+                        log_id, task_id
+                    )
+                )
+        return log
 
     def create_storage_log(self, message, node, backup, storage):
         from apps.console.log.models import CoreLog
@@ -149,7 +204,6 @@ class CoreAccount(TimeStampedModel):
         from ..utils.models import UtilBackup
         from django.db.models import Sum
         from ..backup.models import CoreDatabaseBackupStoragePoints
-        from ..backup.models import CoreWordPressBackupStoragePoints
         from django.db.models import Count, Q
 
         storage_used = 0
@@ -184,18 +238,6 @@ class CoreAccount(TimeStampedModel):
             )
             storage_used += (
                 CoreDatabaseBackupStoragePoints.objects.filter(query_db)
-                .aggregate(Sum("backup__size"))
-                .get("backup__size__sum", 0)
-                or 0
-            )
-
-        # WordPress Storage
-        if not database_only:
-            query_wp = query & Q(
-                status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE
-            )
-            storage_used += (
-                CoreWordPressBackupStoragePoints.objects.filter(query_wp)
                 .aggregate(Sum("backup__size"))
                 .get("backup__size__sum", 0)
                 or 0
@@ -256,10 +298,6 @@ class CoreAccount(TimeStampedModel):
             query &= ~Q(status=CoreNode.Status.PAUSED)
 
         return CoreNode.objects.filter(query).count()
-
-    def get_node_count_wordpress(self):
-        from ..node.models import CoreNode
-        return CoreNode.objects.filter(type=CoreNode.Type.SAAS, connection__account=self).count()
 
     def get_node_count_website(self):
         from ..node.models import CoreNode
@@ -413,6 +451,10 @@ class CoreAccountGroup(TimeStampedModel):
                 "Can create on-demand backup of node."
             ),
             (
+                "backup_restore",
+                "Can restore backups to scoped nodes or new resources."
+            ),
+            (
                 "backup_download",
                 "Can download any on-demand/scheduled backup of node."
             ),
@@ -444,4 +486,4 @@ class CoreAccountGroup(TimeStampedModel):
 
     @property
     def node_count(self):
-        return 0
+        return self.nodes.count()

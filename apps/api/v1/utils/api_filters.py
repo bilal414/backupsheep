@@ -1,12 +1,36 @@
 import datetime
+from django.core.exceptions import FieldDoesNotExist
 from rest_framework.filters import BaseFilterBackend
 from django.db.models import Q
+
+from apps.api.v1.utils.api_helpers import visible_nodes
+
+
+def scope_direct_node_queryset(request, queryset):
+    """Apply group-node visibility to a queryset whose model owns ``node``.
+
+    The API's node-backed provider resources all expose a direct ``node``
+    relation. Keeping this in a shared filter boundary protects list and
+    retrieve/get_object flows (including guessed IDs) without depending on
+    every provider's account-only ``get_queryset`` implementation.
+    """
+    try:
+        queryset.model._meta.get_field("node")
+    except FieldDoesNotExist:
+        return queryset
+    try:
+        member = request.user.member
+    except AttributeError:
+        return queryset.none()
+    return queryset.filter(node__in=visible_nodes(member)).distinct()
 
 
 
 class DateRangeFilter(BaseFilterBackend):
     def filter_queryset(self, request, queryset, view):
-        total_count = view.get_queryset().count()
+        queryset = scope_direct_node_queryset(request, queryset)
+        total_queryset = scope_direct_node_queryset(request, view.get_queryset())
+        total_count = total_queryset.count()
         if len(getattr(view, "filter_backends", [])) > 1:
             # case of a view with more than 1 filter backend
             filtered_count_before = queryset.count()

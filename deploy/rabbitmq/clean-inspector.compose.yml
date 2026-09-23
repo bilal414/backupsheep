@@ -1,0 +1,56 @@
+# Internal, wrapper-only read-only checkpoint inspector.
+services:
+  rabbitmq-clean-inspector:
+    image: "${BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_IMAGE:?BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_IMAGE is required}"
+    pull_policy: never
+    labels:
+      com.backupsheep.installation-id: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+    user: "${BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_USER:?BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_USER is required}"
+    privileged: false
+    read_only: true
+    init: false
+    cgroup: private
+    ipc: private
+    pids_limit: 32
+    mem_limit: 64m
+    memswap_limit: 64m
+    mem_swappiness: 0
+    cpus: "0.25"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "unattested"
+      BACKUPSHEEP_RABBITMQ_NODE_HOST: "${BACKUPSHEEP_RABBITMQ_NODE_HOST:?BACKUPSHEEP_RABBITMQ_NODE_HOST is required}"
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/backupsheep-rabbitmq-volume-init
+      - inspect-clean
+      - "${BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_TARGET:?BACKUPSHEEP_RABBITMQ_CLEAN_INSPECT_TARGET is required}"
+    command: []
+    volumes:
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        read_only: true
+        volume:
+          nocopy: true
+      - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
+    network_mode: none
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+      nofile:
+        soft: 128
+        hard: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+        max-file: "${DOCKER_LOG_MAX_FILE:-5}"
+    restart: "no"

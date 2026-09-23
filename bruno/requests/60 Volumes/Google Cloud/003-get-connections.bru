@@ -1,0 +1,30 @@
+meta {
+  name: GET /api/v1/volumes/google_cloud/connections/
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/v1/volumes/google_cloud/connections/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-volumes-google-cloud-connections`
+
+  Requires `Authorization: Token <key>`. Read-only request.
+
+  Django action: `apps.api.v1.volume.google_cloud.views.CoreVolumeGoogleCloudView.connections`
+  Source: `apps/api/v1/volume/google_cloud/views.py`
+}

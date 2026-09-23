@@ -1,12 +1,12 @@
 import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
-import boto3
 from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
-    CurrentAccountDefault, IntegrationDefault, bs_encrypt, bs_decrypt,
+    CurrentAccountDefault, IntegrationDefault, bs_encrypt,
 )
+from apps.api.v1.utils.boto import bounded_boto3_client
 from apps.console.connection.models import (
     CoreConnection,
     CoreIntegration,
@@ -20,28 +20,28 @@ from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreCo
 
 class CoreAuthAWSRDSReadSerializer(serializers.ModelSerializer):
     region = CoreAWSRegionSerializer()
-    access_key = serializers.SerializerMethodField()
-    secret_key = serializers.SerializerMethodField()
+    access_key_configured = serializers.SerializerMethodField()
+    secret_key_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreAuthAWSRDS
         fields = (
             "id",
             "region",
-            "access_key",
-            "secret_key",
+            "access_key_configured",
+            "secret_key_configured",
         )
         datatables_always_serialize = (
             "id",
-            "access_key",
-            "secret_key",
+            "access_key_configured",
+            "secret_key_configured",
         )
 
-    def get_access_key(self, obj):
-        return bs_decrypt(obj.access_key, self.context["encryption_key"])
+    def get_access_key_configured(self, obj):
+        return bool(obj.access_key)
 
-    def get_secret_key(self, obj):
-        return bs_decrypt(obj.secret_key, self.context["encryption_key"])
+    def get_secret_key_configured(self, obj):
+        return bool(obj.secret_key)
 
 
 class CoreAWSRDSConnectionReadSerializer(serializers.ModelSerializer):
@@ -91,8 +91,8 @@ class CoreAWSRDSConnectionReadSerializer(serializers.ModelSerializer):
 
 class CoreAuthAWSRDSWriteSerializer(serializers.ModelSerializer):
     region = serializers.PrimaryKeyRelatedField(queryset=CoreAWSRegion.objects.filter())
-    access_key = serializers.CharField(write_only=True)
-    secret_key = serializers.CharField(write_only=True)
+    access_key = serializers.CharField(write_only=True, required=False)
+    secret_key = serializers.CharField(write_only=True, required=False)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -100,12 +100,27 @@ class CoreAuthAWSRDSWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        supplied = {"access_key", "secret_key"}.intersection(data)
+        if not supplied:
+            if getattr(getattr(self, "parent", None), "instance", None) is None:
+                raise serializers.ValidationError(
+                    {"credentials": "Access key and secret key are required."}
+                )
+            return data
+        if supplied != {"access_key", "secret_key"}:
+            raise serializers.ValidationError(
+                {"credentials": "Access key and secret key must be replaced together."}
+            )
         try:
-            region = data["region"]
+            parent_instance = getattr(getattr(self, "parent", None), "instance", None)
+            existing = getattr(parent_instance, "auth_aws_rds", None) if parent_instance else None
+            region = data.get("region") or getattr(existing, "region", None)
+            if region is None:
+                raise serializers.ValidationError({"region": "This field is required."})
             access_key = data["access_key"]
             secret_key = data["secret_key"]
 
-            client = boto3.client(
+            client = bounded_boto3_client(
                 "rds",
                 region_name=region.code,
                 aws_access_key_id=access_key,
@@ -114,7 +129,7 @@ class CoreAuthAWSRDSWriteSerializer(serializers.ModelSerializer):
             client.describe_db_instances()
             data["access_key"] = bs_encrypt(access_key, self.context["encryption_key"])
             data["secret_key"] = bs_encrypt(secret_key, self.context["encryption_key"])
-        except Exception as e:
+        except Exception:
             raise serializers.ValidationError(
                 "Unable to authenticate. "
                 "Please check your access_key and secret_key and "

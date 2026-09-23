@@ -4,13 +4,16 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
+from apps.api.v1.storage.serializers import (
+    CoreStorageTypeSerializer,
+    StorageCredentialReadSerializerMixin,
+    StorageCredentialWriteSerializerMixin,
+)
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
     StorageDefault,
     bs_encrypt,
-    bs_decrypt,
 )
 from apps.console.backup.models import (
     CoreWebsiteBackupStoragePoints,
@@ -19,8 +22,8 @@ from apps.console.backup.models import (
 from apps.console.storage.models import CoreStorageGoogleCloud, CoreStorage
 
 
-class CoreStorageGoogleCloudReadSerializer(serializers.ModelSerializer):
-    service_key = serializers.SerializerMethodField()
+class CoreStorageGoogleCloudReadSerializer(StorageCredentialReadSerializerMixin, serializers.ModelSerializer):
+    credential_fields = ("service_key", "access_token", "refresh_token")
 
     class Meta:
         model = CoreStorageGoogleCloud
@@ -39,12 +42,12 @@ class CoreStorageGoogleCloudReadSerializer(serializers.ModelSerializer):
             "prefix",
         )
 
-    def get_service_key(self, obj):
-        return bs_decrypt(obj.service_key, self.context["encryption_key"])
-
-
-class CoreStorageGoogleCloudWriteSerializer(serializers.ModelSerializer):
+class CoreStorageGoogleCloudWriteSerializer(StorageCredentialWriteSerializerMixin, serializers.ModelSerializer):
+    credential_fields = ("service_key", "access_token", "refresh_token")
+    credential_groups = (("service_key",), ("access_token", "refresh_token"))
     service_key = serializers.CharField(write_only=True)
+    access_token = serializers.CharField(write_only=True, required=False)
+    refresh_token = serializers.CharField(write_only=True, required=False)
     bucket_name = serializers.CharField(write_only=True)
     no_delete = serializers.BooleanField(allow_null=True, write_only=True, required=False)
     prefix = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True, default="")
@@ -62,7 +65,7 @@ class CoreStorageGoogleCloudWriteSerializer(serializers.ModelSerializer):
 
             data["service_key"] = bs_encrypt(data["service_key"], self.context["encryption_key"])
         except Exception as e:
-            raise serializers.ValidationError(f"Unable to authenticate. {e.__str__()}")
+            raise serializers.ValidationError("Unable to authenticate with the storage provider. Verify the credentials and configuration.")
         return data
 
 

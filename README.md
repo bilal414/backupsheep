@@ -29,14 +29,22 @@
 
 ## Features
 
+BackupSheep's stock self-hosted artifact encryption is local and does not require
+AWS KMS, AWS credentials, or an AWS account. The installer creates separate,
+installation-bound keyrings for database and file backups. The current runtime providers
+are `local-file` for production and `local-development` for development/test only;
+`aws-kms` remains solely as a historical migration/rollback identifier and cannot be
+selected by the current runtime. AWS remains optional only when an operator chooses an
+AWS source, storage destination, or Amazon SES email integration.
+
 ### Backup anything
 
 | Source | Details |
 |---|---|
-| **Websites / files** | FTP, FTPS, SFTP, SSH. Include/exclude rules (regex + glob), parallel transfers, all key types (Ed25519/ECDSA/RSA, incl. passphrase-protected), server-side tar transport for SSH sources. |
+| **Websites / files** | FTPS, SFTP, SSH, and explicit opt-in legacy FTP. Include/exclude rules (regex + glob), parallel transfers, all key types (Ed25519/ECDSA/RSA, incl. passphrase-protected), server-side tar transport for SSH sources. Plain FTP is disabled by default because it exposes credentials and backup data. |
 | **Databases** | MySQL (bundled Oracle MySQL 8.4 client), MariaDB, PostgreSQL (version-matched `pg_dump` 14–18). Direct TCP or SSH tunnel, all databases or per-table selection, stored procedures, SSL/TLS. |
 | **Cloud servers & volumes** | DigitalOcean, AWS (EC2, RDS, Lightsail), Hetzner, Vultr, UpCloud, Oracle Cloud, Google Cloud, OVH (CA/EU/US) — provider-native snapshots. |
-| **SaaS apps** | WordPress, Basecamp. |
+| **SaaS apps** | Basecamp. |
 
 ### Incremental website backups
 
@@ -52,9 +60,9 @@ Or stick with classic **Full mode** — every file, every time.
 Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, DigitalOcean Spaces, Google Cloud
 Storage, Google Drive, Azure Blob, Dropbox, OneDrive, pCloud, IDrive e2, IBM COS,
 Oracle, Scaleway, Linode, Vultr, UpCloud, Exoscale, Filebase, IONOS, Leviia, RackCorp,
-Tencent COS, Alibaba OSS — plus **Local Storage**: keep backups as plain zip files on
-the BackupSheep server's own disk (or any bind-mounted path/NFS). Push every backup to
-several destinations at once.
+Tencent COS, Alibaba OSS — plus **Local Storage**: keep encrypted `.bse1` backup
+artifacts on the BackupSheep server's own disk (or any bind-mounted path/NFS). Push
+every backup to several destinations at once.
 
 ### Immutable S3 archives and lifecycle controls
 
@@ -104,94 +112,74 @@ console does · specialized Celery worker queues you can scale independently.
 
 ## Quick start
 
-### One-command server install
+### Verified server install
 
-On a fresh **Ubuntu 22.04+ or Debian 12+** server, run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash
-```
-
-The installer downloads BackupSheep from GitHub, installs Docker Engine with the Compose
-plugin and Git, generates secure application/database/onboarding secrets, builds the
-stack, and waits for the app health check. It prints the onboarding URL and token at the
-end. It detects the public IPv4 address by default; pass your hostname explicitly when
-you know it:
+The host operator supplies Git, Docker Engine 28.0.0+ and Docker Compose 2.33.1+.
+Choose a reviewed release commit, download the installer from that exact immutable
+commit, inspect it, and run it as the unprivileged user already authorized for Docker:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash -s -- --domain backups.example.com
+COMMIT='<40-character-reviewed-release-commit>'
+curl -fSLo install.sh \
+  "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
+less install.sh
+chmod 700 install.sh
+./install.sh --ref "${COMMIT}" --domain backups.example.com
 ```
 
-The initial install serves plain HTTP on port 8000. Allow that port through your firewall
-if needed, and put the app behind HTTPS before exposing it publicly. See
-[Production deployment](docs/deployment.md).
+Do not pipe a remote script to a shell. The installer does not install packages or
+change Docker, firewall, kernel, daemon, TLS, DNS, or service configuration. It verifies
+the exact checkout, generates protected file-backed secrets, builds the image, and starts
+only PostgreSQL, RabbitMQ, migrations, the security preflight, and the web UI. Provider
+workers and Beat require a later explicit `--enable-operations` after recovery state and
+credentials have been reviewed.
+
+The initial install binds plain HTTP to `127.0.0.1:8000`; do not open that port publicly.
+Use the printed SSH tunnel for onboarding, then put the app behind HTTPS. See
+[Production deployment](docs/guides/production.md).
 
 ### DigitalOcean Droplet
 
 DigitalOcean App Platform's deploy button supports only a single service (optionally with
 a development database), while BackupSheep needs a web process, queue worker, scheduler,
 database, and broker. Create an Ubuntu 22.04+ or Debian 12+ Droplet, then use the
-[one-command installer](docs/digitalocean-droplet.md). It deploys the complete Docker
-Compose stack with persistent volumes.
+[verified installer](docs/digitalocean-droplet.md). It deploys the complete Docker
+Compose definition with persistent volumes, while leaving backup workers and Beat off
+until the operator explicitly enables operations.
 
 ### Other cloud VMs
 
 The same complete installer works on fresh Ubuntu 22.04+ or Debian 12+ VMs from **AWS**,
 **Azure**, **Google Cloud**, **Hetzner**, **Vultr**, **Akamai/Linode**, **OVHcloud**,
 **Scaleway**, **UpCloud**, and similar providers. The [cloud VM guide](docs/cloud-vms.md)
-includes the exact one-command and reusable cloud-init configuration. This is the preferred
-path for durable local archives and independently scalable worker pools.
+includes the exact verified-install commands. Unattended root cloud-init installation is
+intentionally disabled; host provisioning remains the operator's responsibility. This is
+the preferred path for durable local archives and independently scalable worker pools.
 
-### Render
+### Managed one-click platforms
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/bilal414/backupsheep/tree/main)
-
-The Render Blueprint deploys the web console, one all-queue Celery worker, Beat, managed
-PostgreSQL, and a private RabbitMQ service with persistent storage. Enter a private
-onboarding token during setup, then use external object storage for backups—**Local
-Storage** is not suitable for this PaaS deployment. See the [Render guide](docs/render.md)
-for its sizing and worker limitations.
-
-### Heroku
-
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/bilal414/backupsheep/tree/main)
-
-The Heroku button provisions PostgreSQL, CloudAMQP's **RabbitMQ** Little Lemur plan, and
-separate web, worker, and Beat processes. Enter an onboarding token and the app's public
-hostname during setup; use external object storage for backup archives. See the
-[Heroku guide](docs/heroku.md) for its limits and production sizing.
-
-### Railway
-
-Railway requires a published multi-service template before it can issue a Deploy on Railway
-button. The repository includes the versioned service configurations and exact template
-publication steps in the [Railway guide](docs/railway.md). It provisions web, worker, Beat,
-PostgreSQL, and a private RabbitMQ service in one project; use external object storage for
-backup archives.
+BackupSheep does not ship Render, Heroku, or Railway one-click templates. Their
+monolithic worker and shared-environment models cannot satisfy the production lane,
+file-keyring, filesystem, and identity boundaries. Use the verified Docker installer on
+a VM, or the documented split-process non-Docker deployment contract; do not adapt an old
+one-click manifest for production.
 
 ### Manual Docker Compose install
 
-You need [Docker](https://docs.docker.com/get-docker/) with the Compose plugin, and `git`.
+The manual path uses the same exact-commit checkout, `.secrets` file mounts, core-only
+default startup, and explicit `operations` profile. Follow the complete
+[Docker installation guide](docs/guides/installation.md); a plain `.env` containing
+database or broker passwords is no longer the supported security model. Use the shipped
+`./backupsheep-compose` wrapper for manual operations so ambient Compose/Bake/profile
+variables and implicit override discovery cannot change the reviewed model.
 
-```bash
-git clone <your-fork-or-this-repo-url> backupsheep
-cd backupsheep
-
-cp .env_sample .env
-# Edit .env and set at least:
-#   DJANGO_SECRET_KEY  -> a long random string (python -c "import secrets; print(secrets.token_urlsafe(64))")
-#   DB_PASSWORD        -> a database password of your choice
-# The other defaults already target the bundled db/rabbitmq services.
-
-docker compose up --build
-```
-
-Open **http://localhost:8000/** — the first-run wizard guides you through creating the
-admin account, email, storage, and your first source.
+After the core preflight passes, open **http://localhost:8000/** on the Docker host. The
+first-run wizard guides you through creating the admin account, email, storage, and your
+first source.
 
 > The app serves plain HTTP on port 8000 and is meant to sit behind your own
 > TLS-terminating reverse proxy in production. Before exposing it, read
-> **[docs/deployment.md](docs/deployment.md)**.
+> **[Production deployment guide](docs/guides/production.md)**.
 
 ---
 
@@ -238,22 +226,19 @@ Celery, Alpine.js + Tailwind CSS. See [docs/scaling.md](docs/scaling.md).
 
 ## Documentation
 
-| Guide | What's in it |
-|-------|--------------|
-| [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, the `.env` you must edit |
-| [DigitalOcean Droplet](docs/digitalocean-droplet.md) | Deploy the complete Docker stack with the one-command installer |
-| [Cloud VMs](docs/cloud-vms.md) | One-command/cloud-init deployments on AWS, Azure, Google Cloud, and VM providers |
-| [Render](docs/render.md) | Deploy the web, worker, scheduler, PostgreSQL, and private RabbitMQ stack |
-| [Heroku](docs/heroku.md) | Deploy via Heroku Button with PostgreSQL and managed RabbitMQ |
-| [Railway](docs/railway.md) | Publish the ready-to-configure multi-service Railway deployment template |
-| [Configuration](docs/configuration.md) | Environment-variable reference, incl. `BS_LOCAL_STORAGE_PATH` |
-| [Immutable backups & lifecycle](docs/immutable-backups-and-lifecycle.md) | S3 Object Lock, air-gapped copy policy, lifecycle tiering, and cost projections |
-| [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |
-| [Usage](docs/usage.md) | Sources, storage, schedules, backup modes, retention, **restores**, dashboard, teams & permissions, notifications, activity log |
-| [Providers](docs/providers.md) | Every backup source & storage destination, and what each needs |
-| [Production deployment](docs/deployment.md) | HTTPS/reverse proxy, hardening, storage volumes, secrets |
-| [Scaling & operations](docs/scaling.md) | Worker queues, scaling uploads, the beat singleton, multi-host |
-| [Troubleshooting](docs/troubleshooting.md) | Common failures, FAQ, known limitations |
+The [documentation hub](docs/README.md) is the best starting point. It separates
+current user and operator guidance from dated engineering test reports.
+
+| Area | Start here |
+|-------|------------|
+| Install and configure | [Installation](docs/guides/installation.md) · [Configuration](docs/guides/configuration.md) · [First run](docs/guides/first-run.md) |
+| Learn the product | [Feature guide](docs/features/README.md) · [Core concepts](docs/features/core-concepts.md) · [Console workflows](docs/features/console-workflows.md) |
+| Sources and destinations | [Backup sources](docs/features/backup-sources.md) · [Storage destinations](docs/features/storage-destinations.md) · [Provider matrix](docs/reference/provider-matrix.md) |
+| Backups and recovery | [Schedules and policies](docs/features/schedules-and-policies.md) · [Executions and history](docs/features/executions-and-history.md) · [Restores](docs/features/restores.md) |
+| Teams and alerts | [Teams, tenancy, and API access](docs/features/teams-tenancy-and-api-access.md) · [Notifications](docs/features/notifications.md) |
+| Automate | [REST API](docs/api/README.md) · [Endpoint reference](docs/api/reference.md) · [Bruno collection](bruno/README.md) |
+| Operate safely | [Production](docs/guides/production.md) · [Operations](docs/guides/operations.md) · [Upgrades](docs/guides/upgrades.md) · [Disaster recovery](docs/guides/disaster-recovery.md) · [Troubleshooting](docs/guides/troubleshooting.md) |
+| Technical reference | [Architecture](docs/reference/architecture.md) · [Environment variables](docs/reference/environment-variables.md) |
 
 Also: [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
 

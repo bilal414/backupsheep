@@ -1,4 +1,5 @@
 from django.db.models import Q
+from apps.api.v1.utils.api_helpers import provider_connections_for_action
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
 from rest_framework import viewsets
@@ -17,6 +18,7 @@ from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, Integrati
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
+from ..view_helpers import safe_connection_action
 
 
 class CoreVultrView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -45,11 +47,9 @@ class CoreVultrView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         }
 
     def get_queryset(self):
-        member = self.request.user.member
-        query = Q(account=member.get_current_account(), integration__code="vultr")
-        # query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        queryset = CoreConnection.objects.filter(query)
-        return queryset
+        return provider_connections_for_action(self.request, getattr(self, "action", None)).filter(
+            integration__code="vultr"
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -66,19 +66,21 @@ class CoreVultrView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         endpoints = CoreConnectionLocation.objects.filter(integrations__code="vultr").values()
         return Response(endpoints)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
+    @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:
             connection = self.get_object()
             validation = connection.validate()
             if validation:
-                return Response({"detail": "Validation passed. Integration is good for backups."}, status=status.HTTP_200_OK)
+                return Response({"detail": "Provider credentials and account access were validated. No backup or recovery was tested."}, status=status.HTTP_200_OK)
             else:
-                return Response({"detail": "Validation failed. Backups will fail. Check integration details immediately."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Provider access validation failed. Review credentials and permissions before using this connection."}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             raise IntegrationValidationError(e.__str__())
 
     @action(detail=True, methods=["get"])
+    @safe_connection_action(stage="object_discovery")
     def objects(self, request, pk=None):
         try:
             connection = self.get_object()

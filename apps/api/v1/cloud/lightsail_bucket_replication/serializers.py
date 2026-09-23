@@ -1,7 +1,9 @@
 from urllib.parse import urlparse
 
 from rest_framework import serializers
+from sentry_sdk import capture_exception
 
+from apps._tasks.integration.lightsail_bucket import safe_failure_details
 from apps.console.backup.replication_models import (
     CoreLightsailBucketReplication,
     CoreLightsailBucketReplicationObject,
@@ -12,16 +14,76 @@ from apps.console.connection.models import CoreConnection
 from apps.console.storage.models import CoreStorage
 
 
-class CoreLightsailBucketReplicationRunSerializer(serializers.ModelSerializer):
+def _safe_error_payload(instance):
+    raw = getattr(instance, "error", "")
+    if not raw:
+        return None
+    return safe_failure_details(
+        raw,
+        fallback_correlation_id=str(getattr(instance, "uuid", "")),
+    )
+
+
+class SafeFailureFieldsMixin:
+    error = serializers.SerializerMethodField()
+    error_details = serializers.SerializerMethodField()
+    error_code = serializers.SerializerMethodField()
+    error_status = serializers.SerializerMethodField()
+    retryable = serializers.SerializerMethodField()
+    correlation_id = serializers.SerializerMethodField()
+    retry_after_seconds = serializers.SerializerMethodField()
+
+    def _failure(self, instance):
+        return _safe_error_payload(instance)
+
+    def get_error(self, instance):
+        payload = self._failure(instance)
+        return payload.get("message") if payload else None
+
+    def get_error_details(self, instance):
+        return self._failure(instance)
+
+    def get_error_code(self, instance):
+        payload = self._failure(instance)
+        return payload.get("code") if payload else None
+
+    def get_error_status(self, instance):
+        payload = self._failure(instance)
+        return payload.get("status") if payload else None
+
+    def get_retryable(self, instance):
+        payload = self._failure(instance)
+        return payload.get("retryable") if payload else None
+
+    def get_correlation_id(self, instance):
+        payload = self._failure(instance)
+        return payload.get("correlation_id") if payload else None
+
+    def get_retry_after_seconds(self, instance):
+        payload = self._failure(instance)
+        return payload.get("retry_after_seconds") if payload else None
+
+
+class CoreLightsailBucketReplicationRunSerializer(
+    SafeFailureFieldsMixin, serializers.ModelSerializer
+):
     status_display = serializers.CharField(source="get_status_display", read_only=True)
+    error = serializers.SerializerMethodField()
+    error_details = serializers.SerializerMethodField()
+    error_code = serializers.SerializerMethodField()
+    error_status = serializers.SerializerMethodField()
+    retryable = serializers.SerializerMethodField()
+    correlation_id = serializers.SerializerMethodField()
+    retry_after_seconds = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreLightsailBucketReplicationRun
-        fields = "__all__"
-        read_only_fields = (
+        fields = (
+            "id",
             "uuid",
-            "celery_task_id",
+            "replication",
             "status",
+            "status_display",
             "started_at",
             "completed_at",
             "object_count",
@@ -29,35 +91,93 @@ class CoreLightsailBucketReplicationRunSerializer(serializers.ModelSerializer):
             "failed_count",
             "delete_marker_count",
             "bytes_transferred",
-            "manifest_key",
-            "manifest",
             "error",
+            "error_details",
+            "error_code",
+            "error_status",
+            "retryable",
+            "correlation_id",
+            "retry_after_seconds",
+        )
+        read_only_fields = (
+            "id",
+            "uuid",
+            "replication",
+            "status",
+            "status_display",
+            "started_at",
+            "completed_at",
+            "object_count",
+            "completed_count",
+            "failed_count",
+            "delete_marker_count",
+            "bytes_transferred",
+            "error",
+            "error_details",
+            "error_code",
+            "error_status",
+            "retryable",
+            "correlation_id",
+            "retry_after_seconds",
         )
 
 
-class CoreLightsailBucketReplicationObjectSerializer(serializers.ModelSerializer):
+class CoreLightsailBucketReplicationObjectSerializer(
+    SafeFailureFieldsMixin, serializers.ModelSerializer
+):
     status_display = serializers.CharField(source="get_status_display", read_only=True)
+    error = serializers.SerializerMethodField()
+    error_details = serializers.SerializerMethodField()
+    error_code = serializers.SerializerMethodField()
+    error_status = serializers.SerializerMethodField()
+    retryable = serializers.SerializerMethodField()
+    correlation_id = serializers.SerializerMethodField()
+    retry_after_seconds = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreLightsailBucketReplicationObject
-        fields = "__all__"
-        read_only_fields = tuple(
-            field.name
-            for field in CoreLightsailBucketReplicationObject._meta.fields
-            if field.name not in {"id", "created", "modified"}
+        fields = (
+            "id",
+            "run",
+            "status",
+            "status_display",
+            "source_size",
+            "bytes_transferred",
+            "attempt_count",
+            "created",
+            "modified",
+            "error",
+            "error_details",
+            "error_code",
+            "error_status",
+            "retryable",
+            "correlation_id",
+            "retry_after_seconds",
         )
+        read_only_fields = fields
 
 
-class CoreLightsailBucketRestoreRunSerializer(serializers.ModelSerializer):
+class CoreLightsailBucketRestoreRunSerializer(
+    SafeFailureFieldsMixin, serializers.ModelSerializer
+):
     status_display = serializers.CharField(source="get_status_display", read_only=True)
+    error = serializers.SerializerMethodField()
+    error_details = serializers.SerializerMethodField()
+    error_code = serializers.SerializerMethodField()
+    error_status = serializers.SerializerMethodField()
+    retryable = serializers.SerializerMethodField()
+    correlation_id = serializers.SerializerMethodField()
+    retry_after_seconds = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreLightsailBucketRestoreRun
-        fields = "__all__"
-        read_only_fields = (
+        fields = (
+            "id",
             "uuid",
-            "celery_task_id",
+            "replication",
+            "source_run",
             "status",
+            "status_display",
             "started_at",
             "completed_at",
             "object_count",
@@ -65,12 +185,35 @@ class CoreLightsailBucketRestoreRunSerializer(serializers.ModelSerializer):
             "skipped_count",
             "failed_count",
             "bytes_restored",
-            "completed_objects",
-            "manifest",
-            "lease_owner",
-            "lease_token",
-            "lease_expires_at",
             "error",
+            "error_details",
+            "error_code",
+            "error_status",
+            "retryable",
+            "correlation_id",
+            "retry_after_seconds",
+        )
+        read_only_fields = (
+            "id",
+            "uuid",
+            "replication",
+            "source_run",
+            "status",
+            "status_display",
+            "started_at",
+            "completed_at",
+            "object_count",
+            "completed_count",
+            "skipped_count",
+            "failed_count",
+            "bytes_restored",
+            "error",
+            "error_details",
+            "error_code",
+            "error_status",
+            "retryable",
+            "correlation_id",
+            "retry_after_seconds",
         )
 
 
@@ -80,8 +223,26 @@ class CoreLightsailBucketReplicationReadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CoreLightsailBucketReplication
-        fields = "__all__"
-        read_only_fields = ("account", "last_run", "status", "metadata")
+        fields = (
+            "id",
+            "uuid",
+            "name",
+            "source_connection",
+            "destination_storage",
+            "include_versions",
+            "part_size_bytes",
+            "lease_seconds",
+            "status",
+            "status_display",
+            "enabled",
+            "interval_minutes",
+            "next_run_at",
+            "last_run",
+            "last_run_summary",
+            "created",
+            "modified",
+        )
+        read_only_fields = fields
 
     @staticmethod
     def get_last_run_summary(obj):
@@ -98,11 +259,36 @@ class CoreLightsailBucketReplicationWriteSerializer(serializers.ModelSerializer)
     destination_storage = serializers.PrimaryKeyRelatedField(
         queryset=CoreStorage.objects.all()
     )
+    source_bucket_name = serializers.CharField(write_only=True)
+    source_prefix = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    source_endpoint_url = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+    )
+    destination_prefix = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+    )
 
     class Meta:
         model = CoreLightsailBucketReplication
-        fields = "__all__"
-        read_only_fields = ("account", "uuid", "last_run", "status", "metadata")
+        fields = (
+            "name",
+            "source_connection",
+            "source_bucket_name",
+            "source_prefix",
+            "source_endpoint_url",
+            "destination_storage",
+            "destination_prefix",
+            "include_versions",
+            "part_size_bytes",
+            "lease_seconds",
+            "enabled",
+            "interval_minutes",
+        )
+        read_only_fields = ()
 
     def validate(self, attrs):
         request = self.context.get("request")
@@ -132,6 +318,7 @@ class CoreLightsailBucketReplicationWriteSerializer(serializers.ModelSerializer)
         try:
             connection.auth_lightsail
         except Exception as error:
+            capture_exception(getattr(error, "__cause__", None) or error)
             raise serializers.ValidationError(
                 {"source_connection": "The Lightsail connection has no credentials configured."}
             ) from error

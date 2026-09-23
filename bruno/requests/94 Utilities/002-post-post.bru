@@ -1,0 +1,38 @@
+meta {
+  name: POST /api/v1/utils/ssh-host-keys/preview/
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/v1/utils/ssh-host-keys/preview/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "host": "{{sshHost}}",
+    "port": "{{sshPort}}"
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-api-v1-utils-ssh-host-keys-preview`
+
+  Requires `Authorization: Token <key>`. Live network probe; no durable approval is written.
+
+  Django action: `apps.api.v1.utils.views.SSHHostKeyPreviewView.post`
+  Source: `apps/api/v1/utils/views.py`
+}

@@ -1,52 +1,366 @@
 import io
+import base64
+import ftplib
+import hashlib
 import json
 import os
+import shlex
 import shutil
+import ssl
 import subprocess
 import stat
+import struct
 import tempfile
 import time
 import uuid
 import zipfile
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 
+import requests as raw_requests
+from botocore.exceptions import ClientError
 from celery.exceptions import MaxRetriesExceededError, Retry
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.conf import settings
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps._tasks.exceptions import (
     IntegrationValidationError,
     NodeBackupFailedError,
+    NodeConnectionErrorWebsite,
     NodeConnectionErrorSFTP,
 )
 from apps._tasks.helper import tasks as helper_tasks
 from apps._tasks.integration.backup import mariadb as MDB_ENGINE
 from apps._tasks.integration.backup import mysql as MYSQL_ENGINE
+from apps._tasks.integration.backup import _mysql_schema as MYSQL_SCHEMA
 from apps._tasks.integration.backup import postgresql as PG_ENGINE
 from apps._tasks.integration.backup import website as W
+from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
+from apps._tasks.integration.backup._sanitize import (
+    UnsafeBackupInput,
+    safe_positional_token,
+)
+from apps._tasks.integration.backup.errors import BackupStageError, safe_backup_failure
 from apps._tasks.integration.database import backup_database
 from apps._tasks.integration.website import backup_website
+from apps._tasks.managed_ssh import validate_managed_ssh_files_connection
+from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer
 from apps.api.v1.node.views import CoreNodeView
-from apps.api.v1.utils.api_helpers import bs_encrypt, ensure_disk_space, zipdir
+from apps.api.v1.utils.api_helpers import (
+    bs_encrypt,
+    ensure_disk_space,
+    FtpImplicitTlsSession,
+    FtpSession,
+    FtpTlsSession,
+    ftp_tls_session_factory,
+    zipdir,
+)
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreDigitalOceanBackup,
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
+    _stop_legacy_backup_container,
 )
 from apps.console.connection.models import (
     CoreAuthDatabase,
     CoreAuthDigitalOcean,
     CoreAuthWebsite,
     CoreConnection,
+    CoreSSHHostKeyApproval,
 )
-from apps.console.node.models import CoreDatabase, CoreNode, CoreWebsite
-from apps.console.storage.models import CoreStorageLocal
-from apps.console.utils.models import UtilBackup
+from apps.console.connection.managed_ssh import create_managed_ssh_operation
+from apps.console.connection.ssh import normalize_ssh_host
+from apps.console.node.models import (
+    CoreDatabase,
+    CoreNode,
+    CoreWebsite,
+    _clear_local_backup_artifacts,
+    _resume_local_backup_owned,
+)
+from apps.console.storage.models import CoreStorage, CoreStorageLocal
+from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
+
+
+def _approve_test_ssh_host(account, member, host, port):
+    """Create the exact tenant approval expected by persisted SSH clients."""
+
+    normalized_host = normalize_ssh_host(host)
+    existing = CoreSSHHostKeyApproval.objects.filter(
+        account=account,
+        normalized_host=normalized_host,
+        port=port,
+    ).first()
+    if existing is not None:
+        return existing
+
+    public_bytes = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    wire_type = b"ssh-ed25519"
+    host_blob = (
+        struct.pack(">I", len(wire_type))
+        + wire_type
+        + struct.pack(">I", len(public_bytes))
+        + public_bytes
+    )
+    return CoreSSHHostKeyApproval.objects.create(
+        account=account,
+        normalized_host=normalized_host,
+        port=port,
+        wire_key_type="ssh-ed25519",
+        public_key_base64=base64.b64encode(host_blob).decode("ascii"),
+        fingerprint=(
+            "SHA256:"
+            + base64.b64encode(hashlib.sha256(host_blob).digest())
+            .decode("ascii")
+            .rstrip("=")
+        ),
+        negotiated_host_key_algorithm="ssh-ed25519",
+        bits=256,
+        approved_by_member_pk_snapshot=member.pk,
+        approved_by_user_pk_snapshot=member.user_id,
+    )
+
+
+def _activate_test_customer_ssh_connection(connection):
+    """Project a customer-key fixture active after its mocked validation."""
+
+    connection.refresh_from_db()
+    connection.status = CoreConnection.Status.ACTIVE
+    connection.save(update_fields=("status", "modified"))
+    connection.refresh_from_db()
+    return connection
+
+
+def _test_managed_public_key(marker):
+    wire_type = b"ssh-ed25519"
+    blob = (
+        struct.pack(">I", len(wire_type))
+        + wire_type
+        + struct.pack(">I", 32)
+        + bytes(marker) * 32
+    )
+    return "ssh-ed25519 " + base64.b64encode(blob).decode("ascii")
+
+
+TEST_MANAGED_SSH_SETTINGS = {
+    "SSH_MANAGED_PUBLIC_KEY": "",
+    "SSH_MANAGED_DATABASE_PUBLIC_KEY": _test_managed_public_key(b"d"),
+    "SSH_MANAGED_FILES_PUBLIC_KEY": _test_managed_public_key(b"f"),
+    "SSH_MANAGED_LANE_ISOLATION_REQUIRED": True,
+}
+
+
+def _authorize_test_backup_destination(node, backup, storage=None):
+    """Commit the same non-secret storage-lane witness a source worker requires."""
+
+    storage = storage or factories.make_storage(
+        node.connection.account,
+        node.added_by,
+        bucket=f"authorized-{uuid.uuid4().hex}",
+    )
+    metadata = dict(backup.metadata or {})
+    metadata.update(
+        {
+            "_backup_storage_ids": [storage.pk],
+            "_backup_storage_invalid_id_count": 0,
+            "_backup_destination_setup": {"state": "complete"},
+        }
+    )
+    backup.metadata = metadata
+    backup.save(update_fields=("metadata", "modified"))
+    backup.storage_points.add(storage)
+    node._authorize_local_backup_destinations(backup, [storage.pk])
+    return node._local_destination_point_model(backup).objects.get(
+        backup_id=backup.pk,
+        storage_id=storage.pk,
+    )
+
+
+class LegacyContainerStopSafetyTests(TestCase):
+    def test_stop_uses_fixed_argv_for_a_canonical_backup_uuid(self):
+        identifier = "12345678-1234-4234-8234-123456789abc"
+        with mock.patch(
+            "apps.console.backup.models.shutil.which", return_value="/usr/bin/docker"
+        ), mock.patch("apps.console.backup.models.subprocess.run") as run:
+            _stop_legacy_backup_container(f"{identifier}-storage")
+
+        run.assert_called_once_with(
+            ["/usr/bin/docker", "stop", f"{identifier}-storage"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=60,
+        )
+
+    def test_stop_rejects_noncanonical_or_shell_shaped_names(self):
+        for candidate in (
+            "12345678123442348234123456789abc",
+            "12345678-1234-4234-8234-123456789abc;id",
+            "../../another-container",
+            "",
+        ):
+            with self.subTest(candidate=candidate), mock.patch(
+                "apps.console.backup.models.shutil.which"
+            ) as which, mock.patch(
+                "apps.console.backup.models.subprocess.run"
+            ) as run:
+                _stop_legacy_backup_container(candidate)
+                which.assert_not_called()
+                run.assert_not_called()
+
+    def test_stop_is_a_noop_without_a_docker_client(self):
+        with mock.patch(
+            "apps.console.backup.models.shutil.which", return_value=None
+        ), mock.patch("apps.console.backup.models.subprocess.run") as run:
+            _stop_legacy_backup_container(
+                "12345678-1234-4234-8234-123456789abc"
+            )
+        run.assert_not_called()
+
+
+class PlainFtpSecureDefaultTests(TestCase):
+    @override_settings(ALLOW_INSECURE_FTP=False)
+    def test_connection_validation_rejects_plain_ftp_before_network_access(self):
+        for protocol in (CoreAuthWebsite.Protocol.FTP, "1"):
+            with self.subTest(protocol=protocol), mock.patch(
+                "ftputil.FTPHost"
+            ) as ftp_host, self.assertRaisesRegex(
+                NodeConnectionErrorWebsite,
+                "Plain FTP is disabled",
+            ):
+                CoreAuthWebsite().check_connection(
+                    data={
+                        "host": "ftp.example.test",
+                        "port": 21,
+                        "username": "user",
+                        "password": "secret",
+                        "protocol": protocol,
+                    }
+                )
+
+            ftp_host.assert_not_called()
+
+    @override_settings(ALLOW_INSECURE_FTP=False)
+    def test_direct_plain_ftp_session_is_denied_before_connect(self):
+        with mock.patch.object(ftplib.FTP, "connect") as connect, self.assertRaisesRegex(
+            RuntimeError,
+            "Plain FTP is disabled",
+        ):
+            FtpSession("ftp.example.test", "user", "secret", 21)
+
+        connect.assert_not_called()
+
+    def test_invalid_protocol_fails_closed_before_network_access(self):
+        with mock.patch("ftputil.FTPHost") as ftp_host, self.assertRaisesRegex(
+            NodeConnectionErrorWebsite,
+            "missing or unsupported",
+        ):
+            CoreAuthWebsite().check_connection(
+                data={
+                    "host": "ftp.example.test",
+                    "port": 21,
+                    "username": "user",
+                    "password": "secret",
+                    "protocol": "invalid",
+                }
+            )
+
+        ftp_host.assert_not_called()
+
+
+class FtpsSessionSecurityTests(TestCase):
+    def _session(self, *, verify_ssl, explicit):
+        with mock.patch.object(ftplib.FTP_TLS, "connect"), mock.patch.object(
+            ftplib.FTP_TLS, "login"
+        ), mock.patch.object(ftplib.FTP_TLS, "prot_p"):
+            return ftp_tls_session_factory(
+                verify_ssl=verify_ssl,
+                explicit=explicit,
+            )("ftps.example.test", "user", "secret", 990)
+
+    def test_verified_explicit_ftps_requires_certificate_and_hostname(self):
+        session = self._session(verify_ssl=True, explicit=True)
+
+        self.assertIsInstance(session, FtpTlsSession)
+        self.assertEqual(session.context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(session.context.check_hostname)
+
+    def test_verified_implicit_ftps_requires_certificate_and_hostname(self):
+        session = self._session(verify_ssl=True, explicit=False)
+
+        self.assertIsInstance(session, FtpImplicitTlsSession)
+        self.assertEqual(session.context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(session.context.check_hostname)
+
+    def test_certificate_verification_opt_out_still_uses_explicit_tls(self):
+        session = self._session(verify_ssl=False, explicit=True)
+
+        self.assertIsInstance(session, FtpTlsSession)
+        self.assertEqual(session.context.verify_mode, ssl.CERT_NONE)
+        self.assertFalse(session.context.check_hostname)
+
+    def test_certificate_verification_opt_out_still_uses_implicit_tls(self):
+        session = self._session(verify_ssl=False, explicit=False)
+
+        self.assertIsInstance(session, FtpImplicitTlsSession)
+        self.assertEqual(session.context.verify_mode, ssl.CERT_NONE)
+        self.assertFalse(session.context.check_hostname)
+
+    def test_implicit_ftps_wraps_control_socket_with_sni(self):
+        session = object.__new__(FtpImplicitTlsSession)
+        session._implicit_server_hostname = "implicit.example.test"
+        session._sock = None
+        session.context = mock.Mock()
+        raw_socket = mock.sentinel.raw_socket
+        wrapped_socket = mock.sentinel.wrapped_socket
+        session.context.wrap_socket.return_value = wrapped_socket
+
+        session.sock = raw_socket
+
+        session.context.wrap_socket.assert_called_once_with(
+            raw_socket,
+            server_hostname="implicit.example.test",
+        )
+        self.assertIs(session.sock, wrapped_socket)
+
+    def test_connection_validation_honors_ftps_mode_and_verify_policy(self):
+        with mock.patch(
+            "apps.api.v1.utils.api_helpers.ftp_tls_session_factory",
+            return_value=mock.sentinel.session_factory,
+        ) as session_factory, mock.patch("ftputil.FTPHost") as ftp_host:
+            CoreAuthWebsite().check_connection(
+                data={
+                    "host": "ftps.example.test",
+                    "port": 990,
+                    "username": "user",
+                    "password": "secret",
+                    "protocol": CoreAuthWebsite.Protocol.FTPS,
+                    "verify_ssl": False,
+                    "ftps_use_explicit_ssl": False,
+                }
+            )
+
+        session_factory.assert_called_once_with(
+            verify_ssl=False,
+            explicit=False,
+        )
+        ftp_host.assert_called_once_with(
+            "ftps.example.test",
+            "user",
+            "secret",
+            port=990,
+            session_factory=mock.sentinel.session_factory,
+        )
 
 
 class PollCloudBackupTests(BaseTestCase):
@@ -79,6 +393,81 @@ class PollCloudBackupTests(BaseTestCase):
         self.assertEqual(backup.status, UtilBackup.Status.FAILED)
         notify.assert_called_once()
 
+    def test_provider_failure_code_survives_notification_correlation(self):
+        node, backup = self._backup()
+        execution = backup.record_execution_error(
+            code="PROVIDER_OWNERSHIP_MISMATCH",
+            message="provider response must never be persisted",
+        )
+        execution.reconciliation_state = execution.ReconciliationState.MANUAL_REVIEW
+        execution.reconciliation_reason = "PROVIDER_OWNERSHIP_MISMATCH"
+        execution.reconciliation_metadata = {"proof": "durable"}
+        execution.save(
+            update_fields=[
+                "reconciliation_state",
+                "reconciliation_reason",
+                "reconciliation_metadata",
+                "modified",
+            ]
+        )
+
+        with mock.patch.object(
+            CoreDigitalOceanBackup,
+            "poll_status",
+            return_value=UtilBackup.Status.FAILED,
+        ), mock.patch.object(
+            backup.__class__, "record_execution_error", wraps=backup.record_execution_error
+        ) as record_error, mock.patch(
+            "apps.console.account.models.CoreAccount.create_log"
+        ):
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        record_error.assert_not_called()
+        backup.refresh_from_db()
+        persisted = backup.get_execution_state(create=False)
+        self.assertEqual(persisted.last_error_code, "PROVIDER_OWNERSHIP_MISMATCH")
+        self.assertEqual(
+            persisted.last_error_message,
+            "Provider ownership verification failed.",
+        )
+        self.assertEqual(
+            persisted.reconciliation_state,
+            persisted.ReconciliationState.MANUAL_REVIEW,
+        )
+        self.assertEqual(persisted.reconciliation_metadata, {"proof": "durable"})
+
+        with mock.patch.object(node, "notify_backup_fail") as notify:
+            helper_tasks._notify_cloud_failure_once(
+                node, backup, True, UtilBackup.Status.FAILED
+            )
+        notification_error = notify.call_args.args[0]
+        self.assertEqual(
+            notification_error.error_code, "PROVIDER_OWNERSHIP_MISMATCH"
+        )
+        contract = node._backup_notification_contract(notification_error)
+        self.assertEqual(contract["code"], "PROVIDER_OWNERSHIP_MISMATCH")
+        self.assertIn("ownership", contract["remediation"].lower())
+
+    def test_notification_lookup_failure_uses_generic_safe_contract(self):
+        node, backup = self._backup()
+        sensitive_lookup_detail = "provider-token=do-not-leak-or-persist"
+
+        with mock.patch.object(
+            backup,
+            "get_execution_state",
+            side_effect=RuntimeError(sensitive_lookup_detail),
+        ), mock.patch.object(node, "notify_backup_fail") as notify:
+            helper_tasks._notify_cloud_failure_once(
+                node, backup, True, UtilBackup.Status.FAILED
+            )
+
+        notify.assert_called_once()
+        notification_error = notify.call_args.args[0]
+        contract = node._backup_notification_contract(notification_error)
+        self.assertEqual(contract["code"], "SOURCE_EXPORT_FAILED")
+        self.assertNotIn(sensitive_lookup_detail, str(notification_error))
+        self.assertNotIn(sensitive_lookup_detail, str(contract))
+
     def test_in_progress_requeues(self):
         node, backup = self._backup()
         with mock.patch.object(CoreDigitalOceanBackup, "poll_status",
@@ -87,6 +476,64 @@ class PollCloudBackupTests(BaseTestCase):
             helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
         requeue.assert_called_once()
         self.assertIn("countdown", requeue.call_args.kwargs)
+
+    def test_escaped_timeout_is_categorized_and_requeued(self):
+        node, backup = self._backup()
+        canary = "Bearer provider-token"
+        with mock.patch.object(
+            CoreDigitalOceanBackup,
+            "poll_status",
+            side_effect=raw_requests.Timeout(canary),
+        ), mock.patch.object(helper_tasks.poll_cloud_backup, "apply_async") as requeue:
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        execution = backup.execution_records.get()
+        self.assertEqual(execution.last_error_code, "PROVIDER_TIMEOUT")
+        self.assertNotIn(canary, execution.last_error_message)
+        requeue.assert_called_once()
+
+    def test_escaped_auth_failure_is_terminal_not_in_progress(self):
+        node, backup = self._backup()
+        error = ClientError(
+            {
+                "Error": {"Code": "AccessDenied", "Message": "secret body"},
+                "ResponseMetadata": {"HTTPStatusCode": 403},
+            },
+            "DescribeSnapshots",
+        )
+        with mock.patch.object(
+            CoreDigitalOceanBackup, "poll_status", side_effect=error
+        ), mock.patch.object(CoreNode, "notify_backup_fail") as notify:
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        backup.refresh_from_db()
+        execution = backup.execution_records.get()
+        self.assertEqual(backup.status, UtilBackup.Status.FAILED)
+        self.assertEqual(execution.last_error_code, "PROVIDER_AUTH_FAILED")
+        self.assertNotIn("secret body", execution.last_error_message)
+        notify.assert_called_once()
+
+    def test_rate_limit_retry_deadline_controls_next_poll(self):
+        node, backup = self._backup()
+
+        def rate_limited(instance):
+            instance.record_execution_error(
+                code="PROVIDER_RATE_LIMIT",
+                retry_at=timezone.now() + timedelta(seconds=600),
+            )
+            return UtilBackup.Status.IN_PROGRESS
+
+        with mock.patch.object(
+            CoreDigitalOceanBackup,
+            "poll_status",
+            autospec=True,
+            side_effect=rate_limited,
+        ), mock.patch.object(helper_tasks.poll_cloud_backup, "apply_async") as requeue:
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        countdown = requeue.call_args.kwargs["countdown"]
+        self.assertGreaterEqual(countdown, 598)
+        self.assertLessEqual(countdown, 600)
 
     def test_second_poller_is_blocked_by_database_lease(self):
         node, backup = self._backup()
@@ -204,16 +651,19 @@ class LocalFinalizerTests(BaseTestCase):
 
 
 class ProviderPollStatusResilienceTests(BaseTestCase):
-    def test_poll_status_never_raises_on_api_error(self):
-        # No auth_digitalocean is configured, so get_client() blows up inside poll_status;
-        # the contract is to return IN_PROGRESS, never raise.
+    def test_poll_status_missing_auth_is_terminal_and_categorized(self):
+        # Missing local provider credentials are not a transient provider operation.
         node = factories.make_cloud_node(self.account, self.member, code="digitalocean")
         backup = CoreDigitalOceanBackup.objects.create(
             digitalocean=node.digitalocean, status=UtilBackup.Status.IN_PROGRESS, action_id="A1",
         )
-        self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
+        self.assertEqual(backup.poll_status(), UtilBackup.Status.FAILED)
+        self.assertEqual(
+            backup.execution_records.get().last_error_code,
+            "PROVIDER_AUTH_FAILED",
+        )
 
-    def test_digitalocean_volume_waits_for_snapshot(self):
+    def test_digitalocean_persisted_snapshot_404_is_terminal(self):
         node = factories.make_cloud_node(
             self.account,
             self.member,
@@ -225,19 +675,29 @@ class ProviderPollStatusResilienceTests(BaseTestCase):
             status=UtilBackup.Status.IN_PROGRESS,
             unique_id="snapshot-1",
         )
-        not_found = SimpleNamespace(status_code=404, json=lambda: {})
-        empty_list = SimpleNamespace(
-            status_code=200,
-            json=lambda: {"snapshots": None, "meta": {"total": 0}},
+        CoreAuthDigitalOcean.objects.create(
+            connection=node.connection,
+            api_key=bs_encrypt(
+                "test-token", self.account.get_encryption_key()
+            ),
+        )
+        not_found = SimpleNamespace(
+            status_code=404,
+            json=lambda: {},
+            close=lambda: None,
         )
         with mock.patch(
-            "apps.console.connection.models.CoreAuthDigitalOcean.get_client",
+            "apps.console.connection.models.CoreAuthDigitalOcean.get_verified_client",
             return_value={},
         ), mock.patch(
             "apps.console.backup.models.requests.get",
-            side_effect=[not_found, empty_list],
+            return_value=not_found,
         ):
-            self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
+            self.assertEqual(backup.poll_status(), UtilBackup.Status.FAILED)
+        self.assertEqual(
+            backup.execution_records.get().last_error_code,
+            "PROVIDER_NOT_FOUND",
+        )
 
 
 class DigitalOceanSnapshotCreateTests(BaseTestCase):
@@ -262,15 +722,37 @@ class DigitalOceanSnapshotCreateTests(BaseTestCase):
         empty_catalog = SimpleNamespace(
             status_code=200,
             json=lambda: {"snapshots": None, "meta": {"total": 0}},
+            close=lambda: None,
+        )
+        source_volume = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "volume": {"id": str(node.digitalocean.unique_id)}
+            },
+            close=lambda: None,
         )
         created_snapshot = SimpleNamespace(
             status_code=201,
             json=lambda: {
-                "snapshot": {"id": "volume-snapshot-1", "min_disk_size": 1}
+                "snapshot": {
+                    "id": "volume-snapshot-1",
+                    "name": backup.uuid_str,
+                    "resource_id": str(node.digitalocean.unique_id),
+                    "resource_type": "volume",
+                    "min_disk_size": 1,
+                }
             },
+            close=lambda: None,
         )
-        with mock.patch(
-            "apps.console.node.models.requests.get", return_value=empty_catalog
+        with mock.patch.object(
+            CoreAuthDigitalOcean,
+            "get_verified_client",
+            return_value={"Authorization": "Bearer test-token"},
+        ), mock.patch(
+            "apps.api.v1.connection.digitalocean.client.requests.request",
+            return_value=empty_catalog,
+        ), mock.patch(
+            "apps.console.node.models.requests.get", return_value=source_volume
         ), mock.patch(
             "apps.console.node.models.requests.post", return_value=created_snapshot
         ):
@@ -283,7 +765,13 @@ class DigitalOceanSnapshotCreateTests(BaseTestCase):
 
 class LftpScriptBuilderTests(TestCase):
     def _auth(self, proto, explicit=False, verify=True):
-        return SimpleNamespace(protocol=proto, ftps_use_explicit_ssl=explicit, verify_ssl=verify)
+        return SimpleNamespace(
+            protocol=proto,
+            ftps_use_explicit_ssl=explicit,
+            verify_ssl=verify,
+            _approved_known_hosts_path="/run/backupsheep/ssh/known-hosts-test",
+            _approved_host_key_algorithm="ssh-ed25519",
+        )
 
     def test_password_in_script_not_argv_and_quoted(self):
         s = W._build_lftp_script(
@@ -292,6 +780,31 @@ class LftpScriptBuilderTests(TestCase):
             ssh_key_path=None, parallel=2, transfer='get "f" -o "t"', mirror=False)
         self.assertIn('user "u\\"x" "pa\\"ss"', s)
         self.assertIn("set ftps:initial-prot P", s)
+
+    def test_redaction_covers_lftp_escaped_quotes_and_backslashes(self):
+        username = 'user"name\\tenant'
+        password = 'pass"word\\secret'
+        script = W._build_lftp_script(
+            auth=self._auth(CoreAuthWebsite.Protocol.FTPS, explicit=True),
+            host_url="ftp://h",
+            port=21,
+            username=username,
+            password=password,
+            ssh_key_path=None,
+            parallel=1,
+            transfer='get "f" -o "t"',
+            mirror=False,
+        )
+
+        redacted = W._redact(script, username, password)
+
+        for marker in (
+            username,
+            password,
+            'user\\"name\\\\tenant',
+            'pass\\"word\\\\secret',
+        ):
+            self.assertNotIn(marker, redacted)
 
     def test_verify_ssl_flag_reflected(self):
         on = W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.FTPS, verify=True),
@@ -302,6 +815,8 @@ class LftpScriptBuilderTests(TestCase):
                                    ssh_key_path=None, parallel=1, transfer="get a", mirror=False)
         self.assertIn("set ssl:verify-certificate yes", on)
         self.assertIn("set ssl:verify-certificate no", off)
+        self.assertIn("set ftp:ssl-force true", on)
+        self.assertIn("set ftp:ssl-force true", off)
 
     def test_sftp_username_cannot_inject_via_connect_program(self):
         s = W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.SFTP),
@@ -312,11 +827,168 @@ class LftpScriptBuilderTests(TestCase):
         # the dangerous chars are shell-quoted, so they are data, not commands/args
         self.assertNotIn("-l u'; rm -rf /", line)
 
-    def test_plain_ftp_disables_tls(self):
+    def test_sftp_password_uses_exact_ephemeral_trust_without_ambient_auth(self):
+        s = W._build_lftp_script(
+            auth=self._auth(CoreAuthWebsite.Protocol.SFTP),
+            host_url="sftp://h",
+            port=22,
+            username="user",
+            password="secret",
+            ssh_key_path=None,
+            parallel=2,
+            transfer='mirror "." "t"',
+            mirror=True,
+        )
+        line = next(l for l in s.splitlines() if "connect-program" in l)
+        self.assertIn("ssh -F /dev/null", line)
+        self.assertIn("StrictHostKeyChecking=yes", line)
+        self.assertIn(
+            "UserKnownHostsFile=/run/backupsheep/ssh/known-hosts-test", line
+        )
+        self.assertIn("GlobalKnownHostsFile=/dev/null", line)
+        self.assertIn("UpdateHostKeys=no", line)
+        self.assertIn("HostKeyAlgorithms=ssh-ed25519", line)
+        self.assertIn("PubkeyAcceptedAlgorithms=", line)
+        self.assertIn("IdentityAgent=none", line)
+        self.assertIn("VerifyHostKeyDNS=no", line)
+        self.assertIn("CheckHostIP=no", line)
+        self.assertIn("CanonicalizeHostname=no", line)
+        self.assertIn("IdentitiesOnly=yes", line)
+        self.assertIn("PubkeyAuthentication=no", line)
+        self.assertIn("PreferredAuthentications=password", line)
+        self.assertIn("KbdInteractiveAuthentication=no", line)
+        self.assertNotIn(settings.SSH_KNOWN_HOSTS_PATH, line)
+        self.assertIn('user "user" "secret"', s)
+
+    def test_sftp_key_mode_is_publickey_only_with_no_password_fallback(self):
+        s = W._build_lftp_script(
+            auth=self._auth(CoreAuthWebsite.Protocol.SFTP),
+            host_url="sftp://h",
+            port=22,
+            username="user",
+            password="must-not-be-used",
+            ssh_key_path="/run/backupsheep/ssh/ssh-key-test",
+            parallel=2,
+            transfer='mirror "." "t"',
+            mirror=True,
+        )
+        line = next(l for l in s.splitlines() if "connect-program" in l)
+        self.assertIn("PreferredAuthentications=publickey", line)
+        self.assertIn("PasswordAuthentication=no", line)
+        self.assertIn("KbdInteractiveAuthentication=no", line)
+        self.assertIn("IdentitiesOnly=yes", line)
+        self.assertIn("-i /run/backupsheep/ssh/ssh-key-test", line)
+        self.assertNotIn("PubkeyAuthentication=no", line)
+        self.assertNotIn("must-not-be-used", s)
+
+    def test_sftp_refuses_to_build_without_exact_tenant_trust_snapshot(self):
+        auth = self._auth(CoreAuthWebsite.Protocol.SFTP)
+        auth._approved_known_hosts_path = ""
+        with self.assertRaisesRegex(ValueError, "exact SFTP host-key approval"):
+            W._build_lftp_script(
+                auth=auth,
+                host_url="sftp://h",
+                port=22,
+                username="user",
+                password="secret",
+                ssh_key_path=None,
+                parallel=1,
+                transfer='mirror "." "t"',
+                mirror=True,
+            )
+
+    @override_settings(ALLOW_INSECURE_FTP=False)
+    def test_plain_ftp_is_denied_by_default(self):
+        with self.assertRaisesRegex(NodeBackupFailedError, "Plain FTP is disabled"):
+            W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.FTP),
+                                 host_url="ftp://h", port=21, username="u", password="p",
+                                 ssh_key_path=None, parallel=1, transfer="get a", mirror=False)
+
+    @override_settings(ALLOW_INSECURE_FTP=True)
+    def test_plain_ftp_explicit_opt_in_disables_tls(self):
         s = W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.FTP),
                                  host_url="ftp://h", port=21, username="u", password="p",
                                  ssh_key_path=None, parallel=1, transfer="get a", mirror=False)
         self.assertIn("set ftp:ssl-allow false", s)
+        self.assertIn("set ftp:ssl-force false", s)
+
+    def test_serial_fallback_changes_only_parallel_mirror_controls(self):
+        script = "\n".join(
+            [
+                "set net:connection-limit 3",
+                'open -p 22 "sftp://host"',
+                'mirror --parallel=3 "/deep-3" "/target-3"',
+                "bye",
+            ]
+        )
+        serial = W._serial_lftp_script(script)
+        self.assertIn("set net:connection-limit 1", serial)
+        self.assertIn('--parallel=1 "/deep-3" "/target-3"', serial)
+        self.assertNotIn("--parallel=3", serial)
+
+    def test_serial_fallback_leaves_file_and_serial_scripts_unchanged(self):
+        file_script = "set net:connection-limit 3\nget -P source -o target\n"
+        serial_script = (
+            "set net:connection-limit 1\n"
+            "mirror --parallel=1 source target\n"
+        )
+        self.assertEqual(W._serial_lftp_script(file_script), file_script)
+        self.assertEqual(W._serial_lftp_script(serial_script), serial_script)
+
+    def test_depth_assertion_requires_nonzero_exact_lftp_signature(self):
+        exact = SimpleNamespace(
+            returncode=-6,
+            stdout=(
+                "lftp: SMTask.cc:152: static void SMTask::Enter(SMTask*): "
+                "Assertion `stack_ptr<SMTASK_MAX_DEPTH' failed."
+            ),
+        )
+        self.assertTrue(W._lftp_depth_stack_exhausted(exact))
+        self.assertFalse(
+            W._lftp_depth_stack_exhausted(
+                SimpleNamespace(returncode=0, stdout=exact.stdout)
+            )
+        )
+        self.assertFalse(
+            W._lftp_depth_stack_exhausted(
+                SimpleNamespace(returncode=1, stdout="mirror: permission denied")
+            )
+        )
+
+
+class RemoteTarCommandSafetyTests(TestCase):
+    def test_leading_dash_sources_are_operands_not_tar_options(self):
+        sources = [
+            "--checkpoint=1",
+            "--checkpoint-action=exec=touch /tmp/attacker-controlled",
+        ]
+
+        command = W._build_remote_tar_command(
+            archive_path="/tmp/backupsheep/archive.tar",
+            exclude_rules="--exclude='*.sock'",
+            sources=sources,
+        )
+        arguments = shlex.split(command)
+        operand_boundary = arguments.index("--")
+
+        self.assertIn(
+            "--file=/tmp/backupsheep/archive.tar",
+            arguments[:operand_boundary],
+        )
+        self.assertEqual(arguments[operand_boundary + 1:], sources)
+
+
+class DatabaseClientOperandSafetyTests(SimpleTestCase):
+    def test_option_shaped_database_and_table_names_fail_closed(self):
+        for value in ("-V", "--help", "--tab=_storage", "--result-file=loot.sql"):
+            with self.subTest(value=value), self.assertRaises(UnsafeBackupInput):
+                safe_positional_token(value, "database")
+
+    def test_non_option_database_identifier_is_preserved(self):
+        self.assertEqual(
+            safe_positional_token("customer-data_2026", "database"),
+            "customer-data_2026",
+        )
 
 
 class CeleryRoutingTests(TestCase):
@@ -330,6 +1002,8 @@ class CeleryRoutingTests(TestCase):
         self.assertEqual(q("backup_website"), "files")
         self.assertEqual(q("backup_digitalocean"), "cloud")
         self.assertEqual(q("storage_upload"), "storage")
+        self.assertEqual(q("storage_cleanup_owned_multipart"), "storage")
+        self.assertEqual(q("storage_sweep_owned_multipart_cleanup"), "storage")
         self.assertEqual(q("finalize_backup"), "storage")
         self.assertEqual(q("delete_from_disk"), "storage")
         self.assertEqual(q("poll_cloud_backup"), "cloud")
@@ -347,10 +1021,14 @@ class CeleryRoutingTests(TestCase):
         for module in settings.CELERY_IMPORTS:
             importlib.import_module(module)
         for name in ["backup_website", "backup_database", "backup_digitalocean",
-                     "backup_hetzner", "backup_aws", "storage_upload", "finalize_backup",
+                     "backup_hetzner", "backup_aws", "storage_upload",
+                     "storage_cleanup_owned_multipart",
+                     "storage_sweep_owned_multipart_cleanup", "finalize_backup",
                      "delete_from_disk", "poll_cloud_backup", "delete_old_logs",
+                     "delete_old_database_logs", "delete_old_storage_logs",
                      "run_scheduled_backup", "resume_in_progress_backups"]:
             self.assertIn(name, app.tasks)
+        self.assertNotIn("send_to_firebase", app.tasks)
 
 
 class DiskCleanupTests(TestCase):
@@ -366,11 +1044,23 @@ class DiskCleanupTests(TestCase):
         uid = "u1"
         os.makedirs(os.path.join(st, uid))
         open(os.path.join(st, f"{uid}.zip"), "w").close()
+        open(os.path.join(st, f"{uid}.files"), "w").close()
+        open(os.path.join(st, f"{uid}.members"), "w").close()
+        staged = (
+            f".{uid}.zip.0123456789abcdef0123456789abcdef.partial.zip"
+        )
+        open(os.path.join(st, staged), "w").close()
+        foreign = ".other.zip.0123456789abcdef0123456789abcdef.partial.zip"
+        open(os.path.join(st, foreign), "w").close()
         open(os.path.join(st, f"{uid}.log"), "w").close()
         with override_settings(BASE_DIR=base):
             helper_tasks.delete_from_disk.apply(args=[uid, "both"])
         self.assertFalse(os.path.exists(os.path.join(st, uid)))
         self.assertFalse(os.path.exists(os.path.join(st, f"{uid}.zip")))
+        self.assertFalse(os.path.exists(os.path.join(st, f"{uid}.files")))
+        self.assertFalse(os.path.exists(os.path.join(st, f"{uid}.members")))
+        self.assertFalse(os.path.exists(os.path.join(st, staged)))
+        self.assertTrue(os.path.exists(os.path.join(st, foreign)))
         self.assertTrue(os.path.exists(os.path.join(st, f"{uid}.log")))  # log retained
 
     def test_delete_from_disk_path_traversal_guard(self):
@@ -381,6 +1071,77 @@ class DiskCleanupTests(TestCase):
         with override_settings(BASE_DIR=base):
             helper_tasks.delete_from_disk.apply(args=["../secret", "dir"])
         self.assertTrue(os.path.exists(os.path.join(base, "secret")))  # not escaped
+
+    def test_retry_cleanup_removes_only_exact_incomplete_generation(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        st = self._storage(base)
+        uid = "retry-owned"
+        backup = SimpleNamespace(uuid_str=uid)
+        os.makedirs(os.path.join(st, uid))
+        exact_files = (
+            f"{uid}.zip",
+            f"{uid}.manifest.json",
+            f"{uid}.files",
+            f"{uid}.members",
+            f".{uid}.zip.0123456789abcdef0123456789abcdef.partial.zip",
+            f".{uid}.files.0123456789abcdef0123456789abcdef.partial",
+            f".{uid}.members.0123456789abcdef0123456789abcdef.partial",
+        )
+        for name in exact_files:
+            open(os.path.join(st, name), "w").close()
+        foreign = ".foreign.members.0123456789abcdef0123456789abcdef.partial"
+        open(os.path.join(st, foreign), "w").close()
+
+        with override_settings(BASE_DIR=base):
+            _clear_local_backup_artifacts(backup)
+
+        self.assertFalse(os.path.exists(os.path.join(st, uid)))
+        for name in exact_files:
+            self.assertFalse(os.path.exists(os.path.join(st, name)))
+        self.assertTrue(os.path.exists(os.path.join(st, foreign)))
+
+    def test_delete_from_disk_removes_one_fenced_restore_generation(self):
+        import tempfile
+        base = tempfile.mkdtemp()
+        st = self._storage(base)
+        prefix = "restore_backup-id_0123456789abcdef"
+        os.makedirs(os.path.join(st, prefix))
+        for name in (
+            f"{prefix}.zip",
+            f"{prefix}.manifest.json",
+            f"{prefix}.sql",
+            f".{prefix}.sql.0123456789abcdef0123456789abcdef.partial",
+            f"my_{prefix}.cnf",
+            f"ssh_{prefix}",
+        ):
+            open(os.path.join(st, name), "w").close()
+        foreign_sql = ".restore_backup-id_foreign.sql.0123456789abcdef.partial"
+        open(os.path.join(st, foreign_sql), "w").close()
+        log_path = os.path.join(st, "restore_backup-id.log")
+        open(log_path, "w").close()
+
+        with override_settings(BASE_DIR=base):
+            helper_tasks.delete_from_disk.apply(args=[prefix, "restore"])
+
+        self.assertFalse(os.path.exists(os.path.join(st, prefix)))
+        self.assertFalse(os.path.exists(os.path.join(st, f"{prefix}.zip")))
+        self.assertFalse(
+            os.path.exists(os.path.join(st, f"{prefix}.manifest.json"))
+        )
+        self.assertFalse(os.path.exists(os.path.join(st, f"{prefix}.sql")))
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(
+                    st,
+                    f".{prefix}.sql.0123456789abcdef0123456789abcdef.partial",
+                )
+            )
+        )
+        self.assertFalse(os.path.exists(os.path.join(st, f"my_{prefix}.cnf")))
+        self.assertFalse(os.path.exists(os.path.join(st, f"ssh_{prefix}")))
+        self.assertTrue(os.path.exists(os.path.join(st, foreign_sql)))
+        self.assertTrue(os.path.exists(log_path))
 
     def test_delete_old_logs_prunes_by_age(self):
         import tempfile
@@ -395,6 +1156,30 @@ class DiskCleanupTests(TestCase):
             helper_tasks.delete_old_logs.apply(args=[30])
         self.assertFalse(os.path.exists(old))
         self.assertTrue(os.path.exists(fresh))
+
+    def test_database_lane_delete_old_logs_uses_the_same_private_pruner(self):
+        import tempfile
+        base = tempfile.mkdtemp()
+        st = self._storage(base)
+        old = os.path.join(st, "old-database.log")
+        open(old, "w").close()
+        forty_days = time.time() - 40 * 86400
+        os.utime(old, (forty_days, forty_days))
+        with override_settings(BASE_DIR=base):
+            helper_tasks.delete_old_database_logs.apply(args=[30])
+        self.assertFalse(os.path.exists(old))
+
+    def test_storage_lane_delete_old_logs_uses_the_same_private_pruner(self):
+        import tempfile
+        base = tempfile.mkdtemp()
+        st = self._storage(base)
+        old = os.path.join(st, "old-storage.log")
+        open(old, "w").close()
+        forty_days = time.time() - 40 * 86400
+        os.utime(old, (forty_days, forty_days))
+        with override_settings(BASE_DIR=base):
+            helper_tasks.delete_old_storage_logs.apply(args=[30])
+        self.assertFalse(os.path.exists(old))
 
 
 def _cleanup_storage_artifacts(*paths):
@@ -426,12 +1211,53 @@ class WebsiteEngineBase(BaseTestCase):
 
     def _make_backup(self, *, incremental=False, backup_type=None,
                      use_private_key=False, use_public_key=False):
-        """A real website node (FTP password auth, all_paths) + CoreWebsiteBackup row."""
+        """A real website node (SFTP password auth, all_paths) + backup row."""
         node = factories.make_website_node(self.account, self.member)
         auth = node.connection.auth_website
+        # Generic engine tests exercise backup behavior, not the explicit legacy
+        # FTP opt-in. Keep their fixture on the secure production default so a
+        # plaintext-FTP regression cannot be hidden by the test setup.
+        auth.protocol = CoreAuthWebsite.Protocol.SFTP
+        auth.port = 22
         auth.use_private_key = use_private_key
         auth.use_public_key = use_public_key
         auth.save()
+        _approve_test_ssh_host(
+            self.account,
+            self.member,
+            auth.host,
+            auth.port,
+        )
+        if use_public_key:
+            # Managed identities may become ACTIVE only through a completed worker
+            # validation for the exact current connection generation.
+            with override_settings(**TEST_MANAGED_SSH_SETTINGS), mock.patch(
+                "apps.console.connection.managed_ssh.current_app.send_task"
+            ):
+                operation = create_managed_ssh_operation(
+                    node.connection,
+                    "validate",
+                    requested_by_member=self.member,
+                )
+                with mock.patch.object(
+                    CoreAuthWebsite,
+                    "check_connection",
+                    return_value=None,
+                ):
+                    validate_managed_ssh_files_connection.run(operation.pk)
+        else:
+            _activate_test_customer_ssh_connection(node.connection)
+        node.connection.refresh_from_db()
+        auth._state.fields_cache["connection"] = node.connection
+        if not hasattr(self, "_ssh_runtime_dir"):
+            self._ssh_runtime_dir = tempfile.mkdtemp(prefix="bs-test-runtime-")
+            os.chmod(self._ssh_runtime_dir, 0o700)
+            runtime_patch = mock.patch.dict(
+                os.environ, {"XDG_RUNTIME_DIR": self._ssh_runtime_dir}
+            )
+            runtime_patch.start()
+            self.addCleanup(runtime_patch.stop)
+            self.addCleanup(shutil.rmtree, self._ssh_runtime_dir, True)
         website = node.website
         website.backup_type = backup_type or CoreWebsite.BackupType.FULL
         website.incremental = incremental
@@ -455,6 +1281,8 @@ class WebsiteEngineBase(BaseTestCase):
         self.addCleanup(_cleanup_storage_artifacts(
             f"_storage/{backup.uuid}.log",
             f"_storage/{backup.uuid}.zip",
+            f"_storage/{backup.uuid}.files",
+            f"_storage/{backup.uuid}.members",
             f"_storage/{backup.uuid}/",
             f"_storage/ssh_{backup.uuid}",
             f"_storage/website_cache/{node.uuid_str}/",
@@ -503,16 +1331,11 @@ class WebsiteSnapshotDispatchTests(WebsiteEngineBase):
         self.assertIn(backup.uuid, base_dir)
         self.assertNotIn("website_cache", base_dir)
 
-    def test_public_key_on_lftp_path_fails(self):
-        # Managed public-key auth is SaaS-only; only the tar path may see key auth.
+    def test_public_key_routes_to_lftp_when_managed_key_is_configured(self):
         node, backup = self._make_backup(use_public_key=True)
-        with mock.patch.object(CoreAuthWebsite, "check_connection", lambda *a, **k: None), \
-             mock.patch.object(W.subprocess, "run") as run, \
-             mock.patch.object(W, "_finalize_zip"), \
-             mock.patch.object(W, "delete_from_disk"):
-            with self.assertRaises(NodeBackupFailedError):
-                W.snapshot_website(backup)
-        run.assert_not_called()
+        lftp, tar = self._run(backup)
+        tar.assert_not_called()
+        lftp.assert_called_once()
 
 
 class WebsiteMirrorOptsTests(WebsiteEngineBase):
@@ -536,6 +1359,11 @@ class WebsiteMirrorOptsTests(WebsiteEngineBase):
              mock.patch.object(W, "_finalize_zip"):
             W._snapshot_lftp(backup, base_dir=base_dir, incremental=incremental)
         self.assertTrue(scripts, "expected _snapshot_lftp to invoke lftp")
+        runtime_ssh = os.path.join(self._ssh_runtime_dir, "ssh")
+        self.assertFalse(
+            os.path.isdir(runtime_ssh)
+            and any(name.startswith("known-hosts-") for name in os.listdir(runtime_ssh))
+        )
         return scripts[0]
 
     def test_incremental_mirror_opts(self):
@@ -553,7 +1381,42 @@ class WebsiteMirrorOptsTests(WebsiteEngineBase):
         self.assertIn("--ignore-size", s)
         self.assertNotIn("--delete", s)
 
-    def test_sftp_private_key_path_is_absolute_for_lftp(self):
+    def test_mirror_uses_backup_path_snapshot_after_node_edit(self):
+        node, backup = self._make_backup(incremental=False)
+        backup.all_paths = False
+        backup.paths = [{"path": "request-path", "type": "directory"}]
+        backup.save(update_fields=["all_paths", "paths", "modified"])
+        website = node.website
+        website.all_paths = False
+        website.paths = [{"path": "later-node-path", "type": "directory"}]
+        website.save(update_fields=["all_paths", "paths", "modified"])
+        scripts = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd == ["lftp"]:
+                scripts.append(kwargs.get("input") or "")
+            return SimpleNamespace(stdout="", returncode=0)
+
+        with mock.patch.object(
+            CoreAuthWebsite, "check_connection", lambda *a, **k: None
+        ), mock.patch.object(
+            W.subprocess, "run", side_effect=fake_run
+        ), mock.patch.object(
+            W, "delete_from_disk"
+        ), mock.patch.object(
+            W, "_finalize_zip"
+        ):
+            W._snapshot_lftp(
+                backup,
+                base_dir=f"_storage/{backup.uuid}/",
+                incremental=False,
+            )
+
+        self.assertEqual(len(scripts), 1)
+        self.assertIn('"request-path"', scripts[0])
+        self.assertNotIn("later-node-path", scripts[0])
+
+    def test_sftp_private_key_path_uses_verified_runtime_not_persistent_storage(self):
         node, backup = self._make_backup(use_private_key=True)
         auth = node.connection.auth_website
         auth.protocol = CoreAuthWebsite.Protocol.SFTP
@@ -577,7 +1440,8 @@ class WebsiteMirrorOptsTests(WebsiteEngineBase):
             W._snapshot_lftp(backup, base_dir=f"_storage/{backup.uuid}/", incremental=False)
 
         line = next(line for line in scripts[0].splitlines() if "connect-program" in line)
-        self.assertIn(os.path.abspath(f"_storage/ssh_{backup.uuid}"), line)
+        self.assertIn(os.path.join(self._ssh_runtime_dir, "ssh", "ssh-key-"), line)
+        self.assertNotIn(os.path.abspath("_storage"), line)
 
 
 class CacheFingerprintTests(TestCase):
@@ -611,6 +1475,22 @@ class CacheFingerprintTests(TestCase):
         website.paths = [{"path": "other_dir", "type": "directory"}]
         self.assertNotEqual(fp1, W._cache_fingerprint(website, auth, username))
 
+    def test_backup_snapshot_keeps_fingerprint_stable_after_node_path_edit(self):
+        website, auth, username = self._inputs()
+        backup = SimpleNamespace(
+            all_paths=False,
+            paths=[{"path": "request_path", "type": "directory"}],
+        )
+        fp1 = W._cache_fingerprint(
+            website, auth, username, backup=backup
+        )
+        website.all_paths = True
+        website.paths = None
+        self.assertEqual(
+            fp1,
+            W._cache_fingerprint(website, auth, username, backup=backup),
+        )
+
     def test_changes_when_host_changes(self):
         website, auth, username = self._inputs()
         fp1 = W._cache_fingerprint(website, auth, username)
@@ -619,9 +1499,69 @@ class CacheFingerprintTests(TestCase):
 
 
 class ResetIncrementalCacheTests(BaseTestCase):
-    """POST reset_incremental wipes the node's local snapshot cache + meta file."""
+    """The web role schedules cache deletion on the files-worker boundary."""
 
-    def test_reset_incremental_deletes_local_cache(self):
+    @mock.patch(
+        "apps.api.v1.node.views.reset_incremental_cache.apply_async"
+    )
+    def test_reset_incremental_schedules_files_task(self, apply_async):
+        node = factories.make_website_node(self.account, self.member)
+        request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
+        force_authenticate(request, user=self.user)
+        view = CoreNodeView.as_view({"post": "reset_incremental"})
+        resp = view(request, pk=node.id)
+        self.assertEqual(resp.status_code, 200)
+        apply_async.assert_called_once_with(args=[node.pk])
+
+    @mock.patch(
+        "apps.api.v1.node.views.reset_incremental_cache.apply_async"
+    )
+    def test_reset_incremental_rejects_non_website_without_publishing(self, apply_async):
+        node = factories.make_cloud_node(self.account, self.member)
+        request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
+        force_authenticate(request, user=self.user)
+        view = CoreNodeView.as_view({"post": "reset_incremental"})
+
+        resp = view(request, pk=node.id)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            resp.data,
+            {"detail": "Incremental cache reset is available only for website nodes."},
+        )
+        apply_async.assert_not_called()
+
+    @mock.patch(
+        "apps.api.v1.node.views.reset_incremental_cache.apply_async"
+    )
+    def test_reset_incremental_does_not_disclose_foreign_website(self, apply_async):
+        other_account, other_member, _other_user = factories.make_account()
+        node = factories.make_website_node(other_account, other_member)
+        request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
+        force_authenticate(request, user=self.user)
+        view = CoreNodeView.as_view({"post": "reset_incremental"})
+
+        resp = view(request, pk=node.id)
+
+        self.assertEqual(resp.status_code, 404)
+        apply_async.assert_not_called()
+
+    def test_files_task_ignores_non_website_node_even_if_called_directly(self):
+        node = factories.make_cloud_node(self.account, self.member)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cache_dir = os.path.join(tmp, "_storage", "website_cache", node.uuid_str)
+        os.makedirs(cache_dir)
+        sentinel = os.path.join(cache_dir, "must-survive")
+        with open(sentinel, "w") as handle:
+            handle.write("not a website cache")
+
+        with override_settings(BASE_DIR=tmp):
+            helper_tasks.reset_incremental_cache.apply(args=[node.pk]).get()
+
+        self.assertTrue(os.path.isfile(sentinel))
+
+    def test_files_task_deletes_only_requested_cache(self):
         node = factories.make_website_node(self.account, self.member)
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -634,20 +1574,63 @@ class ResetIncrementalCacheTests(BaseTestCase):
         with open(meta_path, "w") as fh:
             json.dump({"fingerprint": "x"}, fh)
 
-        request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
-        force_authenticate(request, user=self.user)
-        view = CoreNodeView.as_view({"post": "reset_incremental"})
         with override_settings(BASE_DIR=tmp):
-            resp = view(request, pk=node.id)
-        self.assertEqual(resp.status_code, 200)
+            helper_tasks.reset_incremental_cache.apply(args=[node.pk]).get()
         self.assertFalse(os.path.exists(cache_dir))
         self.assertFalse(os.path.exists(meta_path))
+        self.assertTrue(os.path.isfile(
+            os.path.join(tmp, "_storage", "website_cache", f"{node.uuid_str}.lock")
+        ))
+
+    def test_files_task_holds_incremental_lock_around_deletion(self):
+        node = factories.make_website_node(self.account, self.member)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cache_dir = os.path.join(tmp, "_storage", "website_cache", node.uuid_str)
+        os.makedirs(cache_dir)
+
+        events = []
+        real_flock = helper_tasks.fcntl.flock
+        real_rmtree = helper_tasks.shutil.rmtree
+
+        def observed_flock(file_obj, operation):
+            events.append("lock" if operation == helper_tasks.fcntl.LOCK_EX else "unlock")
+            return real_flock(file_obj, operation)
+
+        def observed_rmtree(*args, **kwargs):
+            events.append("delete")
+            return real_rmtree(*args, **kwargs)
+
+        with override_settings(BASE_DIR=tmp), mock.patch.object(
+            helper_tasks.fcntl, "flock", side_effect=observed_flock
+        ), mock.patch.object(
+            helper_tasks.shutil, "rmtree", side_effect=observed_rmtree
+        ):
+            helper_tasks.reset_incremental_cache.apply(args=[node.pk]).get()
+
+        self.assertEqual(events, ["lock", "delete", "unlock"])
+
+    def test_files_task_rejects_cache_root_symlink_outside_workdir(self):
+        node = factories.make_website_node(self.account, self.member)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        storage_dir = os.path.join(tmp, "_storage")
+        outside = os.path.join(tmp, "backup-storage")
+        victim = os.path.join(outside, node.uuid_str)
+        os.makedirs(victim)
+        with open(os.path.join(victim, "must-survive"), "w") as handle:
+            handle.write("sentinel")
+        os.makedirs(storage_dir)
+        os.symlink(outside, os.path.join(storage_dir, "website_cache"))
+
+        with override_settings(BASE_DIR=tmp):
+            helper_tasks.reset_incremental_cache.apply(args=[node.pk]).get()
+
+        self.assertTrue(os.path.isfile(os.path.join(victim, "must-survive")))
 
 
 class NormalizeSshKeyTests(TestCase):
-    """_normalize_ssh_key: paramiko rewrites the key unencrypted when it can; for keys
-    paramiko parses but cannot serialize (Ed25519 in paramiko 5.0.0) it must fall back
-    to the system ssh-keygen -- and only when a passphrase was supplied."""
+    """Private-key normalization never puts passphrases in process arguments."""
 
     def _key_file(self, contents="-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n"):
         fd, path = tempfile.mkstemp()
@@ -672,16 +1655,57 @@ class NormalizeSshKeyTests(TestCase):
                 mock.patch("paramiko.RSAKey", rsa),
                 mock.patch("paramiko.ECDSAKey", ec))
 
-    def test_paramiko_write_failure_falls_back_to_ssh_keygen(self):
-        path = self._key_file()
+    def test_materialize_restores_terminal_newline_and_owner_only_mode(self):
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, True)
+        generated_path = os.path.join(tmp_dir, "generated_ed25519")
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", generated_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with open(generated_path, encoding="utf-8") as source:
+            key_without_newline = source.read().rstrip("\n")
+
+        os.chmod(tmp_dir, 0o700)
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp_dir}):
+            materialized_path = W._materialize_ssh_private_key(
+                key_without_newline
+            )
+
+        with open(materialized_path, "rb") as source:
+            materialized = source.read()
+        self.assertTrue(materialized.endswith(b"\n"))
+        self.assertFalse(materialized.endswith(b"\n\n"))
+        self.assertEqual(stat.S_IMODE(os.stat(materialized_path).st_mode), 0o600)
+        parsed = subprocess.run(
+            ["ssh-keygen", "-y", "-f", materialized_path],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+
+    def test_paramiko_write_failure_uses_in_process_crypto(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        private_key = Ed25519PrivateKey.generate()
+        encrypted = private_key.private_bytes(
+            encoding=W.serialization.Encoding.PEM,
+            format=W.serialization.PrivateFormat.OpenSSH,
+            encryption_algorithm=W.serialization.BestAvailableEncryption(
+                b"s3cret-passphrase"
+            ),
+        )
+        path = self._key_file(encrypted.decode("utf-8"))
         ed, rsa, ec = self._paramiko_write_broken()
         with ed, rsa, ec, mock.patch.object(W.subprocess, "run") as run:
-            run.return_value = SimpleNamespace(returncode=0, stdout="")
             W._normalize_ssh_key(path, "s3cret-passphrase")
-        run.assert_called_once()
-        argv = run.call_args.args[0]
-        self.assertEqual(argv, ["ssh-keygen", "-p", "-P", "s3cret-passphrase",
-                                "-N", "", "-f", path])
+        run.assert_not_called()
+        W.paramiko.Ed25519Key.from_private_key_file(path)
 
     def test_paramiko_rewrite_success_runs_no_subprocess(self):
         # Real RSA key encrypted with a passphrase: paramiko rewrites it, no fallback.
@@ -737,6 +1761,9 @@ class GetSftpClientKeyTests(BaseTestCase):
         auth.private_key = bs_encrypt("-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n", key)
         auth.password = bs_encrypt("key-pass", key)  # the key's passphrase
         auth.save()
+        _approve_test_ssh_host(self.account, self.member, auth.host, auth.port)
+        connection = _activate_test_customer_ssh_connection(node.connection)
+        auth._state.fields_cache["connection"] = connection
         return auth
 
     def _storage_listing(self):
@@ -745,6 +1772,8 @@ class GetSftpClientKeyTests(BaseTestCase):
     def test_ed25519_key_connects_when_rsa_cannot_parse(self):
         auth = self._auth()
         pkey = mock.Mock(name="pkey")
+        pkey.get_name.return_value = "ssh-ed25519"
+        pkey.get_bits.return_value = 256
         ed = mock.Mock()
         ed.from_private_key_file.return_value = pkey
         rsa = mock.Mock()
@@ -771,8 +1800,11 @@ class GetSftpClientKeyTests(BaseTestCase):
 
     def test_connect_failure_removes_temp_key(self):
         auth = self._auth()
+        pkey = mock.Mock(name="pkey")
+        pkey.get_name.return_value = "ssh-ed25519"
+        pkey.get_bits.return_value = 256
         ed = mock.Mock()
-        ed.from_private_key_file.return_value = mock.Mock(name="pkey")
+        ed.from_private_key_file.return_value = pkey
         ssh_client = mock.Mock(name="ssh")
         ssh_client.connect.side_effect = Exception("boom")
         before = self._storage_listing()
@@ -780,7 +1812,8 @@ class GetSftpClientKeyTests(BaseTestCase):
              mock.patch("paramiko.SSHClient", return_value=ssh_client):
             with self.assertRaises(Exception) as ctx:
                 auth.get_sftp_client()
-        self.assertIn("boom", str(ctx.exception))
+        self.assertNotIn("boom", str(ctx.exception))
+        self.assertIn("validate", str(ctx.exception).lower())
         self.assertEqual(self._storage_listing(), before)
 
     def test_unparseable_key_raises_and_removes_temp_key(self):
@@ -789,8 +1822,10 @@ class GetSftpClientKeyTests(BaseTestCase):
         before = self._storage_listing()
         with mock.patch("paramiko.SSHClient", return_value=ssh_client):
             # Real key classes, garbage key contents -> nothing parses.
-            with self.assertRaises(NodeConnectionErrorSFTP):
+            with self.assertRaises(Exception) as ctx:
                 auth.get_sftp_client()
+        self.assertNotIn("unexpected OpenSSH", str(ctx.exception))
+        self.assertIn("validate", str(ctx.exception).lower())
         ssh_client.connect.assert_not_called()
         self.assertEqual(self._storage_listing(), before)
 
@@ -801,6 +1836,36 @@ class GetSftpClientKeyTests(BaseTestCase):
 
 DB_USER = "dbuser"
 DB_PASS = "p@ssw0rdSecret"
+MYSQL_SCHEMA_DEFAULTS = b"utf8mb4\tutf8mb4_unicode_ci\n"
+MYSQL_SCHEMA_PREAMBLE = (
+    b"ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+)
+
+
+class MysqlSchemaMetadataTests(TestCase):
+    def test_database_defaults_are_validated_and_rendered_as_digest_bound_sql(self):
+        defaults = MYSQL_SCHEMA.parse_database_defaults(
+            MYSQL_SCHEMA_DEFAULTS.decode("ascii")
+        )
+
+        self.assertEqual(
+            defaults,
+            {"character_set": "utf8mb4", "collation": "utf8mb4_unicode_ci"},
+        )
+        self.assertEqual(
+            MYSQL_SCHEMA.database_defaults_preamble(defaults),
+            MYSQL_SCHEMA_PREAMBLE,
+        )
+
+    def test_database_defaults_reject_sql_metacharacters_and_missing_rows(self):
+        for output in (
+            "",
+            "utf8mb4\tutf8mb4_unicode_ci\nextra\trow\n",
+            "utf8mb4\tutf8mb4_unicode_ci;DROP_DATABASE\n",
+        ):
+            with self.subTest(output=output):
+                with self.assertRaises(ValueError):
+                    MYSQL_SCHEMA.parse_database_defaults(output)
 
 
 def make_database_node(account, member, *, db_type, version, database_name="appdb",
@@ -813,6 +1878,17 @@ def make_database_node(account, member, *, db_type, version, database_name="appd
     bs_decrypt calls succeed."""
     conn = factories.make_connection(account, member, code="database")
     key = account.get_encryption_key()
+    ssh_fields = {}
+    if use_private_key:
+        ssh_fields = {
+            "ssh_host": normalize_ssh_host(host),
+            "ssh_port": 22,
+            "ssh_username": bs_encrypt("sshuser", key),
+            "ssh_password": bs_encrypt("sshpw", key),
+            "private_key": bs_encrypt(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n", key
+            ),
+        }
     CoreAuthDatabase.objects.create(
         connection=conn,
         host=host, port=port,
@@ -824,16 +1900,18 @@ def make_database_node(account, member, *, db_type, version, database_name="appd
         use_ssl=False,
         use_public_key=False,
         use_private_key=use_private_key,
+        **ssh_fields,
     )
     if use_private_key:
         auth = conn.auth_database
-        auth.ssh_host = host
-        auth.ssh_port = 22
-        auth.ssh_username = bs_encrypt("sshuser", key)
-        auth.ssh_password = bs_encrypt("sshpw", key)
-        auth.private_key = bs_encrypt(
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n", key)
-        auth.save()
+        _approve_test_ssh_host(
+            account,
+            member,
+            auth.ssh_host,
+            auth.ssh_port,
+        )
+        conn = _activate_test_customer_ssh_connection(conn)
+        auth._state.fields_cache["connection"] = conn
     node = CoreNode.objects.create(connection=conn, type=CoreNode.Type.DATABASE,
                                    name="db", added_by=member)
     CoreDatabase.objects.create(
@@ -855,10 +1933,58 @@ def _recorded_run(calls, *, dump=b"", stderr=b"", returncode=0):
                          if a.startswith("--defaults-extra-file=")), None)
         if defaults:
             call["defaults_mode"] = stat.S_IMODE(os.stat(defaults).st_mode)
+        if any(
+            item.startswith("--execute=") and "DEFAULT_CHARACTER_SET_NAME" in item
+            for item in argv
+        ):
+            return SimpleNamespace(
+                returncode=0, stdout=MYSQL_SCHEMA_DEFAULTS, stderr=b""
+            )
         out = kwargs.get("stdout")
         if out is not None and dump:
-            out.write(dump)
+            # Match subprocess semantics: the child writes to the descriptor,
+            # not through the parent's Python buffer.
+            os.write(out.fileno(), dump)
         return SimpleNamespace(returncode=returncode, stderr=stderr)
+
+    return fake_run
+
+
+def _recorded_multi_database_run(calls, *, inventory=None):
+    """Record direct client/dump calls for selected/all-database fixtures."""
+    inventory = inventory or []
+
+    def fake_run(argv, **kwargs):
+        call = {"argv": list(argv), "kwargs": kwargs}
+        calls.append(call)
+        defaults = next(
+            (
+                item.split("=", 1)[1]
+                for item in argv
+                if item.startswith("--defaults-extra-file=")
+            ),
+            None,
+        )
+        if defaults:
+            call["defaults_mode"] = stat.S_IMODE(os.stat(defaults).st_mode)
+        if "--execute=SHOW DATABASES;" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=("\n".join(inventory) + "\n").encode(),
+                stderr=b"",
+            )
+        if any(
+            item.startswith("--execute=") and "DEFAULT_CHARACTER_SET_NAME" in item
+            for item in argv
+        ):
+            return SimpleNamespace(
+                returncode=0, stdout=MYSQL_SCHEMA_DEFAULTS, stderr=b""
+            )
+        database = argv[-1]
+        os.write(
+            kwargs["stdout"].fileno(), f"-- dump of {database}\n".encode()
+        )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     return fake_run
 
@@ -882,30 +2008,77 @@ class _FakeChannelStream:
 
 
 class _FakeSFTP:
-    """Records open()/write()/chmod() of the remote credentials file."""
+    """Records exclusive remote credential-file creation and verification."""
 
-    def __init__(self):
+    def __init__(self, *, bad_stat_open_index=None, fail_open_index=None):
         self.files = {}
         self.chmods = []
+        self.events = []
+        self.entries = []
+        self.removed = []
+        self.open_count = 0
+        self.bad_stat_open_index = bad_stat_open_index
+        self.fail_open_index = fail_open_index
         self.closed = False
 
     def open(self, name, mode):
         sftp = self
+        self.open_count += 1
+        open_index = self.open_count
+        self.events.append(("open", name, mode))
+        if open_index == self.fail_open_index:
+            raise OSError("exclusive create failed")
 
         class _FH:
+            file_mode = 0o600
+
             def __enter__(self):
                 return self
 
             def __exit__(self, *args):
                 return False
 
+            def chmod(self, requested_mode):
+                self.file_mode = requested_mode
+                sftp.chmods.append((name, requested_mode))
+                sftp.events.append(("chmod", name, requested_mode))
+
+            def stat(self):
+                sftp.events.append(("stat", name, self.file_mode))
+                observed_mode = self.file_mode
+                if (
+                    open_index == sftp.bad_stat_open_index
+                    and not sftp.files.get(name)
+                ):
+                    observed_mode = 0o644
+                return SimpleNamespace(
+                    st_mode=stat.S_IFREG | observed_mode,
+                    st_size=len(sftp.files.get(name, "")),
+                )
+
             def write(self, data):
+                sftp.events.append(("write", name, data))
                 sftp.files[name] = sftp.files.get(name, "") + data
+
+            def flush(self):
+                sftp.events.append(("flush", name))
 
         return _FH()
 
     def chmod(self, name, mode):
         self.chmods.append((name, mode))
+
+    def listdir_attr(self, path):
+        self.events.append(("listdir_attr", path))
+        return list(self.entries)
+
+    def listdir_iter(self, path, read_aheads):
+        self.events.append(("listdir_iter", path, read_aheads))
+        yield from self.entries
+
+    def remove(self, name):
+        self.removed.append(name)
+        self.files.pop(name, None)
 
     def close(self):
         self.closed = True
@@ -920,7 +2093,7 @@ class _FakeSSH:
         self.sftp = _FakeSFTP()
         self.closed = False
 
-    def exec_command(self, command):
+    def exec_command(self, command, **_kwargs):
         self.commands.append(command)
         out, err, exit_status = self.handler(command)
         return (
@@ -934,6 +2107,101 @@ class _FakeSSH:
 
     def close(self):
         self.closed = True
+
+
+class RemoteDatabaseCredentialMaterializationTests(SimpleTestCase):
+    def _ssh(self, sftp):
+        return SimpleNamespace(open_sftp=mock.Mock(return_value=sftp))
+
+    @override_settings(SSH_REMOTE_CREDENTIAL_STALE_SECONDS=900)
+    def test_secrets_are_written_only_after_exclusive_private_empty_file_check(self):
+        sftp = _FakeSFTP()
+        credentials = CoreAuthDatabase()._install_remote_database_credentials(
+            self._ssh(sftp),
+            host="database.internal.test",
+            port=5432,
+            username="backup-user",
+            password="database-secret",
+        )
+
+        self.assertEqual(len(credentials["files"]), 2)
+        for name in credentials["files"]:
+            events = [event for event in sftp.events if len(event) > 1 and event[1] == name]
+            self.assertEqual(events[0], ("open", name, "wx"))
+            self.assertEqual(events[1], ("chmod", name, 0o600))
+            self.assertEqual(events[2], ("stat", name, 0o600))
+            write_index = next(
+                index for index, event in enumerate(events) if event[0] == "write"
+            )
+            self.assertGreater(write_index, 2)
+            self.assertEqual(events[write_index + 1], ("flush", name))
+            self.assertEqual(events[write_index + 2], ("stat", name, 0o600))
+            self.assertIn("database-secret", sftp.files[name])
+        self.assertTrue(sftp.closed)
+
+    @override_settings(SSH_REMOTE_CREDENTIAL_STALE_SECONDS=900)
+    def test_unsafe_metadata_fails_before_first_secret_byte_and_cleans_path(self):
+        sftp = _FakeSFTP(bad_stat_open_index=1)
+        with self.assertRaisesRegex(PermissionError, "private empty regular file"):
+            CoreAuthDatabase()._install_remote_database_credentials(
+                self._ssh(sftp),
+                host="database.internal.test",
+                port=5432,
+                username="backup-user",
+                password="must-never-be-written",
+            )
+
+        self.assertFalse(any(event[0] == "write" for event in sftp.events))
+        self.assertFalse(
+            any("must-never-be-written" in content for content in sftp.files.values())
+        )
+        self.assertEqual(len(sftp.removed), 1)
+        self.assertTrue(sftp.closed)
+
+    @override_settings(SSH_REMOTE_CREDENTIAL_STALE_SECONDS=900)
+    def test_partial_second_file_failure_removes_the_first_exclusive_file(self):
+        sftp = _FakeSFTP(fail_open_index=2)
+        with self.assertRaisesRegex(OSError, "exclusive create failed"):
+            CoreAuthDatabase()._install_remote_database_credentials(
+                self._ssh(sftp),
+                host="database.internal.test",
+                port=5432,
+                username="backup-user",
+                password="database-secret",
+            )
+
+        opened_names = [event[1] for event in sftp.events if event[0] == "open"]
+        self.assertEqual(len(opened_names), 2)
+        self.assertEqual(sftp.removed, [opened_names[0]])
+        self.assertNotIn(opened_names[0], sftp.files)
+        self.assertTrue(sftp.closed)
+
+    @override_settings(SSH_REMOTE_CREDENTIAL_STALE_SECONDS=900)
+    def test_stale_sweep_matches_only_exact_old_regular_artifacts(self):
+        now = 2_000_000_000
+        old = now - 901
+        young = now - 899
+        exact_old_cnf = ".backupsheep-0123456789abcdef0123456789abcdef.cnf"
+        exact_old_pgpass = ".backupsheep-fedcba9876543210fedcba9876543210.pgpass"
+        exact_young = ".backupsheep-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.cnf"
+        near_match = ".backupsheep-0123456789abcdef0123456789abcdef.cnf.bak"
+        old_directory = ".backupsheep-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pgpass"
+        sftp = _FakeSFTP()
+        sftp.entries = [
+            SimpleNamespace(filename=exact_old_cnf, st_mode=stat.S_IFREG | 0o600, st_mtime=old),
+            SimpleNamespace(filename=exact_old_pgpass, st_mode=stat.S_IFREG | 0o600, st_mtime=old),
+            SimpleNamespace(filename=exact_young, st_mode=stat.S_IFREG | 0o600, st_mtime=young),
+            SimpleNamespace(filename=near_match, st_mode=stat.S_IFREG | 0o600, st_mtime=old),
+            SimpleNamespace(filename=old_directory, st_mode=stat.S_IFDIR | 0o700, st_mtime=old),
+        ]
+
+        with mock.patch("apps.console.connection.models.time.time", return_value=now):
+            CoreAuthDatabase._sweep_stale_remote_database_credentials(sftp)
+
+        self.assertEqual(sftp.removed, [exact_old_cnf, exact_old_pgpass])
+        self.assertNotIn(exact_young, sftp.removed)
+        self.assertNotIn(near_match, sftp.removed)
+        self.assertNotIn(old_directory, sftp.removed)
 
 
 class DatabaseEngineBase(BaseTestCase):
@@ -985,9 +2253,17 @@ class DatabaseSnapshotDispatchTests(BaseTestCase):
             status=UtilBackup.Status.PENDING, attempt_no=1,
             type=UtilBackup.Type.ON_DEMAND,
         )
+        _authorize_test_backup_destination(node, backup)
         with mock.patch("apps._tasks.integration.backup.mysql.snapshot_mysql") as m_mysql, \
              mock.patch("apps._tasks.integration.backup.mariadb.snapshot_mariadb") as m_maria, \
              mock.patch("apps._tasks.integration.backup.postgresql.snapshot_postgresql") as m_pg, \
+             mock.patch(
+                 "apps._tasks.execution.verify_and_commit_source_artifact",
+                 return_value=SimpleNamespace(byte_count=0),
+             ), \
+             mock.patch(
+                 "apps._tasks.integration.storage.tasks.storage_upload.s"
+             ), \
              mock.patch("apps._tasks.integration.storage.tasks.finalize_backup"):
             node.database.create_snapshot(backup)
         return m_mysql, m_maria, m_pg, backup
@@ -1024,6 +2300,7 @@ class DatabaseSnapshotDispatchTests(BaseTestCase):
             status=UtilBackup.Status.PENDING, attempt_no=1,
             type=UtilBackup.Type.ON_DEMAND,
         )
+        _authorize_test_backup_destination(node, backup)
         with mock.patch("apps._tasks.integration.backup.mysql.snapshot_mysql") as m_mysql, \
              mock.patch("apps._tasks.integration.backup.mariadb.snapshot_mariadb") as m_maria, \
              mock.patch("apps._tasks.integration.backup.postgresql.snapshot_postgresql") as m_pg:
@@ -1034,10 +2311,72 @@ class DatabaseSnapshotDispatchTests(BaseTestCase):
         m_pg.assert_not_called()
 
 
+class DatabaseCredentialFileSecurityTests(SimpleTestCase):
+    def test_local_defaults_publish_never_follows_an_existing_link(self):
+        for engine in (MYSQL_ENGINE, MDB_ENGINE):
+            with self.subTest(engine=engine.__name__):
+                with tempfile.TemporaryDirectory() as root:
+                    victim = os.path.join(root, "victim")
+                    destination = os.path.join(root, "credentials.cnf")
+                    with open(victim, "w", encoding="utf-8") as output:
+                        output.write("must-survive")
+                    os.symlink(victim, destination)
+
+                    engine._write_local_defaults_file(
+                        destination, "password=secret\n"
+                    )
+
+                    self.assertFalse(os.path.islink(destination))
+                    self.assertEqual(
+                        stat.S_IMODE(os.stat(destination).st_mode), 0o600
+                    )
+                    with open(destination, encoding="utf-8") as source:
+                        self.assertEqual(source.read(), "password=secret\n")
+                    with open(victim, encoding="utf-8") as source:
+                        self.assertEqual(source.read(), "must-survive")
+
+    def test_remote_defaults_are_restricted_before_credentials_are_written(self):
+        for engine in (MYSQL_ENGINE, MDB_ENGINE, PG_ENGINE):
+            with self.subTest(engine=engine.__name__):
+                events = []
+                writer = mock.MagicMock()
+                writer.write.side_effect = lambda _content: events.append("write")
+                opened = mock.MagicMock()
+                opened.__enter__.return_value = writer
+                sftp = mock.MagicMock()
+                sftp.open.side_effect = lambda *_args: (
+                    events.append("open") or opened
+                )
+                sftp.chmod.side_effect = lambda *_args: events.append("chmod")
+                sftp.close.side_effect = lambda: events.append("close")
+                ssh = mock.MagicMock()
+                ssh.open_sftp.return_value = sftp
+
+                engine._sftp_write_remote_file(
+                    ssh, "credentials.cnf", "password=secret\n"
+                )
+
+                self.assertEqual(events, ["open", "chmod", "write", "close"])
+                sftp.open.assert_called_once_with("credentials.cnf", "x")
+                sftp.chmod.assert_called_once_with("credentials.cnf", 0o600)
+
+
 class MysqlDirectEngineTests(DatabaseEngineBase):
     """snapshot_mysql in DIRECT mode: argv list, temp defaults file, exit-code checks."""
 
     DUMP = b"-- dump\nINSERT INTO t VALUES (1);\n"
+
+    def test_mysql_defaults_file_has_exact_tls_mode(self):
+        required = MYSQL_ENGINE._defaults_file_content(
+            DB_USER, DB_PASS, "db.example.test", 3306, True
+        )
+        disabled = MYSQL_ENGINE._defaults_file_content(
+            DB_USER, DB_PASS, "db.example.test", 3306, False
+        )
+
+        self.assertIn("ssl-mode=Required", required)
+        self.assertNotIn("ssl-mode=Preferred", required)
+        self.assertIn("ssl-mode=Disabled", disabled)
 
     def _run_engine(self, backup, fake_run):
         with self._patch_check_connection(), \
@@ -1048,6 +2387,8 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
     def test_direct_success(self):
         node, backup = self._make_backup(
             db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0")
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
         calls = []
         self._run_engine(backup, _recorded_run(calls, dump=self.DUMP))
 
@@ -1059,23 +2400,134 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertTrue(os.path.exists(zip_path))
         with zipfile.ZipFile(zip_path) as zf:
             self.assertIn("appdb.sql", zf.namelist())
-            self.assertEqual(zf.read("appdb.sql"), self.DUMP)
+            self.assertEqual(
+                zf.read("appdb.sql"), MYSQL_SCHEMA_PREAMBLE + self.DUMP
+            )
 
-        # Exactly one subprocess, argv list with the defaults file first, mode 0600.
-        self.assertEqual(len(calls), 1)
-        argv, kwargs = calls[0]["argv"], calls[0]["kwargs"]
+        # One metadata query plus one dump. Both use the same 0600 defaults file.
+        self.assertEqual(len(calls), 2)
+        defaults_call = next(
+            call for call in calls if "--database=appdb" in call["argv"]
+        )
+        self.assertIn("DEFAULT_CHARACTER_SET_NAME", " ".join(defaults_call["argv"]))
+        argv, kwargs = next(
+            (call["argv"], call["kwargs"])
+            for call in calls
+            if call["argv"][0].endswith("mysqldump")
+        )
         self.assertTrue(argv[0].endswith("mysqldump"))
         self.assertEqual(argv[1], f"--defaults-extra-file=_storage/my_{backup.uuid}.cnf")
         self.assertIn("--column-statistics=0", argv)  # mysql_8
+        self.assertIn("--routines", argv)
+        self.assertIn("--triggers", argv)
+        self.assertIn("--events", argv)
+        self.assertIn("--extended-insert", argv)
+        self.assertNotIn("--skip-extended-insert", argv)
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertNotIn(DB_USER, " ".join(argv))
         self.assertFalse(kwargs.get("shell"))
         self.assertNotIn("env", kwargs)
         self.assertEqual(kwargs.get("timeout"), 12 * 3600)
         self.assertEqual(calls[0]["defaults_mode"], 0o600)
+        operand_boundary = argv.index("--")
+        self.assertEqual(operand_boundary, len(argv) - 2)
+        self.assertEqual(backup.option_mysql, " ".join(argv[2:operand_boundary]))
+        self.assertEqual(
+            backup.metadata["logical_dump"],
+            {
+                "contract_version": 2,
+                "engine": "mysql",
+                "version": "mysql_8_0",
+                "client": "mysqldump",
+                "flags": argv[2:operand_boundary],
+                "extended_insert": True,
+                "max_allowed_packet_bytes": 512 * 1024 * 1024,
+                "database_defaults": {
+                    "appdb": {
+                        "character_set": "utf8mb4",
+                        "collation": "utf8mb4_unicode_ci",
+                    }
+                },
+            },
+        )
 
         # The credentials file is deleted afterwards.
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
+
+    def test_direct_selected_databases_dump_each_database(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL,
+            version="mysql_8_0",
+            database_name=None,
+            all_tables=False,
+            tables=[],
+            databases=["analytics", "appdb"],
+        )
+        calls = []
+
+        self._run_engine(
+            backup,
+            _recorded_multi_database_run(calls),
+        )
+
+        self.assertEqual(
+            [
+                call["argv"][-1]
+                for call in calls
+                if call["argv"][0].endswith("mysqldump")
+            ],
+            ["analytics", "appdb"],
+        )
+        self.assertTrue(all(call["defaults_mode"] == 0o600 for call in calls))
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["analytics.sql", "appdb.sql", "backupsheep.txt"],
+            )
+
+    def test_direct_all_databases_filters_system_schemas_before_dump(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL,
+            version="mysql_8_0",
+            database_name=None,
+            all_tables=False,
+            tables=[],
+            databases=[],
+            all_databases=True,
+        )
+        calls = []
+
+        self._run_engine(
+            backup,
+            _recorded_multi_database_run(
+                calls,
+                inventory=[
+                    "mysql",
+                    "analytics",
+                    "information_schema",
+                    "appdb",
+                    "performance_schema",
+                    "sys",
+                ],
+            ),
+        )
+
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(calls[0]["argv"][0].endswith("mysql"))
+        self.assertIn("--execute=SHOW DATABASES;", calls[0]["argv"])
+        self.assertEqual(
+            [
+                call["argv"][-1]
+                for call in calls
+                if call["argv"][0].endswith("mysqldump")
+            ],
+            ["analytics", "appdb"],
+        )
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["analytics.sql", "appdb.sql", "backupsheep.txt"],
+            )
 
     def test_direct_failure_raises_and_cleans_up(self):
         node, backup = self._make_backup(
@@ -1084,9 +2536,84 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         with self.assertRaises(NodeBackupFailedError):
             self._run_engine(backup, _recorded_run(
                 calls, dump=b"partial", stderr=b"mysqldump: boom", returncode=1))
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertFalse(os.path.exists(f"_storage/{backup.uuid}.zip"))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
+
+    def test_explicit_skip_opt_keeps_row_by_row_format_visible(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0"
+        )
+        node.database.option_skip_opt = True
+        node.database.save(update_fields=["option_skip_opt"])
+        calls = []
+
+        self._run_engine(backup, _recorded_run(calls, dump=self.DUMP))
+
+        backup.refresh_from_db()
+        argv = next(
+            call["argv"]
+            for call in calls
+            if call["argv"][0].endswith("mysqldump")
+        )
+        self.assertIn("--skip-opt", argv)
+        self.assertIn("--quick", argv)
+        self.assertLess(argv.index("--skip-opt"), argv.index("--quick"))
+        self.assertNotIn("--extended-insert", argv)
+        self.assertNotIn("--skip-extended-insert", argv)
+        self.assertFalse(backup.metadata["logical_dump"]["extended_insert"])
+
+    def test_event_privilege_failure_contract_is_stable_and_not_retryable(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0")
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
+        canary = "password=event-secret host=db.internal"
+        calls = []
+
+        with self.assertRaises(NodeBackupFailedError) as ctx:
+            self._run_engine(
+                backup,
+                _recorded_run(
+                    calls,
+                    dump=b"partial",
+                    stderr=(
+                        "mysqldump: Couldn't execute 'show events': Access denied "
+                        f"for user 'backup' ({canary})"
+                    ).encode(),
+                    returncode=1,
+                ),
+            )
+
+        self.assertEqual(ctx.exception.error_code, "DATABASE_EVENT_PRIVILEGE_REQUIRED")
+        self.assertFalse(ctx.exception.retryable)
+        self.assertIn("EVENT privilege", str(ctx.exception.detail))
+        self.assertNotIn(canary, str(ctx.exception.detail))
+        self.assertNotIn(canary, self._read_log(backup))
+
+    def test_stale_worker_does_not_delete_successor_artifacts(self):
+        _node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0"
+        )
+        calls = []
+        with self._patch_check_connection(), \
+             mock.patch.object(
+                 MYSQL_ENGINE.subprocess,
+                 "run",
+                 side_effect=_recorded_run(calls, dump=self.DUMP),
+             ), \
+             mock.patch.object(
+                 MYSQL_ENGINE,
+                 "create_python_zip",
+                 side_effect=BackupExecutionLeaseLostError("stale worker"),
+             ), \
+             mock.patch.object(
+                 MYSQL_ENGINE.delete_from_disk, "apply_async"
+             ) as cleanup:
+            with self.assertRaises(BackupExecutionLeaseLostError):
+                MYSQL_ENGINE.snapshot_mysql(backup)
+
+        cleanup.assert_not_called()
 
     def test_stderr_on_success_is_warning_not_fatal(self):
         node, backup = self._make_backup(
@@ -1135,9 +2662,23 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
 class MariadbDirectEngineTests(DatabaseEngineBase):
     """snapshot_mariadb direct mode: mariadb-appropriate flags."""
 
+    def test_mariadb_defaults_file_never_uses_mysql_ssl_mode(self):
+        enabled = MDB_ENGINE._defaults_file_content(
+            DB_USER, DB_PASS, "db.example.test", 3306, True
+        )
+        disabled = MDB_ENGINE._defaults_file_content(
+            DB_USER, DB_PASS, "db.example.test", 3306, False
+        )
+
+        self.assertIn("ssl=1\n", enabled)
+        self.assertNotIn("ssl-mode", enabled)
+        self.assertNotIn("ssl-mode", disabled)
+
     def test_direct_success_flags(self):
         node, backup = self._make_backup(
             db_type=CoreAuthDatabase.DatabaseType.MARIADB, version="mariadb_10_11")
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
         calls = []
         with self._patch_check_connection(), \
              mock.patch.object(MDB_ENGINE.subprocess, "run",
@@ -1146,14 +2687,200 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
             MDB_ENGINE.snapshot_mariadb(backup)
         backup.refresh_from_db()
         self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
-        self.assertEqual(len(calls), 1)
-        argv = calls[0]["argv"]
-        self.assertTrue(argv[0].endswith("mysqldump"))
+        self.assertEqual(len(calls), 2)
+        argv = next(
+            call["argv"]
+            for call in calls
+            if call["argv"][0].endswith("mariadb-dump")
+        )
+        self.assertTrue(argv[0].endswith("mariadb-dump"))
         self.assertEqual(argv[1], f"--defaults-extra-file=_storage/my_{backup.uuid}.cnf")
         self.assertIn("--compress", argv)
+        self.assertIn("--routines", argv)
+        self.assertIn("--triggers", argv)
+        self.assertIn("--events", argv)
+        self.assertIn("--extended-insert", argv)
+        self.assertNotIn("--skip-extended-insert", argv)
         self.assertFalse(any("column-statistics" in a for a in argv))
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
+        operand_boundary = argv.index("--")
+        self.assertEqual(operand_boundary, len(argv) - 2)
+        self.assertEqual(
+            backup.option_mariadb, " ".join(argv[2:operand_boundary])
+        )
+        self.assertEqual(
+            backup.metadata["logical_dump"],
+            {
+                "contract_version": 2,
+                "engine": "mariadb",
+                "version": "mariadb_10_11",
+                "client": "mariadb-dump",
+                "flags": argv[2:operand_boundary],
+                "extended_insert": True,
+                "max_allowed_packet_bytes": 512 * 1024 * 1024,
+                "database_defaults": {
+                    "appdb": {
+                        "character_set": "utf8mb4",
+                        "collation": "utf8mb4_unicode_ci",
+                    }
+                },
+            },
+        )
+
+    def test_direct_selected_databases_dump_each_database(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_11_8",
+            database_name=None,
+            all_tables=False,
+            tables=[],
+            databases=["analytics", "appdb"],
+        )
+        calls = []
+        with self._patch_check_connection(), mock.patch.object(
+            MDB_ENGINE.subprocess,
+            "run",
+            side_effect=_recorded_multi_database_run(calls),
+        ), mock.patch.object(MDB_ENGINE, "delete_from_disk"):
+            MDB_ENGINE.snapshot_mariadb(backup)
+
+        self.assertEqual(
+            [
+                call["argv"][-1]
+                for call in calls
+                if call["argv"][0].endswith("mariadb-dump")
+            ],
+            ["analytics", "appdb"],
+        )
+        self.assertTrue(all(call["defaults_mode"] == 0o600 for call in calls))
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["analytics.sql", "appdb.sql", "backupsheep.txt"],
+            )
+
+    def test_direct_all_databases_filters_system_schemas_before_dump(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_11_8",
+            database_name=None,
+            all_tables=False,
+            tables=[],
+            databases=[],
+            all_databases=True,
+        )
+        calls = []
+        with self._patch_check_connection(), mock.patch.object(
+            MDB_ENGINE.subprocess,
+            "run",
+            side_effect=_recorded_multi_database_run(
+                calls,
+                inventory=[
+                    "mysql",
+                    "analytics",
+                    "information_schema",
+                    "appdb",
+                    "performance_schema",
+                    "sys",
+                ],
+            ),
+        ), mock.patch.object(MDB_ENGINE, "delete_from_disk"):
+            MDB_ENGINE.snapshot_mariadb(backup)
+
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(calls[0]["argv"][0].endswith("mariadb"))
+        self.assertIn("--execute=SHOW DATABASES;", calls[0]["argv"])
+        self.assertEqual(
+            [
+                call["argv"][-1]
+                for call in calls
+                if call["argv"][0].endswith("mariadb-dump")
+            ],
+            ["analytics", "appdb"],
+        )
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["analytics.sql", "appdb.sql", "backupsheep.txt"],
+            )
+
+    def test_explicit_skip_opt_keeps_row_by_row_format_visible(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_10_11",
+        )
+        node.database.option_skip_opt = True
+        node.database.save(update_fields=["option_skip_opt"])
+        calls = []
+        with self._patch_check_connection(), \
+             mock.patch.object(
+                 MDB_ENGINE.subprocess,
+                 "run",
+                 side_effect=_recorded_run(calls, dump=b"-- dump\n"),
+             ), \
+             mock.patch.object(MDB_ENGINE, "delete_from_disk"):
+            MDB_ENGINE.snapshot_mariadb(backup)
+
+        backup.refresh_from_db()
+        argv = next(
+            call["argv"]
+            for call in calls
+            if call["argv"][0].endswith("mariadb-dump")
+        )
+        self.assertIn("--skip-opt", argv)
+        self.assertIn("--quick", argv)
+        self.assertLess(argv.index("--skip-opt"), argv.index("--quick"))
+        self.assertNotIn("--extended-insert", argv)
+        self.assertNotIn("--skip-extended-insert", argv)
+        self.assertFalse(backup.metadata["logical_dump"]["extended_insert"])
+
+
+class MariadbSshEngineTests(DatabaseEngineBase):
+    """MariaDB SSH mode uses MariaDB-native query and dump clients."""
+
+    def test_ssh_success_uses_mariadb_dump(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_11_8",
+            use_private_key=True,
+        )
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
+        dump = b"/*M!999999\\- enable the sandbox mode */\nCREATE TABLE t (id int);\n"
+        ssh = _FakeSSH(
+            lambda command: (
+                (MYSQL_SCHEMA_DEFAULTS if "DEFAULT_CHARACTER_SET_NAME" in command else dump),
+                b"",
+                0,
+            )
+        )
+        key_path = self._key_file()
+        with self._patch_check_connection(), \
+             mock.patch.object(
+                 CoreAuthDatabase,
+                 "get_ssh_client",
+                 return_value=(ssh, key_path),
+             ), \
+             mock.patch.object(MDB_ENGINE, "delete_from_disk"):
+            MDB_ENGINE.snapshot_mariadb(backup)
+
+        dump_commands = [
+            command for command in ssh.commands
+            if command.startswith("mariadb-dump ")
+        ]
+        self.assertEqual(len(dump_commands), 1)
+        self.assertIn("--routines", dump_commands[0])
+        self.assertIn("--triggers", dump_commands[0])
+        self.assertIn("--events", dump_commands[0])
+        self.assertIn("--extended-insert", dump_commands[0])
+        self.assertNotIn("--skip-extended-insert", dump_commands[0])
+        self.assertNotIn(DB_PASS, dump_commands[0])
+        self.assertIn(" -- appdb", dump_commands[0])
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                archive.read("appdb.sql"), MYSQL_SCHEMA_PREAMBLE + dump
+            )
 
 
 class PostgresDirectEngineTests(DatabaseEngineBase):
@@ -1177,10 +2904,15 @@ class PostgresDirectEngineTests(DatabaseEngineBase):
         self.assertTrue(argv[0].endswith("pg_dump"))
         self.assertIn("-w", argv)
         self.assertIn("--clean", argv)
+        self.assertIn("--if-exists", argv)
         self.assertIn("appdb", argv)
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertEqual(kwargs["env"]["PGPASSWORD"], DB_PASS)
         self.assertFalse(kwargs.get("shell"))
+        self.assertEqual(
+            backup.option_postgres,
+            PG_ENGINE.DEFAULT_POSTGRES_OPTIONS,
+        )
 
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as zf:
             self.assertEqual(zf.read("appdb.sql"), b"-- pg dump\n")
@@ -1211,7 +2943,19 @@ class MysqlSshEngineTests(DatabaseEngineBase):
 
     def test_ssh_success_contract(self):
         node, backup = self._ssh_backup()
-        ssh = _FakeSSH(lambda command: (self.DUMP, b"", 0))
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
+        ssh = _FakeSSH(
+            lambda command: (
+                (
+                    MYSQL_SCHEMA_DEFAULTS
+                    if "DEFAULT_CHARACTER_SET_NAME" in command
+                    else self.DUMP
+                ),
+                b"",
+                0,
+            )
+        )
         key_path = self._key_file()
         with self._patch_check_connection(), \
              mock.patch.object(CoreAuthDatabase, "get_ssh_client",
@@ -1227,7 +2971,13 @@ class MysqlSshEngineTests(DatabaseEngineBase):
         self.assertEqual(len(dump_cmds), 1)
         self.assertIn(f"--defaults-extra-file={remote_name}", dump_cmds[0])
         self.assertIn("--column-statistics=0", dump_cmds[0])  # mysql_8 over SSH too
+        self.assertIn("--routines", dump_cmds[0])
+        self.assertIn("--triggers", dump_cmds[0])
+        self.assertIn("--events", dump_cmds[0])
+        self.assertIn("--extended-insert", dump_cmds[0])
+        self.assertNotIn("--skip-extended-insert", dump_cmds[0])
         self.assertNotIn(DB_PASS, dump_cmds[0])
+        self.assertIn(" -- appdb", dump_cmds[0])
 
         # Credentials file SFTP-uploaded with 0600, then removed best-effort.
         self.assertIn(remote_name, ssh.sftp.files)
@@ -1240,11 +2990,19 @@ class MysqlSshEngineTests(DatabaseEngineBase):
         self.assertFalse(os.path.exists(key_path))
 
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as zf:
-            self.assertEqual(zf.read("appdb.sql"), self.DUMP)
+            self.assertEqual(
+                zf.read("appdb.sql"), MYSQL_SCHEMA_PREAMBLE + self.DUMP
+            )
 
     def test_ssh_nonzero_exit_raises_and_cleans_up(self):
         node, backup = self._ssh_backup()
-        ssh = _FakeSSH(lambda command: (b"", b"mysqldump: access denied", 2))
+        ssh = _FakeSSH(
+            lambda command: (
+                (MYSQL_SCHEMA_DEFAULTS, b"", 0)
+                if "DEFAULT_CHARACTER_SET_NAME" in command
+                else (b"", b"mysqldump: access denied", 2)
+            )
+        )
         key_path = self._key_file()
         with self._patch_check_connection(), \
              mock.patch.object(CoreAuthDatabase, "get_ssh_client",
@@ -1294,8 +3052,14 @@ class PostgresSshEngineTests(DatabaseEngineBase):
         dump_cmds = [c for c in work_cmds if " pg_dump " in c]
         self.assertEqual(len(dump_cmds), 1)
         self.assertIn("-d db_one", dump_cmds[0])
+        self.assertIn("--clean", dump_cmds[0])
+        self.assertIn("--if-exists", dump_cmds[0])
         self.assertNotIn("template0", " ".join(dump_cmds))
         self.assertNotIn("template1", " ".join(dump_cmds))
+        self.assertEqual(
+            backup.option_postgres,
+            PG_ENGINE.DEFAULT_POSTGRES_OPTIONS,
+        )
 
         # pgpass uploaded with 0600 and removed afterwards.
         self.assertEqual(ssh.sftp.chmods, [(remote_name, 0o600)])
@@ -1351,6 +3115,8 @@ class AuthDatabaseGetSshClientTests(BaseTestCase):
     def test_falls_back_to_rsa_when_ed25519_cannot_parse(self):
         auth = self._auth()
         pkey = mock.Mock(name="pkey")
+        pkey.get_name.return_value = "ssh-rsa"
+        pkey.get_bits.return_value = 3072
         ed = mock.Mock()
         ed.from_private_key_file.side_effect = Exception("not an Ed25519 key")
         rsa = mock.Mock()
@@ -1373,8 +3139,11 @@ class AuthDatabaseGetSshClientTests(BaseTestCase):
 
     def test_connect_failure_removes_temp_key(self):
         auth = self._auth()
+        pkey = mock.Mock(name="pkey")
+        pkey.get_name.return_value = "ssh-ed25519"
+        pkey.get_bits.return_value = 256
         ed = mock.Mock()
-        ed.from_private_key_file.return_value = mock.Mock(name="pkey")
+        ed.from_private_key_file.return_value = pkey
         ssh_client = mock.Mock(name="ssh")
         ssh_client.connect.side_effect = Exception("boom")
         before = self._storage_listing()
@@ -1382,7 +3151,8 @@ class AuthDatabaseGetSshClientTests(BaseTestCase):
              mock.patch("paramiko.SSHClient", return_value=ssh_client):
             with self.assertRaises(Exception) as ctx:
                 auth.get_ssh_client()
-        self.assertIn("boom", str(ctx.exception))
+        self.assertNotIn("boom", str(ctx.exception))
+        self.assertIn("validate", str(ctx.exception).lower())
         self.assertEqual(self._storage_listing(), before)
 
 
@@ -1396,8 +3166,17 @@ class AuthDatabaseCheckConnectionSshTests(BaseTestCase):
             db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0",
             use_private_key=True)
         auth = node.connection.auth_database
-        ssh = _FakeSSH(lambda command: (b"mysql  Ver 8.0\nServer version: 8.0.35\n",
-                                        b"", 0))
+
+        def handler(command):
+            if command == "mysql --version":
+                return b"mysql  Ver 8.0.36 for Linux (MySQL Community Server)\n", b"", 0
+            if command == "mysqldump --version":
+                return b"mysqldump  Ver 8.0.36 for Linux (MySQL Community Server)\n", b"", 0
+            if "SELECT 1" in command:
+                return b"1\n", b"", 0
+            return b"mysql  Ver 8.0\nServer version: 8.0.35\n", b"", 0
+
+        ssh = _FakeSSH(handler)
         fd, key_path = tempfile.mkstemp(dir="_storage", prefix="sshkey_")
         os.write(fd, b"fake-key")
         os.close(fd)
@@ -1405,6 +3184,86 @@ class AuthDatabaseCheckConnectionSshTests(BaseTestCase):
         with mock.patch.object(CoreAuthDatabase, "get_ssh_client",
                                return_value=(ssh, key_path)):
             auth.check_connection()
+        self.assertTrue(ssh.closed)
+        self.assertFalse(os.path.exists(key_path))
+
+    def test_postgresql_ssh_check_connection_does_not_build_mysql_tls_option(self):
+        node = make_database_node(
+            self.account,
+            self.member,
+            db_type=CoreAuthDatabase.DatabaseType.POSTGRESQL,
+            version="postgres_16",
+            use_private_key=True,
+        )
+        auth = node.connection.auth_database
+
+        def handler(command):
+            if command == "pg_dump --version":
+                return b"pg_dump (PostgreSQL) 16.10\n", b"", 0
+            if "SELECT version();" in command:
+                return (
+                    b"PostgreSQL 16.10 on x86_64, compiled by gcc, 64-bit\n",
+                    b"",
+                    0,
+                )
+            self.fail(f"unexpected PostgreSQL validation command: {command}")
+
+        ssh = _FakeSSH(handler)
+        fd, key_path = tempfile.mkstemp(dir="_storage", prefix="sshkey_")
+        os.write(fd, b"fake-key")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(key_path) and os.remove(key_path))
+
+        with mock.patch.object(
+            CoreAuthDatabase,
+            "get_ssh_client",
+            return_value=(ssh, key_path),
+        ), mock.patch.object(
+            CoreAuthDatabase,
+            "_mysql_family_ssl_option",
+            side_effect=AssertionError("MySQL TLS helper used for PostgreSQL"),
+        ):
+            auth.check_connection()
+
+        self.assertTrue(ssh.closed)
+        self.assertFalse(os.path.exists(key_path))
+
+    def test_postgresql_ssh_object_listing_does_not_build_mysql_tls_option(self):
+        node = make_database_node(
+            self.account,
+            self.member,
+            db_type=CoreAuthDatabase.DatabaseType.POSTGRESQL,
+            version="postgres_16",
+            use_private_key=True,
+        )
+        auth = node.connection.auth_database
+
+        def handler(command):
+            if "FROM pg_catalog.pg_tables" in command:
+                return b"fixture_meta\nbig\n", b"", 0
+            self.fail(f"unexpected PostgreSQL listing command: {command}")
+
+        ssh = _FakeSSH(handler)
+        fd, key_path = tempfile.mkstemp(dir="_storage", prefix="sshkey_")
+        os.write(fd, b"fake-key")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(key_path) and os.remove(key_path))
+
+        with mock.patch.object(auth, "check_connection"), mock.patch.object(
+            CoreAuthDatabase,
+            "get_ssh_client",
+            return_value=(ssh, key_path),
+        ), mock.patch.object(
+            CoreAuthDatabase,
+            "_mysql_family_ssl_option",
+            side_effect=AssertionError("MySQL TLS helper used for PostgreSQL"),
+        ):
+            objects = auth.get_eligible_objects()
+
+        self.assertEqual(
+            objects,
+            [{"name": "big"}, {"name": "fixture_meta"}],
+        )
         self.assertTrue(ssh.closed)
         self.assertFalse(os.path.exists(key_path))
 
@@ -1424,13 +3283,36 @@ class BackupTaskValidationOrderTests(BaseTestCase):
             self.account, self.member,
             db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0")
 
+    def _storage(self, suffix):
+        return factories.make_storage(
+            self.account,
+            self.member,
+            bucket=f"validation-order-{suffix}",
+        )
+
+    @staticmethod
+    def _authorized_source_task():
+        # Destination-lane authorization is covered independently. These tests
+        # begin at the source task's post-handoff connection-validation stage.
+        return mock.patch.object(
+            CoreNode,
+            "authorized_local_destination_point_ids",
+            return_value=[1],
+        )
+
     def test_website_validation_failure_creates_row_and_marks_retrying(self):
         node = self._website_node()
-        with mock.patch.object(CoreConnection, "validate", return_value=False), \
+        storage = self._storage("website-retry")
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate", return_value=False), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_website, "retry",
                                side_effect=Retry("retrying")) as retry:
-            backup_website.apply(kwargs={"node_id": node.id, "storage_ids": []}, throw=False)
+            backup_website.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
         backup = CoreWebsiteBackup.objects.get(website=node.website)
         self.assertEqual(backup.status, UtilBackup.Status.RETRYING)
         self.assertEqual(backup.type, UtilBackup.Type.ON_DEMAND)
@@ -1440,23 +3322,78 @@ class BackupTaskValidationOrderTests(BaseTestCase):
 
     def test_website_validation_failure_max_retries_marks_row(self):
         node = self._website_node()
-        with mock.patch.object(CoreConnection, "validate", return_value=False), \
+        storage = self._storage("website-max")
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate", return_value=False), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_website, "retry",
                                side_effect=MaxRetriesExceededError("maxed")):
-            backup_website.apply(kwargs={"node_id": node.id, "storage_ids": []}, throw=False)
+            backup_website.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
         backup = CoreWebsiteBackup.objects.get(website=node.website)
         self.assertEqual(backup.status, UtilBackup.Status.MAX_RETRY_FAILED)
         notify.assert_called_once()
 
+    def test_website_terminal_archive_policy_stops_without_retry(self):
+        node = self._website_node()
+        storage = self._storage("website-archive-policy")
+        failure = safe_backup_failure(
+            ArchiveSourcePolicyError(
+                "symlink", relative_path="private/customer/path"
+            ),
+            stage="website_backup",
+        )
+        terminal = NodeBackupFailedError(
+            node,
+            "archive-policy-test",
+            1,
+            UtilBackup.Type.ON_DEMAND,
+            failure.detail,
+            public_failure=failure,
+        )
+
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate", return_value=True), \
+             mock.patch.object(
+                 CoreWebsite, "create_snapshot", side_effect=terminal
+             ), \
+             mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
+             mock.patch.object(backup_website, "retry") as retry:
+            backup_website.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
+
+        backup = CoreWebsiteBackup.objects.get(website=node.website)
+        contract = node._backup_notification_contract(terminal)
+        self.assertEqual(terminal.error_code, "SOURCE_SPECIAL_FILE_UNSUPPORTED")
+        self.assertFalse(terminal.retryable)
+        self.assertEqual(contract["code"], "SOURCE_SPECIAL_FILE_UNSUPPORTED")
+        self.assertFalse(contract["retryable"])
+        self.assertIn("Remove or exclude", contract["remediation"])
+        self.assertEqual(backup.status, UtilBackup.Status.MAX_RETRY_FAILED)
+        self.assertEqual(backup.attempt_no, 1)
+        notify.assert_called_once()
+        retry.assert_not_called()
+
     def test_database_validation_failure_creates_row_and_marks_retrying(self):
         node = self._database_node()
-        with mock.patch.object(CoreConnection, "validate",
+        storage = self._storage("database-retry")
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate",
                                side_effect=IntegrationValidationError("nope")), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_database, "retry",
                                side_effect=Retry("retrying")) as retry:
-            backup_database.apply(kwargs={"node_id": node.id, "storage_ids": []}, throw=False)
+            backup_database.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
         backup = CoreDatabaseBackup.objects.get(database=node.database)
         self.assertEqual(backup.status, UtilBackup.Status.RETRYING)
         self.assertEqual(backup.type, UtilBackup.Type.ON_DEMAND)
@@ -1466,12 +3403,18 @@ class BackupTaskValidationOrderTests(BaseTestCase):
 
     def test_database_validation_failure_max_retries_marks_row(self):
         node = self._database_node()
-        with mock.patch.object(CoreConnection, "validate",
+        storage = self._storage("database-max")
+        with self._authorized_source_task(), \
+             mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate",
                                side_effect=IntegrationValidationError("nope")), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_database, "retry",
                                side_effect=MaxRetriesExceededError("maxed")):
-            backup_database.apply(kwargs={"node_id": node.id, "storage_ids": []}, throw=False)
+            backup_database.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
         backup = CoreDatabaseBackup.objects.get(database=node.database)
         self.assertEqual(backup.status, UtilBackup.Status.MAX_RETRY_FAILED)
         notify.assert_called_once()
@@ -1552,6 +3495,33 @@ class LftpFailureDetectionTests(WebsiteEngineBase):
             fake_run=lambda cmd, **kwargs: SimpleNamespace(stdout="", returncode=0),
         )
         finalize.assert_called_once()
+
+    def test_deep_tree_stack_abort_retries_same_mirror_serially(self):
+        node, backup = self._make_backup(incremental=False)
+        scripts = []
+
+        def fake_run(cmd, **kwargs):
+            scripts.append(kwargs.get("input") or "")
+            if len(scripts) == 1:
+                return SimpleNamespace(
+                    stdout=(
+                        "lftp: SMTask.cc:152: static void SMTask::Enter(SMTask*): "
+                        "Assertion `stack_ptr<SMTASK_MAX_DEPTH' failed.\n"
+                    ),
+                    returncode=-6,
+                )
+            return SimpleNamespace(stdout="", returncode=0)
+
+        finalize = self._run(
+            backup, incremental=False, fake_run=fake_run
+        )
+        finalize.assert_called_once()
+        self.assertEqual(len(scripts), 2)
+        self.assertIn("--parallel=3", scripts[0])
+        self.assertIn("--parallel=1", scripts[1])
+        self.assertIn("set net:connection-limit 1", scripts[1])
+        with open(f"_storage/{backup.uuid}.log") as log:
+            self.assertIn("serial directory traversal", log.read())
 
     def test_login_failure_still_raises_from_output_grep(self):
         node, backup = self._make_backup(incremental=False)
@@ -1777,8 +3747,8 @@ class FinalizeZipManifestTests(WebsiteEngineBase):
         manifest = f"_storage/{backup.uuid}.files"
         self.assertTrue(os.path.exists(manifest))
         with open(manifest) as fh:
-            entries = set(fh.read().splitlines())
-        self.assertEqual(entries, {"index.html", os.path.join("sub", "world.txt")})
+            entries = fh.read().splitlines()
+        self.assertEqual(entries, ["index.html", "sub/world.txt"])
 
         # The tree itself holds no manifest copy...
         self.assertFalse(os.path.exists(os.path.join(tmp, f"{backup.uuid}.files")))
@@ -1796,6 +3766,51 @@ class FinalizeZipManifestTests(WebsiteEngineBase):
         self.assertEqual(backup.total_files, 2)
         self.assertEqual(backup.size, os.stat(zip_path).st_size)
         self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
+
+    def test_verified_enumeration_feeds_zip_once_and_keeps_empty_directories(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        os.makedirs(os.path.join(tmp, "empty-directory"))
+        original_walk = os.walk
+
+        with mock.patch.object(W.os, "walk", wraps=original_walk) as walk:
+            self._finalize(backup, tmp, keep_dir=True)
+
+        walk.assert_called_once()
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertIn("empty-directory/", archive.namelist())
+        with open(f"_storage/{backup.uuid}.files") as manifest:
+            self.assertEqual(
+                manifest.read().splitlines(),
+                ["index.html", "sub/world.txt"],
+            )
+        member_prefix = f".{backup.uuid}.members."
+        self.assertFalse(
+            any(
+                name.startswith(member_prefix) and name.endswith(".partial")
+                for name in os.listdir("_storage")
+            )
+        )
+
+    def test_member_list_preserves_unicode_spaces_and_quotes(self):
+        _node, backup = self._make_backup()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        names = (
+            "caf\u00e9 space.txt",
+            "arabic-\u0645\u0631\u062d\u0628\u0627.txt",
+            "quote-'\".txt",
+        )
+        for name in names:
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as source:
+                source.write(name)
+
+        self._finalize(backup, tmp, keep_dir=True)
+
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(set(archive.namelist()), set(names))
+            for name in names:
+                self.assertEqual(archive.read(name).decode("utf-8"), name)
 
     def test_full_mode_discards_working_dir_via_task(self):
         node, backup = self._make_backup()
@@ -1820,3 +3835,366 @@ class FinalizeZipManifestTests(WebsiteEngineBase):
         # cache-local was planted: no {uuid}.files inside the cache.
         self.assertEqual(sorted(os.listdir(cache)), ["index.html", "sub"])
         self.assertTrue(os.path.exists(os.path.join(cache, "sub", "world.txt")))
+
+    def test_symlink_is_rejected_before_archive_or_manifest_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        os.symlink("index.html", os.path.join(tmp, "site-link"))
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "symlink")
+        self.assertEqual(context.exception.relative_path, "site-link")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))
+
+
+class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
+    def _tree(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        os.makedirs(os.path.join(directory, "sub"))
+        with open(os.path.join(directory, "index.html"), "w") as source:
+            source.write("first")
+        with open(os.path.join(directory, "sub", "world.txt"), "w") as source:
+            source.write("second")
+        return directory
+
+    def _checkpoint_tree(self, backup):
+        directory = os.path.abspath(f"_storage/{backup.uuid}")
+        os.makedirs(os.path.join(directory, "sub"), exist_ok=True)
+        with open(os.path.join(directory, "index.html"), "w") as source:
+            source.write("first")
+        with open(os.path.join(directory, "sub", "world.txt"), "w") as source:
+            source.write("second")
+        return directory
+
+    def test_archive_failure_persists_exact_mirror_checkpoint(self):
+        _node, backup = self._make_backup()
+        directory = self._checkpoint_tree(backup)
+        fingerprint = W._cache_fingerprint(
+            backup.website,
+            backup.website.node.connection.auth_website,
+            "u",
+        )
+
+        with mock.patch.object(W, "create_zip", side_effect=RuntimeError("zip stopped")):
+            with self.assertRaises(BackupStageError) as raised:
+                W._finalize_zip(
+                    backup,
+                    directory,
+                    keep_dir=True,
+                    configuration_sha256=fingerprint,
+                )
+        self.assertEqual(raised.exception.stage, "website_archive")
+        self.assertEqual(str(raised.exception), "website backup stage failed")
+        self.assertEqual(str(raised.exception.error), "zip stopped")
+        self.assertEqual(
+            safe_backup_failure(raised.exception).code,
+            "ARCHIVE_CREATION_FAILED",
+        )
+
+        backup.refresh_from_db()
+        checkpoint = backup.metadata[W._WEBSITE_CHECKPOINT_KEY]
+        self.assertEqual(checkpoint["phase"], "archive_building")
+        self.assertEqual(checkpoint["identity"]["file_count"], 2)
+        self.assertEqual(checkpoint["identity"]["directory_count"], 1)
+        self.assertEqual(backup.total_files, 2)
+        self.assertTrue(os.path.isfile(f"_storage/{backup.uuid}.members"))
+        self.assertTrue(W.website_mirror_checkpoint_candidate(backup))
+
+    def test_retry_revalidates_checkpoint_and_skips_second_lftp_transfer(self):
+        node, backup = self._make_backup()
+        directory = self._checkpoint_tree(backup)
+        fingerprint = W._cache_fingerprint(
+            backup.website,
+            node.connection.auth_website,
+            "u",
+        )
+        with mock.patch.object(W, "create_zip", side_effect=RuntimeError("zip stopped")):
+            with self.assertRaises(RuntimeError):
+                W._finalize_zip(
+                    backup,
+                    directory,
+                    keep_dir=True,
+                    configuration_sha256=fingerprint,
+                )
+
+        with mock.patch.object(
+                 CoreAuthWebsite,
+                 "check_connection",
+                 side_effect=AssertionError("archive retry touched the source"),
+             ) as check_connection, \
+             mock.patch.object(
+                 W,
+                 "_preflight_website_capacity",
+                 side_effect=AssertionError("archive retry requested mirror capacity"),
+             ) as mirror_preflight, \
+             mock.patch.object(W.subprocess, "run") as lftp, \
+             mock.patch.object(W, "delete_from_disk"):
+            W._snapshot_lftp(
+                backup,
+                base_dir=directory + os.sep,
+                incremental=False,
+            )
+
+        lftp.assert_not_called()
+        check_connection.assert_not_called()
+        mirror_preflight.assert_not_called()
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
+        with open(f"_storage/{backup.uuid}.log") as run_log:
+            self.assertIn("without another source transfer", run_log.read())
+
+    def test_changed_checkpoint_workspace_forces_fresh_mirror(self):
+        node, backup = self._make_backup()
+        directory = self._checkpoint_tree(backup)
+        fingerprint = W._cache_fingerprint(
+            backup.website,
+            node.connection.auth_website,
+            "u",
+        )
+        with mock.patch.object(W, "create_zip", side_effect=RuntimeError("zip stopped")):
+            with self.assertRaises(RuntimeError):
+                W._finalize_zip(
+                    backup,
+                    directory,
+                    keep_dir=True,
+                    configuration_sha256=fingerprint,
+                )
+        with open(os.path.join(directory, "index.html"), "w") as source:
+            source.write("changed after checkpoint")
+
+        with mock.patch.object(
+                 CoreAuthWebsite,
+                 "check_connection",
+             ) as check_connection, \
+             mock.patch.object(
+                 W.subprocess,
+                 "run",
+                 return_value=SimpleNamespace(stdout="", returncode=0),
+             ) as lftp, \
+             mock.patch.object(W, "_finalize_zip"), \
+             mock.patch.object(W, "delete_from_disk"):
+            W._snapshot_lftp(
+                backup,
+                base_dir=directory + os.sep,
+                incremental=False,
+            )
+
+        lftp.assert_called_once()
+        check_connection.assert_called_once_with()
+
+    def test_inode_preflight_fails_before_work_when_capacity_is_short(self):
+        with mock.patch.object(
+            W.os,
+            "statvfs",
+            return_value=SimpleNamespace(f_files=100, f_favail=3),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Not enough free inodes for website backup",
+            ):
+                W._ensure_inode_capacity("_storage", 4, what="website backup")
+
+    def test_resume_preserves_checkpoint_and_unbinds_progress_callback(self):
+        node, backup = self._make_backup()
+        _authorize_test_backup_destination(node, backup)
+        checkpoint = mock.Mock(return_value=True)
+        execution = SimpleNamespace(
+            state=SimpleNamespace(progress_completed=12000),
+            progress=mock.Mock(),
+            ensure_owned=mock.Mock(),
+        )
+
+        def snapshot(current):
+            self.assertIs(current, backup)
+            self.assertIs(current._execution_progress_callback, execution.progress)
+            self.assertEqual(current._execution_progress_floor, 12000)
+
+        with mock.patch(
+                 "apps.console.node.models._clear_local_backup_artifacts",
+             ) as clear_artifacts, \
+             mock.patch(
+                 "apps._tasks.execution.verify_and_commit_source_artifact",
+                 return_value=SimpleNamespace(byte_count=321),
+             ), \
+             mock.patch(
+                 "apps._tasks.integration.storage.tasks.finalize_backup.apply_async",
+             ) as finalize, \
+             mock.patch(
+                 "apps._tasks.integration.storage.tasks.storage_upload.s",
+             ) as storage_signature:
+            _resume_local_backup_owned(
+                backup,
+                node,
+                snapshot,
+                "stored_website_backups",
+                CoreWebsiteBackupStoragePoints.Status,
+                execution,
+                resume_source_checkpoint=checkpoint,
+            )
+
+        checkpoint.assert_called_once_with(backup)
+        clear_artifacts.assert_not_called()
+        execution.progress.assert_called_once_with(
+            321,
+            321,
+            unit="bytes",
+            metadata_updates={"public_stage": None},
+        )
+        point = CoreWebsiteBackupStoragePoints.objects.get(backup=backup)
+        storage_signature.assert_called_once_with(node.id, backup.id, point.id)
+        storage_signature.return_value.set.assert_called_once_with()
+        storage_signature.return_value.set.return_value.apply_async.assert_called_once_with()
+        finalize.assert_not_called()
+        self.assertNotIn("_execution_progress_callback", backup.__dict__)
+        self.assertNotIn("_execution_progress_floor", backup.__dict__)
+
+    def test_source_ready_parent_waits_for_a_storage_worker_claim(self):
+        node, backup = self._make_backup()
+        storage = factories.make_storage(
+            self.account,
+            self.member,
+            code="local",
+            bucket=f"source-ready-{uuid.uuid4().hex[:12]}",
+        )
+        CoreStorageLocal.objects.create(storage=storage, path=None)
+        CoreWebsiteBackupStoragePoints.objects.create(
+            backup=backup,
+            storage=storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY,
+        )
+        _authorize_test_backup_destination(node, backup, storage)
+        execution = SimpleNamespace(
+            state=SimpleNamespace(progress_completed=0),
+            progress=mock.Mock(),
+            ensure_owned=mock.Mock(),
+        )
+        artifact = SimpleNamespace(byte_count=321)
+
+        queued_upload = mock.Mock()
+        with mock.patch(
+            "apps._tasks.execution.verify_and_commit_source_artifact",
+            return_value=artifact,
+        ), mock.patch(
+            "apps._tasks.integration.storage.tasks.storage_upload.s",
+            return_value=queued_upload,
+        ) as storage_signature:
+            _resume_local_backup_owned(
+                backup,
+                node,
+                mock.Mock(),
+                "stored_website_backups",
+                CoreWebsiteBackupStoragePoints.Status,
+                execution,
+            )
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
+        self.assertEqual(
+            CoreWebsiteBackupSerializer(backup).data["execution_status"]["phase"],
+            "source_ready",
+        )
+        point = CoreWebsiteBackupStoragePoints.objects.get(backup=backup)
+        storage_signature.assert_called_once_with(node.id, backup.id, point.id)
+        queued_upload.set.assert_called_once_with()
+        queued_upload.set.return_value.apply_async.assert_called_once_with()
+
+    def test_directory_symlink_is_rejected_before_archive_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        os.symlink("sub", os.path.join(tmp, "linked-directory"))
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "symlink")
+        self.assertEqual(context.exception.relative_path, "linked-directory")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))
+
+    def test_fifo_is_rejected_before_archive_or_manifest_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        os.mkfifo(os.path.join(tmp, "updates.pipe"))
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "special")
+        self.assertEqual(context.exception.relative_path, "updates.pipe")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))
+
+    def test_manifest_ambiguous_name_is_rejected_before_archive_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        with open(os.path.join(tmp, "line\nbreak.txt"), "w") as source:
+            source.write("not representable in the line manifest")
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "invalid_path")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))
+
+    def test_manifest_control_character_is_rejected_before_archive_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        with open(os.path.join(tmp, "tab\tname.txt"), "w") as source:
+            source.write("not portable across supported website protocols")
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "invalid_path")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))

@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db.models import Q
+from apps.api.v1.utils.api_helpers import provider_connections_for_action
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
 from rest_framework import viewsets
@@ -14,15 +15,18 @@ from apps.console.connection.models import (
     CoreIntegration,
 )
 from apps.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_authentication import ConsoleSessionAuthentication
 from apps.console.node.models import CoreDigitalOcean, CoreNode
 from .filters import CoreDigitalOceanFilter
 from .permissions import CoreDigitalOceanViewPermissions
 from .serializers import CoreDigitalOceanConnectionReadSerializer, CoreDigitalOceanConnectionWriteSerializer
-from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
-    IntegrationValidationError
+from .client import list_eligible_objects
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
-from requests.utils import requote_uri
+from ...utils.api_permissions import member_has_perm
+from ...utils.oauth_security import issue_oauth_state
+from ..view_helpers import safe_connection_action
+from urllib.parse import urlencode
 
 
 class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -51,13 +55,9 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         }
 
     def get_queryset(self):
-        member = self.request.user.member
-        query = Q(
-            account=member.get_current_account(), integration__code="digitalocean"
+        return provider_connections_for_action(self.request, getattr(self, "action", None)).filter(
+            integration__code="digitalocean"
         )
-        # query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        queryset = CoreConnection.objects.filter(query)
-        return queryset
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -76,43 +76,84 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         endpoints = CoreConnectionLocation.objects.filter(integrations__code="digitalocean").values()
         return Response(endpoints)
 
-    @action(detail=False, methods=["get"])
+    @action(
+        detail=False,
+        methods=["post"],
+        authentication_classes=[ConsoleSessionAuthentication],
+    )
     def oauth_url(self, request):
-        name = self.request.query_params.get("name")
-        if not name:
-            return Response({"detail": "Name parameter is required to setup DigitalOcean integration."}, status=status.HTTP_400_BAD_REQUEST)
-        oauth_url = (
-                f"https://cloud.digitalocean.com/v1/oauth/authorize?"
-                f"response_type=code"
-                f"&client_id={settings.DIGITALOCEAN_APP_CLIENT_ID}"
-                f"&redirect_uri={settings.APP_URL + '/api/v1/callback/digitalocean/'}"
-                f"&scope=read write"
-                f"&state={name}"
+        if not member_has_perm(request, "integration_changes"):
+            return Response(
+                {"detail": "You do not have permission to connect integrations."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        member = request.user.member
+        oauth_state = issue_oauth_state(
+            request,
+            provider="digitalocean",
+            member=member,
+            account=member.get_current_account(),
         )
-        return Response({"oauth_url": requote_uri(oauth_url)})
+        oauth_url = "https://cloud.digitalocean.com/v1/oauth/authorize?" + urlencode(
+            {
+                "response_type": "code",
+                "client_id": settings.DIGITALOCEAN_APP_CLIENT_ID,
+                "redirect_uri": settings.APP_URL
+                + "/api/v1/callback/digitalocean/",
+                "scope": "read write",
+                "state": oauth_state["state"],
+            }
+        )
+        return Response({"oauth_url": oauth_url})
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
+    @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
-        try:
-            connection = self.get_object()
-            validation = connection.validate()
-            if validation:
-                return Response({"detail": "Validation passed. Integration is good for backups."}, status=status.HTTP_200_OK)
-            else:
-                return Response({"detail": "Validation failed. Backups will fail. Check integration details immediately."}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            raise IntegrationValidationError(e.__str__())
+        connection = self.get_object()
+        validation = connection.validate()
+        if validation:
+            return Response(
+                {
+                    "detail": (
+                        "Provider credentials and account access were validated. "
+                        "No backup or recovery was tested."
+                    )
+                },
+                status=status.HTTP_200_OK,
+            )
+        return Response(
+            {
+                "detail": (
+                    "Provider access validation failed. Review credentials and "
+                    "permissions before using this connection."
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     @action(detail=True, methods=["get"])
+    @safe_connection_action(stage="object_discovery")
     def objects(self, request, pk=None):
-        try:
-            connection = self.get_object()
-            eligible_objects = connection.auth_digitalocean.get_eligible_objects(object_type=self.request.query_params.get("object_type"))
-            for eligible_object in eligible_objects:
-                query = Q(unique_id=eligible_object["id"], node__connection=connection)
-                query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-                if CoreDigitalOcean.objects.filter(query).exists():
-                    eligible_object["_bs_attached"] = True
-            return Response(eligible_objects)
-        except Exception as e:
-            raise NodeConnectionErrorEligibleObjects(e.__str__())
+        object_type = self.request.query_params.get("object_type", "cloud")
+        if object_type not in {"cloud", "volume"}:
+            return Response(
+                {"detail": "object_type must be either cloud or volume."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        connection = self.get_object()
+        eligible_objects = list_eligible_objects(
+            headers=connection.auth_digitalocean.get_verified_client(),
+            object_type=object_type,
+        )
+        attached_ids = {
+            str(value)
+            for value in CoreDigitalOcean.objects.filter(
+                node__connection=connection,
+            )
+            .exclude(node__status=CoreNode.Status.DELETE_REQUESTED)
+            .values_list("unique_id", flat=True)
+        }
+        for eligible_object in eligible_objects:
+            if str(eligible_object["id"]) in attached_ids:
+                eligible_object["_bs_attached"] = True
+        return Response(eligible_objects)

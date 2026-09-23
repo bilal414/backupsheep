@@ -1,16 +1,26 @@
 {% extends "console/onboarding/_base.html" %}
 {% block step %}
-    <h2 class="text-lg font-semibold text-slate-900 mb-1">Create your admin account</h2>
-    <p class="text-sm text-slate-500 mb-5">This is the account owner. You'll sign in with this email address.</p>
-    <form method="post" novalidate>
+    <h2 class="text-lg font-semibold tracking-tight text-slate-900">Create your admin account</h2>
+    <p class="mt-1 text-sm text-slate-500">This is the account owner. You'll sign in with this email address.</p>
+    <form method="post" novalidate class="mt-6">
         {% csrf_token %}
         {% if form.non_field_errors %}
-            <div class="rounded-lg bg-red-50 ring-1 ring-red-100 text-red-700 text-sm px-4 py-3 mb-4">{{ form.non_field_errors }}</div>
+            <div class="mb-4 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
+                <svg class="mt-0.5 h-5 w-5 flex-none text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+                </svg>
+                <div class="min-w-0 flex-1 font-medium leading-6">{{ form.non_field_errors }}</div>
+            </div>
         {% endif %}
-        <div class="rounded-lg bg-amber-50 ring-1 ring-amber-200 text-amber-800 text-sm px-4 py-3 mb-4">
-            The install token proves you have access to this server before the first admin
-            is created. Find it with:
-            <code class="font-mono text-xs">docker compose exec app cat /code/_storage/install_token</code>
+        <div class="mb-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="alert">
+            <svg class="mt-0.5 h-5 w-5 flex-none text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>
+            </svg>
+            <p class="min-w-0 flex-1 leading-6">
+                The install token proves you have access to this server before the first admin
+                is created. Find it with:
+                <code class="font-mono text-xs">docker compose exec app cat /code/_storage/install_token</code>
+            </p>
         </div>
         {% include "console/onboarding/_field.html" with field=form.install_token %}
         {% include "console/onboarding/_field.html" with field=form.full_name %}
@@ -18,8 +28,13 @@
         {% include "console/onboarding/_field.html" with field=form.email %}
         {% include "console/onboarding/_field.html" with field=form.password1 %}
         {% include "console/onboarding/_field.html" with field=form.password2 %}
-        <div class="flex justify-end mt-6">
-            <button type="submit" class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Create account &rarr;</button>
+        <div class="mt-6 flex justify-end">
+            <button type="submit" class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                Create account
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
+                </svg>
+            </button>
         </div>
     </form>
 {% endblock %}

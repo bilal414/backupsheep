@@ -275,4 +275,4 @@ class VultrRestoreRecoveryTests(BaseTestCase):
                 node_id=node.id, backup_id=backup.id, restore_id=restore.id
             )
         create.assert_not_called()
-        poll.assert_called_once_with(args=[node.id, restore.id], countdown=60)
+        poll.assert_called_once_with(args=[node.id, restore.id], countdown=30)

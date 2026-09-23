@@ -4,7 +4,11 @@ import uuid
 from datetime import timedelta
 from decimal import Decimal
 
-import requests
+from apps.api.v1.utils.http import request_timeout, requests
+from apps.api.v1.utils.boto import (
+    bounded_boto3_client,
+    bounded_ibm_boto3_client,
+)
 from django.db import models
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
@@ -13,9 +17,72 @@ from sentry_sdk import capture_message, capture_exception
 from ..account.models import CoreAccount
 from ..connection.models import CoreAWSRegion, CoreWasabiRegion, CoreDoSpacesRegion, CoreFilebaseRegion, \
     CoreExoscaleRegion, CoreOracleRegion, CoreScalewayRegion, CoreTencentRegion, CoreAlibabaRegion, CoreIonosRegion, \
-    CoreRackCorpRegion, CoreIBMRegion
+    CoreRackCorpRegion, CoreIBMRegion, _BoundedGoogleAuthorizedSession, _provider_sdk_timeout
 from ..member.models import CoreMember
 from apps.api.v1.utils.api_helpers import bs_encrypt, bs_decrypt
+
+
+def _validation_object_key(prefix):
+    """Return a collision-resistant probe key owned by this validation call."""
+    normalized = str(prefix or "")
+    if normalized and not normalized.endswith("/"):
+        normalized += "/"
+    return f"{normalized}backupsheep_test_{uuid.uuid4().hex}.txt"
+
+
+def _read_validation_url(url):
+    """Read a validation URL through the bounded provider HTTP facade."""
+    try:
+        response = requests.get(url, verify=True)
+    except Exception:
+        return None
+    try:
+        if int(getattr(response, "status_code", 0) or 0) != 200:
+            return None
+        return bytes(getattr(response, "content", b"") or b"")
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+
+
+class S3StorageConfigurationError(ValueError):
+    """Typed, bounded S3 configuration error safe for an API response."""
+
+    MESSAGES = {
+        "OBJECT_LOCK_PAIR_REQUIRED": (
+            "Object Lock mode and retention days must be configured together."
+        ),
+        "OBJECT_LOCK_RETENTION_INVALID": (
+            "Object Lock retention must be at least one day."
+        ),
+        "EXPECTED_BUCKET_OWNER_INVALID": (
+            "Expected bucket owner must be a 12-digit AWS account ID."
+        ),
+        "LIFECYCLE_PAIR_REQUIRED": (
+            "Lifecycle transition days and storage class must be configured together."
+        ),
+        "LIFECYCLE_DAYS_INVALID": (
+            "Lifecycle transition must be at least one day."
+        ),
+        "LIFECYCLE_PREFIX_REQUIRED": (
+            "A folder prefix is required before BackupSheep can manage an S3 "
+            "lifecycle rule."
+        ),
+        "OBJECT_LOCK_NOT_ENABLED": (
+            "S3 Object Lock is not enabled for this bucket. Enable it before "
+            "configuring retention."
+        ),
+    }
+    DEFAULT_MESSAGE = "The S3 storage configuration is invalid."
+
+    def __init__(self, code):
+        self.code = str(code or "INVALID_CONFIGURATION")
+        super().__init__(self.public_message(self.code))
+
+    @classmethod
+    def public_message(cls, code):
+        return cls.MESSAGES.get(str(code or ""), cls.DEFAULT_MESSAGE)
 
 
 class CoreStorageType(models.Model):
@@ -68,6 +135,9 @@ class CoreStorageDropbox(TimeStampedModel):
             oauth2_refresh_token=refresh_token,
             app_key=settings.DROPBOX_APP_KEY,
             app_secret=settings.DROPBOX_APP_SECRET,
+            timeout=_provider_sdk_timeout()[1],
+            max_retries_on_error=0,
+            max_retries_on_rate_limit=0,
         )
 
         with open(local_txt_file, "rb") as file_to_upload:
@@ -106,6 +176,8 @@ class CoreStorageDropbox(TimeStampedModel):
                         cursor.offset = file_to_upload.tell()
 
         if storage_file_id:
+            if not self.no_delete:
+                dbx.files_delete_v2(dest_path)
             return True
 
     def get_refresh_token(self):
@@ -125,7 +197,14 @@ class CoreStorageDropbox(TimeStampedModel):
             "client_secret": settings.DROPBOX_APP_SECRET,
         }
 
-        token_request = requests.post(dropbox_url, data=params)
+        token_request = requests.post(
+            dropbox_url,
+            data=params,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if token_request.status_code == 200:
             token_data = token_request.json()
@@ -135,6 +214,8 @@ class CoreStorageDropbox(TimeStampedModel):
 
 
 class CoreStoragePCloud(TimeStampedModel):
+    API_HOSTNAMES = frozenset({"api.pcloud.com", "eapi.pcloud.com"})
+
     class Location(models.IntegerChoices):
         US = 1, "US"
         EUROPE = 2, "EUROPE"
@@ -152,11 +233,10 @@ class CoreStoragePCloud(TimeStampedModel):
         db_table = "core_storage_pcloud"
 
     def get_client(self, file_upload=None, data=None):
-        encryption_key = self.storage.account.get_encryption_key()
-
         if data:
             access_token = data["access_token"]
         else:
+            encryption_key = self.storage.account.get_encryption_key()
             access_token = bs_decrypt(self.access_token, encryption_key)
 
         client = {
@@ -176,37 +256,63 @@ class CoreStoragePCloud(TimeStampedModel):
         return bs_decrypt(self.access_token, encryption_key)
 
     def validate(self, data=None, raise_exp=None):
-        import requests
-        from pcloud import PyCloud
-
         if data:
             hostname = data["hostname"]
+            no_delete = data.get("no_delete")
         else:
             hostname = self.hostname
+            no_delete = getattr(self, "no_delete", False)
+
+        hostname = str(hostname or "").strip().lower().rstrip(".")
+        if hostname not in self.API_HOSTNAMES:
+            return False
 
         local_txt_file = "_upload_test_files/backupsheep.txt"
-        pcloud_path = "/validate/backupsheep.txt"
-
-        # create validate folder if doesn't exists
-        requests.post(
-            f"https://{hostname}/createfolderifnotexists?path=/validate",
-            headers=self.get_client(data=data),
+        filename = f"backupsheep_{uuid.uuid4().hex}.txt"
+        pcloud_path = f"/validate/{filename}"
+        headers = self.get_client(data=data)
+        folder_response = requests.post(
+            f"https://{hostname}/createfolderifnotexists",
+            params={"path": "/validate"},
+            headers=headers,
             verify=True,
+            timeout=request_timeout(),
+            allow_redirects=False,
         )
+        if int(getattr(folder_response, "status_code", 0) or 0) >= 400:
+            return False
 
-        pc = PyCloud(
-            username=self.userid,
-            password=self.get_access_token(),
-            endpoint=self.hostname.split('.')[0],
-            oauth2=True
-        )
-        result = pc.uploadfile(files=[local_txt_file], path="/validate")
-
-        if result.get('metadata'):
-            metadata = result.get('metadata')[0]
-            if metadata.get("path") == pcloud_path:
-                pc.deletefile(path=pcloud_path, fileid=metadata.get("fileid"))
-                return True
+        with open(local_txt_file, "rb") as file_to_upload:
+            upload_response = requests.post(
+                f"https://{hostname}/uploadfile",
+                data={"path": "/validate", "renameifexists": 0},
+                headers=headers,
+                files={"file": (filename, file_to_upload, "text/plain")},
+                verify=True,
+                timeout=request_timeout(),
+                allow_redirects=False,
+            )
+        if int(getattr(upload_response, "status_code", 0) or 0) >= 400:
+            return False
+        try:
+            payload = upload_response.json()
+        except Exception:
+            return False
+        metadata = payload.get("metadata") or []
+        if metadata and metadata[0].get("path") == pcloud_path:
+            if not no_delete:
+                requests.post(
+                    f"https://{hostname}/deletefile",
+                    data={
+                        "path": pcloud_path,
+                        "fileid": metadata[0].get("fileid"),
+                    },
+                    headers=headers,
+                    verify=True,
+                    timeout=request_timeout(),
+                    allow_redirects=False,
+                )
+            return True
 
 
 class CoreStorageOneDrive(TimeStampedModel):
@@ -247,6 +353,7 @@ class CoreStorageOneDrive(TimeStampedModel):
         from django.conf import settings
         from datetime import datetime
         import time
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
         encryption_key = self.storage.account.get_encryption_key()
 
@@ -259,7 +366,22 @@ class CoreStorageOneDrive(TimeStampedModel):
             "client_secret": settings.MS_CLIENT_SECRET_VALUE,
         }
 
-        token_request = requests.post(settings.MS_OAUTH_TOKEN_URL, data=params)
+        token_endpoint = validated_https_endpoint(
+            settings.MS_OAUTH_TOKEN_URL,
+            allowed_hostnames={"login.microsoftonline.com"},
+            allowed_path_suffixes={"/oauth2/v2.0/token"},
+        )
+        if token_endpoint is None:
+            return False
+
+        token_request = requests.post(
+            token_endpoint,
+            data=params,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if token_request.status_code == 200:
             token_data = token_request.json()
@@ -268,11 +390,11 @@ class CoreStorageOneDrive(TimeStampedModel):
             self.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
             self.scope = token_data["scope"]
             self.save()
+            return True
         else:
-            print(token_request.json())
+            return False
 
     def validate(self, data=None, raise_exp=None):
-        import requests
         from django.conf import settings
 
         url = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.drive_id}"
@@ -280,17 +402,17 @@ class CoreStorageOneDrive(TimeStampedModel):
         drive_request = requests.request("GET", url, headers=self.get_client(data))
 
         if drive_request.status_code == 200:
-            file_name = "backupsheep.txt"
+            file_name = f"backupsheep_{uuid.uuid4().hex}.txt"
             local_file_path = "_upload_test_files/backupsheep.txt"
             target_file_path = f"backupsheep/{file_name}"
 
             onedrive_path = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.drive_id}/root:/{target_file_path}"
 
             # Upload file
-            file_data = open(local_file_path, "rb")
-            r = requests.put(
-                onedrive_path + ":/content", data=file_data, headers=self.get_client()
-            )
+            with open(local_file_path, "rb") as file_data:
+                r = requests.put(
+                    onedrive_path + ":/content", data=file_data, headers=self.get_client()
+                )
             if r.status_code == 201 or r.status_code == 200:
                 pass
 
@@ -325,28 +447,6 @@ class CoreStorageGoogleDrive(TimeStampedModel):
     def get_client(self, data=None):
         import google.oauth2.credentials
         from django.conf import settings
-        from google.auth.transport.requests import AuthorizedSession
-        import google.auth.transport.urllib3
-
-        encryption_key = self.storage.account.get_encryption_key()
-        access_token = bs_decrypt(self.access_token, encryption_key)
-
-        credentials = google.oauth2.credentials.Credentials(
-            access_token,
-            client_id=settings.GOOGLE_CLIENT_ID,
-            client_secret=settings.GOOGLE_CLIENT_SECRET,
-        )
-
-        client = AuthorizedSession(credentials)
-        return client
-
-    def get_refresh_token(self):
-        import google.oauth2.credentials
-        from django.conf import settings
-        from google.auth.transport.requests import AuthorizedSession
-        from google.auth.transport.urllib3 import AuthorizedHttp
-        import google.auth.transport.urllib3
-        import urllib3
 
         encryption_key = self.storage.account.get_encryption_key()
         access_token = bs_decrypt(self.access_token, encryption_key)
@@ -360,9 +460,37 @@ class CoreStorageGoogleDrive(TimeStampedModel):
             client_secret=settings.GOOGLE_CLIENT_SECRET,
         )
 
-        http = urllib3.PoolManager()
-        request = google.auth.transport.urllib3.Request(http)
-        credentials.refresh(request)
+        return _BoundedGoogleAuthorizedSession(credentials)
+
+    def get_refresh_token(self):
+        import google.oauth2.credentials
+        from django.conf import settings
+        from google.auth.transport.requests import Request
+
+        encryption_key = self.storage.account.get_encryption_key()
+        access_token = bs_decrypt(self.access_token, encryption_key)
+        refresh_token = bs_decrypt(self.refresh_token, encryption_key)
+
+        credentials = google.oauth2.credentials.Credentials(
+            access_token,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=settings.GOOGLE_CLIENT_ID,
+            client_secret=settings.GOOGLE_CLIENT_SECRET,
+        )
+
+        # Token exchange is a provider POST. It gets the same finite timeout as
+        # every other provider request and the shared session does not retry POST,
+        # so a lost token response cannot be replayed by the HTTP adapter.
+        refresh_session = requests.Session()
+        refresh_session.max_redirects = 0
+        request = Request(session=refresh_session)
+
+        def bounded_request(**kwargs):
+            kwargs["timeout"] = _provider_sdk_timeout()
+            return request(**kwargs)
+
+        credentials.refresh(bounded_request)
         self.access_token = bs_encrypt(credentials.token, encryption_key)
         self.refresh_token = bs_encrypt(credentials.refresh_token, encryption_key)
         self.expiry = credentials.expiry
@@ -410,7 +538,7 @@ class CoreStorageGoogleDrive(TimeStampedModel):
 
         if bs_folder:
             file_metadata = {
-                "name": "backupsheep.txt",
+                "name": f"backupsheep_{uuid.uuid4().hex}.txt",
                 "mimeType": "text/plain",
                 "parents": [bs_folder],
             }
@@ -450,6 +578,8 @@ class CoreStorageGoogleDrive(TimeStampedModel):
                     if r.status_code == 201 or r.status_code == 200:
                         storage_file_id = r.json()["id"]
 
+                        if self.no_delete:
+                            return True
                         result = client.delete(
                             f"https://www.googleapis.com/drive/v3/files/{storage_file_id}",
                             headers={"Content-Type": "application/json; charset=UTF-8"},
@@ -552,7 +682,6 @@ class CoreStorageAWSS3(TimeStampedModel):
 
     @staticmethod
     def _s3_client(values):
-        import boto3
 
         kwargs = {
             "aws_access_key_id": values["access_key"],
@@ -561,7 +690,7 @@ class CoreStorageAWSS3(TimeStampedModel):
         region = values.get("region")
         if region and getattr(region, "code", None):
             kwargs["region_name"] = region.code
-        return boto3.client("s3", **kwargs)
+        return bounded_boto3_client("s3", **kwargs)
 
     @staticmethod
     def validate_immutability_settings(data):
@@ -572,20 +701,19 @@ class CoreStorageAWSS3(TimeStampedModel):
         lifecycle_class = data.get("lifecycle_storage_class") or ""
 
         if bool(mode) != bool(retain_days):
-            raise ValueError("Object Lock mode and retention days must be configured together.")
+            raise S3StorageConfigurationError("OBJECT_LOCK_PAIR_REQUIRED")
         if retain_days is not None and retain_days < 1:
-            raise ValueError("Object Lock retention must be at least one day.")
+            raise S3StorageConfigurationError("OBJECT_LOCK_RETENTION_INVALID")
         if expected_bucket_owner and (not expected_bucket_owner.isdigit() or len(expected_bucket_owner) != 12):
-            raise ValueError("Expected bucket owner must be a 12-digit AWS account ID.")
+            raise S3StorageConfigurationError("EXPECTED_BUCKET_OWNER_INVALID")
         if bool(transition_days) != bool(lifecycle_class):
-            raise ValueError("Lifecycle transition days and storage class must be configured together.")
+            raise S3StorageConfigurationError("LIFECYCLE_PAIR_REQUIRED")
         if transition_days is not None and transition_days < 1:
-            raise ValueError("Lifecycle transition must be at least one day.")
+            raise S3StorageConfigurationError("LIFECYCLE_DAYS_INVALID")
         if transition_days and not (data.get("prefix") or ""):
-            raise ValueError("A folder prefix is required before BackupSheep can manage an S3 lifecycle rule.")
+            raise S3StorageConfigurationError("LIFECYCLE_PREFIX_REQUIRED")
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         import time
 
         values = self._connection_values(data)
@@ -602,9 +730,7 @@ class CoreStorageAWSS3(TimeStampedModel):
             )
             configuration = response.get("ObjectLockConfiguration") or {}
             if configuration.get("ObjectLockEnabled") != "Enabled":
-                raise ValueError(
-                    "S3 Object Lock is not enabled for this bucket. Enable it before configuring retention."
-                )
+                raise S3StorageConfigurationError("OBJECT_LOCK_NOT_ENABLED")
             s3_client.head_bucket(Bucket=values["bucket_name"], **owner_kwargs)
             return True
 
@@ -616,7 +742,7 @@ class CoreStorageAWSS3(TimeStampedModel):
             return True
 
         prefix = self.normalize_prefix(values["prefix"])
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=values["bucket_name"], Key=filename, **owner_kwargs
@@ -714,7 +840,6 @@ class CoreStorageWasabi(TimeStampedModel):
         db_table = "core_storage_wasabi"
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         import time
         from botocore.client import Config
 
@@ -734,7 +859,7 @@ class CoreStorageWasabi(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{region.endpoint}",
             config=Config(
@@ -747,7 +872,7 @@ class CoreStorageWasabi(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -786,7 +911,6 @@ class CoreStorageDoSpaces(TimeStampedModel):
         db_table = "core_storage_do_spaces"
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         from botocore.client import Config
 
         if data:
@@ -805,7 +929,7 @@ class CoreStorageDoSpaces(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{region.endpoint}",
             config=Config(
@@ -860,7 +984,6 @@ class CoreStorageFilebase(TimeStampedModel):
         db_table = "core_storage_filebase"
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         import time
         from botocore.client import Config
 
@@ -880,7 +1003,7 @@ class CoreStorageFilebase(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://s3.filebase.io",
             config=Config(
@@ -893,7 +1016,7 @@ class CoreStorageFilebase(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -932,7 +1055,6 @@ class CoreStorageExoscale(TimeStampedModel):
         db_table = "core_storage_exoscale"
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         import time
         from botocore.client import Config
 
@@ -952,7 +1074,7 @@ class CoreStorageExoscale(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{region.endpoint}",
             config=Config(
@@ -965,7 +1087,7 @@ class CoreStorageExoscale(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1002,7 +1124,6 @@ class CoreStorageBackBlazeB2(TimeStampedModel):
         db_table = "core_storage_backblaze_b2"
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         import time
         from botocore.client import Config
 
@@ -1022,7 +1143,7 @@ class CoreStorageBackBlazeB2(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
             config=Config(
@@ -1035,7 +1156,7 @@ class CoreStorageBackBlazeB2(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1072,7 +1193,6 @@ class CoreStorageLinode(TimeStampedModel):
         db_table = "core_storage_linode"
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         import time
         from botocore.client import Config
 
@@ -1092,7 +1212,7 @@ class CoreStorageLinode(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
             config=Config(
@@ -1105,7 +1225,7 @@ class CoreStorageLinode(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1142,7 +1262,6 @@ class CoreStorageVultr(TimeStampedModel):
         db_table = "core_storage_vultr"
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         import time
         from botocore.client import Config
 
@@ -1162,7 +1281,7 @@ class CoreStorageVultr(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
             config=Config(
@@ -1175,7 +1294,7 @@ class CoreStorageVultr(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1212,7 +1331,6 @@ class CoreStorageUpCloud(TimeStampedModel):
         db_table = "core_storage_upcloud"
 
     def validate(self, data=None, raise_exp=None):
-        import boto3
         import time
         from botocore.client import Config
 
@@ -1232,7 +1350,7 @@ class CoreStorageUpCloud(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
             config=Config(
@@ -1245,7 +1363,7 @@ class CoreStorageUpCloud(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1291,7 +1409,6 @@ class CoreStorageOracle(TimeStampedModel):
 
     def validate(self, data=None, raise_exp=None):
 
-        import boto3
         import time
         from botocore.client import Config
 
@@ -1315,7 +1432,7 @@ class CoreStorageOracle(TimeStampedModel):
 
         endpoint = f"{namespace}.compat.objectstorage.{region.code}.oraclecloud.com"
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             region_name=region.code, endpoint_url=f"https://{endpoint}",
             config=Config(
@@ -1328,7 +1445,7 @@ class CoreStorageOracle(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1373,7 +1490,6 @@ class CoreStorageScaleway(TimeStampedModel):
 
     def validate(self, data=None, raise_exp=None):
 
-        import boto3
         import time
         from botocore.client import Config
 
@@ -1395,7 +1511,7 @@ class CoreStorageScaleway(TimeStampedModel):
 
         endpoint = f"s3.{region.code}.scw.cloud"
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3",
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
@@ -1411,7 +1527,7 @@ class CoreStorageScaleway(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1454,7 +1570,6 @@ class CoreStorageCloudflare(TimeStampedModel):
 
     def validate(self, data=None, raise_exp=None):
 
-        import boto3
         import time
         from botocore.config import Config
 
@@ -1475,7 +1590,7 @@ class CoreStorageCloudflare(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name="auto",
             endpoint_url=f"https://{endpoint}", config=Config(signature_version='s3v4')
         )
@@ -1484,7 +1599,7 @@ class CoreStorageCloudflare(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1526,7 +1641,6 @@ class CoreStorageLeviia(TimeStampedModel):
 
     def validate(self, data=None, raise_exp=None):
 
-        import boto3
         import time
         from botocore.config import Config
 
@@ -1546,7 +1660,7 @@ class CoreStorageLeviia(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name="auto",
             endpoint_url=f"https://{endpoint}", config=Config(
                 signature_version='s3v4',
@@ -1559,7 +1673,7 @@ class CoreStorageLeviia(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -1607,7 +1721,6 @@ class CoreStorageTencent(TimeStampedModel):
         import time
         from qcloud_cos import CosConfig
         from qcloud_cos import CosS3Client
-        import urllib.request
 
         if data:
             access_key = data["access_key"]
@@ -1625,14 +1738,23 @@ class CoreStorageTencent(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        config = CosConfig(Region=region.code, SecretId=access_key, SecretKey=secret_key, Scheme="https")
-        client = CosS3Client(config)
+        timeout = _provider_sdk_timeout()[1]
+        config = CosConfig(
+            Region=region.code,
+            SecretId=access_key,
+            SecretKey=secret_key,
+            Scheme="https",
+            Timeout=timeout,
+        )
+        # COS retries are deliberately owned by the durable task.  Every write
+        # uses the exact validation key and is followed by explicit verification.
+        client = CosS3Client(config, retry=0)
 
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         file_content = "BackupSheep test upload."
 
@@ -1659,15 +1781,12 @@ class CoreStorageTencent(TimeStampedModel):
             Expired=120
         )
 
-        with urllib.request.urlopen(object_url) as response:
-            url_response = response.read()
-
-            if url_response.decode() != file_content:
-                if raise_exp:
-                    raise ValueError(
-                        f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
-                else:
-                    return False
+        url_response = _read_validation_url(object_url)
+        if url_response != file_content.encode():
+            if raise_exp:
+                raise ValueError(
+                    f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
+            return False
 
         if not no_delete:
             client.delete_object(Bucket=bucket_name, Key=filename)
@@ -1700,7 +1819,6 @@ class CoreStorageAliBaba(TimeStampedModel):
 
         import time
         import oss2
-        import urllib.request
 
         if data:
             access_key = data["access_key"]
@@ -1725,13 +1843,19 @@ class CoreStorageAliBaba(TimeStampedModel):
         # Signature V4 requires the region ID, e.g. "us-east-1" from endpoint "oss-us-east-1.aliyuncs.com".
         region_id = endpoint.split(".")[0].removeprefix("oss-").removesuffix("-internal")
 
-        bucket = oss2.Bucket(auth, f"https://{endpoint}", bucket_name, region=region_id)
+        bucket = oss2.Bucket(
+            auth,
+            f"https://{endpoint}",
+            bucket_name,
+            region=region_id,
+            connect_timeout=_provider_sdk_timeout()[0],
+        )
 
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         file_content = "BackupSheep test upload."
 
@@ -1748,15 +1872,12 @@ class CoreStorageAliBaba(TimeStampedModel):
         object_url = bucket.sign_url('GET', filename, 3600 * 24, headers={'content-disposition': 'attachment'},
                                      slash_safe=True)
 
-        with urllib.request.urlopen(object_url) as response:
-            url_response = response.read()
-
-            if url_response.decode() != file_content:
-                if raise_exp:
-                    raise ValueError(
-                        f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
-                else:
-                    return False
+        url_response = _read_validation_url(object_url)
+        if url_response != file_content.encode():
+            if raise_exp:
+                raise ValueError(
+                    f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
+            return False
 
         if not no_delete:
             s3_delete = bucket.delete_object(filename)
@@ -1780,7 +1901,7 @@ class CoreStorageAzure(TimeStampedModel):
 
     def get_client(self, data=None):
         import json
-        from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
+        from azure.storage.blob import BlobServiceClient
 
         if data:
             connection_string = data["connection_string"]
@@ -1788,14 +1909,23 @@ class CoreStorageAzure(TimeStampedModel):
             encryption_key = self.storage.account.get_encryption_key()
             connection_string = bs_decrypt(self.connection_string, encryption_key)
 
-        return BlobServiceClient.from_connection_string(connection_string)
+        connect_timeout, read_timeout = _provider_sdk_timeout()
+        return BlobServiceClient.from_connection_string(
+            connection_string,
+            connection_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            retry_total=0,
+            retry_connect=0,
+            retry_read=0,
+            retry_status=0,
+            retry_to_secondary=False,
+        )
 
     def validate(self, data=None, raise_exp=None):
         import time
         import datetime
         from azure.storage.blob import BlobSasPermissions, generate_blob_sas
         from datetime import timedelta
-        import urllib.request
 
         if data:
             no_delete = data.get("no_delete")
@@ -1810,14 +1940,19 @@ class CoreStorageAzure(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         blob_service_client = self.get_client(data)
         blob_client = blob_service_client.get_blob_client(container=bucket_name, blob=filename)
 
         file_content = "BackupSheep test upload."
 
-        blob_client.upload_blob(file_content, blob_type="BlockBlob")
+        operation_timeout = _provider_sdk_timeout()[1]
+        blob_client.upload_blob(
+            file_content,
+            blob_type="BlockBlob",
+            timeout=operation_timeout,
+        )
 
         # Create a SAS token that expires in 1 hour
         sas_expiry = datetime.datetime.now(datetime.timezone.utc) + timedelta(hours=1)
@@ -1834,18 +1969,15 @@ class CoreStorageAzure(TimeStampedModel):
         # Use the SAS token to create a shared access URL
         blob_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{bucket_name}/{filename}?{sas_token}"
 
-        with urllib.request.urlopen(blob_url) as response:
-            url_response = response.read()
-
-            if url_response.decode() != file_content:
-                if raise_exp:
-                    raise ValueError(
-                        f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
-                else:
-                    return False
+        url_response = _read_validation_url(blob_url)
+        if url_response != file_content.encode():
+            if raise_exp:
+                raise ValueError(
+                    f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
+            return False
 
         if not no_delete:
-            blob_client.delete_blob()
+            blob_client.delete_blob(timeout=operation_timeout)
         return True
 
 
@@ -1887,7 +2019,6 @@ class CoreStorageGoogleCloud(TimeStampedModel):
         import time
         from google.cloud import storage as gc_storage
         from datetime import timedelta
-        import urllib.request
 
         if data:
             no_delete = data.get("no_delete")
@@ -1898,10 +2029,15 @@ class CoreStorageGoogleCloud(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
-        storage_client = gc_storage.Client(credentials=self.get_credentials(data))
+        timeout = _provider_sdk_timeout()
+        credentials = self.get_credentials(data)
+        session = _BoundedGoogleAuthorizedSession(credentials, timeout=timeout)
+        storage_client = gc_storage.Client(
+            credentials=credentials, _http=session
+        )
         bucket = storage_client.bucket(bucket_name)
 
-        if not bucket.exists():
+        if not bucket.exists(timeout=timeout, retry=None):
             if raise_exp:
                 raise ValueError(
                     f"The bucket {bucket_name} doesn't exists. "
@@ -1914,7 +2050,7 @@ class CoreStorageGoogleCloud(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         # Create file
         blob = bucket.blob(filename)
@@ -1922,9 +2058,9 @@ class CoreStorageGoogleCloud(TimeStampedModel):
         # blob.upload_from_filename(filename, if_generation_match=generation_match_precondition)
         file_content = "BackupSheep test upload."
 
-        blob.upload_from_string(file_content)
+        blob.upload_from_string(file_content, timeout=timeout, retry=None)
 
-        blob.reload()
+        blob.reload(timeout=timeout, retry=None)
 
         url = blob.generate_signed_url(
             version="v4",
@@ -1932,19 +2068,16 @@ class CoreStorageGoogleCloud(TimeStampedModel):
             method="GET",
         )
 
-        with urllib.request.urlopen(url) as response:
-            url_response = response.read()
-
-            if url_response.decode() != file_content:
-                if raise_exp:
-                    raise ValueError(
-                        f"We were unable to validate uploaded file. Check your file {filename} in your bucket"
-                    )
-                else:
-                    return False
+        url_response = _read_validation_url(url)
+        if url_response != file_content.encode():
+            if raise_exp:
+                raise ValueError(
+                    f"We were unable to validate uploaded file. Check your file {filename} in your bucket"
+                )
+            return False
 
         if not no_delete:
-            blob.delete()
+            blob.delete(timeout=timeout, retry=None)
         return True
 
 
@@ -1975,7 +2108,6 @@ class CoreStorageIDrive(TimeStampedModel):
 
     def validate(self, data=None, raise_exp=None):
 
-        import boto3
         import time
         from botocore.config import Config
 
@@ -1997,7 +2129,7 @@ class CoreStorageIDrive(TimeStampedModel):
 
         # Allow a full URL (e.g. http://minio:9000) for S3-compatible/self-hosted
         # endpoints; bare hostnames keep the original https:// default.
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=self.build_endpoint_url(endpoint),
             config=Config(
@@ -2011,7 +2143,7 @@ class CoreStorageIDrive(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -2057,7 +2189,6 @@ class CoreStorageIonos(TimeStampedModel):
 
     def validate(self, data=None, raise_exp=None):
 
-        import boto3
         import time
         from botocore.config import Config
 
@@ -2082,7 +2213,7 @@ class CoreStorageIonos(TimeStampedModel):
         # boto3 >= 1.36 sends checksums IONOS rejects (InvalidTrailer) unless
         # checksum calculation/validation is set to "when_required".
         # https://docs.ionos.com/cloud/managed-services/s3-object-storage/s3-tools/boto3-python-sdk
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name=region.code,
             endpoint_url=f"https://{endpoint}", config=Config(
                 signature_version='s3v4',
@@ -2095,7 +2226,7 @@ class CoreStorageIonos(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -2140,7 +2271,6 @@ class CoreStorageRackCorp(TimeStampedModel):
 
     def validate(self, data=None, raise_exp=None):
 
-        import boto3
         import time
         from botocore.config import Config
 
@@ -2162,7 +2292,7 @@ class CoreStorageRackCorp(TimeStampedModel):
 
         endpoint = f"{region.code}.s3.rackcorp.com"
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name=region.code,
             endpoint_url=f"https://{endpoint}", config=Config(
                 signature_version='s3v4',
@@ -2175,7 +2305,7 @@ class CoreStorageRackCorp(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename
@@ -2221,7 +2351,6 @@ class CoreStorageIBM(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
 
         import time
-        import ibm_boto3
         from ibm_botocore.client import Config
 
         if data:
@@ -2242,7 +2371,7 @@ class CoreStorageIBM(TimeStampedModel):
 
         endpoint = f"s3.{region.code}.cloud-object-storage.appdomain.cloud"
 
-        s3_client = ibm_boto3.client(
+        s3_client = bounded_ibm_boto3_client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name=region.code,
             endpoint_url=f"https://{endpoint}", config=Config(signature_version='s3v4')
         )
@@ -2251,7 +2380,7 @@ class CoreStorageIBM(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        filename = _validation_object_key(prefix)
 
         file_content = "BackupSheep test upload."
 
@@ -2299,17 +2428,12 @@ class CoreStorage(TimeStampedModel):
     # Counts
     stats_website_count = models.BigIntegerField(null=True)
     stats_database_count = models.BigIntegerField(null=True)
-    stats_wordpress_count = models.BigIntegerField(null=True)
     # Backups
     stats_website_backup_count = models.BigIntegerField(null=True)
     stats_database_backup_count = models.BigIntegerField(null=True)
-    stats_wordpress_backup_count = models.BigIntegerField(null=True)
     # Size
     stats_website_size = models.BigIntegerField(null=True)
     stats_database_size = models.BigIntegerField(null=True)
-    stats_wordpress_size = models.BigIntegerField(null=True)
-    # Delete this later
-    stat_wordpress_size = models.BigIntegerField(null=True)
     # Protection and pricing are destination-level settings. Pricing is deliberately
     # explicit: provider rates vary by region, agreement, and storage class.
     is_air_gapped = models.BooleanField(default=False)
@@ -2383,22 +2507,23 @@ class CoreStorage(TimeStampedModel):
         actual provider billing remains authoritative because transitions can be
         asynchronous and contracts vary by customer and region.
 
-        Byte totals are aggregated in SQL (one grouped query per destination per
-        backup type) instead of iterating every storage-point row in Python, so the
-        dashboard and /api/v1/storage/costs/ stay fast on installs with many backups.
+        Byte totals are aggregated in SQL (one grouped query per backup type)
+        instead of iterating every destination or storage-point row in Python, so
+        the dashboard and /api/v1/storage/costs/ stay fast as destinations grow.
         """
-        from django.db.models import Q, Sum
+        from django.db.models import BigIntegerField, Case, Count, F, Sum, Value, When
 
         from ..backup.models import (
             CoreBasecampBackupStoragePoints,
             CoreDatabaseBackupStoragePoints,
             CoreWebsiteBackupStoragePoints,
-            CoreWordPressBackupStoragePoints,
         )
 
         storages = {
             storage.id: storage
-            for storage in cls.objects.filter(account=account).select_related("type")
+            for storage in cls.objects.filter(account=account).select_related(
+                "type", "storage_aws_s3"
+            )
         }
         destinations = {
             storage.id: {
@@ -2411,6 +2536,14 @@ class CoreStorage(TimeStampedModel):
                 "cold_stored_bytes": 0,
                 "estimated_monthly_storage_usd": Decimal("0"),
                 "estimated_full_retrieval_usd": Decimal("0"),
+                "categories": {
+                    category: {
+                        "source_count": 0,
+                        "backup_count": 0,
+                        "stored_bytes": 0,
+                    }
+                    for category in ("website", "database", "saas")
+                },
             }
             for storage in storages.values()
         }
@@ -2420,21 +2553,19 @@ class CoreStorage(TimeStampedModel):
                 CoreWebsiteBackupStoragePoints,
                 "backup__website__node_id",
                 "backup__website__node__name",
+                "website",
             ),
             (
                 CoreDatabaseBackupStoragePoints,
                 "backup__database__node_id",
                 "backup__database__node__name",
-            ),
-            (
-                CoreWordPressBackupStoragePoints,
-                "backup__wordpress__node_id",
-                "backup__wordpress__node__name",
+                "database",
             ),
             (
                 CoreBasecampBackupStoragePoints,
                 "backup__basecamp__node_id",
                 "backup__basecamp__node__name",
+                "saas",
             ),
         )
         gib = Decimal(1024 ** 3)
@@ -2443,56 +2574,97 @@ class CoreStorage(TimeStampedModel):
             storage.id: cls._storage_cold_cutoff(storage, now)
             for storage in storages.values()
         }
+        cold_size_conditions = [
+            When(
+                storage_id=storage_id,
+                backup__created__lte=cutoff,
+                then=F("backup__size"),
+            )
+            for storage_id, cutoff in cold_cutoffs.items()
+            if cutoff is not None
+        ]
+        category_sources = {}
 
-        for storage in storages.values():
-            cutoff = cold_cutoffs[storage.id]
-            destination = destinations[storage.id]
-            for point_model, node_id_field, node_name_field in point_models:
-                annotations = {"stored": Sum("backup__size")}
-                if cutoff:
-                    annotations["cold_stored"] = Sum(
-                        "backup__size", filter=Q(backup__created__lte=cutoff)
+        # One grouped query per backup family keeps the query count fixed as the
+        # number of destinations grows. Querying the concrete through tables also
+        # avoids the cross-join multiplication caused by annotating every M2M on
+        # CoreStorage in one queryset.
+        for point_model, node_id_field, node_name_field, category in point_models:
+            annotations = {
+                "stored": Sum("backup__size"),
+                "backup_count": Count("backup_id", distinct=True),
+            }
+            if cold_size_conditions:
+                annotations["cold_stored"] = Sum(
+                    Case(
+                        *cold_size_conditions,
+                        default=Value(0),
+                        output_field=BigIntegerField(),
                     )
-                rows = (
-                    point_model.objects.filter(
-                        storage_id=storage.id,
-                        status=point_model.Status.UPLOAD_COMPLETE,
-                        backup__size__isnull=False,
-                    )
-                    .values(node_id_field, node_name_field)
-                    .annotate(**annotations)
                 )
-                for row in rows:
-                    stored = int(row["stored"] or 0)
-                    cold = int(row.get("cold_stored") or 0) if cutoff else 0
-                    standard = stored - cold
+            rows = (
+                point_model.objects.filter(
+                    storage_id__in=storages,
+                    storage__account=account,
+                    status=point_model.Status.UPLOAD_COMPLETE,
+                )
+                .values("storage_id", node_id_field, node_name_field)
+                .annotate(**annotations)
+                .order_by()
+            )
+            for row in rows:
+                storage_id = row["storage_id"]
+                storage = storages[storage_id]
+                destination = destinations[storage_id]
+                stored = int(row["stored"] or 0)
+                cold = int(row.get("cold_stored") or 0)
+                standard = max(0, stored - cold)
 
-                    monthly_cost = (
-                        (Decimal(cold) / gib) * storage.cold_storage_cost_usd_per_gib_month
-                        + (Decimal(standard) / gib) * storage.storage_cost_usd_per_gib_month
-                    )
-                    retrieval_cost = (Decimal(stored) / gib) * storage.retrieval_cost_usd_per_gib
+                monthly_cost = (
+                    (Decimal(cold) / gib)
+                    * storage.cold_storage_cost_usd_per_gib_month
+                    + (Decimal(standard) / gib)
+                    * storage.storage_cost_usd_per_gib_month
+                )
+                retrieval_cost = (
+                    (Decimal(stored) / gib) * storage.retrieval_cost_usd_per_gib
+                )
 
-                    destination["stored_bytes"] += stored
-                    destination["cold_stored_bytes"] += cold
-                    destination["standard_stored_bytes"] += standard
-                    destination["estimated_monthly_storage_usd"] += monthly_cost
-                    destination["estimated_full_retrieval_usd"] += retrieval_cost
+                destination["stored_bytes"] += stored
+                destination["cold_stored_bytes"] += cold
+                destination["standard_stored_bytes"] += standard
+                destination["estimated_monthly_storage_usd"] += monthly_cost
+                destination["estimated_full_retrieval_usd"] += retrieval_cost
+                destination["categories"][category]["backup_count"] += int(
+                    row["backup_count"] or 0
+                )
+                destination["categories"][category]["stored_bytes"] += stored
+                category_sources.setdefault((storage_id, category), set()).add(
+                    (point_model._meta.label_lower, row.get(node_id_field))
+                )
 
-                    source_key = (row.get(node_id_field), row.get(node_name_field) or "Unknown source")
-                    source = sources.setdefault(
-                        source_key,
-                        {
-                            "source_id": source_key[0],
-                            "source_name": source_key[1],
-                            "stored_bytes": 0,
-                            "estimated_monthly_storage_usd": Decimal("0"),
-                            "estimated_full_retrieval_usd": Decimal("0"),
-                        },
-                    )
-                    source["stored_bytes"] += stored
-                    source["estimated_monthly_storage_usd"] += monthly_cost
-                    source["estimated_full_retrieval_usd"] += retrieval_cost
+                source_key = (
+                    row.get(node_id_field),
+                    row.get(node_name_field) or "Unknown source",
+                )
+                source = sources.setdefault(
+                    source_key,
+                    {
+                        "source_id": source_key[0],
+                        "source_name": source_key[1],
+                        "stored_bytes": 0,
+                        "estimated_monthly_storage_usd": Decimal("0"),
+                        "estimated_full_retrieval_usd": Decimal("0"),
+                    },
+                )
+                source["stored_bytes"] += stored
+                source["estimated_monthly_storage_usd"] += monthly_cost
+                source["estimated_full_retrieval_usd"] += retrieval_cost
+
+        for (storage_id, category), source_ids in category_sources.items():
+            destinations[storage_id]["categories"][category]["source_count"] = len(
+                source_ids
+            )
 
         destination_rows = []
         for destination in destinations.values():
@@ -2623,9 +2795,11 @@ class CoreStorage(TimeStampedModel):
 
 
 class CoreStorageLocal(TimeStampedModel):
-    """'Local Storage' backend: backups are kept as plain zip files on a disk path of
-    this BackupSheep server. `path` is an optional subdirectory under
-    settings.LOCAL_STORAGE_ROOT (''/None = the root itself)."""
+    """Store encrypted BSE1 artifacts below the configured local disk root.
+
+    ``path`` is an optional subdirectory under ``settings.LOCAL_STORAGE_ROOT``;
+    an empty value selects the root itself.
+    """
 
     storage = models.OneToOneField(
         "CoreStorage", related_name="storage_local", on_delete=models.CASCADE
@@ -2642,40 +2816,137 @@ class CoreStorageLocal(TimeStampedModel):
 
         return os.path.realpath(settings.LOCAL_STORAGE_ROOT)
 
+    @staticmethod
+    def _path_parts(subpath):
+        """Return a canonical root-relative directory path without touching disk.
+
+        Local Storage configuration is accepted by the Internet-facing API, while
+        the mounted backup volume is writable only by ``worker-storage``.  Keep the
+        API-side check lexical: no create/open/unlink operation belongs in the web
+        process, and no absolute path is ever placed on the broker.
+        """
+
+        value = str(subpath or "")
+        if "\x00" in value or os.path.isabs(value):
+            raise ValueError("Path must be relative to the local storage root.")
+        normalized = value.replace("\\", "/")
+        parts = []
+        for part in normalized.split("/"):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                raise ValueError("Path must stay inside the local storage root.")
+            parts.append(part)
+        return tuple(parts)
+
+    @classmethod
+    def validate_configuration(cls, data=None):
+        """Validate only persisted configuration; never mutate ``/backups``."""
+
+        path = data.get("path") if isinstance(data, dict) else data
+        cls._path_parts(path)
+        return True
+
     def resolve_path(self, subpath=None):
         """Resolve `subpath` (defaults to this storage's `path`) to an absolute
         directory inside the local storage root. Rejects absolute paths and any
         '..' traversal escaping the root."""
         root = self.storage_root()
-        subpath = (subpath if subpath is not None else self.path) or ""
-        if os.path.isabs(subpath):
-            raise ValueError("Path must be relative to the local storage root.")
-        target = os.path.realpath(os.path.join(root, subpath))
+        subpath = subpath if subpath is not None else self.path
+        parts = self._path_parts(subpath)
+        target = os.path.realpath(os.path.join(root, *parts))
         if target != root and not target.startswith(root + os.sep):
             raise ValueError("Path must stay inside the local storage root.")
         return target
 
-    def validate(self, data=None, raise_exp=None):
-        if data is not None:
-            path = data.get("path")
-        else:
-            path = self.path
+    def _open_directory(self, *, create):
+        """Open the configured directory through no-follow directory fds.
 
-        target_dir = self.resolve_path(path)
-        os.makedirs(target_dir, exist_ok=True)
+        Walking from the already-open Local Storage root prevents a symlink in a
+        configured component from redirecting a validation/upload outside the
+        mounted volume.  The returned fd is owned by the caller.
+        """
 
-        # Validation can run concurrently when duplicate Celery deliveries race
-        # through backup_initiate. A second-resolution timestamp lets one probe
-        # delete another probe's file and falsely report the storage as invalid.
-        filename = f"backupsheep_test_{uuid.uuid4().hex}.txt"
-        test_file = os.path.join(target_dir, filename)
+        root = self.storage_root()
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        current_fd = os.open(root, flags)
+        try:
+            for part in self._path_parts(self.path):
+                if create:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                    except FileExistsError:
+                        pass
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd
+        except Exception:
+            os.close(current_fd)
+            raise
 
-        with open(test_file, "w") as fh:
-            fh.write(filename)
+    def prepare_directory(self):
+        """Create/open the configured directory from ``worker-storage`` only."""
 
-        with open(test_file, "r") as fh:
-            if fh.read() != filename:
+        directory_fd = self._open_directory(create=True)
+        try:
+            return self.resolve_path()
+        finally:
+            os.close(directory_fd)
+
+    def probe_filesystem(self):
+        """Perform the destructive write/read/unlink probe on worker-storage."""
+
+        directory_fd = self._open_directory(create=True)
+        filename = f".backupsheep-validation-{uuid.uuid4().hex}"
+        file_fd = None
+        try:
+            flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            file_fd = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+            payload = filename.encode("ascii")
+            if os.write(file_fd, payload) != len(payload):
                 return False
+            os.fsync(file_fd)
+            os.lseek(file_fd, 0, os.SEEK_SET)
+            return os.read(file_fd, len(payload) + 1) == payload
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            try:
+                os.unlink(filename, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            os.close(directory_fd)
 
-        os.remove(test_file)
-        return True
+    def validate(self, data=None, raise_exp=None):
+        """Return durable configuration eligibility without touching the volume.
+
+        New/updated Local Storage rows remain ``PENDING`` until the dedicated
+        storage worker completes :meth:`probe_filesystem`.  Backup source workers
+        can therefore evaluate a destination without acquiring write access to
+        ``/backups``.
+        """
+
+        if data is not None:
+            return self.validate_configuration(data)
+        self.validate_configuration(self.path)
+        return bool(
+            self.storage_id
+            and self.storage.status == self.storage.Status.ACTIVE
+        )
+
+
+class CoreStorageDeletionLease(TimeStampedModel):
+    """Internal coordinator lease for one storage-configuration deletion."""
+
+    storage = models.OneToOneField(
+        CoreStorage, related_name="deletion_lease", on_delete=models.CASCADE
+    )
+    owner = models.CharField(max_length=255, blank=True, default="")
+    token = models.UUIDField(null=True, blank=True, editable=False)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "core_storage_deletion_lease"

@@ -1,46 +1,90 @@
+import re
+
 import boto3
-from botocore.client import Config
+from botocore.config import Config
 
 from apps._tasks.exceptions import StorageUpCloudUploadFailedError
+from apps._tasks.integration.storage.s3_verified import upload_verified_s3
+from apps._tasks.artifact_encryption import storage_artifact_identity
+from apps._tasks.integration.storage.vultr import _safe_upload_exception
 from apps.api.v1.utils.api_helpers import bs_decrypt
+from apps.api.v1.utils.boto import bounded_boto3_client
+
+
+UPCLOUD_OBJECT_METADATA_KEY = "upcloud_s3_object"
+_DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def normalize_upcloud_endpoint(endpoint):
+    """Accept only an UpCloud-managed HTTPS S3 hostname.
+
+    The database stores a hostname rather than a URL.  Enforcing UpCloud's
+    documented ``*.upcloudobjects.com`` boundary prevents credentials and
+    validation requests from being redirected to an arbitrary host.
+    """
+    hostname = str(endpoint or "").strip().casefold().rstrip(".")
+    if (
+        not hostname
+        or "://" in hostname
+        or any(character in hostname for character in "/?#@:")
+        or len(hostname) > 253
+    ):
+        raise ValueError("Invalid UpCloud Object Storage endpoint.")
+    labels = hostname.split(".")
+    if (
+        len(labels) < 3
+        or labels[-2:] != ["upcloudobjects", "com"]
+        or any(not _DNS_LABEL.fullmatch(label) for label in labels)
+    ):
+        raise ValueError("Invalid UpCloud Object Storage endpoint.")
+    return hostname
+
+
+def _s3_client(upcloud, encryption_key):
+    # Revalidate the persisted endpoint at every credential-use boundary.  UI
+    # validation protects newly-created rows, but legacy/imported rows must not
+    # be able to redirect object-storage credentials to an arbitrary host.
+    endpoint = normalize_upcloud_endpoint(upcloud.endpoint)
+    return bounded_boto3_client(
+        "s3",
+        allow_retries=True,
+        aws_access_key_id=bs_decrypt(upcloud.access_key, encryption_key),
+        aws_secret_access_key=bs_decrypt(upcloud.secret_key, encryption_key),
+        endpoint_url=f"https://{endpoint}",
+        config=Config(
+            signature_version="s3v4",
+            connect_timeout=10,
+            read_timeout=60,
+            retries={"max_attempts": 5, "mode": "standard"},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
+    )
 
 
 def storage_upcloud(stored_backup):
     try:
-        local_zip = f"_storage/{stored_backup.backup.uuid}.zip"
         storage = stored_backup.storage
-        encryption_key = storage.account.get_encryption_key()
-        prefix = storage.storage_upcloud.prefix
+        upcloud = storage.storage_upcloud
+        prefix = upcloud.prefix or ""
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        artifact_identity = storage_artifact_identity(stored_backup.backup)
+        key = f"{prefix}{artifact_identity.filename}"
 
-        file_name = f"{stored_backup.backup.uuid}.zip"
-        session = boto3.Session(
-            aws_access_key_id=bs_decrypt(storage.storage_upcloud.access_key, encryption_key),
-            aws_secret_access_key=bs_decrypt(storage.storage_upcloud.secret_key, encryption_key),
+        upload_verified_s3(
+            stored_backup,
+            client=_s3_client(upcloud, storage.account.get_encryption_key()),
+            bucket=upcloud.bucket_name,
+            key=key,
+            local_path=f"_storage/{artifact_identity.filename}",
+            metadata_key=UPCLOUD_OBJECT_METADATA_KEY,
+            supports_checksum=False,
         )
-        config = Config(
-            request_checksum_calculation="when_required",
-            response_checksum_validation="when_required",
-        )
-        s3 = session.resource(
-            "s3", endpoint_url=f"https://{storage.storage_upcloud.endpoint}",
-            config=config,
-        )
-
-        if prefix:
-            if (prefix != "") and (prefix.endswith("/") is False):
-                prefix += "/"
-            file_key = prefix + file_name
-        else:
-            file_key = file_name
-        s3.meta.client.upload_file(
-            local_zip, storage.storage_upcloud.bucket_name, file_key
-        )
-        storage_file_id = file_key
-        stored_backup.storage_file_id = storage_file_id
-        stored_backup.status = stored_backup.Status.UPLOAD_COMPLETE
-        stored_backup.save()
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         stored_backup.status = stored_backup.Status.UPLOAD_FAILED_FILE_NOT_FOUND
-        stored_backup.save()
-    except Exception as e:
-        raise StorageUpCloudUploadFailedError(stored_backup.backup.uuid_str, stored_backup.backup.attempt_no, stored_backup.backup.type, e.__str__())
+        stored_backup.save(update_fields=["status", "modified"])
+    except Exception as error:
+        raise _safe_upload_exception(
+            StorageUpCloudUploadFailedError, stored_backup, error
+        ) from error

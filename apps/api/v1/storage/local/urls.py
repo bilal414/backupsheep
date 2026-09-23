@@ -9,6 +9,11 @@ router.register(r"local", CoreStorageLocalView, basename="")
 urlpatterns = router.urls
 urlpatterns += [
     path(
+        "local/file/<slug:backup_family>/<int:stored_backup_id>/",
+        LocalStorageFileDownloadView.as_view(),
+        name="local_storage_family_file",
+    ),
+    path(
         "local/file/<int:stored_backup_id>/",
         LocalStorageFileDownloadView.as_view(),
         name="local_storage_file",

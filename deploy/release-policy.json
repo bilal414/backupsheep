@@ -1,0 +1,155 @@
+{
+  "schema_version": 4,
+  "source_repository": "bilal414/backupsheep",
+  "release_workflow": ".github/workflows/release-images.yml",
+  "registry": "ghcr.io",
+  "images": {
+    "app": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep",
+      "dockerfile": "Dockerfile"
+    },
+    "postgres": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-postgres-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-postgres",
+      "dockerfile": "Dockerfile.postgres"
+    },
+    "egress": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-egress-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-egress",
+      "dockerfile": "Dockerfile.egress"
+    },
+    "rabbitmq": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-rabbitmq",
+      "dockerfile": "Dockerfile.rabbitmq"
+    },
+    "rabbitmq-upgrade": {
+      "quarantine_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-upgrade-quarantine",
+      "official_repository": "ghcr.io/bilal414/backupsheep-rabbitmq-upgrade",
+      "dockerfile": "Dockerfile.rabbitmq-upgrade"
+    }
+  },
+  "platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "release_tag_regex": "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$",
+  "identity": {
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "certificate_identity_regex": "^https://github\\.com/bilal414/backupsheep/\\.github/workflows/release-images\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$",
+    "workflow_trigger": "push"
+  },
+  "consumer": {
+    "descriptor_filename": "backupsheep-release-descriptor-v2.txt",
+    "descriptor_bundle_filename": "backupsheep-release-descriptor-v2.sigstore.json",
+    "manifest_filename": "release-manifest.json",
+    "consumer_script_filename": "backupsheep-consume-signed-release-v2.sh",
+    "consumer_script_bundle_filename": "backupsheep-consume-signed-release-v2.sigstore.json",
+    "trusted_root": {
+      "path": "deploy/release/sigstore-trusted-root.json",
+      "sha256": "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
+      "source_repository": "sigstore/root-signing",
+      "source_commit": "0d8bd7c40a20b5291c18fb80fbe8c9f598685a2c",
+      "source_path": "targets/trusted_root.json"
+    },
+    "cosign_image": {
+      "version": "3.1.3",
+      "runtime_contract_version": 1,
+      "repository": "ghcr.io/bilal414/backupsheep-release-verifier",
+      "index_digest": "sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e",
+      "reference": "ghcr.io/bilal414/backupsheep-release-verifier@sha256:ba8edf9b99437ffc62650133972365eb381b39b46f208d33c82f8949b159cd5e",
+      "platforms": {
+        "linux/amd64": {
+          "manifest_digest": "sha256:29c25a1a2bcbe8190166f65e0914fbd4c904968be5a615f59421dc8fd4526f06",
+          "config_digest": "sha256:6feeb7c97d6b7b709f2dc6b33723de442205437694fd3679461d78635745349d"
+        },
+        "linux/arm64": {
+          "manifest_digest": "sha256:2d0bfa77e828bff3c198039763f05f44017e6c2cd75572fce8f61431a95b927d",
+          "config_digest": "sha256:9a6ceeac0bc63631bd168417839d56e01a2ee157411daef235df13e0c8d04c01"
+        }
+      }
+    }
+  },
+  "transition": {
+    "schema_version": 1,
+    "policy_path": "deploy/release-transition-policy.json",
+    "migration_contract_command": [
+      "python",
+      "-m",
+      "apps.release_migration_contract"
+    ],
+    "maximum_predecessors": 8
+  },
+  "attestations": {
+    "provenance_predicate_type": "https://slsa.dev/provenance/v1",
+    "provenance_mode": "max",
+    "buildkit_build_type": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+    "sbom_predicate_types": {
+      "cyclonedx-json": "https://cyclonedx.org/bom",
+      "spdx-json": "https://spdx.dev/Document"
+    }
+  },
+  "tools": {
+    "actionlint": {
+      "version": "1.7.12",
+      "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+      "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+      "archive_member": "actionlint"
+    },
+    "cosign": {
+      "version": "3.1.3",
+      "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64",
+      "sha256": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
+      "archive_member": null
+    },
+    "grype": {
+      "version": "0.116.1",
+      "url": "https://github.com/anchore/grype/releases/download/v0.116.1/grype_0.116.1_linux_amd64.tar.gz",
+      "sha256": "0122df7b655981abe547ad3d2190d65551dac6a2bfc80b4dc2a989b5d0587458",
+      "archive_member": "grype"
+    },
+    "oras": {
+      "version": "1.3.3",
+      "url": "https://github.com/oras-project/oras/releases/download/v1.3.3/oras_1.3.3_linux_amd64.tar.gz",
+      "sha256": "9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59",
+      "archive_member": "oras"
+    },
+    "syft": {
+      "version": "1.51.0",
+      "url": "https://github.com/anchore/syft/releases/download/v1.51.0/syft_1.51.0_linux_amd64.tar.gz",
+      "sha256": "2a2e837a2c8d59ec9af5472ee22d3b04ee463c4e44476ecf993fd1e5ab6ebc7f",
+      "archive_member": "syft"
+    },
+    "trivy": {
+      "version": "0.74.0",
+      "url": "https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz",
+      "sha256": "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
+      "archive_member": "trivy"
+    }
+  },
+  "vulnerability_policy": {
+    "scanner": "trivy",
+    "scanner_version": "0.74.0",
+    "secondary_scanner": "grype",
+    "secondary_scanner_version": "0.116.1",
+    "database": {
+      "lock_path": "deploy/trivy-db-lock.json",
+      "lock_sha256": "sha256:adcb37cdcad64dcacb7441ef31b0dbf333c44172e7172cb16f5dfd451b6a1f28"
+    },
+    "secondary_database": {
+      "lock_path": "deploy/grype-db-lock.json",
+      "lock_sha256": "sha256:07fb19ba8d924fca629f0cedca97e8beec8dd9d73b1c19187ba263f484721dec"
+    },
+    "fail_severities": [
+      "HIGH",
+      "CRITICAL"
+    ],
+    "ignore_unfixed": false,
+    "allowlist": null
+  },
+  "evidence": {
+    "workflow_artifact_retention_days": 90,
+    "durable_github_release_assets": true
+  }
+}

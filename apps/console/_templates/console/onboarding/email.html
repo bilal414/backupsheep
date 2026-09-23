@@ -1,35 +1,40 @@
 {% extends "console/onboarding/_base.html" %}
 {% block step %}
-    <h2 class="text-lg font-semibold text-slate-900 mb-1">Transactional email</h2>
-    <p class="text-sm text-slate-500 mb-5">Used for password resets and notifications. Choose "Disabled" to skip — you can configure it later in settings.</p>
-    <form method="post" novalidate x-data="{ provider: '{{ form.email_provider.value|default:"none" }}' }">
+    <h2 class="text-lg font-semibold tracking-tight text-slate-900">Transactional email</h2>
+    <p class="mt-1 text-sm text-slate-500">Used for password resets and notifications. Choose "Disabled" to skip — you can configure it later in settings.</p>
+    <form method="post" novalidate class="mt-6" x-data="{ provider: '{{ form.email_provider.value|default:"none" }}' }">
         {% csrf_token %}
         {% include "console/onboarding/_field.html" with field=form.email_provider %}
 
-        <div x-show="provider === 'postmark'" x-cloak class="border-t border-slate-100 pt-4 mt-2">
+        <div x-show="provider === 'postmark'" x-cloak class="mt-2 border-t border-slate-200 pt-5">
             {% include "console/onboarding/_field.html" with field=form.postmark_api_key %}
             {% include "console/onboarding/_field.html" with field=form.postmark_email %}
         </div>
-        <div x-show="provider === 'mailgun'" x-cloak class="border-t border-slate-100 pt-4 mt-2">
+        <div x-show="provider === 'mailgun'" x-cloak class="mt-2 border-t border-slate-200 pt-5">
             {% include "console/onboarding/_field.html" with field=form.mailgun_api_key %}
             {% include "console/onboarding/_field.html" with field=form.mailgun_domain %}
             {% include "console/onboarding/_field.html" with field=form.mailgun_email %}
         </div>
-        <div x-show="provider === 'ses'" x-cloak class="border-t border-slate-100 pt-4 mt-2">
+        <div x-show="provider === 'ses'" x-cloak class="mt-2 border-t border-slate-200 pt-5">
             {% include "console/onboarding/_field.html" with field=form.ses_access_key_id %}
             {% include "console/onboarding/_field.html" with field=form.ses_secret_access_key %}
             {% include "console/onboarding/_field.html" with field=form.ses_region_name %}
             {% include "console/onboarding/_field.html" with field=form.ses_from_email %}
         </div>
 
-        <div class="flex items-center justify-between mt-6">
+        <div class="mt-6 flex flex-wrap items-center justify-between gap-3">
             <button type="submit" name="action" value="test" x-show="provider !== 'none'" x-cloak
-                    class="rounded-lg px-4 py-2.5 text-sm font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-50">
+                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                 Send test email
             </button>
-            <span x-show="provider === 'none'" class="text-xs text-slate-400">No provider selected</span>
+            <span x-show="provider === 'none'" x-cloak class="text-xs text-slate-400">No provider selected</span>
             <button type="submit" name="action" value="continue"
-                    class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Continue &rarr;</button>
+                    class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                Continue
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
+                </svg>
+            </button>
         </div>
     </form>
 {% endblock %}

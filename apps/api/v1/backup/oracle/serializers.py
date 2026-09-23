@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreOracleBackup,
 )
 from apps.console.node.models import CoreOracle, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreOracleSerializer(serializers.ModelSerializer):
@@ -18,8 +22,9 @@ class CoreOracleSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreOracleBackupSerializer(serializers.ModelSerializer):
-    website = CoreOracleSerializer(read_only=True)
+class CoreOracleBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
+    website = CoreOracleSerializer(source="oracle", read_only=True)
+    database = CoreOracleSerializer(source="oracle", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()
@@ -29,11 +34,13 @@ class CoreOracleBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreOracleBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

@@ -1,145 +1,185 @@
 # Installation
 
-BackupSheep runs as a Docker Compose stack. It includes PostgreSQL and RabbitMQ, so you
-don't need to install either separately. (You *can* point at external services — see
-[Configuration](configuration.md).)
+BackupSheep runs as a hardened Docker Compose stack. The canonical, maintained
+instructions are in the [verified installation guide](guides/installation.md).
 
-## One-command server installation
+## Security boundary
 
-For a fresh **Ubuntu 22.04+ or Debian 12+** server with `sudo` access and outbound
-internet access, run:
+The BackupSheep installer manages only its application checkout, configuration, secret
+files, images, containers, networks and named volumes. It does **not** install Git or
+Docker, add package repositories, enable or restart services, edit Docker daemon
+configuration, open a firewall, change kernel settings, or create host users. The
+default mode is non-root; an explicit root-owned mode is available for a host that keeps
+its existing rootful Docker daemon behind `sudo`. The host operator must provide and
+secure:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash
-```
+- Git and Bash;
+- Docker Engine 28.0.0 or newer;
+- Docker Compose 2.33.1 or newer;
+- access to the intended Docker daemon through the chosen invoking identity;
+- an installation path owned by that same effective UID and sufficient CPU, memory and
+  storage;
+- host/network/TLS policy, monitoring, patching and recovery.
 
-The script is part of this repository. It installs Git, Docker Engine, and Docker Compose
-from Docker's official apt repository; clones BackupSheep into `/opt/backupsheep`; creates
-a root-readable-only `.env` with random Django, PostgreSQL, and onboarding secrets; and
-builds/starts the complete stack. It then waits for the app health check and prints the
-URL plus the onboarding token needed by the first-run wizard.
+## Verified installer
 
-By default it detects your public IPv4 address. If this server has a DNS name, configure
-that from the start so Django accepts requests for it:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash -s -- --domain backups.example.com
-```
-
-Useful options:
-
-```text
---domain HOST       hostname or IPv4 address (no scheme, path, or port)
---branch BRANCH     install a release branch/tag instead of main
---install-dir PATH  use a directory other than /opt/backupsheep
---skip-start        install/configure only; do not start Docker Compose
-```
-
-The initial setup intentionally serves **plain HTTP on port 8000**. Open that port in
-your host/cloud firewall if needed. Before public use, put it behind a TLS reverse proxy
-and follow the [production deployment guide](deployment.md); the installer never opens a
-firewall port or enables HTTPS on your behalf.
-
-To operate the installation later:
+Download the installer from the exact release commit you intend to run. Never pipe a
+mutable remote script into a privileged shell:
 
 ```bash
-cd /opt/backupsheep
-sudo docker compose logs -f
-sudo docker compose up --build -d
+COMMIT='<40-character-reviewed-release-commit>'
+curl -fSLo install.sh \
+  "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
+less install.sh
+chmod 700 install.sh
+./install.sh \
+  --ref "${COMMIT}" \
+  --install-dir "$HOME/.local/share/backupsheep" \
+  --project-name backupsheep \
+  --domain backups.example.com
 ```
 
-## Manual Docker Compose installation
+The installer generates independent database/files artifact keyrings locally; no external
+key service, AWS account, or AWS credential is required for artifact encryption. AWS
+credentials remain optional only for a configured AWS source, storage destination, or
+Amazon SES email integration. Back up both keyrings before enabling work.
 
-### Prerequisites
+By default, run it as the same unprivileged user that is already authorized for the
+intended Docker daemon. Root and `sudo` remain refused unless the operator supplies the
+explicit `--allow-root-install` flag. This does not provision or reconfigure the host.
 
-- A Linux host (or any machine) with **Docker** and the **Docker Compose plugin**
-  (`docker compose version` should work).
-- **git**.
-- ~2 GB RAM to start; backups of large databases/sites need disk for the working copy.
-
-### 1. Clone and configure
+For an existing rootful daemon intentionally accessible only through root, first place
+the reviewed installer in a protected root-owned directory, then run the root-owned copy
+explicitly:
 
 ```bash
-git clone <your-fork-or-this-repo-url> backupsheep
-cd backupsheep
-cp .env_sample .env
+sudo install -d -o root -g root -m 0700 /root/backupsheep-install
+sudo install -o root -g root -m 0700 ./install.sh \
+  /root/backupsheep-install/install.sh
+sudo -H /root/backupsheep-install/install.sh \
+  --allow-root-install \
+  --ref "${COMMIT}" \
+  --install-dir /opt/backupsheep \
+  --project-name backupsheep \
+  --domain backups.example.com
 ```
 
-Open `.env` and set, at minimum:
-
-| Variable | Set it to |
-|----------|-----------|
-| `DJANGO_SECRET_KEY` | A long random string. Generate one: `python -c "import secrets; print(secrets.token_urlsafe(64))"`. **Keep it stable** — changing it later logs everyone out and makes stored email credentials undecryptable. |
-| `DB_PASSWORD` | Any password you choose for the bundled PostgreSQL. |
-| `DJANGO_ALLOWED_HOSTS` | The hostname/IP browsers will use, for example `backup.example.com` or `203.0.113.10`. |
-| `APP_DOMAIN` | That same public host, with `:8000` for direct HTTP, for example `backup.example.com:8000`. |
-
-The remaining defaults are already wired for the Compose stack:
-
-- `DB_HOST=db`, `DB_PORT=5432`, `DB_NAME=backupsheep`, `DB_USER=backupsheep`
-- `CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//`
-- `DJANGO_DEBUG=false`, `DJANGO_HTTPS=false` (enable HTTPS only behind a real TLS proxy)
-
-Provider/email/storage credentials can stay blank — you add those later through the UI or
-`.env` only for the integrations you actually use. See [Configuration](configuration.md)
-for the full reference.
-
-### 2. Build and start
+The installer creates both lane keyrings inside its protected root-owned secret
+directory and never places root-key material in arguments or environment variables.
+Back up their exact bytes with PostgreSQL before enabling operations, as shown in the
+full [verified installation guide](guides/installation.md#explicit-rootful-daemon-mode).
+The installer and wrapper never use `SUDO_USER` or `chown`: the checkout, configuration,
+secrets, override and mutation lock remain owned by the real effective invoker. Every
+later root-owned wrapper command must also run as UID 0 and begin with the approval flag:
 
 ```bash
-docker compose up --build
+sudo -H /opt/backupsheep/backupsheep-compose --allow-root-install ps --all
 ```
 
-On first start, Compose:
+The flag changes only host-side installation ownership and Docker access. It does not
+change the reviewed non-root user, capability or filesystem configuration inside any
+long-lived container.
 
-1. starts `db` (PostgreSQL) and `rabbitmq`, waiting for both to pass healthchecks;
-2. runs the one-shot **`migrate`** service, which applies all database migrations **and
-   seeds the reference data** (the 18 backup sources, 26 storage types, and provider
-   regions a fresh install needs) and creates the cache table, then exits;
-3. starts the web **`app`**, the five Celery **workers**, and **`beat`**.
+The installer fetches that exact commit from the canonical HTTPS repository, verifies
+the checkout and its own bytes, creates protected file-backed secrets, explicitly builds
+commit-tagged application, PostgreSQL and namespace-guard images, and starts only the core
+database/broker, provision/migrate/seal/preflight gates, app guard and web UI. The web
+listener stays on `127.0.0.1:8000`.
+Application, PostgreSQL and egress-guard roles use `pull_policy: never`; the installer will
+not substitute registry images if a reviewed local build is missing. The PostgreSQL build
+starts from the digest-pinned official PostgreSQL 18.6 Alpine 3.24 image, verifies the
+official entrypoint, installs exact `su-exec=0.3-r0`, replaces and deletes `gosu`, and
+declares UID/GID `70:70`. Stock Compose starts it directly as that user with every Linux
+capability dropped and an installation-bound ICU/storage-generation witness. Existing
+Debian `pgdata` requires the explicit
+[Alpine/ICU logical migration gate](guides/postgres-runtime-migration.md); the Alpine
+image never mounts or auto-adopts that volume.
 
-Add `-d` to run detached. To rebuild after pulling new code: `docker compose up --build -d`.
+It also creates a stable random 64-hex installation ID and an empty labeled sentinel
+volume, then verifies Compose resource ownership before mutation. It enumerates every
+exact project network/volume name and rejects an unlabeled or foreign collision rather
+than letting Compose adopt it. A project-name collision, foreign/missing ownership
+evidence or ambiguous legacy resource fails closed. Existing RabbitMQ data is accepted
+only with the installer-owned `4.3` generation witness or exactly one running, healthy
+project broker. A blank witness on existing data requires the explicit wrapper migration
+or reconciliation path so the pinned image and Khepri state are attested; the installer
+never guesses at or migrates a 3.13/4.2 data directory.
 
-### 3. Open the setup wizard
+An old stock deployment that was taken down before identity sentinels existed may have
+only its four labeled data volumes left. Use the guarded one-time
+`--adopt-legacy-project NAME` workflow in the
+[verified installation guide](guides/installation.md#one-time-legacy-compose-down-adoption).
+It accepts no containers, networks, extra project-prefixed volumes, newer volume names
+or label drift, creates and re-inspects only the identity sentinel, and leaves the
+ordinary ownership checks intact. Do not simulate adoption by editing `.env` directly.
 
-Browse to **http://localhost:8000/** (or your host's address/port). A fresh install
-redirects you into the first-run wizard automatically. Walk through it — the first account
-you create becomes the admin and you're logged straight in. See
-[First-run wizard](first-run.md).
+When exact-path legacy containers are still present, the installer automatically creates
+that sentinel only after the complete container, network and volume inventory passes its
+exact path/model/service/logical-name/physical-name and blank-identity checks. The wrapper
+uses the matching sentinel to permit those immutable blank container labels only until
+the reviewed Compose commands recreate them; foreign or partial identities still fail
+closed.
 
-### 4. (Optional) Create a Django admin superuser
+Development staging layout v2 was prerelease-only. Its canonical project-owned
+`ssh_trust` volume may pass the ordinary exact ownership/name/label checks, but it is
+preserved detached as rollback evidence during the explicit v3 migration. Layout v3 has
+no shared trust mount, group or provisioning path, and the wrapper rejects every
+`--volume` override. The retired global host-key inventory is never imported; operators
+must reapprove each exact account/host/port/key in the PostgreSQL ledger. A foreign or
+ambiguous legacy trust volume fails closed.
 
-The wizard's admin runs the BackupSheep console but is intentionally **not** a Django
-superuser, so it cannot open `/django-admin/`. If you want the Django admin site, create a
-superuser separately:
+Provider workers and the scheduler are intentionally disabled by default. Review
+credentials and durable recovery/queue state before explicitly enabling operations:
 
 ```bash
-docker compose run --rm app python manage.py createsuperuser
+./install.sh \
+  --ref "${COMMIT}" \
+  --install-dir "$HOME/.local/share/backupsheep" \
+  --project-name backupsheep \
+  --domain backups.example.com \
+  --enable-operations
 ```
 
-### 5. Production
+This opt-in can execute queued or recoverable provider work. The installer never
+performs an in-place source upgrade and never deletes containers or volumes as an
+automatic rollback.
 
-The `app` service serves plain HTTP on `:8000`. For anything internet-facing, put a
-TLS-terminating reverse proxy in front of it and harden the config — see
-[Production deployment](deployment.md) before you expose it.
+## Secrets
 
-### Updating
+The installer writes `.env` as mode `0600` and `.secrets` as a mode `0700` directory.
+The Django key, database bootstrap/migrator/per-lane passwords, RabbitMQ
+bootstrap/per-lane passwords, task-signing material, artifact lane keyrings and onboarding
+token are separate mode-`0444` files inside it. Directory traversal protection keeps them
+private on the host while Docker mounts each individual file read-only only in its granted
+role. Their direct `.env` keys remain blank, so values do not appear in Compose-expanded
+configuration or container inspection.
+
+Optional `.secrets/ssh_managed_database_private_key` and
+`.secrets/ssh_managed_files_private_key` files follow the same host mode; leave both empty
+to disable managed identities. The database key is mounted only in `worker-database`, and
+the files key only in `worker-files`; the app and other roles receive neither. The
+entrypoint validates each non-empty Ed25519 key, copies the lane's source to private tmpfs
+at `/run/backupsheep/ssh/managed_private_key` with mode `0600`, and never points SSH at the
+mode-`0444` source. The two identities must be distinct and are supported only while the
+installation has exactly one account. Multi-account deployments use customer-supplied
+private keys. Existing installations must follow the explicit legacy-identity retirement
+and host-key reapproval procedure in the [upgrade guide](guides/upgrades.md).
+
+Retrieve the onboarding token only from the trusted host shell:
 
 ```bash
-git pull
-docker compose up --build -d        # re-runs migrate automatically
+cd "$HOME/.local/share/backupsheep"
+cat .secrets/onboarding_token
 ```
 
-Migrations and the reference-data seed are idempotent, so re-running is safe.
+Then use an SSH tunnel to reach the loopback listener and complete first-run setup. See
+the [production deployment guide](deployment.md) before exposing the service publicly.
+Warning-level HTTPS findings from Django's deployment check are expected only in this
+deliberate loopback HTTP/SSH-tunnel mode. Public access requires real TLS,
+`DJANGO_HTTPS=true`, `APP_PROTOCOL=https://`, the exact public domain/allowed hosts, and
+review of every deployment warning.
 
-## Running without Docker (advanced)
-
-BackupSheep is a standard Django project (`manage.py`). You can run it directly with
-Python 3.12+ (3.14 tested), a PostgreSQL database, a RabbitMQ broker, and the system backup
-tools (`lftp`, `pg_dump` 14–18, `mysqldump`/`mariadb-dump`). For MySQL 8 targets you need
-the real Oracle MySQL client — the MariaDB-compat `mysqldump` rejects MySQL 8 dump flags;
-the Docker image ships the Oracle MySQL 8.4 client in `/opt/mysql/bin` and picks it up
-automatically (`CoreAuthDatabase.bin_path`). Install `requirements.txt`,
-set the same `.env`, then run `manage.py migrate`, `manage.py collectstatic`, a gunicorn
-server, the Celery workers, and Celery beat. The `Dockerfile` is the canonical reference
-for the exact system packages required.
+Every application-image command passes through the hardened entrypoint, which neutralizes
+startup-loader hooks, verifies the runtime boundary and repeats the deployment preflight
+before web, worker and Beat processes. Automatic restarts therefore do not rely only on a
+previous one-shot preflight result, and any unapplied Django migration stops startup.

@@ -1,0 +1,17 @@
+<details class="settings-mobile-nav">
+    <summary>
+        <span>Settings sections</span>
+        <span class="settings-mobile-nav__current">
+            {% if active_url == "profile" %}Profile{% elif active_url == "multifactor" %}Authenticator{% elif active_url == "password" %}Password{% elif active_url == "account" %}Workspace{% elif active_url == "user" %}Members{% elif active_url == "group" %}Access groups{% elif active_url == "invite" %}Invitations{% elif active_url == "notifications" %}Notification channels{% endif %}
+        </span>
+    </summary>
+    <nav aria-label="Settings sections">
+        {% include "console/setting/_nav_links.html" %}
+    </nav>
+</details>
+
+<aside class="settings-sidebar" aria-label="Settings sections">
+    <nav>
+        {% include "console/setting/_nav_links.html" %}
+    </nav>
+</aside>

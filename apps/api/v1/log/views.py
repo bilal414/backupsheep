@@ -1,4 +1,6 @@
-from django.db.models import Q
+from django.db.models import CharField, Q, Subquery
+from django.db.models.fields.json import KT
+from django.db.models.functions import Cast
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, mixins
 from rest_framework import viewsets
@@ -29,11 +31,32 @@ class CoreLogView(mixins.ListModelMixin, viewsets.GenericViewSet):
 
     def get_queryset(self):
         member = self.request.user.member
-        query_partners = Q(account=member.get_current_account())
-        # Deterministic default ordering: newest first.
-        queryset = CoreLog.objects.filter(query_partners).order_by("-created")
-        if not member.is_primary_account:
-            queryset = queryset.filter(
-                data__node_id__in=visible_nodes(member).values_list("id", flat=True)
+        membership = member.get_active_current_membership()
+        if membership is None:
+            return CoreLog.objects.none()
+
+        queryset = CoreLog.objects.filter(account=membership.account)
+        if not membership.primary:
+            scoped_nodes = visible_nodes(member)
+            visible_node_ids_as_text = scoped_nodes.annotate(
+                activity_scope_node_id=Cast("id", output_field=CharField())
+            ).values("activity_scope_node_id")
+            queryset = queryset.annotate(
+                activity_node_id_text=KT("data__node_id")
+            ).filter(
+                Q(
+                    activity_node_id_text__in=Subquery(
+                        visible_node_ids_as_text
+                    )
+                )
+                | (
+                    Q(type__in=(CoreLog.Type.AUTH, CoreLog.Type.MEMBER))
+                    & Q(data__actor_email__iexact=self.request.user.email)
+                    & Q(data__node_id__isnull=True)
+                    & Q(data__connection_id__isnull=True)
+                    & Q(data__backup_id__isnull=True)
+                )
             )
-        return queryset
+        # Stable ordering prevents rows with the same timestamp moving between
+        # responses and matches the console register.
+        return queryset.order_by("-created", "-id")

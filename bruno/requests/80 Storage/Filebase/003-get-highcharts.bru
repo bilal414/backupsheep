@@ -1,0 +1,35 @@
+meta {
+  name: GET /api/v1/storage/filebase/highcharts/
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/v1/storage/filebase/highcharts/
+  body: none
+  auth: none
+}
+
+params:query {
+  date_from: 2030-01-01
+  date_to: 2030-01-31
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-storage-filebase-highcharts`
+
+  Requires `Authorization: Token <key>`. Read-only request.
+
+  Django action: `apps.api.v1.storage.filebase.views.CoreStorageFilebaseView.highcharts`
+  Source: `apps/api/v1/storage/filebase/views.py`
+}

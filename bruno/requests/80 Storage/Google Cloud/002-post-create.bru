@@ -1,0 +1,47 @@
+meta {
+  name: POST /api/v1/storage/google_cloud/
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/v1/storage/google_cloud/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "storage_google_cloud": {
+      "service_key": "replace-with-service-key",
+      "bucket_name": "backup-example"
+    },
+    "name": "Example resource"
+  }
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-api-v1-storage-google-cloud`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.storage.google_cloud.views.CoreStorageGoogleCloudView.create`
+  Source: `apps/api/v1/storage/google_cloud/views.py`
+}

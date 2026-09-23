@@ -1,0 +1,25 @@
+# Applied last by install.sh/backupsheep-compose only after signed release verification.
+# !reset is supported by the installer's minimum Docker Compose version and removes
+# every local build definition, including one supplied by an approved local override.
+services:
+  db:
+    build: !reset null
+    image: "${BACKUPSHEEP_POSTGRES_IMAGE:?signed release PostgreSQL digest is required}"
+    pull_policy: never
+  app-egress-guard:
+    build: !reset null
+    image: "${BACKUPSHEEP_EGRESS_IMAGE:?signed release egress digest is required}"
+    pull_policy: never
+  app:
+    build: !reset null
+    image: "${BACKUPSHEEP_IMAGE:?signed release application digest is required}"
+    pull_policy: never
+  rabbitmq-volume-init:
+    build: !reset null
+    pull_policy: never
+  rabbitmq:
+    build: !reset null
+    pull_policy: never
+  rabbitmq-provision:
+    build: !reset null
+    pull_policy: never

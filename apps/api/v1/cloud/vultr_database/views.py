@@ -13,6 +13,8 @@ from apps.api.v1.cloud.vultr_database.serializers import (
     CoreVultrDatabaseReadSerializer,
     CoreVultrDatabaseWriteSerializer,
 )
+from apps.api.v1.utils.api_filters import scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.console.backup.models import CoreVultrDatabaseBackup
 from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreVultrDatabase
@@ -33,10 +35,13 @@ class CoreVultrDatabaseView(viewsets.ModelViewSet):
 
     def get_queryset(self):
         account = self.request.user.member.get_current_account()
-        return CoreVultrDatabase.objects.filter(
-            Q(node__connection__account=account)
-            & ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-            & Q(node__connection__integration__code="vultr")
+        return scope_direct_node_queryset(
+            self.request,
+            CoreVultrDatabase.objects.filter(
+                Q(node__connection__account=account)
+                & ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
+                & Q(node__connection__integration__code="vultr")
+            ),
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -45,15 +50,19 @@ class CoreVultrDatabaseView(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def connections(self, request):
-        account = request.user.member.get_current_account()
+        member = request.user.member
+        account = member.get_current_account()
         return Response(
-            CoreConnection.objects.filter(account=account, integration__code="vultr")
+            visible_connections(member).filter(
+                account=account,
+                integration__code="vultr",
+            )
             .values("id", "name", "location_id", "location__name", "location__image_url")
         )
 
     @action(detail=False, methods=["get"])
     def totals(self, request):
-        nodes = self.get_queryset()
+        nodes = scope_direct_node_queryset(request, self.get_queryset())
         return Response(
             {
                 "nodes": nodes.count(),

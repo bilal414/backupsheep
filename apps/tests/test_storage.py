@@ -1,4 +1,6 @@
 import os
+import base64
+import hashlib
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -7,15 +9,30 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
 
+from django.db import connection
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
 from django.utils import timezone
 from botocore.exceptions import ClientError
 
 from apps._tasks.integration.storage.aws_s3 import storage_aws_s3
 from apps._tasks.integration.storage.local import storage_local
 from apps.api.v1.utils.api_helpers import bs_encrypt
-from apps.console.backup.models import CoreWebsiteBackup, CoreWebsiteBackupStoragePoints
+from apps.console.backup.models import (
+    CoreBasecampBackup,
+    CoreBasecampBackupStoragePoints,
+    CoreDatabaseBackup,
+    CoreDatabaseBackupStoragePoints,
+    CoreWebsiteBackup,
+    CoreWebsiteBackupStoragePoints,
+)
 from apps.console.connection.models import CoreDoSpacesRegion
+from apps.console.node.models import (
+    CoreBasecamp,
+    CoreDatabase,
+    CoreNode,
+)
 from apps.console.storage.models import (
     CoreStorage,
     CoreStorageAWSS3,
@@ -26,6 +43,7 @@ from apps.console.storage.models import (
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
+from backupsheep.download_urls import UnsafeBrowserDownloadTarget
 
 
 def make_local_storage(account, member, *, path=None, no_delete=None):
@@ -47,6 +65,51 @@ def make_website_backup_point(member, storage, *, status, storage_file_id=None):
     return CoreWebsiteBackupStoragePoints.objects.create(
         backup=backup, storage=storage, status=status,
         storage_file_id=storage_file_id,
+    )
+
+
+def make_category_backup_point(member, storage, *, category, size, status=None):
+    connection = factories.make_connection(
+        storage.account,
+        member,
+        code=category,
+        name=f"{category}-{uuid.uuid4().hex[:8]}",
+    )
+    node = CoreNode.objects.create(
+        connection=connection,
+        type=(
+            CoreNode.Type.DATABASE
+            if category == "database"
+            else CoreNode.Type.SAAS
+        ),
+        name=f"{category}-source",
+        added_by=member,
+    )
+    suffix = uuid.uuid4().hex
+    if category == "database":
+        source = CoreDatabase.objects.create(node=node, name="database-source")
+        backup_model = CoreDatabaseBackup
+        point_model = CoreDatabaseBackupStoragePoints
+        source_field = "database"
+    elif category == "basecamp":
+        source = CoreBasecamp.objects.create(node=node, name="basecamp-source")
+        backup_model = CoreBasecampBackup
+        point_model = CoreBasecampBackupStoragePoints
+        source_field = "basecamp"
+    else:
+        raise ValueError(f"Unsupported category: {category}")
+
+    backup = backup_model.objects.create(
+        **{source_field: source},
+        uuid=f"storage-summary-{category}-{suffix}",
+        status=UtilBackup.Status.COMPLETE,
+        type=UtilBackup.Type.ON_DEMAND,
+        size=size,
+    )
+    return point_model.objects.create(
+        backup=backup,
+        storage=storage,
+        status=status or point_model.Status.UPLOAD_COMPLETE,
     )
 
 
@@ -164,12 +227,24 @@ class S3ImmutabilityTests(BaseTestCase):
             fh.write(b"immutable-backup")
         self.addCleanup(lambda: os.path.exists(local_zip) and os.remove(local_zip))
 
+        payload = b"immutable-backup"
+        digest = hashlib.sha256(payload)
         client = mock.MagicMock()
-        client.head_object.return_value = {
+        client.head_object.side_effect = [
+            ClientError({"Error": {"Code": "404"}}, "HeadObject"),
+            {
+            "ContentLength": len(payload),
             "VersionId": "version-1",
+            "ETag": '"etag-1"',
+            "Metadata": {
+                "backupsheep-backup-id": str(point.backup_id),
+                "backupsheep-sha256": digest.hexdigest(),
+                "backupsheep-bytes": str(len(payload)),
+            },
             "ObjectLockMode": "COMPLIANCE",
             "ObjectLockRetainUntilDate": timezone.now() + timedelta(days=30),
-        }
+            },
+        ]
         with mock.patch(
             "apps._tasks.integration.storage.aws_s3.boto3.client", return_value=client
         ):
@@ -178,10 +253,16 @@ class S3ImmutabilityTests(BaseTestCase):
         point.refresh_from_db()
         self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE)
         self.assertEqual(point.metadata["s3_object_lock"]["version_id"], "version-1")
-        upload_args = client.upload_fileobj.call_args.kwargs["ExtraArgs"]
+        upload_args = client.put_object.call_args.kwargs
         self.assertEqual(upload_args["ObjectLockMode"], "COMPLIANCE")
-        self.assertEqual(upload_args["ChecksumAlgorithm"], "SHA256")
+        self.assertEqual(
+            upload_args["ChecksumSHA256"],
+            base64.b64encode(digest.digest()).decode("ascii"),
+        )
         self.assertEqual(upload_args["ExpectedBucketOwner"], "123456789012")
+        self.assertEqual(
+            point.metadata["aws_s3_object"]["sha256"], digest.hexdigest()
+        )
 
     def test_active_object_lock_defers_deletion_and_keeps_parent_backup_complete(self):
         storage = self._protected_storage()
@@ -220,6 +301,9 @@ class S3ImmutabilityTests(BaseTestCase):
             "VersionId": "version-expired",
             "ObjectLockMode": "COMPLIANCE",
             "ObjectLockRetainUntilDate": timezone.now() - timedelta(days=1),
+            "Metadata": {
+                "backupsheep-backup-id": str(point.backup_id),
+            },
         }
 
         with mock.patch("boto3.client", return_value=client):
@@ -287,15 +371,113 @@ class StorageCostSummaryTests(BaseTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["estimated_monthly_storage_usd"], 0.04)
 
+    def test_category_usage_is_completed_account_scoped_and_fixed_query_count(self):
+        storage = factories.make_storage(self.account, self.member, code="aws_s3")
+        website_point = make_website_backup_point(
+            self.member,
+            storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+        )
+        website_point.backup.size = 100
+        website_point.backup.save(update_fields=["size", "modified"])
+        make_category_backup_point(
+            self.member, storage, category="database", size=200
+        )
+        make_category_backup_point(
+            self.member, storage, category="basecamp", size=400
+        )
+
+        failed_point = make_website_backup_point(
+            self.member,
+            storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_FAILED,
+        )
+        failed_point.backup.size = 500
+        failed_point.backup.save(update_fields=["size", "modified"])
+
+        other_account, other_member, _other_user = factories.make_account()
+        other_storage = factories.make_storage(
+            other_account, other_member, code="aws_s3"
+        )
+        other_point = make_website_backup_point(
+            other_member,
+            other_storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+        )
+        other_point.backup.size = 600
+        other_point.backup.save(update_fields=["size", "modified"])
+
+        # The storage lookup plus one grouped query for each of website, database,
+        # and Basecamp stays constant as destinations grow.
+        with CaptureQueriesContext(connection) as captured:
+            summary = CoreStorage.cost_summary_for_account(self.account)
+        self.assertLessEqual(len(captured), 4)
+
+        destination = next(
+            item
+            for item in summary["destinations"]
+            if item["storage_id"] == storage.id
+        )
+        self.assertEqual(destination["categories"]["website"], {
+            "source_count": 1,
+            "backup_count": 1,
+            "stored_bytes": 100,
+        })
+        self.assertEqual(destination["categories"]["database"], {
+            "source_count": 1,
+            "backup_count": 1,
+            "stored_bytes": 200,
+        })
+        self.assertEqual(destination["categories"]["saas"], {
+            "source_count": 1,
+            "backup_count": 1,
+            "stored_bytes": 400,
+        })
+        self.assertEqual(destination["stored_bytes"], 700)
+        self.assertEqual(
+            sum(
+                category["stored_bytes"]
+                for category in destination["categories"].values()
+            ),
+            destination["stored_bytes"],
+        )
+        self.assertNotIn(
+            other_storage.id,
+            {item["storage_id"] for item in summary["destinations"]},
+        )
+
+        self.client.force_login(self.user)
+        response = self.client.get(
+            reverse(
+                "console:setup:integration_storage_open",
+                args=[storage.type.code],
+            )
+        )
+        self.assertEqual(response.status_code, 200)
+        storage_row = next(
+            item
+            for item in response.context["page"].object_list
+            if item.id == storage.id
+        )
+        self.assertEqual(storage_row.stats_website_count, 1)
+        self.assertEqual(storage_row.stats_website_backup_count, 1)
+        self.assertEqual(storage_row.stats_website_size, 100)
+        self.assertEqual(storage_row.stats_database_count, 1)
+        self.assertEqual(storage_row.stats_database_backup_count, 1)
+        self.assertEqual(storage_row.stats_database_size, 200)
+        self.assertEqual(storage_row.stats_saas_count, 1)
+        self.assertEqual(storage_row.stats_saas_backup_count, 1)
+        self.assertEqual(storage_row.stats_saas_size, 400)
+
 
 class LocalStorageModelTests(BaseTestCase):
     def test_validate_roundtrip_at_root(self):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
-            self.assertTrue(CoreStorageLocal().validate({"path": None, "no_delete": None}))
+            self.assertTrue(CoreStorageLocal(path=None).probe_filesystem())
 
     def test_validate_roundtrip_with_subdirectory(self):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
-            self.assertTrue(CoreStorageLocal().validate({"path": "server1"}))
+            self.assertTrue(CoreStorageLocal(path="server1").probe_filesystem())
             target_dir = os.path.join(os.path.realpath(tmp), "server1")
             self.assertTrue(os.path.isdir(target_dir))
             # the write/read test file is cleaned up afterwards
@@ -305,7 +487,7 @@ class LocalStorageModelTests(BaseTestCase):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
             local = CoreStorageLocal(path="concurrent")
             with ThreadPoolExecutor(max_workers=8) as pool:
-                results = list(pool.map(lambda _unused: local.validate(), range(8)))
+                results = list(pool.map(lambda _unused: local.probe_filesystem(), range(8)))
 
             self.assertEqual(results, [True] * 8)
             self.assertEqual(os.listdir(os.path.join(tmp, "concurrent")), [])
@@ -381,15 +563,25 @@ class LocalStorageUploadTests(BaseTestCase):
 class LocalStorageDeleteTests(BaseTestCase):
     def test_soft_delete_removes_file(self):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
-            target = os.path.join(tmp, "backup.zip")
-            with open(target, "wb") as fh:
-                fh.write(b"zip-bytes")
             storage = make_local_storage(self.account, self.member)
             point = make_website_backup_point(
                 self.member, storage,
                 status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
-                storage_file_id=target,
             )
+            payload = b"zip-bytes"
+            target = os.path.join(tmp, f"{point.backup.uuid_str}.zip")
+            with open(target, "wb") as fh:
+                fh.write(payload)
+            point.storage_file_id = target
+            point.metadata = {
+                "local_object": {
+                    "object_key": os.path.basename(target),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "size_bytes": len(payload),
+                    "checksum_algorithm": "sha256",
+                }
+            }
+            point.save()
             point.soft_delete()
             point.refresh_from_db()
             self.assertFalse(os.path.exists(target))
@@ -406,11 +598,16 @@ class LocalStorageDeleteTests(BaseTestCase):
                 status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
                 storage_file_id=target,
             )
-            point.soft_delete()
+            self.assertFalse(point.soft_delete())
             point.refresh_from_db()
-            # the file is kept; only BackupSheep's record of it is closed out
+            # Protected copies remain visibly restorable and are not reported as
+            # deleted while the bytes still exist.
             self.assertTrue(os.path.exists(target))
-            self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.DELETE_COMPLETED)
+            self.assertEqual(
+                point.status,
+                CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            )
+            self.assertIn("deletion_protection", point.metadata)
 
     def test_soft_delete_refuses_path_outside_root(self):
         with tempfile.TemporaryDirectory() as tmp, \
@@ -441,8 +638,28 @@ class LocalStorageDeleteTests(BaseTestCase):
         )
         self.assertEqual(
             point.generate_download_url(),
-            f"/api/v1/storage/local/file/{point.id}/",
+            f"/api/v1/storage/local/file/website/{point.id}/",
         )
+        self.assertEqual(
+            point.generate_browser_download_target(),
+            f"/api/v1/storage/local/file/website/{point.id}/",
+        )
+
+    def test_browser_download_target_rejects_unsafe_provider_output(self):
+        storage = make_local_storage(self.account, self.member)
+        point = make_website_backup_point(
+            self.member,
+            storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="/backups/x.zip",
+        )
+        with mock.patch.object(
+            point,
+            "generate_download_url",
+            return_value="javascript:alert(document.domain)",
+        ):
+            with self.assertRaises(UnsafeBrowserDownloadTarget):
+                point.generate_browser_download_target()
 
 
 class LocalStorageDownloadViewTests(BaseTestCase):
@@ -458,12 +675,46 @@ class LocalStorageDownloadViewTests(BaseTestCase):
             storage_file_id=target,
         )
 
+    def _make_family_point_with_file(
+        self,
+        family,
+        account,
+        member,
+        root,
+        payload,
+        *,
+        backup_status=UtilBackup.Status.COMPLETE,
+    ):
+        storage = make_local_storage(account, member)
+        target = os.path.join(root, f"{family}-{uuid.uuid4().hex}.zip")
+        with open(target, "wb") as fh:
+            fh.write(payload)
+        if family == "website":
+            point = make_website_backup_point(
+                member,
+                storage,
+                status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+                storage_file_id=target,
+            )
+        else:
+            point = make_category_backup_point(
+                member,
+                storage,
+                category=family,
+                size=len(payload),
+            )
+            point.storage_file_id = target
+            point.save(update_fields=["storage_file_id", "modified"])
+        point.backup.status = backup_status
+        point.backup.save(update_fields=["status", "modified"])
+        return point
+
     def test_download_streams_file_for_owner(self):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
             payload = b"zip-bytes" * 100
             point = self._make_point_with_file(self.account, self.member, tmp, payload)
             self.client.force_login(self.user)
-            r = self.client.get(f"/api/v1/storage/local/file/{point.id}/")
+            r = self.client.get(f"/api/v1/storage/local/file/website/{point.id}/")
             self.assertEqual(r.status_code, 200)
             self.assertEqual(b"".join(r.streaming_content), payload)
             self.assertIn("attachment", r.headers["Content-Disposition"])
@@ -473,8 +724,83 @@ class LocalStorageDownloadViewTests(BaseTestCase):
             other_account, other_member, _ = factories.make_account()
             point = self._make_point_with_file(other_account, other_member, tmp, b"zip-bytes")
             self.client.force_login(self.user)
-            r = self.client.get(f"/api/v1/storage/local/file/{point.id}/")
+            r = self.client.get(f"/api/v1/storage/local/file/website/{point.id}/")
             self.assertEqual(r.status_code, 404)
+
+    def test_family_routes_require_complete_parent_for_every_backup_family(self):
+        with tempfile.TemporaryDirectory() as tmp, override_settings(
+            LOCAL_STORAGE_ROOT=tmp,
+            BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+            BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        ):
+            self.client.force_login(self.user)
+            for family in ("website", "database", "basecamp"):
+                with self.subTest(family=family):
+                    payload = f"{family}-bytes".encode()
+                    point = self._make_family_point_with_file(
+                        family,
+                        self.account,
+                        self.member,
+                        tmp,
+                        payload,
+                        backup_status=UtilBackup.Status.IN_PROGRESS,
+                    )
+                    url = f"/api/v1/storage/local/file/{family}/{point.id}/"
+                    self.assertEqual(self.client.get(url).status_code, 404)
+
+                    point.backup.status = UtilBackup.Status.COMPLETE
+                    point.backup.save(update_fields=["status", "modified"])
+                    response = self.client.get(url)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(b"".join(response.streaming_content), payload)
+
+    def test_family_qualified_routes_prevent_cross_table_id_collisions(self):
+        with tempfile.TemporaryDirectory() as tmp, override_settings(
+            LOCAL_STORAGE_ROOT=tmp,
+            BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+            BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        ):
+            website = self._make_family_point_with_file(
+                "website", self.account, self.member, tmp, b"website-bytes"
+            )
+            database = self._make_family_point_with_file(
+                "database", self.account, self.member, tmp, b"database-bytes"
+            )
+            if database.id != website.id:
+                database_backup = database.backup
+                database_storage = database.storage
+                database_path = database.storage_file_id
+                database.delete()
+                database = CoreDatabaseBackupStoragePoints.objects.create(
+                    id=website.id,
+                    backup=database_backup,
+                    storage=database_storage,
+                    status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE,
+                    storage_file_id=database_path,
+                )
+            self.assertEqual(database.id, website.id)
+
+            self.client.force_login(self.user)
+            website_response = self.client.get(
+                f"/api/v1/storage/local/file/website/{website.id}/"
+            )
+            database_response = self.client.get(
+                f"/api/v1/storage/local/file/database/{database.id}/"
+            )
+            self.assertEqual(website_response.status_code, 200)
+            self.assertEqual(database_response.status_code, 200)
+            self.assertEqual(
+                b"".join(website_response.streaming_content), b"website-bytes"
+            )
+            self.assertEqual(
+                b"".join(database_response.streaming_content), b"database-bytes"
+            )
+            self.assertEqual(
+                self.client.get(
+                    f"/api/v1/storage/local/file/{website.id}/"
+                ).status_code,
+                404,
+            )
 
 
 class S3ImmutabilityFollowupTests(BaseTestCase):
@@ -582,6 +908,9 @@ class S3ImmutabilityFollowupTests(BaseTestCase):
             "VersionId": "version-expired",
             "ObjectLockMode": "COMPLIANCE",
             "ObjectLockRetainUntilDate": timezone.now() - timedelta(days=1),
+            "Metadata": {
+                "backupsheep-backup-id": str(point.backup_id),
+            },
         }
 
         with mock.patch("boto3.client", return_value=client):
@@ -668,3 +997,28 @@ class S3ImmutabilityFollowupTests(BaseTestCase):
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("configured together", str(serializer.errors))
+
+    def test_serializer_never_exposes_provider_exception_text(self):
+        from apps.api.v1.storage.aws_s3.serializers import CoreStorageAWSS3WriteSerializer
+        from apps.console.connection.models import CoreAWSRegion
+
+        canary = "aws-provider-secret-canary"
+        aws_s3 = self._protected_storage().storage_aws_s3
+        region_id = aws_s3.region_id or CoreAWSRegion.objects.first().id
+        serializer = CoreStorageAWSS3WriteSerializer(
+            instance=aws_s3,
+            data={
+                "access_key": "access",
+                "secret_key": "secret",
+                "bucket_name": "test-bucket",
+                "region": region_id,
+            },
+            context={"encryption_key": self.account.get_encryption_key()},
+        )
+
+        with mock.patch.object(
+            CoreStorageAWSS3, "validate", side_effect=ValueError(canary)
+        ):
+            self.assertFalse(serializer.is_valid())
+        self.assertNotIn(canary, str(serializer.errors))
+        self.assertIn("Unable to authenticate", str(serializer.errors))

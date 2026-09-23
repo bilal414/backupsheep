@@ -1,9 +1,13 @@
-from apps.api.v1.utils.api_permissions import MemberGroupPermissions
+from apps.api.v1.utils.api_permissions import (
+    MemberGroupPermissions,
+    SOURCE_DISCOVERY_PERMISSIONS,
+)
 
 
 class CoreUpCloudViewPermissions(MemberGroupPermissions):
-    action_permissions = {"*": "integration_changes"}
+    action_permissions = {
+        "objects": SOURCE_DISCOVERY_PERMISSIONS,
+        "*": "integration_changes",
+    }
 
-    def has_object_permission(self, request, view, obj):
-        if request.user.member.memberships.filter(account=obj.account).exists():
-            return True
+    object_account_path = "account"

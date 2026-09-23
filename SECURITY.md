@@ -28,21 +28,19 @@ Self-hosting means you own the deployment's security. Before exposing an instanc
 - Restrict who can reach the console (network/firewall/VPN) — it stores cloud-provider and
   storage credentials and SSH keys.
 
-See [docs/deployment.md](docs/deployment.md) for the full guide.
+See the [production deployment guide](docs/guides/production.md) for the full checklist.
 
 ## Known security considerations
 
 We document these openly so operators can make informed decisions:
 
-- **Browser-session API CSRF.** The console's single-page UI calls the REST API
-  authenticated by the session cookie, and CSRF enforcement is currently disabled for
-  session-authenticated requests (a carry-over from the SaaS SPA). Modern browsers'
-  default `SameSite=Lax` cookie policy blocks the cross-site `POST`/`PATCH`/`DELETE`
-  requests this would otherwise expose, and there is no CORS allowance, so cross-site
-  exploitation is substantially mitigated in practice. Still, for defense in depth, run
-  the console over HTTPS on a dedicated origin and restrict access. Restoring full CSRF
-  enforcement for cookie auth (while keeping API-token auth CSRF-free) is a planned
-  hardening item.
+- **Browser-session API CSRF.** Session-authenticated REST requests use Django REST
+  Framework's standard CSRF enforcement. The console sends the CSRF cookie value in the
+  `X-CSRFToken` header for unsafe methods. Token-authenticated API clients use
+  `Authorization: Token ...` and do not rely on cookies, so Django's CSRF check does not
+  apply to those requests. Keep both session cookies and API tokens private, run the
+  console over HTTPS on a dedicated origin, and do not weaken the session authenticator
+  to work around a missing CSRF header in a custom client.
 - **Credential storage.** Connection credentials are encrypted at rest with a per-account
   Fernet key; email-provider credentials are encrypted with a key derived from
   `DJANGO_SECRET_KEY`. Protect the database and the secret key accordingly.

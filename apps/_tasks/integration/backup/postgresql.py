@@ -24,19 +24,19 @@ zipped to ``_storage/{uuid}.zip`` and the dump directory is deleted; on any
 failure everything is deleted and NodeBackupFailedError is raised. A
 disk-space preflight (~2x the node's most recent COMPLETE backup, 1 GiB
 floor) runs before anything is dumped so a huge database fails fast instead of
-filling the shared _storage volume mid-run.
+filling the private database workdir mid-run.
 """
 
 import subprocess
-import zipfile
 import os
 from sentry_sdk import capture_exception
+from apps._tasks.integration.backup.errors import safe_backup_failure
 from apps._tasks.exceptions import NodeBackupFailedError
-from apps._tasks.integration.backup._archive import validate_zip_archive
+from apps._tasks.integration.backup._archive import create_python_zip
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.api.v1.utils.api_helpers import bs_decrypt, ensure_disk_space
-from apps.api.v1.utils.api_helpers import zipdir, mkdir_p
-from apps.console.utils.models import UtilBackup
+from apps.api.v1.utils.api_helpers import mkdir_p
+from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps._tasks.integration.backup._sanitize import (
     safe_token,
     safe_password,
@@ -44,6 +44,7 @@ from apps._tasks.integration.backup._sanitize import (
 )
 
 COMMAND_TIMEOUT = 12 * 3600
+DEFAULT_POSTGRES_OPTIONS = "-w --clean --if-exists"
 
 
 def _redact(text, username, password):
@@ -63,9 +64,11 @@ def _pgpass_escape(value):
 def _sftp_write_remote_file(ssh, remote_name, content):
     sftp = ssh.open_sftp()
     try:
-        with sftp.open(remote_name, "w") as fh:
+        with sftp.open(remote_name, "x") as fh:
+            # Refuse a pre-positioned file or symlink, then restrict the empty
+            # inode before publishing any pgpass credential bytes.
+            sftp.chmod(remote_name, 0o600)
             fh.write(content)
-        sftp.chmod(remote_name, 0o600)
     finally:
         sftp.close()
 
@@ -129,7 +132,10 @@ def _ssh_check_result(node, backup, stdout, stderr, log_file, username, password
 def _ssh_run_capture(node, backup, ssh, command, log_file, username, password, what):
     """Run a remote command and return its stdout text; raise on non-zero exit."""
     log_file.write(f"PostgreSQL: {_redact(command, username, password)}\n")
-    stdin, stdout, stderr = ssh.exec_command(command)
+    stdin, stdout, stderr = ssh.exec_command(
+        command,
+        timeout=int(getattr(settings, "DATABASE_COMMAND_TIMEOUT", 23 * 3600)),
+    )
     stdout._set_mode("rb")
     out_text = _decode(stdout.read())
     _ssh_check_result(node, backup, stdout, stderr, log_file, username, password, what)
@@ -139,7 +145,10 @@ def _ssh_run_capture(node, backup, ssh, command, log_file, username, password, w
 def _ssh_dump_to_file(node, backup, ssh, command, db_file, log_file, username, password):
     """Run a remote pg_dump, streaming stdout to db_file (binary append); raise on failure."""
     log_file.write(f"PostgreSQL: {_redact(command, username, password)}\n")
-    stdin, stdout, stderr = ssh.exec_command(command)
+    stdin, stdout, stderr = ssh.exec_command(
+        command,
+        timeout=int(getattr(settings, "DATABASE_COMMAND_TIMEOUT", 23 * 3600)),
+    )
     stdout._set_mode("rb")
     with open(db_file, "ab") as tmp:
         while True:
@@ -179,8 +188,8 @@ def snapshot_postgresql(backup):
     log_file.write(f"Attempt Number: {backup.attempt_no} \n")
 
     try:
-        # Disk-space preflight: a huge dump must not fill the shared _storage
-        # volume mid-run. Estimate ~2x the node's most recent COMPLETE backup
+        # Disk-space preflight: a huge dump must not fill the private database
+        # workdir mid-run. Estimate ~2x the node's most recent COMPLETE backup
         # (dump files plus the final zip), floored at 1 GiB.
         last = (
             backup.__class__.objects.filter(
@@ -195,7 +204,7 @@ def snapshot_postgresql(backup):
         if node.database.option_postgres:
             option_postgres = f"-w {safe_options(node.database.option_postgres, 'option_postgres')}"
         else:
-            option_postgres = "-w --clean"
+            option_postgres = DEFAULT_POSTGRES_OPTIONS
 
         # Save backup options used
         backup.option_postgres = option_postgres
@@ -378,7 +387,9 @@ def snapshot_postgresql(backup):
                         )
             finally:
                 try:
-                    ssh.exec_command(f"rm -f ~/{remote_pgpass_name}")
+                    ssh.exec_command(
+                        f"rm -f ~/{remote_pgpass_name}", timeout=30
+                    )
                 except Exception:
                     pass
                 ssh.close()
@@ -441,11 +452,12 @@ def snapshot_postgresql(backup):
                     f"{os.path.relpath(full_path, local_dir)} ({os.path.getsize(full_path)} bytes)\n"
                 )
 
-        zipf = zipfile.ZipFile(local_zip, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
-        zipdir(local_dir, zipf)
-        zipf.close()
-
-        validate_zip_archive(local_zip, required_suffix=".sql")
+        create_python_zip(
+            local_dir,
+            local_zip,
+            required_suffix=".sql",
+            before_publish=backup.ensure_execution_fence,
+        )
         backup.size = os.stat(local_zip).st_size
         backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
         backup.save()
@@ -457,16 +469,21 @@ def snapshot_postgresql(backup):
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "dir"],
         )
+    except BackupExecutionLeaseLostError:
+        raise
     except Exception as e:
-        log_file.write(f"Error: {e.__str__()} \n")
         capture_exception(e)
+        failure = safe_backup_failure(e, stage="database_backup")
+        log_file.write(f"Error [{failure.code}]: {failure.detail}\n")
         """
         Delete files
         """
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "both"],
         )
-        raise NodeBackupFailedError(node, backup.uuid_str, backup.attempt_no, backup.type, e.__str__())
+        raise NodeBackupFailedError(
+            node, backup.uuid_str, backup.attempt_no, backup.type, failure.detail
+        )
     finally:
         log_file.close()
 
@@ -475,3 +492,4 @@ def snapshot_postgresql(backup):
         """
         if ssh_key_path:
             os.remove(ssh_key_path)
+from django.conf import settings

@@ -6,7 +6,8 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.api.v1.website.filters import CoreWebsiteFilter
 from apps.api.v1.website.permissions import CoreWebsiteViewPermissions
@@ -56,7 +57,7 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query = Q(account=member.get_current_account(), integration__code="website")
 
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        regions = CoreConnection.objects.filter(query).values(
+        regions = visible_connections(member).filter(query).values(
             "id",
             "name",
             "location_id",
@@ -75,7 +76,10 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 | Q(node__connection__auth_website__protocol=CoreAuthWebsite.Protocol.FTPS)
         )
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-        websites = CoreWebsite.objects.filter(query)
+        websites = scope_direct_node_queryset(
+            request,
+            CoreWebsite.objects.filter(query),
+        )
         all_totals = {
             "nodes": websites.count(),
             "backups": CoreWebsiteBackup.objects.filter(

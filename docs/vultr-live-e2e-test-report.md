@@ -1,5 +1,9 @@
 # Vultr live E2E test report
 
+> Historical evidence for the exact run below. Do not treat these results as a
+> fresh validation of later code. Any rerun requires confirmed current login
+> information, a new unique run marker, and an independently persisted ledger.
+
 - Run: `bs-vultr-e2e-20260804133752-91b44d`
 - Mode: `LIVE_PROVIDER`
 - Started: `2026-08-04T13:37:52.959308+00:00`

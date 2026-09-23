@@ -8,11 +8,8 @@ class CoreLightsailBucketReplicationViewPermissions(MemberGroupPermissions):
         "partial_update": "node_changes",
         "destroy": "node_changes",
         "run": "backup_create",
-        "restore": "backup_create",
+        "restore": "backup_restore",
         "validate": "backup_create",
     }
 
-    def has_object_permission(self, request, view, obj):
-        return request.user.member.memberships.filter(
-            account=obj.account
-        ).exists()
+    object_account_path = "account"

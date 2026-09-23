@@ -1,9 +1,10 @@
+from django.db import transaction
+from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
-from slugify import slugify
 
 from apps.console.account.models import CoreAccountGroup
 from .filters import CoreAccountGroupFilter
@@ -32,10 +33,29 @@ def _sync_permissions(account_group, permissions):
     The submitted list replaces, not augments: an empty list clears all custom
     permissions (previously a no-op guard made "clear everything" impossible).
     Only this model's custom permissions are touched."""
-    for permission in account_group._meta.permissions:
-        account_group.group.permissions.remove(Permission.objects.get(codename=permission[0]))
-    for permission in permissions:
-        account_group.group.permissions.add(Permission.objects.get(codename=permission))
+    allowed_codenames = {
+        codename for codename, _label in account_group._meta.permissions
+    }
+    requested = set(permissions)
+    unknown = requested - allowed_codenames
+    if unknown:
+        raise ValueError("Unknown account-group permission")
+
+    model_permissions = Permission.objects.filter(
+        content_type__app_label=account_group._meta.app_label,
+        content_type__model=account_group._meta.model_name,
+        codename__in=allowed_codenames,
+    )
+    account_group.group.permissions.remove(*model_permissions)
+    selected = model_permissions.filter(codename__in=requested)
+    account_group.group.permissions.add(*selected)
+
+
+def _locked_group_delete_impact(account_group, auth_group):
+    """Capture deletion impact while both group records are row-locked."""
+    member_count = auth_group.user_set.count()
+    source_count = account_group.nodes.count()
+    return member_count, source_count
 
 
 class CoreAccountGroupView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -63,12 +83,11 @@ class CoreAccountGroupView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         # None = key absent (leave permissions alone); [] = clear all.
         permissions = serializer.validated_data.pop("permissions", None)
 
-        self.perform_create(serializer)
-        account_group = serializer.instance
-
-        # Now sync permissions to group
-        if permissions is not None:
-            _sync_permissions(account_group, permissions)
+        with transaction.atomic():
+            self.perform_create(serializer)
+            account_group = serializer.instance
+            if permissions is not None:
+                _sync_permissions(account_group, permissions)
 
         _record_member_log(
             account_group.account,
@@ -92,12 +111,11 @@ class CoreAccountGroupView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         # None = key absent (leave permissions alone); [] = clear all.
         permissions = serializer.validated_data.pop("permissions", None)
 
-        self.perform_update(serializer)
-        account_group = serializer.instance
-
-        # Now sync permissions to group
-        if permissions is not None:
-            _sync_permissions(account_group, permissions)
+        with transaction.atomic():
+            self.perform_update(serializer)
+            account_group = serializer.instance
+            if permissions is not None:
+                _sync_permissions(account_group, permissions)
 
         _record_member_log(
             account_group.account,
@@ -117,20 +135,71 @@ class CoreAccountGroupView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return Response(serializer.data)
 
     def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        if instance.member_count > 0:
-            return Response(
-                data={"detail": "Please remove all the users from the group before deleting it."},
-                status=status.HTTP_400_BAD_REQUEST,
+        authorized_instance = self.get_object()
+        authorized_group_id = authorized_instance.group_id
+        authorized_enrollment_id = authorized_instance.id
+        actor_email = request.user.email
+
+        with transaction.atomic():
+            # Lock in the same order as group updates: the backing Django auth
+            # Group first, then the tenant enrollment. The auth Group lock
+            # serializes auth_user_groups FK inserts so a member cannot be added
+            # after the zero-member check but before deletion.
+            locked_auth_group = get_object_or_404(
+                Group.objects.select_for_update(),
+                pk=authorized_group_id,
             )
-        _record_member_log(
-            instance.account,
-            {
-                "message": f"Group {instance.name} deleted.",
-                "actor_email": request.user.email,
-                "group_id": instance.id,
-                "group_name": instance.name,
-            },
-        )
-        instance.group.delete()
+            locked_account_group = get_object_or_404(
+                self.get_queryset()
+                .select_for_update()
+                .select_related("account"),
+                pk=authorized_enrollment_id,
+                group_id=locked_auth_group.id,
+            )
+            self.check_object_permissions(request, locked_account_group)
+
+            member_count, source_count = _locked_group_delete_impact(
+                locked_account_group,
+                locked_auth_group,
+            )
+            if member_count > 0:
+                return Response(
+                    data={
+                        "detail": (
+                            "Please remove all the users from the group before "
+                            "deleting it."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            account = locked_account_group.account
+            group_id = locked_account_group.id
+            group_name = locked_account_group.name
+            source_scope = "selected_sources" if source_count else "all_sources"
+            audit_data = {
+                "message": (
+                    f"Access group {group_name} deleted. Its member assignment and "
+                    "source-scope policy were removed; protected sources and recovery "
+                    "points were not deleted."
+                ),
+                "action": "group_delete",
+                "outcome": "succeeded",
+                "actor_email": actor_email,
+                "group_id": group_id,
+                "group_name": group_name,
+                "member_count": member_count,
+                "source_count": source_count,
+                "source_scope": source_scope,
+            }
+
+            locked_auth_group.delete()
+            # A callback registered after deletion is discarded automatically if
+            # this transaction (or an enclosing request transaction) rolls back.
+            transaction.on_commit(
+                lambda account=account, data=audit_data: _record_member_log(
+                    account, data
+                )
+            )
+
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -1,7 +1,9 @@
 import pytz
 from django.conf import settings
+from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 
 from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
@@ -19,14 +21,30 @@ from apps.console.connection.models import (
 )
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreConnectionLocationSerializer
+from apps.api.v1.connection.serializer_helpers import (
+    MANAGED_SSH_SINGLE_ACCOUNT_VALIDATION_DETAIL,
+    StructuredConnectionValidationMixin,
+    safe_connection_validation_error,
+)
+from apps.console.connection.managed_ssh import (
+    _active_request_permission,
+    acquire_managed_ssh_mutation_lock,
+    assert_managed_ssh_single_account,
+    create_managed_ssh_operation,
+    ManagedSSHOperationError,
+    managed_public_key_fingerprint,
+)
+from apps.console.connection.ssh import normalize_ssh_host
+from apps.console.connection.reliability import classify_and_record_connection_error
 
 
 class CoreAuthDatabaseReadSerializer(serializers.ModelSerializer):
-    password = serializers.SerializerMethodField()
     username = serializers.SerializerMethodField()
-    private_key = serializers.SerializerMethodField()
     ssh_username = serializers.SerializerMethodField()
-    ssh_password = serializers.SerializerMethodField()
+    password_configured = serializers.SerializerMethodField()
+    private_key_configured = serializers.SerializerMethodField()
+    ssh_password_configured = serializers.SerializerMethodField()
+    auth_mode = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreAuthDatabase
@@ -38,18 +56,19 @@ class CoreAuthDatabaseReadSerializer(serializers.ModelSerializer):
             "database_name",
             "all_databases",
             "username",
-            "password",
+            "password_configured",
             "include_stored_procedure",
             "use_ssl",
             "ssh_username",
-            "ssh_password",
+            "ssh_password_configured",
             "ssh_port",
             "ssh_host",
-            "private_key",
+            "private_key_configured",
             "type",
             "version",
             "use_public_key",
             "use_private_key",
+            "auth_mode",
         )
         datatables_always_serialize = (
             "id",
@@ -59,34 +78,46 @@ class CoreAuthDatabaseReadSerializer(serializers.ModelSerializer):
             "database_name",
             "all_databases",
             "username",
-            "password",
+            "password_configured",
             "include_stored_procedure",
             "use_ssl",
             "ssh_username",
-            "ssh_password",
+            "ssh_password_configured",
             "ssh_port",
             "ssh_host",
-            "private_key",
+            "private_key_configured",
             "type",
             "version",
             "use_public_key",
             "use_private_key",
+            "auth_mode",
         )
-
-    def get_password(self, obj):
-        return bs_decrypt(obj.password, self.context["encryption_key"])
 
     def get_username(self, obj):
         return bs_decrypt(obj.username, self.context["encryption_key"])
 
-    def get_private_key(self, obj):
-        return bs_decrypt(obj.private_key, self.context["encryption_key"])
-
     def get_ssh_username(self, obj):
         return bs_decrypt(obj.ssh_username, self.context["encryption_key"])
 
-    def get_ssh_password(self, obj):
-        return bs_decrypt(obj.ssh_password, self.context["encryption_key"])
+    @staticmethod
+    def get_password_configured(obj):
+        return bool(obj.password)
+
+    @staticmethod
+    def get_private_key_configured(obj):
+        return bool(obj.private_key)
+
+    @staticmethod
+    def get_ssh_password_configured(obj):
+        return bool(obj.ssh_password)
+
+    @staticmethod
+    def get_auth_mode(obj):
+        if obj.use_public_key:
+            return "public_key"
+        if obj.use_private_key:
+            return "private_key"
+        return "direct"
 
 
 class CoreDatabaseConnectionReadSerializer(serializers.ModelSerializer):
@@ -146,7 +177,12 @@ class CoreAuthDatabaseWriteSerializer(serializers.ModelSerializer):
     all_databases = serializers.BooleanField(write_only=True, allow_null=True, required=False)
 
     username = serializers.CharField(write_only=True)
-    password = serializers.CharField(write_only=True)
+    password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+    )
     type = serializers.ChoiceField(write_only=True, choices=CoreAuthDatabase.DatabaseType)
     include_stored_procedure = serializers.BooleanField(write_only=True, allow_null=True, required=False)
     use_ssl = serializers.BooleanField(write_only=True, allow_null=True, required=False)
@@ -169,49 +205,300 @@ class CoreAuthDatabaseWriteSerializer(serializers.ModelSerializer):
         model = CoreAuthDatabase
         fields = "__all__"
 
-    def validate(self, data):
-        errors = {}
-        if not data.get("all_databases"):
-            if not data.get("database_name"):
-                errors["database_name"] = ["This field is required."]
-        if data.get("use_private_key"):
-            if not data.get("private_key"):
-                errors["private_key"] = ["This field is required."]
-        if data.get("use_public_key") or data.get("use_private_key"):
-            if not data.get("ssh_host"):
-                errors["ssh_host"] = ["This field is required."]
-            if not data.get("ssh_username"):
-                errors["ssh_username"] = ["This field is required."]
-            if not data.get("ssh_port"):
-                errors["ssh_port"] = ["This field is required."]
-
-        if data.get("password"):
-            if "'" in data.get("password") or '"' in data.get("password"):
-                errors["password"] = ["The \" or ' characters are not allowed."]
-                raise serializers.ValidationError(errors)
-
-        if data.get("ssh_password"):
-            if "'" in data.get("ssh_password") or '"' in data.get("ssh_password"):
-                errors["ssh_password"] = ["The \" or ' characters are not allowed."]
-                raise serializers.ValidationError(errors)
-
-        if bool(errors):
-            raise serializers.ValidationError(errors)
+    def _existing_auth(self):
+        parent_instance = getattr(self.parent, "instance", None)
+        if parent_instance is None or not getattr(parent_instance, "pk", None):
+            return None
         try:
-            auth = CoreAuthDatabase()
-            auth.check_connection(data=data)
+            return parent_instance.auth_database
+        except CoreAuthDatabase.DoesNotExist:
+            return None
 
-            data["username"] = bs_encrypt(data.get("username"), self.context["encryption_key"])
-            data["password"] = bs_encrypt(data.get("password"), self.context["encryption_key"])
-            data["ssh_username"] = bs_encrypt(data.get("ssh_username"), self.context["encryption_key"])
-            data["ssh_password"] = bs_encrypt(data.get("ssh_password"), self.context["encryption_key"])
-            data["private_key"] = bs_encrypt(data.get("private_key"), self.context["encryption_key"])
-        except Exception as e:
-            raise serializers.ValidationError(e.__str__())
+    def _existing_secret(self, instance, field_name):
+        if instance is None:
+            return None
+        return bs_decrypt(
+            getattr(instance, field_name),
+            self.context["encryption_key"],
+        )
+
+    @staticmethod
+    def _auth_mode(use_public_key, use_private_key):
+        if use_public_key:
+            return "public_key"
+        if use_private_key:
+            return "private_key"
+        return "direct"
+
+    def validate(self, data):
+        existing = self._existing_auth()
+        errors = {}
+
+        # MySQL 8.4 uses caching_sha2_password by default and many fresh
+        # accounts require secure transport. New connections therefore start
+        # with database TLS enabled. An explicit false remains a supported
+        # opt-out; updates never rewrite an existing connection silently.
+        if (
+            existing is None
+            and data.get("use_ssl") is None
+            and data.get("type") == CoreAuthDatabase.DatabaseType.MYSQL
+            and data.get("version")
+            == CoreAuthDatabase.DatabaseVersion.MYSQL_8_4
+        ):
+            data["use_ssl"] = True
+
+        previous_public_key = bool(getattr(existing, "use_public_key", False))
+        previous_private_key = bool(getattr(existing, "use_private_key", False))
+
+        if data.get("use_public_key") is True and data.get("use_private_key") is True:
+            errors["use_public_key"] = [
+                "Public-key and private-key authentication cannot both be enabled."
+            ]
+            errors["use_private_key"] = [
+                "Public-key and private-key authentication cannot both be enabled."
+            ]
+
+        use_public_key = previous_public_key
+        use_private_key = previous_private_key
+        if data.get("use_public_key") is True:
+            use_public_key = True
+            use_private_key = False
+        elif data.get("use_private_key") is True:
+            use_public_key = False
+            use_private_key = True
+        else:
+            if "use_public_key" in data:
+                use_public_key = bool(data["use_public_key"])
+            if "use_private_key" in data:
+                use_private_key = bool(data["use_private_key"])
+
+        if use_public_key and use_private_key:
+            errors["use_public_key"] = [
+                "Public-key and private-key authentication cannot both be enabled."
+            ]
+            errors["use_private_key"] = [
+                "Public-key and private-key authentication cannot both be enabled."
+            ]
+
+        mode = self._auth_mode(use_public_key, use_private_key)
+        previous_mode = None
+        if existing is not None:
+            previous_mode = self._auth_mode(
+                previous_public_key,
+                previous_private_key,
+            )
+        mode_changed = previous_mode is not None and previous_mode != mode
+
+        all_databases = data.get(
+            "all_databases",
+            bool(getattr(existing, "all_databases", False)),
+        )
+        database_name = data.get(
+            "database_name",
+            getattr(existing, "database_name", None),
+        )
+        if all_databases:
+            database_name = None
+        elif not database_name:
+            errors["database_name"] = ["This field is required."]
+
+        username = data.get("username")
+        if "username" not in data:
+            username = self._existing_secret(existing, "username")
+        password = data.get("password")
+        if "password" not in data:
+            password = self._existing_secret(existing, "password")
+
+        entering_ssh_mode = mode != "direct" and previous_mode == "direct"
+        ssh_host = data.get("ssh_host")
+        ssh_port = data.get("ssh_port")
+        ssh_username = data.get("ssh_username")
+        if existing is not None and not entering_ssh_mode:
+            if "ssh_host" not in data:
+                ssh_host = existing.ssh_host
+            if "ssh_port" not in data:
+                ssh_port = existing.ssh_port
+            if "ssh_username" not in data:
+                ssh_username = self._existing_secret(existing, "ssh_username")
+
+        ssh_password = data.get("ssh_password")
+        if (
+            "ssh_password" not in data
+            and existing is not None
+            and mode == "private_key"
+            and previous_mode == "private_key"
+        ):
+            ssh_password = self._existing_secret(existing, "ssh_password")
+
+        private_key = data.get("private_key")
+        if (
+            "private_key" not in data
+            and existing is not None
+            and mode == "private_key"
+            and previous_mode == "private_key"
+        ):
+            private_key = self._existing_secret(existing, "private_key")
+
+        if not username:
+            errors["username"] = ["This field is required."]
+        if not password:
+            errors["password"] = ["This field is required."]
+        if mode != "direct":
+            if not ssh_host:
+                errors["ssh_host"] = ["This field is required for SSH authentication."]
+            if not ssh_username:
+                errors["ssh_username"] = ["This field is required for SSH authentication."]
+            if not ssh_port:
+                errors["ssh_port"] = ["This field is required for SSH authentication."]
+        if mode == "private_key" and not private_key:
+            errors["private_key"] = [
+                "This field is required when private-key authentication is selected."
+            ]
+        legacy_rsa = bool(
+            data.get(
+                "flag_use_sha1_key_verification",
+                getattr(existing, "flag_use_sha1_key_verification", False),
+            )
+        )
+        if mode == "public_key" and legacy_rsa:
+            errors["flag_use_sha1_key_verification"] = [
+                "Legacy RSA/SHA-1 is not permitted with the managed SSH key."
+            ]
+        if mode == "public_key":
+            try:
+                assert_managed_ssh_single_account(
+                    self.context["request"].user.member.get_current_account().pk
+                )
+            except ManagedSSHOperationError as error:
+                classify_and_record_connection_error(
+                    error,
+                    stage="managed_ssh_policy",
+                )
+                errors["use_public_key"] = [
+                    MANAGED_SSH_SINGLE_ACCOUNT_VALIDATION_DETAIL
+                ]
+
+        if "password" in data and data.get("password"):
+            if "'" in data["password"] or '"' in data["password"]:
+                errors["password"] = ["The \" or ' characters are not allowed."]
+        if mode == "private_key" and "ssh_password" in data and data.get("ssh_password"):
+            if "'" in data["ssh_password"] or '"' in data["ssh_password"]:
+                errors["ssh_password"] = ["The \" or ' characters are not allowed."]
+
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        if mode == "direct":
+            ssh_host = None
+            ssh_port = None
+            ssh_username = None
+            ssh_password = None
+            private_key = None
+        elif mode == "public_key":
+            ssh_password = None
+            private_key = None
+        if mode != "direct":
+            try:
+                ssh_host = normalize_ssh_host(ssh_host)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(
+                    {"ssh_host": ["A valid canonical SSH host is required."]}
+                ) from None
+
+        connection_data = {}
+        for field_name in (
+            "host",
+            "port",
+            "type",
+            "version",
+            "include_stored_procedure",
+            "use_ssl",
+            "flag_use_sha1_key_verification",
+        ):
+            connection_data[field_name] = data.get(
+                field_name,
+                getattr(existing, field_name, None),
+            )
+        connection_data.update(
+            {
+                "_account_id": self.context["request"].user.member.get_current_account().pk,
+                "database_name": database_name,
+                "all_databases": all_databases,
+                "username": username,
+                "password": password,
+                "ssh_host": ssh_host,
+                "ssh_port": ssh_port,
+                "ssh_username": ssh_username,
+                "ssh_password": ssh_password,
+                "private_key": private_key,
+                "use_public_key": use_public_key,
+                "use_private_key": use_private_key,
+            }
+        )
+
+        try:
+            if mode == "public_key":
+                # The managed private key exists only in the database worker. The
+                # web role validates the public identity now and authorizes a
+                # durable, lane-bound worker operation after commit.
+                managed_public_key_fingerprint(source_lane="database")
+        except Exception as error:
+            raise safe_connection_validation_error(error, stage="database") from None
+
+        data["all_databases"] = all_databases
+        if all_databases or "database_name" in data:
+            data["database_name"] = database_name
+        data["use_public_key"] = use_public_key
+        data["use_private_key"] = use_private_key
+
+        if "username" in data or existing is None:
+            data["username"] = bs_encrypt(
+                username,
+                self.context["encryption_key"],
+            )
+        if "password" in data or existing is None:
+            data["password"] = bs_encrypt(
+                password,
+                self.context["encryption_key"],
+            )
+
+        if mode == "direct":
+            data["ssh_host"] = None
+            data["ssh_port"] = None
+            data["ssh_username"] = None
+            data["ssh_password"] = None
+            data["private_key"] = None
+        else:
+            if "ssh_host" in data or mode_changed or existing is None:
+                data["ssh_host"] = ssh_host
+            if "ssh_port" in data or mode_changed or existing is None:
+                data["ssh_port"] = ssh_port
+            if "ssh_username" in data or mode_changed or existing is None:
+                data["ssh_username"] = bs_encrypt(
+                    ssh_username,
+                    self.context["encryption_key"],
+                )
+            if mode == "public_key":
+                data["ssh_password"] = None
+                data["private_key"] = None
+            else:
+                if "ssh_password" in data or mode_changed or existing is None:
+                    data["ssh_password"] = bs_encrypt(
+                        ssh_password,
+                        self.context["encryption_key"],
+                    )
+                if "private_key" in data or mode_changed or existing is None:
+                    data["private_key"] = bs_encrypt(
+                        private_key,
+                        self.context["encryption_key"],
+                    )
         return data
 
 
-class CoreDatabaseConnectionWriteSerializer(serializers.ModelSerializer):
+class CoreDatabaseConnectionWriteSerializer(
+    StructuredConnectionValidationMixin,
+    serializers.ModelSerializer,
+):
     added_by = serializers.HiddenField(default=serializers.CreateOnlyDefault(CurrentMemberDefault()))
     account = serializers.HiddenField(default=serializers.CreateOnlyDefault(CurrentAccountDefault()))
     integration = serializers.HiddenField(default=serializers.CreateOnlyDefault(IntegrationDefault("database")))
@@ -221,19 +508,97 @@ class CoreDatabaseConnectionWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreConnection
         fields = "__all__"
+        read_only_fields = (
+            "status",
+            "old_status",
+            "notification",
+            "managed_ssh_generation",
+        )
 
+    def _requesting_member(self):
+        request = self.context.get("request")
+        member = getattr(getattr(request, "user", None), "member", None)
+        if member is None or not getattr(member, "pk", None):
+            raise serializers.ValidationError(
+                {"detail": "A requesting member is required for managed SSH."}
+            )
+        return member
+
+    @staticmethod
+    def _lock_request_permission(account_id, member_id):
+        try:
+            return _active_request_permission(account_id, member_id)
+        except ManagedSSHOperationError:
+            raise PermissionDenied(
+                "Integration-change permission is required."
+            ) from None
+
+    @transaction.atomic
     def create(self, validated_data):
+        acquire_managed_ssh_mutation_lock()
+        requesting_member = self._requesting_member()
+        account = CoreAccount.objects.select_for_update().get(
+            pk=validated_data["account"].pk
+        )
+        self._lock_request_permission(account.pk, requesting_member.pk)
+        validated_data["account"] = account
         auth_database = validated_data.pop("auth_database", [])
+        managed_key = bool(auth_database.get("use_public_key"))
+        validated_data["status"] = CoreConnection.Status.PENDING
         instance = CoreConnection.objects.create(**validated_data)
         auth_database["connection"] = instance
         CoreAuthDatabase.objects.create(**auth_database)
+        if managed_key:
+            try:
+                self.managed_ssh_operation = create_managed_ssh_operation(
+                    instance,
+                    "validate",
+                    requested_by_member=requesting_member,
+                )
+            except Exception as error:
+                raise safe_connection_validation_error(
+                    error, stage="managed_ssh_intent"
+                ) from None
         return instance
 
+    @transaction.atomic
     def update(self, instance, validated_data):
-        if instance.location != validated_data["location"]:
+        acquire_managed_ssh_mutation_lock()
+        requesting_member = self._requesting_member()
+        account = CoreAccount.objects.select_for_update().get(pk=instance.account_id)
+        self._lock_request_permission(account.pk, requesting_member.pk)
+        instance = CoreConnection.objects.select_for_update().get(
+            pk=instance.pk,
+            account=account,
+        )
+        locked_auth = CoreAuthDatabase.objects.select_for_update().get(
+            connection=instance
+        )
+        instance._state.fields_cache["auth_database"] = locked_auth
+        if validated_data.get("location") and instance.location != validated_data["location"]:
             instance.update_scheduled_backup_locations(validated_data["location"])
         auth_database = validated_data.pop("auth_database", [])
+        if auth_database:
+            validated_data["status"] = CoreConnection.Status.PENDING
         if len(auth_database) > 0:
             super().update(instance.auth_database, auth_database)
+            # The database auth fence can advance the connection generation and
+            # force PENDING. Refresh every trigger-owned field before DRF saves
+            # the parent model so its stale in-memory snapshot cannot clobber or
+            # illegally replay that generation.
+            instance.refresh_from_db(
+                fields=("managed_ssh_generation", "status", "modified")
+            )
         instance = super().update(instance, validated_data)
+        if auth_database and bool(locked_auth.use_public_key):
+            try:
+                self.managed_ssh_operation = create_managed_ssh_operation(
+                    instance,
+                    "validate",
+                    requested_by_member=requesting_member,
+                )
+            except Exception as error:
+                raise safe_connection_validation_error(
+                    error, stage="managed_ssh_intent"
+                ) from None
         return instance

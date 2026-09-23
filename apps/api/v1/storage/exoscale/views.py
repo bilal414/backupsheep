@@ -68,7 +68,7 @@ class CoreStorageExoscaleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return Response(regions)
 
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             storage = self.get_object()
@@ -86,7 +86,11 @@ class CoreStorageExoscaleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         except Exception as e:
-            raise StorageValidationFailed(e.__str__())
+            from sentry_sdk import capture_exception
+            capture_exception(e)
+            raise StorageValidationFailed(
+                "Storage validation failed safely. Verify the credentials and configuration, then retry."
+            )
 
     @action(detail=False)
     def highcharts(self, request):

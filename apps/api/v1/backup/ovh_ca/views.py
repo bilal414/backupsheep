@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from apps.api.v1.backup.ovh_ca.filters import CoreOVHCABackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.ovh_ca.permissions import (
     CoreOVHCABackupViewPermissions,
 )
@@ -21,9 +22,11 @@ from apps.console.node.models import CoreNode
 from rest_framework import status
 
 
-class CoreOVHCABackupView(viewsets.ModelViewSet):
+class CoreOVHCABackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreOVHCABackupViewPermissions)
     serializer_class = CoreOVHCABackupSerializer
+    backup_model = CoreOVHCABackup
+    backup_node_relation = "ovh_ca"
     all_fields = [f.name for f in CoreOVHCABackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -33,16 +36,6 @@ class CoreOVHCABackupView(viewsets.ModelViewSet):
     ]
     filterset_class = CoreOVHCABackupFilter
     search_fields = all_fields
-
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(ovh_ca__node__connection__account=member.get_current_account())
-        query &= ~Q(ovh_ca__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreOVHCABackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(ovh_ca__node__id=self.request.query_params.get("node"))
-        queryset = CoreOVHCABackup.objects.filter(query)
-        return queryset
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()

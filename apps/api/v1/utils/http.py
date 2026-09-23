@@ -1,0 +1,203 @@
+"""Bounded HTTP client used for every direct provider/API request."""
+
+from __future__ import annotations
+
+from http.cookiejar import DefaultCookiePolicy
+import math
+
+import requests as _requests
+from django.conf import settings
+from requests.adapters import HTTPAdapter
+from requests.cookies import RequestsCookieJar
+from urllib3.util.retry import Retry
+
+
+def _bounded_setting(name, default, maximum):
+    try:
+        value = float(getattr(settings, name, default))
+    except (TypeError, ValueError):
+        value = float(default)
+    if not math.isfinite(value):
+        value = float(default)
+    return min(max(value, 0.1), maximum)
+
+
+def request_timeout():
+    """Return a finite connect/read pair for every provider HTTP request."""
+    maximum = _bounded_setting("PROVIDER_HTTP_MAX_TIMEOUT", 300.0, 86400.0)
+    return (
+        _bounded_setting("PROVIDER_HTTP_CONNECT_TIMEOUT", 10.0, maximum),
+        _bounded_setting("PROVIDER_HTTP_READ_TIMEOUT", 60.0, maximum),
+    )
+
+
+def _pool_size():
+    """Keep provider connection reuse useful without accepting absurd config."""
+    try:
+        value = int(getattr(settings, "PROVIDER_HTTP_MAX_POOL_CONNECTIONS", 50))
+    except (TypeError, ValueError):
+        value = 50
+    return min(max(value, 1), 500)
+
+
+def _retry_policy(*, allow_mutation_retries=True):
+    try:
+        retries = int(getattr(settings, "PROVIDER_HTTP_MAX_RETRIES", 4))
+    except (TypeError, ValueError):
+        retries = 0
+    retries = max(0, min(retries, 10_000))
+    allowed_methods = {"GET", "HEAD", "OPTIONS"}
+    if allow_mutation_retries:
+        # Kept as an explicit opt-in for legacy callers/tests.  All
+        # BackupSheep-created sessions use the safer default below.
+        allowed_methods.update({"DELETE", "PUT"})
+    return Retry(
+        total=retries,
+        connect=retries,
+        read=retries,
+        status=retries,
+        backoff_factor=max(
+            0.0, _bounded_setting("PROVIDER_HTTP_BACKOFF_FACTOR", 0.5, 3600.0)
+        ),
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(allowed_methods),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+
+
+class RejectAllCookiePolicy(DefaultCookiePolicy):
+    """Provider responses must never create ambient credentials for later calls."""
+
+    def set_ok(self, cookie, request):
+        del cookie, request
+        return False
+
+    def return_ok(self, cookie, request):
+        del cookie, request
+        return False
+
+    def domain_return_ok(self, domain, request):
+        del domain, request
+        return False
+
+    def path_return_ok(self, path, request):
+        del path, request
+        return False
+
+
+class RejectAllCookieJar(RequestsCookieJar):
+    """A cookie jar that cannot retain server- or caller-created state.
+
+    Explicit ``cookies=`` on a single request still works because Requests prepares
+    those values in a separate per-request jar.  The shared session itself remains
+    stateless, preventing one account/provider response from influencing a later call.
+    """
+
+    def __init__(self):
+        super().__init__(policy=RejectAllCookiePolicy())
+
+    def set_cookie(self, cookie, *args, **kwargs):
+        del cookie, args, kwargs
+        return None
+
+
+class TimeoutSession(_requests.Session):
+    """Requests session with bounded I/O and no automatic redirects.
+
+    ``requests`` follows redirects for GET/OPTIONS by default and will replay a
+    POST body after a 307/308 when explicitly enabled.  Provider requests carry
+    credentials, so redirects are an authorization boundary and must be handled
+    manually by a caller that has validated the destination.  No current
+    BackupSheep provider integration requires that exception.
+    """
+
+    def __init__(self, *, allow_mutation_retries=False):
+        super().__init__()
+        self.cookies = RejectAllCookieJar()
+        pool_size = _pool_size()
+        adapter = HTTPAdapter(
+            pool_connections=pool_size,
+            pool_maxsize=pool_size,
+            max_retries=_retry_policy(
+                allow_mutation_retries=allow_mutation_retries
+            )
+        )
+        self.mount("http://", adapter)
+        self.mount("https://", adapter)
+
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", request_timeout())
+        if kwargs.get("allow_redirects"):
+            raise ValueError(
+                "Automatic redirects are disabled for provider HTTP requests."
+            )
+        kwargs["allow_redirects"] = False
+        return super().request(method, url, **kwargs)
+
+    def get(self, url, **kwargs):
+        # requests.Session.get otherwise inserts allow_redirects=True before it
+        # reaches request().
+        kwargs.setdefault("allow_redirects", False)
+        return super().get(url, **kwargs)
+
+    def options(self, url, **kwargs):
+        # requests.Session.options has the same redirect-following default.
+        kwargs.setdefault("allow_redirects", False)
+        return super().options(url, **kwargs)
+
+    def send(self, request, **kwargs):
+        # Cover callers that send a PreparedRequest directly instead of using
+        # request()/get()/post().
+        if kwargs.get("allow_redirects"):
+            raise ValueError(
+                "Automatic redirects are disabled for provider HTTP requests."
+            )
+        kwargs["allow_redirects"] = False
+        return super().send(request, **kwargs)
+
+
+class RequestsFacade:
+    """Drop-in subset of ``requests`` with bounded module-level methods.
+
+    Attribute fallback preserves ``requests.exceptions``, ``RequestException``, and
+    other type references used by existing provider adapters.
+    """
+
+    Session = TimeoutSession
+
+    def __init__(self):
+        self._session = TimeoutSession()
+
+    def request(self, method, url, **kwargs):
+        return self._session.request(method, url, **kwargs)
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
+    def patch(self, url, **kwargs):
+        return self.request("PATCH", url, **kwargs)
+
+    def delete(self, url, **kwargs):
+        return self.request("DELETE", url, **kwargs)
+
+    def head(self, url, **kwargs):
+        return self.request("HEAD", url, **kwargs)
+
+    def options(self, url, **kwargs):
+        return self.request("OPTIONS", url, **kwargs)
+
+    def session(self):
+        return TimeoutSession()
+
+    def __getattr__(self, name):
+        return getattr(_requests, name)
+
+
+requests = RequestsFacade()

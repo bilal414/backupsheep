@@ -41,6 +41,24 @@ def safe_token(value, field):
     return text
 
 
+def safe_positional_token(value, field):
+    """Validate a database-client positional operand.
+
+    Shell metacharacter filtering is not enough for operands passed to
+    ``mysqldump``/``mariadb-dump``: a leading dash is parsed as another client
+    option even when no shell is involved.  Keep this check separate from
+    ``safe_token`` because values supplied as the argument to an explicit
+    option (for example ``-h VALUE``) do not share that ambiguity.
+    """
+    text = safe_token(value, field)
+    if text.startswith("-"):
+        raise UnsafeBackupInput(
+            f"Rejected an option-shaped value in {field!r}. Database and table "
+            "names used as positional operands cannot start with a dash."
+        )
+    return text
+
+
 def safe_password(value, field="password"):
     """Validate a value interpolated inside a single-quoted shell context (e.g. PGPASSWORD).
 

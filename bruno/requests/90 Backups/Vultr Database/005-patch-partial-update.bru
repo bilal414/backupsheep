@@ -1,0 +1,51 @@
+meta {
+  name: PATCH /api/v1/backups/vultr_database/{{resourceId}}/
+  type: http
+  seq: 5
+}
+
+patch {
+  url: {{baseUrl}}/api/v1/backups/vultr_database/{{resourceId}}/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "schedule": {
+      "name": "Example resource",
+      "timezone": "UTC",
+      "notes": "Created from the BackupSheep Bruno collection",
+      "node": "{{nodeId}}",
+      "storage_points": [
+        "replace-with-storage-points-id"
+      ]
+    }
+  }
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `patch-api-v1-backups-vultr-database-resourceid`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.backup.vultr_database.views.CoreVultrDatabaseBackupView.partial_update`
+  Source: `apps/api/v1/backup/vultr_database/views.py`
+}

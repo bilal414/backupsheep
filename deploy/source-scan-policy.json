@@ -1,0 +1,66 @@
+{
+  "reviewed_misconfigurations": [
+    {
+      "finding_sha256": "0999cc03ddc17614db90af2c22d22d0c8f2c2e8444ab37d785df46a9da6c6579",
+      "id": "DS-0017",
+      "reason": "The reported APT update runs only in authenticated builder stages. Ubuntu runtime packages come from a fixed signed AMD64 snapshot with exact versions, imported clients are bound to reviewed archive and payload hashes, and the final image installs the verified closure offline.",
+      "severity": "HIGH",
+      "status": "FAIL",
+      "target": "Dockerfile",
+      "target_sha256": "3ac14ece8f6e887c192efa72efb711b8771179fadb385b4ce2e71ac38b1d7357"
+    },
+    {
+      "finding_sha256": "2fef229054b3d84e89962c7d8c5c1cf8ad73ac7d5d62f16072f95108e8ec2b6f",
+      "id": "DS-0002",
+      "reason": "Root is used only to bootstrap the nftables policy; the entrypoint immediately drops to UID 10020 and retains only NET_ADMIN for the no-secret policy reconciler.",
+      "severity": "HIGH",
+      "status": "FAIL",
+      "target": "Dockerfile.egress",
+      "target_sha256": "be1a29c8f2b3101a6882d225ab7c3ef1338b8c18351d70d77c50fec905fd15bb"
+    }
+  ],
+  "scanner": {
+    "artifact_type": "filesystem",
+    "name": "trivy",
+    "secret_scan": {
+      "disable_allow_rules": [
+        "dist-info",
+        "tests",
+        "examples",
+        "vendor",
+        "usr-dirs",
+        "locale-dir",
+        "markdown",
+        "node.js",
+        "golang",
+        "python",
+        "rubygems",
+        "wordpress",
+        "anaconda-log"
+      ],
+      "fail_severities": [
+        "UNKNOWN",
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ],
+      "scanners": [
+        "secret"
+      ],
+      "skip_patterns": []
+    },
+    "vulnerability_misconfiguration_scan": {
+      "fail_severities": [
+        "HIGH",
+        "CRITICAL"
+      ],
+      "scanners": [
+        "vuln",
+        "misconfig"
+      ]
+    },
+    "version": "0.74.0"
+  },
+  "schema_version": 1
+}

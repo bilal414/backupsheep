@@ -309,8 +309,9 @@ class CoreLightsailBucketRestoreRun(TimeStampedModel):
     skipped_count = models.PositiveBigIntegerField(default=0)
     failed_count = models.PositiveBigIntegerField(default=0)
     bytes_restored = models.PositiveBigIntegerField(default=0)
-    # Keys are durable so a retry after a process crash does not copy an object a
-    # second time even when the destination's metadata API is eventually consistent.
+    # Legacy compatibility only. New restore progress is stored one row per object
+    # in CoreLightsailBucketRestoreObject so inventory size is never bounded by one
+    # JSON value and workers can resume with queryset streaming.
     completed_objects = models.JSONField(default=list, blank=True)
     manifest = models.JSONField(default=dict, blank=True)
     lease_owner = models.CharField(max_length=255, blank=True, default="")
@@ -332,6 +333,76 @@ class CoreLightsailBucketRestoreRun(TimeStampedModel):
         ]
 
 
+class CoreLightsailBucketRestoreObject(TimeStampedModel):
+    """Durable, immutable restore work item for one exact backup object version."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RESTORING = "restoring", "Restoring"
+        COMPLETE = "complete", "Complete"
+        SKIPPED = "skipped", "Skipped"
+        FAILED = "failed", "Failed"
+
+    restore_run = models.ForeignKey(
+        CoreLightsailBucketRestoreRun,
+        related_name="object_states",
+        on_delete=models.CASCADE,
+    )
+    # Keep a nullable link for auditability, while duplicating the immutable source
+    # fingerprint below so a historical replication run can later be pruned without
+    # making an in-progress restore unsafe or ambiguous.
+    source_object = models.ForeignKey(
+        CoreLightsailBucketReplicationObject,
+        related_name="restore_objects",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
+    backup_key_hash = models.CharField(max_length=64)
+    backup_key_encrypted = models.TextField()
+    backup_version_id = models.CharField(max_length=255, blank=True, default="")
+    is_delete_marker = models.BooleanField(default=False)
+    backup_etag = models.CharField(max_length=512, blank=True, default="")
+    backup_size = models.PositiveBigIntegerField(null=True, blank=True)
+    backup_last_modified = models.DateTimeField(null=True, blank=True)
+    source_key_hash = models.CharField(max_length=64)
+    source_key_encrypted = models.TextField()
+    source_version_id = models.CharField(max_length=255, blank=True, default="")
+    source_etag = models.CharField(max_length=512, blank=True, default="")
+    target_key_hash = models.CharField(max_length=64)
+    target_key_encrypted = models.TextField()
+    restored_version_id = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+    bytes_restored = models.PositiveBigIntegerField(default=0)
+    attempt_count = models.PositiveIntegerField(default=0)
+    error = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "core_lightsail_bucket_restore_object"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("restore_run", "backup_key_hash"),
+                name="unique_lightsail_bucket_restore_object_key",
+            ),
+            models.UniqueConstraint(
+                fields=("restore_run", "target_key_hash"),
+                name="unique_lightsail_bucket_restore_target_key",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("restore_run", "status"),
+                name="lightsail_restore_status_idx",
+            ),
+            models.Index(
+                fields=("backup_key_hash", "backup_version_id"),
+                name="lightsail_restore_source_idx",
+            ),
+        ]
+
+
 # Short names make the isolated module pleasant to import while the explicit Core*
 # names match the rest of this repository's Django model conventions.
 LightsailBucketReplication = CoreLightsailBucketReplication
@@ -340,6 +411,7 @@ LightsailBucketReplicationObject = CoreLightsailBucketReplicationObject
 LightsailBucketReplicationLease = CoreLightsailBucketReplicationLease
 LightsailBucketReplicationMultipart = CoreLightsailBucketReplicationMultipart
 LightsailBucketRestoreRun = CoreLightsailBucketRestoreRun
+LightsailBucketRestoreObject = CoreLightsailBucketRestoreObject
 
 
 __all__ = [
@@ -349,10 +421,12 @@ __all__ = [
     "CoreLightsailBucketReplicationLease",
     "CoreLightsailBucketReplicationMultipart",
     "CoreLightsailBucketRestoreRun",
+    "CoreLightsailBucketRestoreObject",
     "LightsailBucketReplication",
     "LightsailBucketReplicationRun",
     "LightsailBucketReplicationObject",
     "LightsailBucketReplicationLease",
     "LightsailBucketReplicationMultipart",
     "LightsailBucketRestoreRun",
+    "LightsailBucketRestoreObject",
 ]

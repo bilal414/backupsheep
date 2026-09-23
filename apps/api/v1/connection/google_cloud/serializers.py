@@ -11,7 +11,6 @@ from apps.api.v1.utils.api_helpers import (
     CurrentAccountDefault,
     IntegrationDefault,
     bs_encrypt,
-    bs_decrypt,
 )
 from apps.console.connection.models import (
     CoreConnection,
@@ -25,21 +24,21 @@ from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreCo
 
 
 class CoreAuthGoogleCloudReadSerializer(serializers.ModelSerializer):
-    service_key = serializers.SerializerMethodField()
+    service_key_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreAuthGoogleCloud
         fields = (
             "id",
-            "service_key",
+            "service_key_configured",
         )
         datatables_always_serialize = (
             "id",
-            "service_key",
+            "service_key_configured",
         )
 
-    def get_service_key(self, obj):
-        return bs_decrypt(obj.service_key, self.context["encryption_key"])
+    def get_service_key_configured(self, obj):
+        return bool(obj.service_key)
 
 
 class CoreGoogleCloudConnectionReadSerializer(serializers.ModelSerializer):
@@ -99,13 +98,17 @@ class CoreGoogleCloudConnectionReadSerializer(serializers.ModelSerializer):
 
 class CoreAuthGoogleCloudWriteSerializer(serializers.ModelSerializer):
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
-    service_key = serializers.CharField(write_only=True)
+    service_key = serializers.CharField(write_only=True, required=False)
 
     class Meta:
         model = CoreAuthGoogleCloud
         fields = "__all__"
 
     def validate(self, data):
+        if "service_key" not in data:
+            if getattr(getattr(self, "parent", None), "instance", None) is None:
+                raise serializers.ValidationError({"service_key": "This field is required."})
+            return data
         auth_google_cloud = CoreAuthGoogleCloud()
 
         try:
@@ -113,8 +116,16 @@ class CoreAuthGoogleCloudWriteSerializer(serializers.ModelSerializer):
         except JSONDecodeError:
             raise serializers.ValidationError({"service_key": "Please enter valid service key in JSON format."})
 
-        if not auth_google_cloud.validate(data, check_errors=True):
-            raise serializers.ValidationError("Unable to authenticate. Please verify your authentication data.")
+        try:
+            authenticated = auth_google_cloud.validate(data, check_errors=True)
+        except Exception:
+            raise serializers.ValidationError(
+                "Unable to authenticate. Please verify the service account and permissions."
+            )
+        if not authenticated:
+            raise serializers.ValidationError(
+                "Unable to authenticate. Please verify the service account and permissions."
+            )
 
         data["service_key"] = bs_encrypt(data["service_key"], self.context["encryption_key"])
         return data

@@ -1,41 +1,42 @@
 <!DOCTYPE html>
 <html lang="en" class="h-full">
 <head>
-    <title>{% block title %}Dashboard{% endblock %}</title>
-    <meta charset="UTF-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>{% block title %}{{ site.app_name }}{% endblock %}</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="{% block description %}{% endblock %}">
     <meta name="author" content="{% block author %}BackupSheep{% endblock %}">
-    <!-- Fonts -->
-    <link rel="shortcuticon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <meta name="referrer" content="no-referrer">
+    {% if server_type == 'dev' %}<meta name="robots" content="noindex,nofollow">{% endif %}
+    <meta property="og:site_name" content="{{ site.app_name }}">
+    <meta property="og:image" content="{% block og_image %}{{ STATIC_URL }}console/images/logo.png{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}{% endblock %}">
+    <meta property="og:title" content="{% block og_title %}{{ site.app_name }}{% endblock %}">
+    <link rel="shortcut icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.css"/>
+    <link rel="stylesheet" href="{{ STATIC_URL }}console/css/compiled.css">
+    <script defer src="{{ STATIC_URL }}console/js/auth.js"></script>
 </head>
-<body class="h-full bg-slate-50 antialiased {% block page_class %}{% endblock %}">
-    <div class="relative min-h-full isolate">
-        <!-- Decorative background -->
-        <div class="absolute inset-0 -z-10 overflow-hidden" aria-hidden="true">
-            <div class="absolute inset-0 bg-gradient-to-br from-slate-50 via-indigo-50/60 to-slate-100"></div>
-            <svg class="absolute left-[max(50%,25rem)] top-0 h-[64rem] w-[128rem] -translate-x-1/2 stroke-slate-200 [mask-image:radial-gradient(64rem_64rem_at_top,white,transparent)]"
-                 aria-hidden="true">
-                <defs>
-                    <pattern id="bs-auth-grid" width="160" height="160" x="50%" y="-1" patternUnits="userSpaceOnUse">
-                        <path d="M.5 160V.5H160" fill="none"/>
-                    </pattern>
-                </defs>
-                <rect width="100%" height="100%" stroke-width="0" fill="url(#bs-auth-grid)"/>
-            </svg>
-            <div class="absolute -top-40 right-0 h-96 w-96 rounded-full bg-indigo-200/40 blur-3xl"></div>
-            <div class="absolute -bottom-40 -left-20 h-96 w-96 rounded-full bg-sky-200/40 blur-3xl"></div>
-        </div>
-        {% block content %}{% endblock %}
+<body class="h-full bg-slate-50 text-slate-900 antialiased {% block page_class %}{% endblock %}">
+{% if messages %}
+    <div class="fixed inset-x-0 top-4 z-[70] mx-auto w-full max-w-md space-y-3 px-4" aria-live="polite">
+        {% for message in messages %}
+            <div data-auth-message
+                 class="flex items-start gap-3 rounded-xl border px-4 py-3 text-sm shadow-lg {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-800{% elif message.tags == 'warning' %}border-amber-200 bg-amber-50 text-amber-800{% elif message.tags == 'info' %}border-sky-200 bg-sky-50 text-sky-800{% else %}border-emerald-200 bg-emerald-50 text-emerald-800{% endif %}"
+                 role="status">
+                <p class="min-w-0 flex-1 font-medium leading-6">{{ message }}</p>
+                <button type="button" data-dismiss-auth-message
+                        class="flex-none rounded-lg p-1 opacity-70 transition hover:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                        aria-label="Dismiss message">
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+        {% endfor %}
     </div>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js"></script>
-    {% include "_notifications.html" %}
-    {% include "_loading.html" %}
-    {% block extra_scripts %}{% endblock %}
+{% endif %}
+
+{% block content %}{% endblock %}
 </body>
 </html>

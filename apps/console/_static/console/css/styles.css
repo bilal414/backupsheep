@@ -1,11 +1,38 @@
 @import 'tailwindcss';
 
-@config '../tailwind.config.js';
+/* Build configuration lives outside STATICFILES_DIRS so it is never served publicly. */
+@config '../../../../../tailwind.config.js';
 
 @theme {
   /* Typography */
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --default-font-family: var(--font-sans);
+
+  /* Recovery Ledger — quiet, evidence-led console surfaces */
+  --color-wool-50: #f4f7f6;
+  --color-paper: #ffffff;
+  --color-ink-950: #17201f;
+  --color-ink-800: #2c3937;
+  --color-ink-650: #53615f;
+  --color-ink-500: #596765;
+  --color-rule-100: #e8eeec;
+  --color-rule-200: #d7dfdd;
+  --color-evidence-50: #f1f7fa;
+  --color-evidence-200: #c9dce8;
+  --color-evidence-600: #245f88;
+  --color-evidence-700: #1d4f72;
+  --color-verified-50: #eef8f5;
+  --color-verified-200: #bde2d8;
+  --color-verified-600: #0f6b58;
+  --color-verified-700: #0b594a;
+  --color-attention-50: #fff8ed;
+  --color-attention-200: #efd5aa;
+  --color-attention-600: #92520a;
+  --color-attention-700: #7a4308;
+  --color-incident-50: #fff4f3;
+  --color-incident-200: #efc9c6;
+  --color-incident-600: #a43a3a;
+  --color-incident-700: #8b3030;
 
   /* Slate palette (modern neutral) */
   --color-slate-50: #f8fafc;
@@ -33,18 +60,18 @@
   --color-gray-900: #0f172a;
   --color-gray-950: #020617;
 
-  /* Remap legacy teal -> indigo so the whole console shares one brand accent */
-  --color-teal-50: #eef2ff;
-  --color-teal-100: #e0e7ff;
-  --color-teal-200: #c7d2fe;
-  --color-teal-300: #a5b4fc;
-  --color-teal-400: #818cf8;
-  --color-teal-500: #6366f1;
-  --color-teal-600: #4f46e5;
-  --color-teal-700: #4338ca;
-  --color-teal-800: #3730a3;
-  --color-teal-900: #312e81;
-  --color-teal-950: #1e1b4b;
+  /* Full amber scale (warning semantic) — the legacy config only exposed amber-500 */
+  --color-amber-50: #fffbeb;
+  --color-amber-100: #fef3c7;
+  --color-amber-200: #fde68a;
+  --color-amber-300: #fcd34d;
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #d97706;
+  --color-amber-700: #b45309;
+  --color-amber-800: #92400e;
+  --color-amber-900: #78350f;
+  --color-amber-950: #451a03;
 
   /* Extra accents for integration provider chips */
   --color-blue-50: #eff6ff;
@@ -61,7 +88,6 @@
   --color-cyan-500: #06b6d4;
   --color-cyan-600: #0891b2;
   --color-pink-500: #ec4899;
-  --color-amber-500: #f59e0b;
   --color-purple-50: #faf5ff;
   --color-purple-100: #f3e8ff;
   --color-purple-200: #e9d5ff;
@@ -100,33 +126,185 @@
   }
 }
 
-.mdl-shadow--2dp {
-    box-shadow: none;
-}
-.select2-container .select2-selection--single {
-    height: 38px;
-}
-.select2-container--classic .select2-selection--single .select2-selection__clear {
-    height: 34px;
-    padding-right: 8px;
-}
-.select2-container--classic .select2-selection--single .select2-selection__rendered {
-    line-height: 34px;
-}
-.select2-container--classic .select2-selection--single .select2-selection__arrow {
-    height: 36px;
-}
-.select2-container .select2-selection--single .select2-selection__clear {
-    height: 34px;
-    padding-right: 8px;
-}
-.select2-container .select2-selection--single .select2-selection__rendered {
-    line-height: 34px;
-}
-.select2-container .select2-selection--single .select2-selection__arrow {
-    height: 36px;
+/* Alpine.js cloak — hides x-cloak elements until Alpine has initialised */
+[x-cloak] {
+  display: none !important;
 }
 
-  .lg\:w-128 {
-    width: 36rem;
+body.dashboard-page,
+body.sources-page,
+body.source-detail-page,
+body.source-config-page,
+body.integration-catalog-page,
+body.integration-operations-page {
+  background: var(--color-wool-50);
+}
+
+body.dashboard-page #main-content > div,
+body.sources-page #main-content > div,
+body.source-detail-page #main-content > div,
+body.source-config-page #main-content > div,
+body.integration-catalog-page #main-content > div,
+body.integration-operations-page #main-content > div {
+  max-width: 92rem;
+}
+
+body.source-detail-page #main-content,
+body.source-config-page #main-content,
+body.integration-catalog-page #main-content,
+body.integration-operations-page #main-content {
+  color: var(--color-ink-950);
+}
+
+/* Connection catalog — compact capability tiles instead of promotional cards. */
+#integration-catalog > section[x-show] {
+  margin-top: 0;
+}
+
+#integration-catalog section[x-show] > div:first-child + p {
+  max-width: 58rem;
+  color: var(--color-ink-650);
+  line-height: 1.5rem;
+}
+
+#integration-catalog [data-search] {
+  min-height: 10.75rem;
+  border-color: var(--color-rule-200);
+  border-radius: 0.5rem;
+  box-shadow: none;
+}
+
+#integration-catalog a[data-search],
+#integration-catalog button[data-search] {
+  position: relative;
+  overflow: hidden;
+}
+
+#integration-catalog a[data-search]:hover,
+#integration-catalog button[data-search]:hover {
+  border-color: var(--color-evidence-200);
+  background: var(--color-evidence-50);
+  box-shadow: none;
+}
+
+#integration-catalog a[data-search]::after,
+#integration-catalog button[data-search]::after {
+  content: "Open connector  \2192";
+  display: block;
+  margin-top: auto;
+  padding-top: 0.9rem;
+  color: var(--color-evidence-700);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+#integration-catalog [data-category="storage"]::after {
+  content: "Open destination  \2192";
+}
+
+#integration-catalog [data-search] > p.text-sm {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--color-ink-650);
+  line-height: 1.35rem;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+#integration-catalog [data-search] > div:first-child > span:first-child {
+  border-color: var(--color-rule-200);
+  border-radius: 0.375rem;
+  background: var(--color-wool-50);
+}
+
+#integration-catalog [data-search] > div:first-child > span:last-child {
+  color: var(--color-ink-950);
+}
+
+body.source-config-page .source-config-workspace section {
+  border-color: var(--color-rule-200);
+  border-radius: 0.5rem;
+  box-shadow: none;
+}
+
+@media (max-width: 767px) {
+  .enterprise-record-table-wrap {
+    overflow: visible;
   }
+
+  .enterprise-record-table,
+  .enterprise-record-table tbody,
+  .enterprise-record-table tr,
+  .enterprise-record-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .enterprise-record-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .enterprise-record-table tbody {
+    display: grid;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    background: var(--color-wool-50);
+  }
+
+  .enterprise-record-table tr {
+    overflow: hidden;
+    border: 1px solid var(--color-rule-200);
+    border-radius: 0.5rem;
+    background: var(--color-paper);
+  }
+
+  .enterprise-record-table td {
+    display: grid;
+    grid-template-columns: minmax(6.5rem, 0.35fr) minmax(0, 0.65fr);
+    gap: 0.75rem;
+    align-items: start;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--color-rule-100);
+    text-align: left;
+    white-space: normal;
+  }
+
+  .enterprise-record-table td:last-child {
+    border-bottom: 0;
+  }
+
+  .enterprise-record-table td::before {
+    content: attr(data-label);
+    color: var(--color-ink-500);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    line-height: 1.25rem;
+    text-transform: uppercase;
+  }
+
+  .enterprise-record-table td > * {
+    min-width: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.source-detail-page *,
+  body.source-config-page *,
+  body.integration-catalog-page *,
+  body.integration-operations-page * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

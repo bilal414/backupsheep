@@ -26,7 +26,6 @@ urlpatterns += [
                 path("", include("apps.api.v1.backup.upcloud.urls")),
                 path("", include("apps.api.v1.backup.oracle.urls")),
                 path("", include("apps.api.v1.backup.google_cloud.urls")),
-                path("", include("apps.api.v1.backup.wordpress.urls")),
                 path("", include("apps.api.v1.backup.basecamp.urls")),
             ]
         ),

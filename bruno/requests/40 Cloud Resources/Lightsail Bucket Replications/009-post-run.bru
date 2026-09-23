@@ -1,0 +1,44 @@
+meta {
+  name: POST /api/v1/clouds/lightsail_bucket_replications/{{resourceId}}/run/
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{baseUrl}}/api/v1/clouds/lightsail_bucket_replications/{{resourceId}}/run/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+  Idempotency-Key: {{idempotencyKey}}
+}
+
+body:json {
+  {
+    "request_id": "{{idempotencyKey}}"
+  }
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-api-v1-clouds-lightsail-bucket-replications-resourceid-run`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.cloud.lightsail_bucket_replication.views.CoreLightsailBucketReplicationView.run`
+  Source: `apps/api/v1/cloud/lightsail_bucket_replication/views.py`
+}

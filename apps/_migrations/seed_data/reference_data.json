@@ -111,17 +111,6 @@
       "type": "database"
     },
     {
-      "code": "wordpress",
-      "name": "WordPress",
-      "public_key": null,
-      "description": "WordPress",
-      "position": 2,
-      "url": "https://wordpress.org",
-      "image": "console/images/storage/wordpress.svg",
-      "enabled": true,
-      "type": "saas"
-    },
-    {
       "code": "upcloud",
       "name": "UpCloud",
       "public_key": null,
@@ -994,9 +983,6 @@
         },
         {
           "task": "scheduled_backup_sftp"
-        },
-        {
-          "task": "scheduled_backup_wordpress"
         },
         {
           "task": "storage_upload"

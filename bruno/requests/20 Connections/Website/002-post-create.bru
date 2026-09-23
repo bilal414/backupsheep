@@ -1,0 +1,51 @@
+meta {
+  name: POST /api/v1/connections/website/
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/v1/connections/website/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "location": "{{locationId}}",
+    "auth_website": {
+      "host": "{{sshHost}}",
+      "port": 22,
+      "username": "{{email}}",
+      "protocol": 1
+    },
+    "name": "Example resource",
+    "notes": "Created from the BackupSheep Bruno collection"
+  }
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-api-v1-connections-website`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.connection.website.views.CoreWebsiteView.create`
+  Source: `apps/api/v1/connection/website/views.py`
+}

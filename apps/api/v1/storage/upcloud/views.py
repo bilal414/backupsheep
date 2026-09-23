@@ -12,8 +12,8 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
-from apps.console.connection.models import CoreDoSpacesRegion, CoreFilebaseRegion
 from apps.console.storage.models import CoreStorage
+from apps._tasks.integration.storage.upcloud import normalize_upcloud_endpoint
 from .filters import CoreStorageUpCloudFilter
 from .permissions import CoreStorageUpCloudPermissions
 from .serializers import CoreStorageReadSerializer, CoreStorageWriteSerializer
@@ -63,10 +63,11 @@ class CoreStorageUpCloudView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return Response("")
 
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             storage = self.get_object()
+            normalize_upcloud_endpoint(storage.storage_upcloud.endpoint)
             validation = storage.storage_upcloud.validate()
             if validation:
                 return Response(
@@ -81,7 +82,11 @@ class CoreStorageUpCloudView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         except Exception as e:
-            raise StorageValidationFailed(e.__str__())
+            from sentry_sdk import capture_exception
+            capture_exception(e)
+            raise StorageValidationFailed(
+                "Storage validation failed safely. Verify the credentials and configuration, then retry."
+            )
 
     @action(detail=False)
     def highcharts(self, request):

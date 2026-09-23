@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.db.models import Q
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_page
@@ -10,15 +11,22 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_datatables.filters import DatatablesFilterBackend
+from apps.console.account.models import CoreAccount
+from apps.console.connection.managed_ssh import acquire_managed_ssh_mutation_lock
 from apps.console.connection.models import CoreConnection, CoreIntegration, CoreConnectionLocation
-from apps.api.v1.utils.api_helpers import visible_nodes
+from apps.api.v1.utils.api_helpers import scoped_connections, visible_nodes
 from apps.api.v1.utils.api_permissions import MemberGroupPermissions
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from .filters import CoreConnectionFilter
 from .serializers import CoreConnectionSerializer
+from .view_helpers import connection_error_response
 from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
+from backupsheep.source_recovery_policy import (
+    RETIRED_SOURCE_FAMILIES,
+    require_source_backup_creation,
+)
 
 
 def _log_activity(request, log_type, data):
@@ -44,12 +52,9 @@ class CoreConnectionView(viewsets.ModelViewSet):
     search_fields = all_fields
 
     def get_queryset(self):
-        member = self.request.user.member
-        query_partners = Q(account=member.get_current_account())
-        queryset = CoreConnection.objects.filter(query_partners)
-        if not member.is_primary_account:
-            queryset = queryset.filter(nodes__in=visible_nodes(member)).distinct()
-        return queryset
+        return scoped_connections(self.request).filter(
+            integration__enabled=True,
+        ).exclude(integration__code__in=RETIRED_SOURCE_FAMILIES)
 
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
@@ -72,6 +77,7 @@ class CoreConnectionView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         connection = self.get_object()
+        require_source_backup_creation(connection.integration.code)
         connection.status = CoreConnection.Status.ACTIVE
         connection.save()
         _log_activity(
@@ -87,6 +93,34 @@ class CoreConnectionView(viewsets.ModelViewSet):
         )
         return Response({"detail": "Connection is resumed."}, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=["post"])
+    def validate(self, request, pk=None):
+        connection = self.get_object()
+        try:
+            valid = bool(connection.validate())
+        except Exception as error:
+            return connection_error_response(error, stage="validation")
+        if not valid:
+            response = connection_error_response(
+                RuntimeError("connection validation returned false"),
+                stage="validation",
+            )
+            response.status_code = status.HTTP_200_OK
+            response.data.update(
+                {
+                    "success": False,
+                    "message": "Integration validation failed.",
+                }
+            )
+            return response
+        return Response(
+            {
+                "success": True,
+                "message": "Provider credentials and account access were validated. No backup or recovery was tested.",
+            },
+            status=status.HTTP_200_OK,
+        )
+
     # @action(detail=True, methods=["post"])
     # def delete(self, request, pk=None):
     #     connection = self.get_object()
@@ -95,8 +129,19 @@ class CoreConnectionView(viewsets.ModelViewSet):
     #     connection.save()
     #     return Response({"detail": "Connection will be deleted soon."}, status=status.HTTP_200_OK)
 
+    @transaction.atomic
     def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
+        # A connection cascade can delete managed auth and operation rows. Fence
+        # before taking the canonical account -> connection row locks.
+        acquire_managed_ssh_mutation_lock()
+        candidate = self.get_object()
+        account = CoreAccount.objects.select_for_update().only("pk").get(
+            pk=candidate.account_id
+        )
+        instance = CoreConnection.objects.select_for_update().get(
+            pk=candidate.pk,
+            account=account,
+        )
         n_count = instance.nodes.filter().count()
         if n_count > 0:
             return Response({"detail": f"The integration is attached to {n_count} node(s). Delete the node(s) first or you can pause it if you are not using it anymore."}, status=status.HTTP_409_CONFLICT)
@@ -135,7 +180,9 @@ class CoreConnectionView(viewsets.ModelViewSet):
             }
         }
 
-        for integration in CoreIntegration.objects.filter():
+        for integration in CoreIntegration.objects.filter(enabled=True).exclude(
+            code__in=RETIRED_SOURCE_FAMILIES
+        ):
             all_totals[integration.code] = {
                 "connections": connections.filter(integration=integration).count(),
                 "paused": connections.filter(

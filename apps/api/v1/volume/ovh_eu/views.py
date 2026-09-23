@@ -10,7 +10,8 @@ from rest_framework.response import Response
 from apps.api.v1.volume.ovh_eu.filters import CoreVolumeOVHEUFilter
 from apps.api.v1.volume.ovh_eu.permissions import CoreVolumeOVHEUViewPermissions
 from apps.api.v1.volume.ovh_eu.serializers import CoreVolumeOVHEUReadSerializer, CoreVolumeOVHEUWriteSerializer
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreOVHEUBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
@@ -53,7 +54,7 @@ class CoreVolumeOVHEUView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.request.user.member
         query = Q(account=member.get_current_account(), integration__code="ovh_eu")
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        regions = CoreConnection.objects.filter(query).values(
+        regions = visible_connections(member).filter(query).values(
             "id",
             "name",
             "location_id",
@@ -69,7 +70,7 @@ class CoreVolumeOVHEUView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= Q(node__connection__integration__code="ovh_eu")
         query &= Q(node__type=CoreNode.Type.VOLUME)
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-        nodes = CoreOVHEU.objects.filter(query)
+        nodes = scope_direct_node_queryset(request, CoreOVHEU.objects.filter(query))
         all_totals = {
             "nodes": nodes.count(),
             "backups": CoreOVHEUBackup.objects.filter(ovh_eu__in=nodes, status=UtilBackup.Status.COMPLETE).count(),

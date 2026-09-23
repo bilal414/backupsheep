@@ -5,7 +5,7 @@ from rest_framework import serializers
 from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
-    CurrentAccountDefault, IntegrationDefault,
+    CurrentAccountDefault, IntegrationDefault, bs_encrypt,
 )
 from apps.console.connection.models import (
     CoreConnection,
@@ -16,9 +16,12 @@ from apps.console.connection.models import (
 from apps.console.node.models import CoreNode
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreConnectionLocationSerializer
+from ..ovh_oauth import build_ovh_client
 
 
 class CoreAuthOVHUSReadSerializer(serializers.ModelSerializer):
+    consumer_key_configured = serializers.SerializerMethodField()
+
     class Meta:
         model = CoreAuthOVHUS
         fields = (
@@ -26,13 +29,19 @@ class CoreAuthOVHUSReadSerializer(serializers.ModelSerializer):
             "info_name",
             "info_email",
             "info_organization",
+            "consumer_key_configured",
         )
         datatables_always_serialize = (
             "id",
             "info_name",
             "info_email",
             "info_organization",
+            "consumer_key_configured",
         )
+
+    @staticmethod
+    def get_consumer_key_configured(obj):
+        return bool(obj.consumer_key)
 
 
 class CoreOVHUSConnectionReadSerializer(serializers.ModelSerializer):
@@ -91,11 +100,29 @@ class CoreOVHUSConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthOVHUSWriteSerializer(serializers.ModelSerializer):
+    consumer_key = serializers.CharField(write_only=True, required=False, allow_null=True)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = CoreAuthOVHUS
         fields = "__all__"
+
+    def validate(self, data):
+        if data.get("consumer_key"):
+            try:
+                client = build_ovh_client(
+                    "ovh_us",
+                    consumer_key=data["consumer_key"],
+                )
+                client.get("/cloud/project")
+            except Exception:
+                raise serializers.ValidationError(
+                    "Unable to authenticate. Please verify the OVH consumer key and permissions."
+                )
+            data["consumer_key"] = bs_encrypt(
+                data["consumer_key"], self.context["encryption_key"]
+            )
+        return data
 
 
 class CoreOVHUSConnectionWriteSerializer(serializers.ModelSerializer):

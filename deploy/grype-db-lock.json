@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "archive": {
+    "url": "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.9_2026-09-03T00:34:04Z_1788417055.tar.zst?checksum=sha256%3A3574269f1e15cc771bd8ea11a31f2e198c5e4cc546ae7d3187919c8f4822cb7a",
+    "sha256": "3574269f1e15cc771bd8ea11a31f2e198c5e4cc546ae7d3187919c8f4822cb7a",
+    "size": 150260638
+  },
+  "database": {
+    "schema_version": "v6.1.9",
+    "built_at": "2026-09-03T06:30:55Z",
+    "valid_until": "2026-09-08T06:30:55Z",
+    "sha256": "e1ab9e58433f4d7cf0a088d7694eaf5f6287c8a9b3a00623a516674040251421",
+    "size": 2124931072,
+    "import_metadata_sha256": "bb633b1fc062b532520e1f790a537f37623dd9800e223ed54adea4824697b5f0",
+    "import_metadata_size": 97
+  }
+}

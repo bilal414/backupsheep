@@ -1,0 +1,11 @@
+# Internal, wrapper-only same-version crash-recovery overlay.
+#
+# The wrapper may add this file only after a protected transition ledger has
+# authorized the exact broker generation.  It never performs a cross-version
+# open: the entrypoint proves the requested recovery version against the
+# running image before RabbitMQ starts.
+services:
+  rabbitmq:
+    environment:
+      BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY: "${BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY:?BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY is required}"
+    restart: "no"

@@ -1,20 +1,28 @@
-import time
-import boto3
+import re
+
 import pytz
+from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
+from apps.api.v1.storage.serializers import (
+    CoreStorageTypeSerializer,
+    StorageCredentialReadSerializerMixin,
+    StorageCredentialWriteSerializerMixin,
+)
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
     StorageDefault,
-    bs_decrypt,
     bs_encrypt,
 )
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints
 from apps.console.connection.models import CoreOracleRegion
-from apps.console.storage.models import CoreStorageOracle, CoreStorage, CoreStorageType
+from apps.console.storage.models import CoreStorage, CoreStorageOracle
+from apps._tasks.integration.storage.oracle import oracle_object_endpoint
+
+
+_SAFE_BUCKET = re.compile(r"[^/\\\x00-\x1f\x7f]{1,1024}\Z")
 
 
 class CoreOracleRegionSerializer(serializers.ModelSerializer):
@@ -24,9 +32,8 @@ class CoreOracleRegionSerializer(serializers.ModelSerializer):
         datatables_always_serialize = ("id",)
 
 
-class CoreStorageOracleReadSerializer(serializers.ModelSerializer):
-    access_key = serializers.SerializerMethodField()
-    secret_key = serializers.SerializerMethodField()
+class CoreStorageOracleReadSerializer(StorageCredentialReadSerializerMixin, serializers.ModelSerializer):
+    credential_fields = ("access_key", "secret_key")
     region = CoreOracleRegionSerializer()
 
     class Meta:
@@ -52,14 +59,8 @@ class CoreStorageOracleReadSerializer(serializers.ModelSerializer):
             "prefix",
         )
 
-    def get_access_key(self, obj):
-        return bs_decrypt(obj.access_key, self.context["encryption_key"])
-
-    def get_secret_key(self, obj):
-        return bs_decrypt(obj.secret_key, self.context["encryption_key"])
-
-
-class CoreStorageOracleWriteSerializer(serializers.ModelSerializer):
+class CoreStorageOracleWriteSerializer(StorageCredentialWriteSerializerMixin, serializers.ModelSerializer):
+    credential_fields = ("access_key", "secret_key")
     access_key = serializers.CharField(write_only=True)
     secret_key = serializers.CharField(write_only=True)
     bucket_name = serializers.CharField(write_only=True)
@@ -77,13 +78,23 @@ class CoreStorageOracleWriteSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         try:
+            namespace = data.get("namespace")
+            region = data.get("region")
+            bucket_name = str(data.get("bucket_name") or "").strip()
+            prefix = data.get("prefix") or ""
+            oracle_object_endpoint(namespace, getattr(region, "code", None))
+            if not _SAFE_BUCKET.fullmatch(bucket_name):
+                raise ValueError("The bucket name is invalid.")
+            if any(ord(character) < 32 or ord(character) == 127 for character in prefix):
+                raise ValueError("The object prefix is invalid.")
+            data["bucket_name"] = bucket_name
             storage = CoreStorageOracle()
             if not storage.validate(data):
                 raise ValueError("Please check bucket name and permissions.")
             data["access_key"] = bs_encrypt(data["access_key"], self.context["encryption_key"])
             data["secret_key"] = bs_encrypt(data["secret_key"], self.context["encryption_key"])
         except Exception as e:
-            raise serializers.ValidationError(f"Unable to authenticate. {e.__str__()}")
+            raise serializers.ValidationError("Unable to authenticate with the storage provider. Verify the credentials and configuration.")
         return data
 
 
@@ -144,6 +155,7 @@ class CoreStorageWriteSerializer(serializers.ModelSerializer):
         ref_name = "Storage Oracle Write"
         fields = "__all__"
 
+    @transaction.atomic
     def create(self, validated_data):
         storage_oracle = validated_data.pop("storage_oracle", [])
         instance = CoreStorage.objects.create(**validated_data)
@@ -151,8 +163,10 @@ class CoreStorageWriteSerializer(serializers.ModelSerializer):
         CoreStorageOracle.objects.create(**storage_oracle)
         return instance
 
+    @transaction.atomic
     def update(self, instance, validated_data):
-        storage_oracle = validated_data.pop("storage_oracle", [])
-        super().update(instance.storage_oracle, storage_oracle)
+        storage_oracle = validated_data.pop("storage_oracle", None)
+        if storage_oracle is not None:
+            super().update(instance.storage_oracle, storage_oracle)
         instance = super().update(instance, validated_data)
         return instance

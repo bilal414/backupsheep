@@ -10,7 +10,8 @@ from rest_framework.response import Response
 from apps.api.v1.volume.oracle.filters import CoreVolumeOracleFilter
 from apps.api.v1.volume.oracle.permissions import CoreVolumeOracleViewPermissions
 from apps.api.v1.volume.oracle.serializers import CoreVolumeOracleReadSerializer, CoreVolumeOracleWriteSerializer
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreOracleBackup
 from apps.console.connection.models import CoreConnection
@@ -53,7 +54,7 @@ class CoreVolumeOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.request.user.member
         query = Q(account=member.get_current_account(), integration__code="oracle")
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        regions = CoreConnection.objects.filter(query).values(
+        regions = visible_connections(member).filter(query).values(
             "id",
             "name",
             "location_id",
@@ -69,7 +70,7 @@ class CoreVolumeOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= Q(node__connection__integration__code="oracle")
         query &= Q(node__type=CoreNode.Type.VOLUME)
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-        nodes = CoreOracle.objects.filter(query)
+        nodes = scope_direct_node_queryset(request, CoreOracle.objects.filter(query))
         all_totals = {
             "nodes": nodes.count(),
             "backups": CoreOracleBackup.objects.filter(oracle__in=nodes, status=UtilBackup.Status.COMPLETE).count(),

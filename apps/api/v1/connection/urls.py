@@ -25,7 +25,6 @@ urlpatterns = [
                 path("", include("apps.api.v1.connection.google_cloud.urls")),
                 path("", include("apps.api.v1.connection.database.urls")),
                 path("", include("apps.api.v1.connection.website.urls")),
-                path("", include("apps.api.v1.connection.wordpress.urls")),
                 path("", include("apps.api.v1.connection.basecamp.urls")),
             ]
         ),

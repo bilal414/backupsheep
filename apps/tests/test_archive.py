@@ -1,22 +1,220 @@
+import hashlib
+import struct
 import tempfile
 import unittest
+import unicodedata
 import zipfile
 from pathlib import Path
+from unittest import mock
 
+from apps._tasks.integration.backup import _archive as ARCHIVE
 from apps._tasks.integration.backup._archive import (
     create_zip,
+    iter_zip_members,
+    mark_utf8_zip_names,
     validate_zip_archive,
 )
 
 
 class ArchiveValidationTests(unittest.TestCase):
+    @staticmethod
+    def _clear_utf8_name_flags(archive_path):
+        with zipfile.ZipFile(archive_path) as archive:
+            infos = archive.infolist()
+            central_offset = archive.start_dir
+
+        with open(archive_path, "r+b") as archive_file:
+            for info in infos:
+                archive_file.seek(central_offset)
+                central = archive_file.read(46)
+                filename_length, extra_length, comment_length = struct.unpack_from(
+                    "<HHH", central, 28
+                )
+                central_flags = struct.unpack_from("<H", central, 8)[0]
+                archive_file.seek(central_offset + 8)
+                archive_file.write(struct.pack("<H", central_flags & ~0x0800))
+
+                archive_file.seek(info.header_offset + 6)
+                local_flags = struct.unpack("<H", archive_file.read(2))[0]
+                archive_file.seek(info.header_offset + 6)
+                archive_file.write(struct.pack("<H", local_flags & ~0x0800))
+                central_offset += 46 + filename_length + extra_length + comment_length
+
+    @staticmethod
+    def _promote_eocd_to_zip64(archive_path):
+        with open(archive_path, "r+b") as archive_file:
+            content = archive_file.read()
+            eocd_offset = content.rfind(b"PK\x05\x06")
+            if eocd_offset < 0:
+                raise AssertionError("test archive has no end record")
+            fields = struct.unpack_from("<4s4H2LH", content, eocd_offset)
+            (
+                _signature,
+                disk_number,
+                central_disk,
+                entries_on_disk,
+                entry_count,
+                central_size,
+                central_offset,
+                comment_length,
+            ) = fields
+            if disk_number or central_disk or comment_length:
+                raise AssertionError("test helper expects a non-spanned commentless ZIP")
+            zip64_eocd = struct.pack(
+                "<4sQ2H2L4Q",
+                b"PK\x06\x06",
+                44,
+                45,
+                45,
+                0,
+                0,
+                entries_on_disk,
+                entry_count,
+                central_size,
+                central_offset,
+            )
+            zip64_locator = struct.pack(
+                "<4sLQL", b"PK\x06\x07", 0, eocd_offset, 1
+            )
+            sentinel_eocd = struct.pack(
+                "<4s4H2LH",
+                b"PK\x05\x06",
+                0,
+                0,
+                0xFFFF,
+                0xFFFF,
+                0xFFFFFFFF,
+                0xFFFFFFFF,
+                0,
+            )
+            archive_file.seek(eocd_offset)
+            archive_file.truncate()
+            archive_file.write(zip64_eocd)
+            archive_file.write(zip64_locator)
+            archive_file.write(sentinel_eocd)
+
+    @staticmethod
+    def _promote_central_local_offset_to_zip64(archive_path):
+        with open(archive_path, "r+b") as archive_file:
+            content = archive_file.read()
+            central_offset = content.find(b"PK\x01\x02")
+            eocd_offset = content.rfind(b"PK\x05\x06")
+            if central_offset < 0 or eocd_offset < 0:
+                raise AssertionError("test archive records are missing")
+
+            central = bytearray(content[central_offset:central_offset + 46])
+            filename_length, extra_length, comment_length = struct.unpack_from(
+                "<HHH", central, 28
+            )
+            local_offset = struct.unpack_from("<L", central, 42)[0]
+            filename_end = central_offset + 46 + filename_length
+            extra_end = filename_end + extra_length
+            entry_end = extra_end + comment_length
+            zip64_extra = struct.pack("<HHQ", 0x0001, 8, local_offset)
+            struct.pack_into("<H", central, 30, extra_length + len(zip64_extra))
+            struct.pack_into("<L", central, 42, 0xFFFFFFFF)
+
+            new_central = (
+                bytes(central)
+                + content[central_offset + 46:filename_end]
+                + zip64_extra
+                + content[filename_end:entry_end]
+            )
+            new_content = bytearray(
+                content[:central_offset]
+                + new_central
+                + content[entry_end:eocd_offset]
+                + content[eocd_offset:]
+            )
+            new_eocd_offset = eocd_offset + len(zip64_extra)
+            central_size = struct.unpack_from(
+                "<L", new_content, new_eocd_offset + 12
+            )[0]
+            struct.pack_into(
+                "<L",
+                new_content,
+                new_eocd_offset + 12,
+                central_size + len(zip64_extra),
+            )
+            archive_file.seek(0)
+            archive_file.truncate()
+            archive_file.write(new_content)
+
+    def test_streaming_writer_publishes_valid_empty_website_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            members = root / "members.txt"
+            members.write_bytes(b"")
+            archive_path = root / "empty.zip"
+
+            create_zip(
+                source,
+                archive_path,
+                timeout=30,
+                member_list_path=members,
+                expected_member_count=0,
+                expected_member_list_sha256=hashlib.sha256(b"").hexdigest(),
+                expected_source_bytes=0,
+            )
+
+            self.assertGreater(archive_path.stat().st_size, 0)
+            self.assertEqual(list(iter_zip_members(archive_path)), [])
+            validate_zip_archive(archive_path)
+
     def test_validate_zip_checks_member_crc(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "backup.zip"
+            with zipfile.ZipFile(
+                archive_path, "w", compression=zipfile.ZIP_STORED
+            ) as archive:
+                archive.writestr("dump.sql", "select 1;\n")
+
+            with zipfile.ZipFile(archive_path) as archive:
+                info = archive.getinfo("dump.sql")
+            with open(archive_path, "r+b") as archive_file:
+                archive_file.seek(info.header_offset)
+                local = archive_file.read(30)
+                filename_length, extra_length = struct.unpack_from("<HH", local, 26)
+                payload_offset = (
+                    info.header_offset + 30 + filename_length + extra_length
+                )
+                archive_file.seek(payload_offset)
+                first_byte = archive_file.read(1)
+                archive_file.seek(payload_offset)
+                archive_file.write(bytes([first_byte[0] ^ 0xFF]))
+
+            with self.assertRaises(ValueError):
+                validate_zip_archive(archive_path, required_suffix=".sql")
+
+    def test_validate_zip_does_not_materialize_zipfile_members(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             archive_path = Path(temp_dir) / "backup.zip"
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("dump.sql", "select 1;\n")
 
-            validate_zip_archive(archive_path, required_suffix=".sql")
+            with mock.patch.object(
+                ARCHIVE.zipfile,
+                "ZipFile",
+                side_effect=AssertionError("ZipFile must not be used for validation"),
+            ):
+                validate_zip_archive(archive_path, required_suffix=".sql")
+
+    def test_iter_zip_members_reads_zip64_local_offsets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "metadata-zip64-entry.zip"
+            original_name = "cjk-\u76ee\u5f55.txt"
+            with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
+                archive.writestr(original_name, "metadata payload")
+            self._promote_central_local_offset_to_zip64(archive_path)
+
+            members = list(iter_zip_members(archive_path))
+
+            self.assertEqual(len(members), 1)
+            self.assertEqual(members[0].filename, original_name)
+            self.assertEqual(members[0].header_offset, 0)
+            self.assertEqual(members[0].file_size, len("metadata payload"))
 
     def test_validate_zip_rejects_archive_without_database_dump(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -36,6 +234,193 @@ class ArchiveValidationTests(unittest.TestCase):
 
             create_zip(source_dir, archive_path, timeout=60)
             validate_zip_archive(archive_path)
+
+    def test_create_zip_marks_utf8_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = Path(temp_dir) / "source"
+            source_dir.mkdir()
+            composed = "caf\u00e9.txt"
+            (source_dir / composed).write_text("composed", encoding="utf-8")
+            (source_dir / "emoji-\U0001f642.txt").write_text(
+                "emoji", encoding="utf-8"
+            )
+            (source_dir / "empty-\u76ee\u5f55").mkdir()
+            archive_path = Path(temp_dir) / "backup.zip"
+
+            create_zip(source_dir, archive_path, timeout=60)
+
+            with zipfile.ZipFile(archive_path) as archive:
+                infos = {info.filename: info for info in archive.infolist()}
+                self.assertIn(composed, infos)
+                self.assertIn("emoji-\U0001f642.txt", infos)
+                self.assertIn("empty-\u76ee\u5f55/", infos)
+                for name in (
+                    composed,
+                    "emoji-\U0001f642.txt",
+                    "empty-\u76ee\u5f55/",
+                ):
+                    self.assertTrue(infos[name].flag_bits & 0x0800)
+                self.assertIsNone(archive.testzip())
+
+    def test_create_zip_preserves_distinct_unicode_normalization_forms(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = Path(temp_dir) / "source"
+            source_dir.mkdir()
+            composed = "caf\u00e9.txt"
+            decomposed = "cafe\u0301.txt"
+            self.assertEqual(unicodedata.normalize("NFC", decomposed), composed)
+            (source_dir / composed).write_text("composed", encoding="utf-8")
+            (source_dir / decomposed).write_text("decomposed", encoding="utf-8")
+            source_names = {path.name for path in source_dir.iterdir()}
+            if source_names != {composed, decomposed}:
+                self.skipTest(
+                    "the test filesystem normalizes distinct Unicode filenames"
+                )
+            archive_path = Path(temp_dir) / "backup.zip"
+
+            create_zip(source_dir, archive_path, timeout=60)
+
+            with zipfile.ZipFile(archive_path) as archive:
+                infos = {info.filename: info for info in archive.infolist()}
+                self.assertEqual(set(infos), {composed, decomposed})
+                self.assertTrue(infos[composed].flag_bits & 0x0800)
+                self.assertTrue(infos[decomposed].flag_bits & 0x0800)
+                self.assertIsNone(archive.testzip())
+
+    def test_member_list_writer_spools_metadata_and_preserves_website_semantics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = Path(temp_dir) / "source"
+            source_dir.mkdir()
+            (source_dir / "empty-目录").mkdir()
+            (source_dir / "café.txt").write_text("composed", encoding="utf-8")
+            (source_dir / "large.bin").write_bytes(b"bounded-writer" * 6000)
+            member_list = Path(temp_dir) / "members"
+            members = (
+                "empty-目录/\n"
+                "café.txt\n"
+                "large.bin\n"
+            ).encode("utf-8")
+            member_list.write_bytes(members)
+            archive_path = Path(temp_dir) / "backup.zip"
+            fence = mock.Mock()
+
+            with mock.patch.object(
+                ARCHIVE,
+                "_run_zip_writer",
+                side_effect=AssertionError("Info-ZIP must not write member lists"),
+            ), mock.patch.object(
+                ARCHIVE.zipfile,
+                "ZipFile",
+                side_effect=AssertionError("writer must not retain ZipInfo members"),
+            ):
+                create_zip(
+                    source_dir,
+                    archive_path,
+                    timeout=60,
+                    member_list_path=member_list,
+                    expected_member_count=3,
+                    expected_member_list_sha256=hashlib.sha256(members).hexdigest(),
+                    expected_source_bytes=(
+                        len("composed".encode("utf-8")) + len(b"bounded-writer" * 6000)
+                    ),
+                    during_write=fence,
+                )
+
+            fence.assert_called_once_with()
+            with zipfile.ZipFile(archive_path) as archive:
+                infos = {info.filename: info for info in archive.infolist()}
+                self.assertEqual(
+                    set(infos),
+                    {"empty-目录/", "café.txt", "large.bin"},
+                )
+                self.assertTrue(infos["empty-目录/"].is_dir())
+                self.assertEqual(infos["café.txt"].compress_type, zipfile.ZIP_STORED)
+                self.assertEqual(infos["large.bin"].compress_type, zipfile.ZIP_DEFLATED)
+                self.assertEqual(archive.read("café.txt"), b"composed")
+                self.assertEqual(archive.read("large.bin"), b"bounded-writer" * 6000)
+                self.assertIsNone(archive.testzip())
+                for info in infos.values():
+                    self.assertTrue(info.flag_bits & 0x0800)
+
+    def test_member_list_identity_failure_keeps_previous_archive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = Path(temp_dir) / "source"
+            source_dir.mkdir()
+            (source_dir / "site.txt").write_text("new", encoding="utf-8")
+            member_list = Path(temp_dir) / "members"
+            member_list.write_bytes(b"site.txt\n")
+            archive_path = Path(temp_dir) / "backup.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("previous.txt", "committed")
+
+            with self.assertRaisesRegex(RuntimeError, "member list changed"):
+                create_zip(
+                    source_dir,
+                    archive_path,
+                    timeout=60,
+                    member_list_path=member_list,
+                    expected_member_count=1,
+                    expected_member_list_sha256="0" * 64,
+                    expected_source_bytes=3,
+                )
+
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertEqual(archive.namelist(), ["previous.txt"])
+            self.assertFalse(
+                any(
+                    path.name.endswith(".partial.zip")
+                    for path in Path(temp_dir).iterdir()
+                )
+            )
+
+    def test_utf8_header_repair_does_not_materialize_zipfile_members(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "legacy.zip"
+            original_name = "caf\u00e9-\u0645\u0631\u062d\u0628\u0627.txt"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr(original_name, "payload")
+            self._clear_utf8_name_flags(archive_path)
+
+            with mock.patch.object(
+                ARCHIVE.zipfile,
+                "ZipFile",
+                side_effect=AssertionError("infolist must not be used"),
+            ):
+                self.assertEqual(mark_utf8_zip_names(archive_path), 1)
+
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertTrue(archive.getinfo(original_name).flag_bits & 0x0800)
+                self.assertEqual(archive.read(original_name), b"payload")
+
+    def test_utf8_header_repair_supports_zip64_end_records(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "legacy-zip64.zip"
+            original_name = "emoji-\U0001f642.txt"
+            with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
+                archive.writestr(original_name, "zip64 payload")
+            self._clear_utf8_name_flags(archive_path)
+            self._promote_eocd_to_zip64(archive_path)
+
+            self.assertEqual(mark_utf8_zip_names(archive_path), 1)
+
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertTrue(archive.getinfo(original_name).flag_bits & 0x0800)
+                self.assertEqual(archive.read(original_name), b"zip64 payload")
+
+    def test_utf8_header_repair_supports_zip64_local_offsets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "legacy-zip64-entry.zip"
+            original_name = "arabic-\u0645\u0631\u062d\u0628\u0627.txt"
+            with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
+                archive.writestr(original_name, "zip64 entry payload")
+            self._clear_utf8_name_flags(archive_path)
+            self._promote_central_local_offset_to_zip64(archive_path)
+
+            self.assertEqual(mark_utf8_zip_names(archive_path), 1)
+
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertTrue(archive.getinfo(original_name).flag_bits & 0x0800)
+                self.assertEqual(archive.read(original_name), b"zip64 entry payload")
 
 
 if __name__ == "__main__":

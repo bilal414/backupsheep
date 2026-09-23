@@ -11,6 +11,7 @@ from apps.api.v1.cloud.lightsail_bucket_replication.views import (
 )
 from apps._tasks.integration.lightsail_bucket import (
     LightsailBucketReplicationError,
+    _object_identity_metadata,
     copy_s3_object,
     list_source_objects,
     replicate_lightsail_bucket,
@@ -23,6 +24,7 @@ from apps.console.backup.replication_models import (
     CoreLightsailBucketReplication,
     CoreLightsailBucketReplicationObject,
     CoreLightsailBucketReplicationRun,
+    CoreLightsailBucketRestoreObject,
     CoreLightsailBucketRestoreRun,
 )
 from apps.console.connection.models import CoreAuthLightsail, CoreLightsailRegion
@@ -62,7 +64,14 @@ class LightsailBucketHelperTests(BaseTestCase):
             },
         ]
 
-        entries = list_source_objects(client, "source", prefix="docs/", include_versions=True)
+        entries = list(
+            list_source_objects(
+                client,
+                "source",
+                prefix="docs/",
+                include_versions=True,
+            )
+        )
 
         self.assertEqual(
             [(row["key"], row["version_id"], row["is_delete_marker"]) for row in entries],
@@ -263,15 +272,42 @@ class LightsailBucketDurabilityTests(BaseTestCase):
     def test_prefix_restore_records_a_resumable_completion(self):
         replication = self._replication()
         source, destination = self._clients()
-        destination.list_objects_v2.return_value = {
-            "Contents": [
-                {"Key": "replica/one.txt", "ETag": '"abc"', "Size": 3},
+        backup_modified = timezone.now().replace(microsecond=0)
+        source_run = replication.runs.create(
+            idempotency_key="restore-source",
+            status=CoreLightsailBucketReplicationRun.Status.COMPLETE,
+        )
+        source_state = source_run.object_states.create(
+            key="one.txt",
+            source_version_id="v1",
+            source_etag="abc",
+            source_size=3,
+            destination_key="replica/one.txt",
+            destination_version_id="dest-v1",
+            status=CoreLightsailBucketReplicationObject.Status.COMPLETE,
+        )
+        replication.last_run = source_run
+        replication.save(update_fields=["last_run", "modified"])
+        destination.list_object_versions.return_value = {
+            "Versions": [
+                {
+                    "Key": "replica/one.txt",
+                    "VersionId": "dest-v1",
+                    "ETag": '"abc"',
+                    "Size": 3,
+                    "LastModified": backup_modified,
+                    "IsLatest": True,
+                },
                 {
                     "Key": "replica/.backupsheep/manifests/ignored.json",
+                    "VersionId": "manifest-v1",
                     "ETag": '"manifest"',
                     "Size": 20,
+                    "LastModified": backup_modified,
+                    "IsLatest": True,
                 },
             ],
+            "DeleteMarkers": [],
             "IsTruncated": False,
         }
         # The replica object must exist for restore; the target Lightsail key does
@@ -280,7 +316,16 @@ class LightsailBucketDurabilityTests(BaseTestCase):
         destination.head_object.return_value = {
             "ETag": '"abc"',
             "ContentLength": 3,
-            "Metadata": {},
+            "LastModified": backup_modified,
+            "VersionId": "dest-v1",
+            "Metadata": _object_identity_metadata(
+                {
+                    "key": source_state.key,
+                    "version_id": source_state.source_version_id,
+                    "is_delete_marker": False,
+                    "etag": source_state.source_etag,
+                }
+            ),
         }
         destination.get_object.return_value = {
             "Body": io.BytesIO(b"one"),
@@ -306,6 +351,7 @@ class LightsailBucketDurabilityTests(BaseTestCase):
                 restore_prefix="",
                 target_prefix="restored/",
                 idempotency_key="restore-1",
+                source_run_id=source_run.id,
             )
 
         self.assertEqual(
@@ -315,11 +361,81 @@ class LightsailBucketDurabilityTests(BaseTestCase):
         )
         restore = replication.restore_runs.get(idempotency_key="restore-1")
         self.assertEqual(restore.completed_count, 1)
+        ledger = CoreLightsailBucketRestoreObject.objects.get(restore_run=restore)
+        self.assertEqual(ledger.backup_version_id, "dest-v1")
+        self.assertEqual(ledger.status, CoreLightsailBucketRestoreObject.Status.COMPLETE)
         source.put_object.assert_called_once()
         self.assertEqual(source.put_object.call_args.kwargs["Key"], "restored/one.txt")
+        destination.get_object.assert_called_once_with(
+            Bucket="destination-bucket",
+            Key="replica/one.txt",
+            VersionId="dest-v1",
+        )
+
+    def test_prefix_restore_replays_exact_owned_delete_marker(self):
+        replication = self._replication()
+        source, destination = self._clients()
+        deleted_at = timezone.now().replace(microsecond=0)
+        source_run = replication.runs.create(
+            idempotency_key="restore-delete-source",
+            status=CoreLightsailBucketReplicationRun.Status.COMPLETE,
+        )
+        source_run.object_states.create(
+            key="gone.txt",
+            source_version_id="source-delete-v1",
+            is_delete_marker=True,
+            destination_key="replica/gone.txt",
+            destination_version_id="backup-delete-v1",
+            status=CoreLightsailBucketReplicationObject.Status.DELETE_MARKER_APPLIED,
+        )
+        replication.last_run = source_run
+        replication.save(update_fields=["last_run", "modified"])
+        destination.list_object_versions.return_value = {
+            "Versions": [],
+            "DeleteMarkers": [
+                {
+                    "Key": "replica/gone.txt",
+                    "VersionId": "backup-delete-v1",
+                    "LastModified": deleted_at,
+                    "IsLatest": True,
+                }
+            ],
+            "IsTruncated": False,
+        }
+        source.delete_object.return_value = {"VersionId": "restored-delete-v1"}
+
+        with mock.patch(
+            "apps._tasks.integration.lightsail_bucket._destination_bucket",
+            return_value="destination-bucket",
+        ):
+            result = run_lightsail_bucket_prefix_restore(
+                replication.id,
+                source_run_id=source_run.id,
+                target_prefix="restored/",
+                idempotency_key="restore-delete",
+                source_client=source,
+                destination_client=destination,
+            )
+
+        self.assertEqual(result["status"], CoreLightsailBucketRestoreRun.Status.COMPLETE)
+        restore = replication.restore_runs.get(idempotency_key="restore-delete")
+        ledger = restore.object_states.get()
+        self.assertTrue(ledger.is_delete_marker)
+        self.assertEqual(ledger.backup_version_id, "backup-delete-v1")
+        self.assertEqual(ledger.restored_version_id, "restored-delete-v1")
+        source.delete_object.assert_called_once_with(
+            Bucket="source-bucket",
+            Key="restored/gone.txt",
+        )
 
     def test_api_idempotency_publishes_each_run_and_restore_once_after_commit(self):
         replication = self._replication()
+        source_run = replication.runs.create(
+            idempotency_key="api-restore-source",
+            status=CoreLightsailBucketReplicationRun.Status.COMPLETE,
+        )
+        replication.last_run = source_run
+        replication.save(update_fields=["last_run", "modified"])
         factory = APIRequestFactory()
 
         run_view = CoreLightsailBucketReplicationView.as_view({"post": "run"})
@@ -370,6 +486,23 @@ class LightsailBucketDurabilityTests(BaseTestCase):
             force_authenticate(retry_request, user=self.user)
             retry_response = restore_view(retry_request, pk=replication.id)
             self.assertEqual(retry_response.status_code, 202)
+            self.assertEqual(enqueue_restore.call_count, 1)
+
+            different_source = replication.runs.create(
+                idempotency_key="different-restore-source",
+                status=CoreLightsailBucketReplicationRun.Status.COMPLETE,
+            )
+            conflict_request = factory.post(
+                "/cloud/lightsail_bucket_replications/1/restore/",
+                {
+                    "idempotency_key": "api-restore-1",
+                    "source_run_id": different_source.id,
+                },
+                format="json",
+            )
+            force_authenticate(conflict_request, user=self.user)
+            conflict_response = restore_view(conflict_request, pk=replication.id)
+            self.assertEqual(conflict_response.status_code, 409)
             self.assertEqual(enqueue_restore.call_count, 1)
 
         restore_run = replication.restore_runs.get(idempotency_key="api-restore-1")
@@ -432,7 +565,8 @@ class LightsailBucketDurabilityTests(BaseTestCase):
         run.refresh_from_db()
         self.assertEqual(run.status, CoreLightsailBucketReplicationRun.Status.RUNNING)
         self.assertIsNone(run.completed_at)
-        self.assertIn("simulated worker failure", run.error)
+        self.assertNotIn("simulated worker failure", run.error)
+        self.assertIn("LIGHTSAIL_WORKER_FAILURE", run.error)
 
     def test_direct_task_rejects_inactive_source_before_provider_access(self):
         replication = self._replication()

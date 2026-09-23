@@ -21,9 +21,8 @@ from apps.console.node.models import CoreNode, CoreSchedule, CoreScheduleRun
 from rest_framework import status
 from django.utils.text import slugify
 from rest_framework.decorators import action
-from celery import current_app
-
 from apps.api.v1.utils.api_exceptions import ExceptionDefault
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 def _log_activity(request, log_type, data):
@@ -148,6 +147,9 @@ class CoreScheduleView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def trigger(self, request, pk=None):
         schedule = self.get_object()
+        require_source_backup_creation(
+            schedule.node.connection.integration.code
+        )
         request.data["schedule"] = schedule.id
 
         serializer = CoreScheduleRunSerializer(data=request.data)
@@ -157,13 +159,20 @@ class CoreScheduleView(viewsets.ModelViewSet):
 
             schedule_run = serializer.instance
 
-            current_app.send_task(
-                schedule.node.backup_task_name(),
-                kwargs={
-                    "node_id": schedule.node.id,
-                    "schedule_id": schedule.id,
-                    "storage_ids": schedule.storage_ids,
-                },
+            from apps._tasks.backup_dispatch import (
+                backup_request_status,
+                create_backup_request,
+            )
+
+            backup_request = create_backup_request(
+                node=schedule.node,
+                schedule=schedule,
+                storage_ids=schedule.storage_ids,
+                requested_by=request.user.member,
+                trigger="schedule",
+                idempotency_key=(
+                    f"api-schedule:{schedule.id}:{schedule_run.request_id}"
+                ),
             )
             _log_activity(
                 request,
@@ -178,8 +187,10 @@ class CoreScheduleView(viewsets.ModelViewSet):
                     "node_name": schedule.node.name,
                 },
             )
+            response_data = dict(serializer.data)
+            response_data["backup_request"] = backup_request_status(backup_request)
             headers = self.get_success_headers(serializer.data)
-            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+            return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
         else:
             raise ExceptionDefault(detail=serializer.errors)
 
@@ -202,11 +213,16 @@ class CoreScheduleView(viewsets.ModelViewSet):
                 "node_name": schedule.node.name,
             },
         )
-        return Response({"detail": "Schedule is paused."}, status=status.HTTP_200_OK)
+        data = self.get_serializer(schedule).data
+        data["detail"] = "Schedule is paused."
+        return Response(data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         schedule = self.get_object()
+        require_source_backup_creation(
+            schedule.node.connection.integration.code
+        )
         schedule.status = CoreSchedule.Status.ACTIVE
         schedule.save()
         schedule.schedule_update()
@@ -223,4 +239,6 @@ class CoreScheduleView(viewsets.ModelViewSet):
                 "node_name": schedule.node.name,
             },
         )
-        return Response({"detail": "Schedule is resumed."}, status=status.HTTP_200_OK)
+        data = self.get_serializer(schedule).data
+        data["detail"] = "Schedule is resumed."
+        return Response(data, status=status.HTTP_200_OK)

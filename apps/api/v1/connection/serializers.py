@@ -9,6 +9,7 @@ from apps.console.connection.models import (
     CoreAWSRegion,
 )
 from apps.api.v1.account.serializers import CoreAccountSerializer
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 class CoreAWSRegionSerializer(serializers.ModelSerializer):
@@ -48,6 +49,14 @@ class CoreConnectionSerializer(serializers.ModelSerializer):
         model = CoreConnection
         fields = "__all__"
         datatables_always_serialize = ("id",)
+
+    def validate(self, data):
+        if (
+            self.instance is not None
+            and data.get("status") == CoreConnection.Status.ACTIVE
+        ):
+            require_source_backup_creation(self.instance.integration.code)
+        return data
 
     @staticmethod
     def get_status_display(obj):

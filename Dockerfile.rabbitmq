@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
+
+# Use the reviewed upstream rebuild whose Erlang crypto NIF and bundled
+# /opt/openssl runtime are both OpenSSL 3.5.8. Updating Alpine's distro packages
+# alone is insufficient because RabbitMQ's Erlang runtime does not load them.
+FROM rabbitmq:4.3.5-alpine@sha256:290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240
+
+LABEL org.opencontainers.image.title="BackupSheep RabbitMQ runtime" \
+      org.opencontainers.image.description="RabbitMQ 4.3.5 with reviewed security package updates" \
+      org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
+      org.opencontainers.image.licenses="MPL-2.0" \
+      com.backupsheep.rabbitmq.runtime-generation="4.3.5-alpine3.23-openssl3.5.8-v2" \
+      com.backupsheep.rabbitmq.base-index-digest="sha256:290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240" \
+      com.backupsheep.rabbitmq.openssl-runtime-version="3.5.8" \
+      com.backupsheep.rabbitmq.openssl-package-version="3.5.8-r0" \
+      com.backupsheep.rabbitmq.enabled-plugins="none"
+
+RUN set -eux; \
+    apk add --no-cache \
+        'libcrypto3=3.5.8-r0' \
+        'libssl3=3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libcrypto3-3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libssl3-3.5.8-r0'; \
+    set -- $(/opt/openssl/bin/openssl version); test "$2" = '3.5.8'; \
+    erl -noshell -eval 'case crypto:info_lib() of [{_, _, <<"OpenSSL 3.5.8 ", _/binary>>}] -> ok; Value -> io:format("~p~n", [Value]), halt(1) end, {ok, Maps} = file:read_file("/proc/self/maps"), case binary:match(Maps, <<"/opt/openssl/lib/libcrypto.so.3">>) of nomatch -> halt(1); _ -> halt(0) end.'; \
+    rabbitmq-plugins disable --offline rabbitmq_prometheus; \
+    ! rabbitmq-plugins list --offline --enabled --minimal 2>/dev/null \
+        | grep -Eq '^rabbitmq_[a-z0-9_]+$'; \
+    test "$(id -u rabbitmq):$(id -g rabbitmq)" = '100:101'; \
+    test -x /usr/local/bin/docker-entrypoint.sh; \
+    test -x /opt/rabbitmq/sbin/rabbitmq-server
+
+USER 100:101

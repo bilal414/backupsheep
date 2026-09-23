@@ -10,8 +10,13 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 import io
+import base64
+import hmac
+import ipaddress
 import json
 import os
+import re
+import ssl
 import warnings
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlparse
@@ -20,8 +25,13 @@ from django.core.exceptions import ImproperlyConfigured
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 import google.auth
+from kombu import Exchange, Queue
 from dotenv import load_dotenv
 from dotenv import dotenv_values
+
+from backupsheep.sentry_security import scrub_sentry_event
+from backupsheep.runtime_secrets import resolve_file_backed_secrets
+from backupsheep.celery_task_manifest import celery_routes
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -32,8 +42,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 # place as the relative "_storage/" paths they use; ensure it exists.
 os.makedirs(os.path.join(BASE_DIR, "_storage"), exist_ok=True)
 
-if "BACKUPSHEEP_SECRETS" in os.environ:
-    config = json.loads(os.environ.get("BACKUPSHEEP_SECRETS"))
+backupsheep_secrets_json = os.environ.get("BACKUPSHEEP_SECRETS")
+if backupsheep_secrets_json:
+    config = json.loads(backupsheep_secrets_json)
 else:
     config = {
         # Keep the sample's defaults available to PaaS deployments, where runtime
@@ -43,6 +54,12 @@ else:
         **dotenv_values(os.path.join(BASE_DIR, ".env")),
         **os.environ,  # override loaded values with environment variables
     }
+
+# The stock Docker deployment injects generated control-plane credentials as
+# individually granted, read-only files below /run/secrets. Resolve only the explicit
+# allowlist before any setting consumes those values. Direct environment variables stay
+# supported for PaaS/external deployments that do not use the Compose secret contract.
+config = resolve_file_backed_secrets(config)
 
 # Coerce env strings to real booleans: dotenv/docker env_file always yield strings, and
 # a bare bool("false") is True, so a raw string can never be turned off. Treat only the
@@ -55,9 +72,120 @@ def _as_bool(value, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _strict_bool(name, value, *, default=False):
+    """Parse a security policy boolean without treating typos as disabled."""
+
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ImproperlyConfigured(f"{name} must be an explicit boolean value.")
+
+
 SECRET_KEY = config["DJANGO_SECRET_KEY"]
 DEBUG = _as_bool(config.get("DJANGO_DEBUG", "false"))
 DJANGO_SERVER = config["DJANGO_SERVER"]
+# The Django admin has its own password-only login and does not inherit the
+# console's authenticator-MFA challenge. Keep the route absent in production
+# unless an operator explicitly enables it behind an administrative access
+# boundary. Development installs retain the historical default.
+DJANGO_ADMIN_ENABLED = _as_bool(
+    config.get("DJANGO_ADMIN_ENABLED"),
+    default=DEBUG,
+)
+
+
+def _bounded_positive_int(name, default, maximum):
+    """Parse a security-sensitive duration without allowing an accidental disable."""
+    try:
+        value = int(config.get(name, default))
+    except (TypeError, ValueError) as error:
+        raise ImproperlyConfigured(f"{name} must be an integer number of seconds.") from error
+    if value <= 0 or value > maximum:
+        raise ImproperlyConfigured(
+            f"{name} must be between 1 and {maximum} seconds."
+        )
+    return value
+
+
+def _trusted_proxy_network_allowlist(name):
+    """Parse exact immediate-proxy addresses/CIDRs for auth throttling."""
+
+    raw_value = config.get(name, "")
+    values = (
+        raw_value
+        if isinstance(raw_value, (list, tuple))
+        else str(raw_value).split(",")
+    )
+    networks = []
+    for value in values:
+        value = str(value).strip()
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as error:
+            raise ImproperlyConfigured(
+                f"{name} must contain exact comma-separated IP addresses or CIDRs."
+            ) from error
+        if network.prefixlen == 0:
+            raise ImproperlyConfigured(
+                f"{name} cannot trust every address; configure only immediate proxies."
+            )
+        if network not in networks:
+            networks.append(network)
+    if len(networks) > 32:
+        raise ImproperlyConfigured(f"{name} may contain at most 32 networks.")
+    return tuple(networks)
+
+
+# DRF's built-in token model is otherwise permanent. Limit bearer-token lifetime
+# even when an operator forgets to configure it, and refuse values over 90 days.
+API_TOKEN_TTL_SECONDS = _bounded_positive_int(
+    "API_TOKEN_TTL_SECONDS",
+    30 * 24 * 60 * 60,
+    90 * 24 * 60 * 60,
+)
+
+# Bound browser authentication independently of API tokens. Browser-close removes
+# the client cookie early; the server-side row still has this absolute upper bound.
+SESSION_COOKIE_AGE = _bounded_positive_int(
+    "SESSION_COOKIE_AGE",
+    12 * 60 * 60,
+    12 * 60 * 60,
+)
+SESSION_EXPIRE_AT_BROWSER_CLOSE = _as_bool(
+    config.get("SESSION_EXPIRE_AT_BROWSER_CLOSE"),
+    default=True,
+)
+
+# Authentication throttles use REMOTE_ADDR by default. A reverse proxy collapses
+# that into one shared bucket, so an operator may explicitly trust the immediate
+# proxy and have it overwrite X-BackupSheep-Client-IP. Never infer this trust from
+# X-Forwarded-For or from the presence of the dedicated header alone.
+AUTH_THROTTLE_TRUSTED_PROXY_ENABLED = _as_bool(
+    config.get("AUTH_THROTTLE_TRUSTED_PROXY_ENABLED"),
+    default=False,
+)
+AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS = _trusted_proxy_network_allowlist(
+    "AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS"
+)
+if (
+    AUTH_THROTTLE_TRUSTED_PROXY_ENABLED
+    and not AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS
+):
+    raise ImproperlyConfigured(
+        "AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS is required when trusted-proxy "
+        "authentication throttling is enabled."
+    )
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_SAVE_EVERY_REQUEST = False
 
 # .env_sample values are merged in as defaults (see config above) so a PaaS deploy
 # that forgets to set DJANGO_SECRET_KEY would otherwise boot with a publicly known
@@ -80,12 +208,13 @@ CSRF_TRUSTED_ORIGINS = [f"{config['APP_PROTOCOL']}{config['APP_DOMAIN']}"]
 HTTPS_ENABLED = _as_bool(config.get("DJANGO_HTTPS", "false"))
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_CONTENT_TYPE_NOSNIFF = True
+SESSION_COOKIE_SECURE = HTTPS_ENABLED
+CSRF_COOKIE_SECURE = HTTPS_ENABLED
+CSRF_COOKIE_SAMESITE = "Lax"
 # Platform health probes commonly reach the container over private HTTP even when the
 # public endpoint is HTTPS. This endpoint contains no sensitive data and must remain 200.
 SECURE_REDIRECT_EXEMPT = [r"^healthz/$"]
 if HTTPS_ENABLED:
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
     SECURE_SSL_REDIRECT = True
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
@@ -107,18 +236,21 @@ INSTALLED_APPS = [
     "django_filters",
     "django_celery_results",
     "django_celery_beat",
-    'apps',
+    "apps.apps.BackupSheepAppConfig",
 
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "utils.middleware.BrowserSecurityHeadersMiddleware",
+    "utils.middleware.AllowedHttpMethodsMiddleware",
     # Serve static files directly from gunicorn (no nginx in the container).
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "utils.middleware.AuthenticationVersionMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django_user_agents.middleware.UserAgentMiddleware",
@@ -155,6 +287,7 @@ TEMPLATES = [
                 "django.template.context_processors.i18n",
                 "utils.context_processors.timezone",
                 "utils.context_processors.site",
+                "utils.context_processors.console_capabilities",
             ],
         },
     },
@@ -180,8 +313,8 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
     ),
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "apps.api.v1.utils.api_authentication.ConsoleSessionAuthentication",
         "apps.api.v1.utils.api_authentication.CustomTokenAuthentication",
+        "apps.api.v1.utils.api_authentication.ConsoleSessionAuthentication",
     ),
     # The browsable API UI is handy in development but exposes a self-documenting,
     # form-driven interface in production, so only enable it when DEBUG is on.
@@ -198,6 +331,66 @@ REST_FRAMEWORK = {
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 MIGRATION_MODULES = {"apps": "apps._migrations"}
+
+
+def _is_local_transport_host(host, compose_hostname):
+    """Return true only for a loopback, Unix socket, or exact stock service name.
+
+    RFC1918 addresses and arbitrary internal DNS names are intentionally not trusted:
+    they can cross hosts and therefore need authenticated transport in production.
+    """
+    value = str(host or "").strip().lower().rstrip(".")
+    if not value or value.startswith("/"):
+        return True
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    if value in {"localhost", compose_hostname}:
+        return True
+    try:
+        return ipaddress.ip_address(value.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_database_transport(database, values):
+    if str(values.get("DJANGO_SERVER") or "").strip().lower() != "prod":
+        return database
+
+    options = database.get("OPTIONS") or {}
+    # libpq accepts alternate routing through URL options, service files, and
+    # PG* environment defaults. Include every route that could bypass DB_HOST.
+    primary_host = (
+        database.get("HOST")
+        or options.get("host")
+        or values.get("PGHOST")
+        or ""
+    )
+    hostaddr = options.get("hostaddr") or values.get("PGHOSTADDR") or ""
+    service_routing = any(
+        str(candidate or "").strip()
+        for candidate in (
+            options.get("service"),
+            options.get("servicefile"),
+            values.get("PGSERVICE"),
+            values.get("PGSERVICEFILE"),
+        )
+    )
+    local_route = (
+        not service_routing
+        and _is_local_transport_host(primary_host, "db")
+        and (not hostaddr or _is_local_transport_host(hostaddr, "db"))
+    )
+    if local_route:
+        return database
+
+    sslmode = str(options.get("sslmode") or "").strip().lower()
+    sslrootcert = str(options.get("sslrootcert") or "").strip()
+    if sslmode != "verify-full" or not sslrootcert:
+        raise ImproperlyConfigured(
+            "External PostgreSQL requires sslmode=verify-full and a configured "
+            "sslrootcert (DATABASE_URL query options or DB_SSLMODE/DB_SSLROOTCERT)."
+        )
+    return database
 
 
 def _database_config():
@@ -218,8 +411,10 @@ def _database_config():
         if config.get("DB_SSLMODE"):
             # An explicit DB_SSLMODE is useful when a platform URL omits its TLS mode.
             options["sslmode"] = config["DB_SSLMODE"]
+        if config.get("DB_SSLROOTCERT"):
+            options["sslrootcert"] = config["DB_SSLROOTCERT"]
 
-        return {
+        database = {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": unquote(parsed.path.lstrip("/")),
             "USER": unquote(parsed.username or ""),
@@ -228,20 +423,41 @@ def _database_config():
             "PORT": str(parsed.port or 5432),
             "OPTIONS": options,
         }
+        return _validate_database_transport(database, config)
+
+    database_name = str(config.get("DB_NAME") or "")
+    stock_identity_generation = str(
+        config.get("BACKUPSHEEP_DATABASE_IDENTITY_GENERATION") or ""
+    )
+    if stock_identity_generation in {
+        "3",
+        "3-pending-fresh",
+        "3-pending-upgrade",
+    }:
+        if (
+            re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", database_name) is None
+            or database_name in {"postgres", "template0", "template1"}
+        ):
+            raise ImproperlyConfigured(
+                "DB_NAME must be a non-system lowercase PostgreSQL database identifier."
+            )
 
     options = {}
     if config.get("DB_SSLMODE"):
         options["sslmode"] = config["DB_SSLMODE"]
+    if config.get("DB_SSLROOTCERT"):
+        options["sslrootcert"] = config["DB_SSLROOTCERT"]
 
-    return {
+    database = {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": config["DB_NAME"],
+        "NAME": database_name,
         "USER": config["DB_USER"],
         "PASSWORD": config["DB_PASSWORD"],
         "HOST": config["DB_HOST"],
         "PORT": config["DB_PORT"],
         "OPTIONS": options,
     }
+    return _validate_database_transport(database, config)
 
 
 DATABASES = {"default": _database_config()}
@@ -312,24 +528,236 @@ APP_DOMAIN = config["APP_DOMAIN"]
 APP_PROTOCOL = config["APP_PROTOCOL"]
 APP_URL = f"{APP_PROTOCOL}{APP_DOMAIN}"
 
+# Backup artifacts have one explicit wire-policy. Production defaults to BSE1 so
+# a direct/PaaS deployment cannot silently write new plaintext artifacts merely
+# because it omitted this setting. The compatibility mode remains available only
+# as an explicit non-enterprise upgrade choice for historical plaintext objects.
+BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE = str(
+    config.get(
+        "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE",
+        "bse1" if DJANGO_SERVER == "prod" else "legacy-only",
+    )
+).strip().lower()
+if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE not in {"bse1", "legacy-only"}:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE must be bse1 or legacy-only."
+    )
+
+BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE = _strict_bool(
+    "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE",
+    config.get("BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE"),
+    default=False,
+)
+BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE = _strict_bool(
+    "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE",
+    config.get("BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE"),
+    default=BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "legacy-only",
+)
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER = str(
+    config.get(
+        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER",
+        "local-file" if DJANGO_SERVER == "prod" else "local-development",
+    )
+).strip().lower()
+if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER not in {
+    "local-file",
+    "local-development",
+}:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER must be local-file or local-development."
+    )
+
+BACKUPSHEEP_INSTALLATION_ID = str(config.get("BACKUPSHEEP_INSTALLATION_ID", ""))
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION = str(
+    config.get("BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS = str(
+    config.get("BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_CHUNK_SIZE = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE", 4 * 1024 * 1024, 64 * 1024 * 1024
+)
+if BACKUPSHEEP_ARTIFACT_CHUNK_SIZE < 64 * 1024:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE must be at least 65536 bytes."
+    )
+
+BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH = str(
+    config.get("BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY = str(
+    config.get("BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID = str(
+    config.get("BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID", "local-v1")
+).strip()
+
+if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1":
+    if not re.fullmatch(r"[0-9a-f]{64}", BACKUPSHEEP_INSTALLATION_ID):
+        raise ImproperlyConfigured(
+            "BSE1 encryption requires a stable 64-character BACKUPSHEEP_INSTALLATION_ID."
+        )
+    if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "local-file":
+        if (
+            BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY
+            or BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID != "local-v1"
+        ):
+            raise ImproperlyConfigured(
+                "The production local-file provider forbids wrapping keys and key IDs in settings."
+            )
+        if (
+            BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH
+            and not os.path.isabs(BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH)
+        ):
+            raise ImproperlyConfigured(
+                "BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH must be absolute."
+            )
+    else:
+        if DJANGO_SERVER == "prod" or BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE:
+            raise ImproperlyConfigured(
+                "The local artifact key provider is restricted to explicit non-production use."
+            )
+        try:
+            local_wrapping_key = base64.b64decode(
+                BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY,
+                validate=True,
+            )
+        except (ValueError, TypeError) as error:
+            raise ImproperlyConfigured(
+                "BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY must be canonical base64."
+            ) from error
+        if len(local_wrapping_key) != 32 or not BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID:
+            raise ImproperlyConfigured(
+                "The local development artifact provider requires a 32-byte key and key ID."
+            )
+        del local_wrapping_key
+
+if BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE and (
+    BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE != "bse1"
+    or BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "local-file"
+    or BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE
+):
+    raise ImproperlyConfigured(
+        "Enterprise artifact policy requires BSE1, lane-scoped local-file keys, and no legacy restore."
+    )
+
+_artifact_runtime_role = str(os.environ.get("BACKUPSHEEP_RUNTIME_ROLE", ""))
+_artifact_celery_lane = str(os.environ.get("BACKUPSHEEP_CELERY_LANE", ""))
+if (
+    (DJANGO_SERVER == "prod" or BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE)
+    and BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1"
+    and BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "local-file"
+    and not BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION
+):
+    raise ImproperlyConfigured(
+        "Production BSE1 requires an explicit sealed artifact key-provider generation."
+    )
+if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION:
+    if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION not in {"1", "1-pending-empty"}:
+        raise ImproperlyConfigured(
+            "The artifact key-provider generation is unsupported."
+        )
+    if (
+        BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION == "1-pending-empty"
+        and _artifact_runtime_role != "migration"
+    ):
+        raise ImproperlyConfigured(
+            "Artifact key-provider migration is pending and long-lived roles are disabled."
+        )
+    from backupsheep.artifact_crypto import artifact_provider_policy_witness
+
+    _artifact_policy_witness = artifact_provider_policy_witness(
+        BACKUPSHEEP_INSTALLATION_ID,
+        BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_GENERATION,
+    )
+    if not hmac.compare_digest(
+        BACKUPSHEEP_ARTIFACT_KEY_PROVIDER_WITNESS,
+        _artifact_policy_witness,
+    ):
+        raise ImproperlyConfigured(
+            "The artifact key-provider witness does not match this installation."
+        )
+    del _artifact_policy_witness
+
+# Only the database and files source/restore workers may receive a production
+# root-key path. Loading and immediately destroying the keyring here makes bad
+# contents or metadata a startup failure rather than a first-backup surprise.
+if (
+    BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1"
+    and BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "local-file"
+):
+    if _artifact_runtime_role in {"database", "files"}:
+        if _artifact_celery_lane != _artifact_runtime_role:
+            raise ImproperlyConfigured(
+                "A BSE1 source worker requires an explicit matching BACKUPSHEEP_CELERY_LANE."
+            )
+        if not BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH:
+            raise ImproperlyConfigured(
+                "The source worker requires its lane-scoped local-file keyring."
+            )
+        from backupsheep.artifact_crypto.providers import LocalFileKeyProvider
+
+        try:
+            _artifact_provider = LocalFileKeyProvider(
+                BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH,
+                lane=_artifact_runtime_role,
+                installation_id=BACKUPSHEEP_INSTALLATION_ID,
+            )
+        except Exception as error:
+            raise ImproperlyConfigured(
+                "The source worker local-file keyring is invalid."
+            ) from error
+        finally:
+            if "_artifact_provider" in locals():
+                _artifact_provider.destroy()
+                del _artifact_provider
+    elif BACKUPSHEEP_ARTIFACT_LOCAL_FILE_KEYRING_PATH:
+        raise ImproperlyConfigured(
+            "Only database and files workers may receive a local-file keyring path."
+        )
+del _artifact_runtime_role, _artifact_celery_lane
+
+
+def _sentry_sample_rate(name):
+    """Return an explicit, bounded Sentry sampling rate.
+
+    Error events remain available when a DSN is configured, while tracing and
+    profiling are off unless an operator deliberately opts in.  Refusing an
+    invalid value is safer than silently turning on high-volume telemetry.
+    """
+
+    raw_value = config.get(name, 0)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ImproperlyConfigured(f"{name} must be a number between 0 and 1.") from error
+    if not 0 <= value <= 1:
+        raise ImproperlyConfigured(f"{name} must be between 0 and 1.")
+    return value
+
+
+SENTRY_TRACES_SAMPLE_RATE = _sentry_sample_rate("SENTRY_TRACES_SAMPLE_RATE")
+SENTRY_PROFILES_SAMPLE_RATE = _sentry_sample_rate("SENTRY_PROFILES_SAMPLE_RATE")
+
 sentry_sdk.init(
     dsn=config["SENTRY_DSN"],
-    # Set traces_sample_rate to 1.0 to capture 100%
-    # of transactions for performance monitoring.
-    traces_sample_rate=1.0,
-    # Set profiles_sample_rate to 1.0 to profile 100%
-    # of sampled transactions.
-    # We recommend adjusting this value in production.
-    profiles_sample_rate=1.0,
+    traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+    profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+    include_local_variables=False,
+    # sentry-sdk's Python option equivalent to request_bodies="never".
+    max_request_body_size="never",
+    send_default_pii=False,
+    before_send=scrub_sentry_event,
+    before_send_transaction=scrub_sentry_event,
     integrations=[
         DjangoIntegration(
-            transaction_style='url',
+            transaction_style="url",
             middleware_spans=True,
             signals_spans=False,
             cache_spans=False,
         ),
     ],
-    environment=DJANGO_SERVER
+    environment=DJANGO_SERVER,
 )
 
 HOME_URL = "/console"
@@ -350,6 +778,8 @@ ONBOARDING_INSTALL_TOKEN_FILE = os.path.join(BASE_DIR, "_storage", "install_toke
 
 LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/healthz/',
+    r'/.well-known/security.txt',
+    r'/security.txt',
     r'/login',
     r'/reset',
     r'/django-admin/',
@@ -510,13 +940,22 @@ def _resolve_celery_broker_url(values):
     """
     host = str(values.get("RABBITMQ_HOST") or "").strip()
     if host:
+        scheme = str(values.get("RABBITMQ_SCHEME") or "amqp").strip().lower()
+        if scheme not in {"amqp", "amqps"}:
+            raise ImproperlyConfigured(
+                "RABBITMQ_SCHEME must be amqp or amqps."
+            )
         if not (values.get("RABBITMQ_USER") and values.get("RABBITMQ_PASSWORD")):
-            # guest/guest is RabbitMQ's well-known default; fine for the private
-            # Compose network, dangerous for any broker reachable beyond it.
+            if str(values.get("DJANGO_SERVER") or "").strip().lower() == "prod":
+                raise ImproperlyConfigured(
+                    "RABBITMQ_USER and RABBITMQ_PASSWORD are required when "
+                    "RABBITMQ_HOST is configured in production."
+                )
+            # Retain the historical local-development fallback, but never permit
+            # it in production above.
             warnings.warn(
                 "RABBITMQ_HOST is set without RABBITMQ_USER/RABBITMQ_PASSWORD; "
-                "falling back to the well-known guest/guest credentials. Set explicit "
-                "credentials unless this broker is on a trusted private network.",
+                "using guest/guest for non-production development only.",
                 stacklevel=2,
             )
         port = str(values.get("RABBITMQ_PORT") or "5672").strip()
@@ -525,26 +964,94 @@ def _resolve_celery_broker_url(values):
         vhost = str(values.get("RABBITMQ_VHOST") or "/").strip().strip("/")
         vhost_path = quote(vhost, safe="")
         if vhost_path:
-            return f"amqp://{user}:{password}@{host}:{port}/{vhost_path}"
-        return f"amqp://{user}:{password}@{host}:{port}//"
+            broker_url = f"{scheme}://{user}:{password}@{host}:{port}/{vhost_path}"
+        else:
+            broker_url = f"{scheme}://{user}:{password}@{host}:{port}//"
+        return _validate_broker_transport(broker_url, values)
 
-    # The Heroku template provisions CloudAMQP's RabbitMQ plan, which exposes its
-    # canonical AMQP URL as CLOUDAMQP_URL. Prefer it over the Compose fallback from
-    # .env_sample, while still allowing an explicitly supplied RabbitMQ URL elsewhere.
+    # Some managed RabbitMQ services expose their canonical URL as CLOUDAMQP_URL.
+    # Prefer it over the Compose fallback from .env_sample while still allowing an
+    # explicitly supplied RabbitMQ URL elsewhere.
     broker_url = str(
         values.get("CLOUDAMQP_URL")
         or values.get("CELERY_BROKER_URL")
         or DEFAULT_CELERY_BROKER_URL
     )
+    if (
+        str(values.get("DJANGO_SERVER") or "").strip().lower() == "prod"
+        and broker_url == DEFAULT_CELERY_BROKER_URL
+    ):
+        raise ImproperlyConfigured(
+            "A non-default RabbitMQ broker URL or explicit RabbitMQ credentials "
+            "are required in production."
+        )
     if urlparse(broker_url).scheme not in {"amqp", "amqps"}:
         raise ValueError("RabbitMQ broker URLs must use the amqp:// or amqps:// scheme.")
+    return _validate_broker_transport(broker_url, values)
+
+
+def _validate_broker_transport(broker_url, values):
+    query_keys = {
+        key.strip().lower()
+        for key, _value in parse_qsl(urlparse(broker_url).query, keep_blank_values=True)
+    }
+    if any(
+        key.startswith("ssl_")
+        or key in {"cert_reqs", "check_hostname", "server_hostname"}
+        for key in query_keys
+    ):
+        raise ImproperlyConfigured(
+            "RabbitMQ TLS options are not accepted in the broker URL. Use "
+            "RABBITMQ_CA_CERT; certificate and hostname verification cannot be "
+            "overridden."
+        )
+    parsed = urlparse(broker_url)
+    if parsed.scheme == "amqps" and not parsed.hostname:
+        raise ImproperlyConfigured(
+            "amqps:// RabbitMQ URLs require an explicit hostname for certificate "
+            "verification."
+        )
+    if str(values.get("DJANGO_SERVER") or "").strip().lower() != "prod":
+        return broker_url
+    if ";" in broker_url:
+        raise ImproperlyConfigured(
+            "Production RabbitMQ configuration accepts one verified broker URL; "
+            "semicolon failover URLs could cross transport trust boundaries."
+        )
+    if _is_local_transport_host(parsed.hostname, "rabbitmq"):
+        return broker_url
+    if parsed.scheme != "amqps":
+        raise ImproperlyConfigured(
+            "External RabbitMQ requires amqps:// with certificate and hostname "
+            "verification. Plain amqp:// is limited to loopback or the stock "
+            "rabbitmq Compose service."
+        )
     return broker_url
 
 
+def _broker_ssl_options(broker_url, values):
+    parsed = urlparse(broker_url)
+    if parsed.scheme != "amqps":
+        return False
+    options = {
+        "cert_reqs": ssl.CERT_REQUIRED,
+        # py-amqp uses this for both SNI and certificate hostname matching.
+        "server_hostname": parsed.hostname,
+    }
+    ca_cert = str(values.get("RABBITMQ_CA_CERT") or "").strip()
+    if ca_cert:
+        options["ca_certs"] = ca_cert
+    return options
+
+
 CELERY_BROKER_URL = _resolve_celery_broker_url(config)
+CELERY_BROKER_USE_SSL = _broker_ssl_options(CELERY_BROKER_URL, config)
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE
+# No production caller consumes Celery result rows, and chords have been removed.
+# Keeping results would give every worker a shared cross-lane data/tamper surface.
+CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_TRACK_STARTED = True
 # Backup tasks perform remote side effects. A worker must acknowledge them only after
 # the task has committed its provider id/status, otherwise a worker crash can lose the
@@ -562,16 +1069,57 @@ CELERY_BROKER_CONNECTION_RETRY = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BROKER_CONNECTION_MAX_RETRIES = None
 CELERY_BROKER_HEARTBEAT = 60
+# Require RabbitMQ to confirm each persistent publication.  A confirmation can
+# still be lost after broker acceptance, so the database outbox republishes the
+# same task id and relies on worker-side idempotency/fencing.
+CELERY_BROKER_TRANSPORT_OPTIONS = {"confirm_publish": True}
+CELERY_TASK_PUBLISH_RETRY = True
+CELERY_TASK_PUBLISH_RETRY_POLICY = {
+    "max_retries": 3,
+    "interval_start": 0,
+    "interval_step": 1,
+    "interval_max": 3,
+}
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+CELERY_TASK_PROTOCOL = 2
+# Stock RabbitMQ declares this fixed topology from a root-owned definitions file.
+# Producers and consumers set ``no_declare`` so their AMQP users need no configure
+# permission and cannot create, delete, or rebind another lane's queue.
+_BACKUPSHEEP_CELERY_QUEUES = ("default", "cloud", "database", "files", "storage", "logs")
+CELERY_TASK_QUEUES = tuple(
+    Queue(
+        queue_name,
+        exchange=Exchange(
+            f"backupsheep.{queue_name}",
+            type="direct",
+            durable=True,
+            auto_delete=False,
+            no_declare=True,
+        ),
+        routing_key=queue_name,
+        durable=True,
+        auto_delete=False,
+        no_declare=True,
+    )
+    for queue_name in _BACKUPSHEEP_CELERY_QUEUES
+)
+CELERY_TASK_CREATE_MISSING_QUEUES = False
+CELERY_TASK_DEFAULT_EXCHANGE = "backupsheep.default"
+CELERY_TASK_DEFAULT_EXCHANGE_TYPE = "direct"
+CELERY_TASK_DEFAULT_ROUTING_KEY = "default"
+# Remote-control pidbox, gossip, and mingle create shared broker resources that defeat
+# queue configure isolation. Compose also passes the explicit CLI disable switches.
+CELERY_WORKER_ENABLE_REMOTE_CONTROL = False
 # Task modules the worker must import at boot so every task is registered. These
 # do not live in the conventional "<app>/tasks.py" location, so Celery's app
-# autodiscovery does not find them; backups are dispatched by name via
-# send_task()/chord(), which fails on an unregistered task unless listed here.
+# autodiscovery does not find them; some tasks are dispatched by registered name,
+# which fails on an unregistered task unless listed here.
 CELERY_IMPORTS = (
     "apps._tasks.helper.tasks",
     "apps._tasks.helper.maintenance",
+    "apps._tasks.managed_ssh",
     "apps._tasks.integration.aws",
     "apps._tasks.integration.aws_rds",
     "apps._tasks.integration.basecamp",
@@ -590,16 +1138,34 @@ CELERY_IMPORTS = (
     "apps._tasks.integration.vultr",
     "apps._tasks.integration.vultr_database",
     "apps._tasks.integration.website",
-    "apps._tasks.integration.wordpress",
     "apps._tasks.integration.storage.tasks",
 )
-# Local scheduled backups are driven by django-celery-beat's database scheduler
-# (replaces the SaaS AWS EventBridge Scheduler).
-CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# Local scheduled backups are driven by BackupSheep's django-celery-beat database
+# scheduler (replaces the SaaS AWS EventBridge Scheduler). The custom scheduler
+# commits each occurrence and its outbox before broker publication.
+CELERY_BEAT_SCHEDULER = "backupsheep.scheduler:BackupDatabaseScheduler"
 
-# Backup run logs are kept on the container's local _storage volume (never uploaded to
-# any external bucket) and pruned by the delete_old_logs task after this many days.
+# Backup run logs are kept in each source lane's private _storage volume (never
+# uploaded to any external bucket) and pruned by the matching lane-owned task after
+# this many days.
 LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
+
+# Notification providers are contacted only after a short database lease has
+# committed. Failed delivery retries use bounded exponential backoff, while the
+# periodic recovery sweep republishes only opaque outbox row IDs after broker or
+# worker loss.
+NOTIFICATION_DELIVERY_LEASE_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_LEASE_SECONDS", 120)
+)
+NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS", 30)
+)
+NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS", 60 * 60)
+)
+NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE = int(
+    config.get("NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE", 100)
+)
 
 # A periodic recovery sweep catches tasks that were lost before late-ack redelivery
 # (for example during broker/server maintenance) and stale ETA poll messages. The
@@ -609,7 +1175,179 @@ BACKUP_RECOVERY_STALE_SECONDS = int(
     config.get("BACKUP_RECOVERY_STALE_SECONDS", 15 * 60)
 )
 BACKUP_RECOVERY_BATCH_SIZE = int(config.get("BACKUP_RECOVERY_BATCH_SIZE", 100))
+BACKUP_REQUEST_RETRY_SECONDS = int(
+    config.get("BACKUP_REQUEST_RETRY_SECONDS", 60)
+)
+BACKUP_REQUEST_RETRY_MAX_SECONDS = int(
+    config.get("BACKUP_REQUEST_RETRY_MAX_SECONDS", 15 * 60)
+)
+BACKUP_REQUEST_CLAIM_TIMEOUT_SECONDS = int(
+    config.get("BACKUP_REQUEST_CLAIM_TIMEOUT_SECONDS", 5 * 60)
+)
+BACKUP_REQUEST_CLAIM_TIMEOUT_MAX_SECONDS = int(
+    config.get("BACKUP_REQUEST_CLAIM_TIMEOUT_MAX_SECONDS", 60 * 60)
+)
+BACKUP_REQUEST_DISPATCH_LEASE_SECONDS = int(
+    config.get("BACKUP_REQUEST_DISPATCH_LEASE_SECONDS", 60)
+)
+BACKUP_REQUEST_RECOVERY_BATCH_SIZE = int(
+    config.get("BACKUP_REQUEST_RECOVERY_BATCH_SIZE", 100)
+)
 BACKUP_POLL_INTERVAL = int(config.get("BACKUP_POLL_INTERVAL", 120))
+# Short, renewable leases protect long-running local dumps and upload publication.
+# A worker heartbeat extends the lease; after a hard crash, recovery can safely take
+# over within minutes rather than waiting for the command's multi-hour timeout.
+BACKUP_WORKER_LEASE_SECONDS = int(
+    config.get("BACKUP_WORKER_LEASE_SECONDS", 180)
+)
+BACKUP_WORKER_HEARTBEAT_SECONDS = int(
+    config.get("BACKUP_WORKER_HEARTBEAT_SECONDS", 30)
+)
+BACKUP_DELETE_LEASE_SECONDS = int(
+    config.get("BACKUP_DELETE_LEASE_SECONDS", 300)
+)
+BACKUP_STORAGE_LEASE_SECONDS = int(
+    config.get("BACKUP_STORAGE_LEASE_SECONDS", 180)
+)
+BACKUP_STORAGE_HEARTBEAT_SECONDS = int(
+    config.get("BACKUP_STORAGE_HEARTBEAT_SECONDS", 30)
+)
+# Storage-point deletion claims are committed before provider I/O. Keep this
+# comfortably above every bounded storage-provider timeout; it is separate from
+# cloud snapshot deletion's shorter BACKUP_DELETE_LEASE_SECONDS setting.
+STORAGE_POINT_DELETE_LEASE_SECONDS = int(
+    config.get("STORAGE_POINT_DELETE_LEASE_SECONDS", 3600)
+)
+RESTORE_WORKER_LEASE_SECONDS = int(
+    config.get("RESTORE_WORKER_LEASE_SECONDS", 180)
+)
+RESTORE_WORKER_HEARTBEAT_SECONDS = int(
+    config.get("RESTORE_WORKER_HEARTBEAT_SECONDS", 30)
+)
+RESTORE_RECOVERY_STALE_SECONDS = int(
+    config.get("RESTORE_RECOVERY_STALE_SECONDS", 5 * 60)
+)
+RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS = int(
+    config.get("RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS", 120)
+)
+RESTORE_RECOVERY_BATCH_SIZE = int(config.get("RESTORE_RECOVERY_BATCH_SIZE", 100))
+
+# Live acceptance testing can pause one exact AWS Backup restore immediately
+# after AWS returns a RestoreJobId and before BackupSheep persists that pointer.
+# The switch is deliberately disabled by default and requires every selector so
+# it can never become a broad production fault injection mechanism.
+AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED = _as_bool(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED", "false")
+)
+AWS_RESTORE_ACCEPTANCE_FAULT_MODE = str(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_MODE", "") or ""
+).strip().lower()
+AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID = str(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID", "") or ""
+).strip()
+AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID = str(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID", "") or ""
+).strip().lower()
+AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE = str(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE", "") or ""
+).strip().lower()
+try:
+    AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS = min(
+        600,
+        max(
+            1,
+            int(config.get("AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS", 30)),
+        ),
+    )
+except (TypeError, ValueError):
+    raise ImproperlyConfigured(
+        "AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS must be an integer."
+    ) from None
+if AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED:
+    if (
+        AWS_RESTORE_ACCEPTANCE_FAULT_MODE not in {"drop_response", "hold"}
+        or not AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID.isdigit()
+        or int(AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID) < 1
+        or AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE not in {"s3", "dynamodb"}
+        or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID,
+        )
+    ):
+        raise ImproperlyConfigured(
+            "AWS restore acceptance fault injection requires an exact mode, "
+            "positive restore id, UUID correlation id, and s3/dynamodb resource type."
+        )
+
+# Oracle native compute/volume acceptance hooks are disabled by default. When
+# enabled, every selector is mandatory: a stable provider marker, one exact
+# database row, the exact Celery task id, and a concrete resource type. This
+# keeps an isolated-worker crash test from becoming a broad production fault
+# injector by configuration drift.
+_ORACLE_FAULT_MARKER_RE = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
+_ORACLE_FAULT_TASK_RE = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"
+
+for _oracle_fault_prefix, _oracle_fault_resource_types in (
+    (
+        "ORACLE_BACKUP_ACCEPTANCE_FAULT",
+        {"compute_image", "boot_volume", "volume"},
+    ),
+    (
+        "ORACLE_RESTORE_ACCEPTANCE_FAULT",
+        {"instance", "boot_volume", "volume"},
+    ),
+):
+    globals()[f"{_oracle_fault_prefix}_ENABLED"] = _as_bool(
+        config.get(f"{_oracle_fault_prefix}_ENABLED", "false")
+    )
+    globals()[f"{_oracle_fault_prefix}_MODE"] = str(
+        config.get(f"{_oracle_fault_prefix}_MODE", "") or ""
+    ).strip().lower()
+    globals()[f"{_oracle_fault_prefix}_MARKER"] = str(
+        config.get(f"{_oracle_fault_prefix}_MARKER", "") or ""
+    ).strip()
+    globals()[f"{_oracle_fault_prefix}_ROW_ID"] = str(
+        config.get(f"{_oracle_fault_prefix}_ROW_ID", "") or ""
+    ).strip()
+    globals()[f"{_oracle_fault_prefix}_TASK_ID"] = str(
+        config.get(f"{_oracle_fault_prefix}_TASK_ID", "") or ""
+    ).strip()
+    globals()[f"{_oracle_fault_prefix}_RESOURCE_TYPE"] = str(
+        config.get(f"{_oracle_fault_prefix}_RESOURCE_TYPE", "") or ""
+    ).strip().lower()
+    try:
+        _oracle_hold_seconds = int(
+            config.get(f"{_oracle_fault_prefix}_HOLD_SECONDS", 30)
+        )
+    except (TypeError, ValueError):
+        raise ImproperlyConfigured(
+            f"{_oracle_fault_prefix}_HOLD_SECONDS must be an integer."
+        ) from None
+    if not 1 <= _oracle_hold_seconds <= 600:
+        raise ImproperlyConfigured(
+            f"{_oracle_fault_prefix}_HOLD_SECONDS must be between 1 and 600."
+        )
+    globals()[f"{_oracle_fault_prefix}_HOLD_SECONDS"] = _oracle_hold_seconds
+    if globals()[f"{_oracle_fault_prefix}_ENABLED"]:
+        if (
+            globals()[f"{_oracle_fault_prefix}_MODE"] not in {"drop_response", "hold"}
+            or not re.fullmatch(
+                _ORACLE_FAULT_MARKER_RE,
+                globals()[f"{_oracle_fault_prefix}_MARKER"],
+            )
+            or not globals()[f"{_oracle_fault_prefix}_ROW_ID"].isdigit()
+            or int(globals()[f"{_oracle_fault_prefix}_ROW_ID"]) < 1
+            or not re.fullmatch(
+                _ORACLE_FAULT_TASK_RE,
+                globals()[f"{_oracle_fault_prefix}_TASK_ID"],
+            )
+            or globals()[f"{_oracle_fault_prefix}_RESOURCE_TYPE"]
+            not in _oracle_fault_resource_types
+        ):
+            raise ImproperlyConfigured(
+                f"{_oracle_fault_prefix} requires an exact mode, marker, positive row id, "
+                "task id, and supported resource type."
+            )
 # Lease the provider-create phase separately from polling. This closes the race in
 # which a duplicate delivery or recovery sweep enters the same create call while the
 # first worker is still waiting on the provider API.
@@ -617,25 +1355,201 @@ BACKUP_CREATE_LEASE_SECONDS = int(
     config.get("BACKUP_CREATE_LEASE_SECONDS", 60 * 60)
 )
 # A storage upload can legitimately run much longer than the general recovery
-# interval. Keep a separate claimant lease so a duplicate chord does not take over
-# a healthy long-running upload and invoke the finalizer too early.
+# interval. Keep a separate claimant lease so a duplicate delivery does not take
+# over a healthy long-running upload and invoke the finalizer too early.
 BACKUP_STORAGE_STALE_SECONDS = int(
     config.get("BACKUP_STORAGE_STALE_SECONDS", 6 * 60 * 60)
 )
 
-# Lifetime (seconds) of presigned download URLs generated for backup archives. 24h by
-# default; lower it for immutable/compliance destinations where long-lived URLs weaken
-# the protection story.
-S3_DOWNLOAD_URL_EXPIRES = int(config.get("S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))
+# Lifetime (seconds) of provider-signed archive download URLs. Five minutes is the
+# secure default and one hour is the hard configuration ceiling.
+S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
+    "S3_DOWNLOAD_URL_EXPIRES",
+    5 * 60,
+    60 * 60,
+)
 
-# Paramiko and the system SSH client both require a verified host key for SSH/SFTP
-# backup sources.  Keep the file under the persistent _storage volume by default so
-# operators can mount a reviewed known_hosts file into the worker containers.
+# Basecamp has no enterprise BSE1 plaintext-export/restore path. Its feature switch
+# is a compatibility opt-in only; the shared recovery capability gate additionally
+# requires non-enterprise legacy-only artifacts with legacy download enabled.
+BASECAMP_INTEGRATION_ENABLED = _strict_bool(
+    "BASECAMP_INTEGRATION_ENABLED",
+    config.get("BASECAMP_INTEGRATION_ENABLED"),
+    default=False,
+)
+
+# Plain FTP sends credentials and backup contents without transport encryption.
+# Keep it unavailable unless an operator accepts that risk explicitly for a legacy
+# endpoint. FTPS and SFTP remain enabled without this compatibility escape hatch.
+ALLOW_INSECURE_FTP = _as_bool(
+    config.get("ALLOW_INSECURE_FTP"),
+    default=False,
+)
+
+# Compatibility path for non-Compose development callers. Stock Compose uses the
+# account-scoped approval ledger and transient per-operation known_hosts files; it
+# must not mount a shared writable trust store.
 SSH_KNOWN_HOSTS_PATH = os.path.expanduser(
     str(config.get("SSH_KNOWN_HOSTS_PATH", os.path.join(BASE_DIR, "_storage", "ssh_known_hosts")))
 )
 if not os.path.isabs(SSH_KNOWN_HOSTS_PATH):
     SSH_KNOWN_HOSTS_PATH = os.path.join(BASE_DIR, SSH_KNOWN_HOSTS_PATH)
+
+SSH_CONNECT_TIMEOUT = int(config.get("SSH_CONNECT_TIMEOUT", 15))
+SSH_BANNER_TIMEOUT = int(config.get("SSH_BANNER_TIMEOUT", 15))
+SSH_AUTH_TIMEOUT = int(config.get("SSH_AUTH_TIMEOUT", 15))
+SSH_KEEPALIVE_SECONDS = int(config.get("SSH_KEEPALIVE_SECONDS", 30))
+DATABASE_CONNECT_TIMEOUT = int(config.get("DATABASE_CONNECT_TIMEOUT", 15))
+DATABASE_STATEMENT_TIMEOUT_MS = int(
+    config.get("DATABASE_STATEMENT_TIMEOUT_MS", 15000)
+)
+DATABASE_LOCK_TIMEOUT_MS = int(config.get("DATABASE_LOCK_TIMEOUT_MS", 5000))
+DATABASE_COMMAND_TIMEOUT = int(config.get("DATABASE_COMMAND_TIMEOUT", 23 * 3600))
+DATABASE_VALIDATION_COMMAND_TIMEOUT = int(
+    config.get("DATABASE_VALIDATION_COMMAND_TIMEOUT", 30)
+)
+SSH_IO_TIMEOUT = _bounded_positive_int("SSH_IO_TIMEOUT", 30, 120)
+SSH_DISCOVERY_TIMEOUT_SECONDS = _bounded_positive_int(
+    "SSH_DISCOVERY_TIMEOUT_SECONDS", 60, 180
+)
+SSH_DISCOVERY_MAX_ENTRIES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_ENTRIES", 10_000, 100_000
+)
+SSH_DISCOVERY_MAX_NAME_BYTES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_NAME_BYTES", 4_096, 16_384
+)
+SSH_DISCOVERY_MAX_RESULT_BYTES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_RESULT_BYTES", 2 * 1024 * 1024, 4 * 1024 * 1024
+)
+SSH_REMOTE_COMMAND_MAX_BYTES = _bounded_positive_int(
+    "SSH_REMOTE_COMMAND_MAX_BYTES", 2 * 1024 * 1024, 4 * 1024 * 1024
+)
+SSH_REMOTE_CREDENTIAL_STALE_SECONDS = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_STALE_SECONDS", 900, 86_400
+)
+SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES", 10_000, 100_000
+)
+SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS", 10, 60
+)
+MANAGED_SSH_OPERATION_TTL_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_OPERATION_TTL_SECONDS", 600, 1_800
+)
+MANAGED_SSH_OPERATION_LEASE_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_OPERATION_LEASE_SECONDS", 300, 900
+)
+MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS", 240, 840
+)
+MANAGED_SSH_TASK_TIME_LIMIT_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_TASK_TIME_LIMIT_SECONDS", 270, 870
+)
+if not (
+    MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS
+    < MANAGED_SSH_TASK_TIME_LIMIT_SECONDS
+    < MANAGED_SSH_OPERATION_LEASE_SECONDS
+    < MANAGED_SSH_OPERATION_TTL_SECONDS
+):
+    raise ImproperlyConfigured(
+        "Managed SSH limits must satisfy soft time limit < hard time limit < "
+        "lease < operation TTL."
+    )
+if SSH_DISCOVERY_TIMEOUT_SECONDS >= MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS:
+    raise ImproperlyConfigured(
+        "SSH_DISCOVERY_TIMEOUT_SECONDS must be below the managed SSH soft time limit."
+    )
+SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS = int(
+    config.get("SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS", 12 * 3600)
+)
+PROVIDER_HTTP_CONNECT_TIMEOUT = float(
+    config.get("PROVIDER_HTTP_CONNECT_TIMEOUT", 10)
+)
+PROVIDER_HTTP_READ_TIMEOUT = float(config.get("PROVIDER_HTTP_READ_TIMEOUT", 60))
+PROVIDER_HTTP_MAX_TIMEOUT = float(config.get("PROVIDER_HTTP_MAX_TIMEOUT", 300))
+PROVIDER_HTTP_MAX_RETRIES = int(config.get("PROVIDER_HTTP_MAX_RETRIES", 4))
+PROVIDER_HTTP_MAX_POOL_CONNECTIONS = int(
+    config.get("PROVIDER_HTTP_MAX_POOL_CONNECTIONS", 50)
+)
+PROVIDER_HTTP_BACKOFF_FACTOR = float(
+    config.get("PROVIDER_HTTP_BACKOFF_FACTOR", 0.5)
+)
+S3_MULTIPART_THRESHOLD_BYTES = int(
+    config.get("S3_MULTIPART_THRESHOLD_BYTES", 8 * 1024 * 1024)
+)
+S3_MULTIPART_PART_SIZE_BYTES = int(
+    config.get("S3_MULTIPART_PART_SIZE_BYTES", 8 * 1024 * 1024)
+)
+S3_MULTIPART_TARGET_PARTS = int(config.get("S3_MULTIPART_TARGET_PARTS", 8000))
+S3_MULTIPART_CHECKPOINT_PARTS = int(
+    config.get("S3_MULTIPART_CHECKPOINT_PARTS", 16)
+)
+S3_MULTIPART_HASH_CHUNK_BYTES = int(
+    config.get("S3_MULTIPART_HASH_CHUNK_BYTES", 1024 * 1024)
+)
+S3_MULTIPART_NO_PROGRESS_SECONDS = int(
+    config.get("S3_MULTIPART_NO_PROGRESS_SECONDS", 3600)
+)
+S3_MULTIPART_NO_PROGRESS_RETRY_AFTER_SECONDS = int(
+    config.get("S3_MULTIPART_NO_PROGRESS_RETRY_AFTER_SECONDS", 300)
+)
+S3_MULTIPART_CLEANUP_RETRY_AFTER_SECONDS = int(
+    config.get("S3_MULTIPART_CLEANUP_RETRY_AFTER_SECONDS", 300)
+)
+S3_MULTIPART_CLEANUP_STALE_SECONDS = int(
+    config.get("S3_MULTIPART_CLEANUP_STALE_SECONDS", 6 * 3600)
+)
+S3_MULTIPART_CLEANUP_BATCH_SIZE = int(
+    config.get("S3_MULTIPART_CLEANUP_BATCH_SIZE", 50)
+)
+S3_MULTIPART_CLEANUP_SCAN_LIMIT = int(
+    config.get("S3_MULTIPART_CLEANUP_SCAN_LIMIT", 1000)
+)
+DROPBOX_UPLOAD_CHUNK_SIZE_BYTES = int(
+    config.get("DROPBOX_UPLOAD_CHUNK_SIZE_BYTES", 8 * 1024 * 1024)
+)
+RESTORE_MAX_ARCHIVE_MEMBERS = int(
+    config.get("RESTORE_MAX_ARCHIVE_MEMBERS", 2_100_000)
+)
+RESTORE_MAX_UNCOMPRESSED_BYTES = int(
+    config.get("RESTORE_MAX_UNCOMPRESSED_BYTES", 2 * 1024 ** 4)
+)
+RESTORE_MAX_COMPRESSION_RATIO = int(
+    config.get("RESTORE_MAX_COMPRESSION_RATIO", 1000)
+)
+RESTORE_DISK_RESERVE_BYTES = int(
+    config.get("RESTORE_DISK_RESERVE_BYTES", 512 * 1024 ** 2)
+)
+# Detailed per-file restore checkpoints remain useful for small sites. Larger
+# trees persist a fixed-size, disk-spooled manifest aggregate instead.
+WEBSITE_RESTORE_INLINE_FILE_LIMIT = config.get(
+    "WEBSITE_RESTORE_INLINE_FILE_LIMIT", 1_000
+)
+
+# Managed-key authentication is optional. Stock Compose exposes two distinct public
+# identities and stages exactly one private half into each source worker's tmpfs.
+# The generic private path is runtime-only and must never point into a shared volume.
+SSH_MANAGED_PRIVATE_KEY_PATH = os.path.expanduser(
+    str(config.get("SSH_MANAGED_PRIVATE_KEY_PATH", ""))
+)
+if SSH_MANAGED_PRIVATE_KEY_PATH and not os.path.isabs(SSH_MANAGED_PRIVATE_KEY_PATH):
+    SSH_MANAGED_PRIVATE_KEY_PATH = os.path.join(
+        BASE_DIR, SSH_MANAGED_PRIVATE_KEY_PATH
+    )
+SSH_MANAGED_PUBLIC_KEY = str(config.get("SSH_MANAGED_PUBLIC_KEY", "")).strip()
+SSH_MANAGED_DATABASE_PUBLIC_KEY = str(
+    config.get("SSH_MANAGED_DATABASE_PUBLIC_KEY", "")
+).strip()
+SSH_MANAGED_FILES_PUBLIC_KEY = str(
+    config.get("SSH_MANAGED_FILES_PUBLIC_KEY", "")
+).strip()
+SSH_MANAGED_LANE_ISOLATION_REQUIRED = _strict_bool(
+    "SSH_MANAGED_LANE_ISOLATION_REQUIRED",
+    config.get("SSH_MANAGED_LANE_ISOLATION_REQUIRED"),
+    default=False,
+)
+# Compatibility for older deployments and code paths.
+SSH_KEY_PATH = SSH_MANAGED_PRIVATE_KEY_PATH
 
 # Periodic maintenance fired by Celery beat. The DatabaseScheduler syncs these entries
 # into django-celery-beat's PeriodicTask table on startup.
@@ -644,7 +1558,15 @@ from celery.schedules import crontab
 CELERY_BEAT_SCHEDULE = {
     "delete-old-logs": {
         "task": "delete_old_logs",
-        "schedule": crontab(minute=0, hour=3),  # daily at 03:00 (worker timezone)
+        "schedule": crontab(minute=0, hour=3),  # files lane, daily at 03:00
+    },
+    "delete-old-database-run-logs": {
+        "task": "delete_old_database_logs",
+        "schedule": crontab(minute=5, hour=3),  # database lane, daily at 03:05
+    },
+    "delete-old-storage-run-logs": {
+        "task": "delete_old_storage_logs",
+        "schedule": crontab(minute=10, hour=3),  # storage lane, daily at 03:10
     },
     # Prune old CoreLog rows from the database (see delete_old_db_logs task).
     "delete-old-db-logs": {
@@ -657,12 +1579,66 @@ CELERY_BEAT_SCHEDULE = {
         "task": "retry_protected_storage_deletes",
         "schedule": crontab(minute=15, hour="*/6"),  # every 6 hours
     },
+    # Application-owned multipart cleanup is exact-key and witness-gated. Provider
+    # lifecycle expiry remains defense in depth, not the correctness mechanism.
+    "sweep-owned-multipart-cleanup": {
+        "task": "storage_sweep_owned_multipart_cleanup",
+        "schedule": crontab(minute=45, hour="*/6"),
+    },
     # Resume backup rows whose task/poller disappeared without changing them to a
     # terminal state. This is deliberately frequent; the database lease in
     # poll_cloud_backup prevents duplicate pollers while a healthy poll is queued,
     # and the poll ETA lets the scheduled successor claim the next check.
     "resume-in-progress-backups": {
         "task": "resume_in_progress_backups",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-database-backups": {
+        "task": "resume_in_progress_database_backups",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-files-backups": {
+        "task": "resume_in_progress_files_backups",
+        "schedule": 60.0,
+    },
+    # API-triggered Oracle snapshot deletes enqueue immediately. This independent
+    # sweep re-publishes DELETE_IN_PROGRESS rows after broker loss, worker crash,
+    # or a server reboot; the provider adapter keeps the exact delete checkpoint.
+    "reconcile-oracle-backup-deletions": {
+        "task": "reconcile_oracle_backup_deletions",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-restores": {
+        "task": "resume_in_progress_restores",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-database-restores": {
+        "task": "resume_in_progress_database_restores",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-files-restores": {
+        "task": "resume_in_progress_files_restores",
+        "schedule": 60.0,
+    },
+    "resume-pending-backup-requests": {
+        "task": "resume_pending_backup_requests",
+        "schedule": 60.0,
+    },
+    # Destination credentials belong only to the storage lane. This sweep repairs
+    # both source-to-storage and storage-to-source publication gaps from the durable
+    # per-backup destination authorization witnesses.
+    "resume-pending-backup-destination-validations": {
+        "task": "resume_pending_backup_destination_validations",
+        "schedule": 60.0,
+    },
+    # Managed SSH API rows expire after five minutes. Each owning source lane
+    # repairs a lost publication and expires/retains only its own durable rows.
+    "maintain-managed-ssh-database-operations": {
+        "task": "maintain_managed_ssh_database_operations",
+        "schedule": 60.0,
+    },
+    "maintain-managed-ssh-files-operations": {
+        "task": "maintain_managed_ssh_files_operations",
         "schedule": 60.0,
     },
     # Bucket replication uses durable run/object leases and can resume after a
@@ -679,71 +1655,77 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_lightsail_bucket_restores",
         "schedule": 60.0,
     },
+    # Local Storage validation/deletion requests are durable database states.
+    # These sweeps recover a broker publish lost after an API transaction commits;
+    # only worker-storage receives the tasks or a writable /backups mount.
+    "validate-pending-local-storages": {
+        "task": "validate_pending_local_storages",
+        "schedule": 60.0,
+    },
+    "resume-requested-storage-deletions": {
+        "task": "resume_requested_storage_deletions",
+        "schedule": 60.0,
+    },
+    "resume-requested-node-deletions": {
+        "task": "resume_requested_node_deletions",
+        "schedule": 60.0,
+    },
+    "resume-requested-local-node-deletions": {
+        "task": "resume_requested_local_node_deletions",
+        "schedule": 60.0,
+    },
+    # Recover outbox publications lost after commit and processing leases left by
+    # a crashed logs worker. Provider delivery is at-least-once across the narrow
+    # crash-after-send/before-SENT window.
+    "recover-notification-deliveries": {
+        "task": "recover_notification_deliveries",
+        "schedule": 60.0,
+    },
+    # A source worker commits the log request before broker publication. The logs
+    # lane expands pending requests into per-channel rows without exposing member
+    # identities or provider credentials to source lanes or RabbitMQ.
+    "recover-notification-fanouts": {
+        "task": "recover_notification_fanouts",
+        "schedule": 60.0,
+    },
+    # Retain terminal replay identities beyond every accepted signed message.
+    # Active/redeliverable rows are never selected by the cleanup task.
+    "cleanup-celery-task-replays": {
+        "task": "cleanup_celery_task_replays",
+        "schedule": crontab(minute=15, hour=4),
+    },
 }
 
 # Task routing across the worker types (see docker-compose.yml):
 #   cloud ..... API-only provider snapshots + general/misc tasks; scales horizontally
 #   database .. database dumps (heavy CPU/disk); isolated so a big dump can't starve
 #               file backups
-#   files ..... website / wordpress / basecamp dumps (heavy CPU/disk); isolated
-#   storage ... uploads each dump to the storage backends + local cleanup; scalable pool
-#               (worker-storage) sharing the _storage volume with the dump workers
-#   logs ...... DB log entries, Slack/Telegram/Firebase notifications, and on-disk
-#               run-log retention (worker-logs)
+#   files ..... website / basecamp dumps (heavy CPU/disk); isolated
+#   storage ... uploads each dump to the storage backends + every local-artifact
+#               mutation/cleanup; scalable pool sharing _storage with dump workers
+#   logs ...... DB log entries and Slack/Telegram notifications; no artifact volume
 #
-# storage_upload/finalize_backup/delete_from_disk go to "storage" so they always run on a
-# worker that can see the files the dump produced. Anything not listed here falls to the
-# default queue, drained by the cloud worker.
+# There is deliberately no catch-all route. The independent manifest defines every
+# production task's queue, publisher lanes, consumer lane, durable-intent resolver,
+# and signed lifetime. Worker and Beat startup compare the imported task registry and
+# this exact route map to the manifest and fail closed on any drift.
 CELERY_TASK_DEFAULT_QUEUE = "default"
-CELERY_TASK_ROUTES = {
-    # Local-disk dumps — isolated per type.
-    "backup_database": {"queue": "database"},
-    "backup_website": {"queue": "files"},
-    "backup_wordpress": {"queue": "files"},
-    "backup_basecamp": {"queue": "files"},
-    # Restores push data back to the source server — same per-type isolation.
-    "restore_website_backup": {"queue": "files"},
-    "restore_database_backup": {"queue": "database"},
-    # Local-disk upload + cleanup — handled by the scalable worker-storage pool.
-    "storage_upload": {"queue": "storage"},
-    "finalize_backup": {"queue": "storage"},
-    "delete_from_disk": {"queue": "storage"},
-    # S3 lifecycle rule application + deferred Object Lock delete retries.
-    "storage_aws_s3_sync_lifecycle": {"queue": "storage"},
-    "retry_protected_storage_deletes": {"queue": "storage"},
-    "sync_lightsail_bucket_replications": {"queue": "storage"},
-    "resume_lightsail_bucket_replications": {"queue": "storage"},
-    "resume_lightsail_bucket_restores": {"queue": "storage"},
-    "start_lightsail_bucket_replication": {"queue": "storage"},
-    "replicate_lightsail_bucket": {"queue": "storage"},
-    "finalize_lightsail_bucket_replication": {"queue": "storage"},
-    "restore_lightsail_bucket_replication": {"queue": "storage"},
-    # Cloud/volume provider snapshots — API-only, no local disk.
-    "backup_digitalocean": {"queue": "cloud"},
-    "backup_hetzner": {"queue": "cloud"},
-    "backup_vultr": {"queue": "cloud"},
-    "backup_vultr_database": {"queue": "cloud"},
-    "poll_vultr_database_backup": {"queue": "cloud"},
-    "restore_vultr_database": {"queue": "cloud"},
-    "poll_vultr_database_restore": {"queue": "cloud"},
-    "backup_aws": {"queue": "cloud"},
-    "backup_aws_rds": {"queue": "cloud"},
-    "backup_lightsail": {"queue": "cloud"},
-    "backup_google_cloud": {"queue": "cloud"},
-    "backup_oracle": {"queue": "cloud"},
-    "backup_upcloud": {"queue": "cloud"},
-    "backup_ovh_ca": {"queue": "cloud"},
-    "backup_ovh_eu": {"queue": "cloud"},
-    "backup_ovh_us": {"queue": "cloud"},
-    # Async snapshot status polling (re-queues itself); API-only, no local disk.
-    "poll_cloud_backup": {"queue": "cloud"},
-    "resume_in_progress_backups": {"queue": "default"},
-    # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram/Firebase
-    # fan-out, and on-disk run-log retention.
-    "send_log_to_db": {"queue": "logs"},
-    "send_log_to_slack": {"queue": "logs"},
-    "send_log_to_telegram": {"queue": "logs"},
-    "send_to_firebase": {"queue": "logs"},
-    "delete_old_logs": {"queue": "logs"},
-    "delete_old_db_logs": {"queue": "logs"},
-}
+CELERY_TASK_ROUTES = celery_routes()
+
+CELERY_TASK_REPLAY_RETENTION_SECONDS = _bounded_positive_int(
+    "CELERY_TASK_REPLAY_RETENTION_SECONDS",
+    14 * 24 * 60 * 60,
+    365 * 24 * 60 * 60,
+)
+try:
+    CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE = int(
+        config.get("CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE", 1000)
+    )
+except (TypeError, ValueError) as error:
+    raise ImproperlyConfigured(
+        "CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE must be an integer."
+    ) from error
+if not 1 <= CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE <= 10000:
+    raise ImproperlyConfigured(
+        "CELERY_TASK_REPLAY_CLEANUP_BATCH_SIZE must be between 1 and 10000."
+    )

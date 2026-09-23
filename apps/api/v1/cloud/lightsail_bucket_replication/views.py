@@ -6,9 +6,11 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter
+from rest_framework.pagination import CursorPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
+from sentry_sdk import capture_exception
 
 from apps.api.v1.cloud.lightsail_bucket_replication.permissions import (
     CoreLightsailBucketReplicationViewPermissions,
@@ -29,6 +31,13 @@ from apps.console.backup.replication_models import (
     CoreLightsailBucketRestoreRun,
 )
 from apps.console.storage.models import CoreStorage
+
+
+class LightsailObjectProgressPagination(CursorPagination):
+    page_size = 100
+    page_size_query_param = "page_size"
+    max_page_size = 500
+    ordering = "id"
 
 
 class CoreLightsailBucketReplicationView(
@@ -149,9 +158,10 @@ class CoreLightsailBucketReplicationView(
         if run is None:
             return Response({"detail": "Replication run not found."}, status=404)
         rows = run.object_states.order_by("key", "source_version_id", "id")
-        return Response(
-            CoreLightsailBucketReplicationObjectSerializer(rows, many=True).data
-        )
+        paginator = LightsailObjectProgressPagination()
+        page = paginator.paginate_queryset(rows, request, view=self)
+        serializer = CoreLightsailBucketReplicationObjectSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
     @action(detail=True, methods=["post"])
     def restore(self, request, pk=None):
@@ -162,13 +172,20 @@ class CoreLightsailBucketReplicationView(
             source_run = replication.runs.filter(pk=source_run_id).first()
             if source_run is None:
                 return Response({"detail": "Source run not found."}, status=404)
-            if source_run.status not in (
-                CoreLightsailBucketReplicationRun.Status.COMPLETE,
-                CoreLightsailBucketReplicationRun.Status.FAILED,
-            ):
-                return Response(
-                    {"detail": "The source run is not ready for restore."}, status=400
-                )
+        else:
+            source_run = replication.last_run
+        if source_run is None:
+            return Response(
+                {"detail": "A completed replication run is required for restore."},
+                status=400,
+            )
+        if source_run.status not in (
+            CoreLightsailBucketReplicationRun.Status.COMPLETE,
+            CoreLightsailBucketReplicationRun.Status.FAILED,
+        ):
+            return Response(
+                {"detail": "The source run is not ready for restore."}, status=400
+            )
         key = self._idempotency_key(request, "restore")
         restore_prefix = str(request.data.get("restore_prefix") or "")
         target_prefix = request.data.get("target_prefix")
@@ -183,15 +200,20 @@ class CoreLightsailBucketReplicationView(
                     f"{replication.source_prefix or ''}{normalized_restore_prefix}"
                 )
             )
+            effective_destination_prefix = (
+                CoreLightsailBucketReplication.normalize_prefix(
+                    f"{replication.destination_prefix or ''}{normalized_restore_prefix}"
+                )
+            )
             defaults = {
                 "source_run": source_run,
                 "restore_prefix": normalized_restore_prefix,
                 "target_prefix": effective_target_prefix,
-                "destination_prefix": "",
+                "destination_prefix": effective_destination_prefix,
                 "status": CoreLightsailBucketRestoreRun.Status.PENDING,
             }
             try:
-                restore_run, _ = CoreLightsailBucketRestoreRun.objects.get_or_create(
+                restore_run, created = CoreLightsailBucketRestoreRun.objects.get_or_create(
                     replication=replication,
                     idempotency_key=key,
                     defaults=defaults,
@@ -199,6 +221,19 @@ class CoreLightsailBucketReplicationView(
             except IntegrityError:
                 restore_run = CoreLightsailBucketRestoreRun.objects.get(
                     replication=replication, idempotency_key=key
+                )
+                created = False
+            if not created and (
+                restore_run.source_run_id != source_run.id
+                or restore_run.restore_prefix != normalized_restore_prefix
+                or restore_run.target_prefix != effective_target_prefix
+                or restore_run.destination_prefix != effective_destination_prefix
+            ):
+                return Response(
+                    {
+                        "detail": "This idempotency key belongs to a different restore request."
+                    },
+                    status=status.HTTP_409_CONFLICT,
                 )
             if restore_run.status == CoreLightsailBucketRestoreRun.Status.COMPLETE:
                 return Response(
@@ -248,6 +283,7 @@ class CoreLightsailBucketReplicationView(
             from apps._tasks.integration.lightsail_bucket import (
                 _validate_replication_scope,
                 _destination_bucket,
+                _failure_for,
                 build_destination_client,
                 build_source_client,
             )
@@ -260,5 +296,14 @@ class CoreLightsailBucketReplicationView(
                 Bucket=_destination_bucket(replication.destination_storage)
             )
         except Exception as error:
-            return Response({"valid": False, "detail": str(error)}, status=400)
+            capture_exception(getattr(error, "__cause__", None) or error)
+            failure = _failure_for(error)
+            return Response(
+                {
+                    "valid": False,
+                    "detail": failure.message,
+                    "error": failure.as_dict(),
+                },
+                status=400,
+            )
         return Response({"valid": True})

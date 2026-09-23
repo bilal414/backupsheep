@@ -97,7 +97,7 @@ def backup_database(
             Node itself should be available now.
             """
             node.status = CoreNode.Status.ACTIVE
-            node.save()
+            node.save(update_fields=["status", "modified"])
         except IntegrationValidationError as error:
             node.notify_backup_fail(error, backup_type)
             node.backup_retrying_reset(self.request.id)
