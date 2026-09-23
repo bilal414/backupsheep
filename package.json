@@ -7,7 +7,7 @@
     "build:css": "tailwindcss -i ./apps/console/_static/console/css/styles.css -o ./apps/console/_static/console/css/compiled.css --minify"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.3.0",
+    "@tailwindcss/cli": "^4.3.3",
     "@tailwindcss/forms": "^0.5.7",
     "@tailwindcss/typography": "^0.5.10",
     "tailwindcss": "^4.3.0"
