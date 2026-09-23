@@ -1427,11 +1427,6 @@ jobs:
               done
               test -z "$(dpkg --audit 2>/dev/null)"
               python -c "import bz2,ctypes,curses,dbm.gnu,decimal,lzma,readline,sqlite3,ssl,uuid,zlib"
-              python manage.py test \
-                apps.tests.test_installer_security \
-                apps.tests.test_compose_wrapper_security \
-                apps.tests.test_docker_preflight_command \
-                --noinput
               python bruno/scripts/validate_collection.py
               python docs/enterprise/tools/validate_docs.py
               python manage.py test apps.tests apps.console.onboarding \
