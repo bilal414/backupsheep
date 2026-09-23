@@ -23,7 +23,7 @@ django-celery-results==2.6.0
 
 # Cloud Storage & Services
 ## AWS
-boto3==1.43.54
+boto3==1.43.98
 
 ## Google Cloud
 google-cloud-storage==3.13.0
