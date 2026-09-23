@@ -2245,7 +2245,7 @@ rabbit_42_recovery_compose_command=(
 rabbit_43_recovery_compose_command=(
     "${safe_environment[@]}"
     "BACKUPSHEEP_RABBITMQ_DATA_GENERATION=unattested"
-    "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.3.5"
+    "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.3.6"
     "$docker_bin" compose
     --project-name "$project_name"
     --project-directory "$root_dir"
@@ -4153,7 +4153,7 @@ validate_compose_project_ownership() {
                             "$rabbit42_config_files") rabbitmq_validation_model=transition-4.2 ;;
                             "$rabbit42_recovery_config_files") rabbitmq_source_recovery_version=4.2.9; rabbitmq_validation_model=recovery-4.2 ;;
                             "$rabbit43_config_files") rabbitmq_source_is_exact_transition_target=true ;;
-                            "$rabbit43_recovery_config_files") rabbitmq_source_recovery_version=4.3.5; rabbitmq_validation_model=recovery-4.3 ;;
+                            "$rabbit43_recovery_config_files") rabbitmq_source_recovery_version=4.3.6; rabbitmq_validation_model=recovery-4.3 ;;
                             "$base_config_files")
                                 rabbitmq_source_is_exact_transition_target=true
                                 rabbitmq_validation_model=canonical-4.3
@@ -4393,11 +4393,11 @@ attest_local_rabbitmq_derivative() {
 
     case "$role" in
         current)
-            expected_metadata='100:101|4.3.5-alpine3.23-openssl3.5.8-v2|sha256:290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240||||3.5.8|3.5.8-r0||none'
-            runtime_check='test "$(rabbitmqctl version)" = 4.3.5; apk info -v 2>/dev/null | grep -Fxq libcrypto3-3.5.8-r0; apk info -v 2>/dev/null | grep -Fxq libssl3-3.5.8-r0'
+            expected_metadata='100:101|4.3.6-alpine3.23-openssl3.5.8-v2|sha256:2531fe16e1cb4ec4086d3eaa63118c8f074dd98620d55f022f453a397b18f037||||3.5.8|3.5.8-r0||none'
+            runtime_check='test "$(rabbitmqctl version)" = 4.3.6; apk info -v 2>/dev/null | grep -Fxq libcrypto3-3.5.8-r0; apk info -v 2>/dev/null | grep -Fxq libssl3-3.5.8-r0'
             ;;
         upgrade)
-            expected_metadata='100:101|4.2.9-alpine3.23-openssl3.5.8-v2|sha256:b2e69a138ea46106d0336bf8741187cac59031b778517d9ed2c9740f139dfa5a||||3.5.8|3.5.8-r0||none'
+            expected_metadata='100:101|4.2.9-alpine3.23-openssl3.5.8-v2|sha256:b5c3420a9bf1066be2a01edf5bafbe846fc7a23e9f7cc5b36c04421d1eeb5af0||||3.5.8|3.5.8-r0||none'
             runtime_check='test "$(rabbitmqctl version)" = 4.2.9; apk info -v 2>/dev/null | grep -Fxq libcrypto3-3.5.8-r0; apk info -v 2>/dev/null | grep -Fxq libssl3-3.5.8-r0'
             ;;
         legacy-source)
@@ -4756,7 +4756,7 @@ load_rabbitmq_transition_state() {
     [[ "$rabbitmq_transition_state_source_class" == "legacy-volume" \
         || "$rabbitmq_transition_state_source_class" == "3.13.7" \
         || "$rabbitmq_transition_state_source_class" == "4.2.9" \
-        || "$rabbitmq_transition_state_source_class" == "4.3.5" ]] \
+        || "$rabbitmq_transition_state_source_class" == "4.3.6" ]] \
         || die "RabbitMQ durable transition source class is invalid."
     [[ "$rabbitmq_transition_state_source_binding" =~ ^[0-9a-f]{64}$ \
         && "$rabbitmq_transition_state_target_config_hash" =~ ^[0-9a-f]{64}$ \
@@ -4768,8 +4768,8 @@ load_rabbitmq_transition_state() {
         prepared:legacy-volume:3.13.7|attested:3.13.7:3.13.7|\
         prepared:3.13.7:4.2.9|source-clean:3.13.7:4.2.9|\
         target-ready:3.13.7:4.2.9|attested:4.2.9:4.2.9|\
-        prepared:4.2.9:4.3.5|target-ready:4.2.9:4.3.5|\
-        attested:4.3.5:4.3.5) ;;
+        prepared:4.2.9:4.3.6|target-ready:4.2.9:4.3.6|\
+        attested:4.3.6:4.3.6) ;;
         *) die "RabbitMQ durable transition state has an impossible phase/source/target combination." ;;
     esac
     cmp -s "$rabbitmq_transition_state_file" <(
@@ -4899,7 +4899,7 @@ rabbitmq_transition_state_content() {
     case "$rabbitmq_transition_target" in
         3.13) target_version=3.13.7 ;;
         4.2) target_version=4.2.9 ;;
-        4.3) target_version=4.3.5 ;;
+        4.3) target_version=4.3.6 ;;
         *) die "internal RabbitMQ transition target is invalid." ;;
     esac
     printf '%s\n' \
@@ -4938,7 +4938,7 @@ rabbitmq_prepared_state_matches_current_target() {
     case "$rabbitmq_transition_target" in
         3.13) target_version=3.13.7 ;;
         4.2) target_version=4.2.9 ;;
-        4.3) target_version=4.3.5 ;;
+        4.3) target_version=4.3.6 ;;
         *) return 1 ;;
     esac
     capture_rabbitmq_target_evidence
@@ -4960,7 +4960,7 @@ rabbitmq_intermediate_state_matches_current_target() {
     local expected_phase="$1" target_version="" source_class=""
     case "$rabbitmq_transition_target" in
         4.2) target_version=4.2.9; source_class=3.13.7 ;;
-        4.3) target_version=4.3.5; source_class=4.2.9 ;;
+        4.3) target_version=4.3.6; source_class=4.2.9 ;;
         *) return 1 ;;
     esac
     case "${expected_phase}:${rabbitmq_transition_target}" in
@@ -5021,8 +5021,8 @@ rabbitmq_attested_43_state_matches_current_target() {
     capture_rabbitmq_target_evidence
     load_rabbitmq_transition_state || return 1
     [[ "$rabbitmq_transition_state_phase" == attested \
-        && "$rabbitmq_transition_state_source_class" == "4.3.5" \
-        && "$rabbitmq_transition_state_target_version" == "4.3.5" \
+        && "$rabbitmq_transition_state_source_class" == "4.3.6" \
+        && "$rabbitmq_transition_state_target_version" == "4.3.6" \
         && "$rabbitmq_transition_state_target_config_hash" == "$rabbitmq_target_config_hash" \
         && "$rabbitmq_transition_state_target_image_ref" == "$rabbitmq_target_image_ref" \
         && "$rabbitmq_transition_state_target_image_id" == "$rabbitmq_target_image_id" ]]
@@ -5158,8 +5158,8 @@ record_attested_rabbitmq_43_state() {
     fi
     rabbitmq_target_ready_state_matches_current_target \
         || die "the RabbitMQ 4.3 target lacks its exact durable target-ready transition state."
-    source_binding="$(rabbitmq_source_evidence_binding "$container_id" "4.3.5")"
-    content="$(rabbitmq_transition_state_content attested "4.3.5" "$source_binding")"$'\n'
+    source_binding="$(rabbitmq_source_evidence_binding "$container_id" "4.3.6")"
+    content="$(rabbitmq_transition_state_content attested "4.3.6" "$source_binding")"$'\n'
     publish_rabbitmq_transition_state "$content"
 }
 
@@ -5171,8 +5171,8 @@ clear_attested_rabbitmq_43_state() {
     fi
     load_rabbitmq_transition_state
     [[ "$rabbitmq_transition_state_phase" == attested \
-        && "$rabbitmq_transition_state_source_class" == "4.3.5" \
-        && "$rabbitmq_transition_state_target_version" == "4.3.5" \
+        && "$rabbitmq_transition_state_source_class" == "4.3.6" \
+        && "$rabbitmq_transition_state_target_version" == "4.3.6" \
         && "$(file_identity "$rabbitmq_transition_state_file")" == "$expected_identity" \
         && "$(sha256_file "$rabbitmq_transition_state_file")" == "$expected_digest" ]] \
         || die "the finalized RabbitMQ 4.3 witness is paired with changed durable attested transition state."
@@ -5196,8 +5196,8 @@ reconcile_committed_rabbitmq_transition_state() {
     expected_id="$("${docker_command[@]}" image inspect --format '{{.Id}}' "$expected_ref")" \
         || die "the committed RabbitMQ transition target image is unavailable during residue reconciliation."
     [[ "$rabbitmq_transition_state_phase" == attested \
-        && "$rabbitmq_transition_state_source_class" == "4.3.5" \
-        && "$rabbitmq_transition_state_target_version" == "4.3.5" \
+        && "$rabbitmq_transition_state_source_class" == "4.3.6" \
+        && "$rabbitmq_transition_state_target_version" == "4.3.6" \
         && "$rabbitmq_transition_state_target_image_ref" == "$expected_ref" \
         && "$rabbitmq_transition_state_target_image_id" == "$expected_id" ]] \
         || die "a committed 4.3 generation has inconsistent protected transition residue."
@@ -5318,8 +5318,8 @@ reconcile_stranded_rabbitmq_transition_oneoff() {
             load_rabbitmq_transition_state \
                 || die "a stranded RabbitMQ transition helper lacks protected attested host state."
             [[ "$rabbitmq_transition_state_phase" == attested \
-                && "$rabbitmq_transition_state_source_class" == 4.3.5 \
-                && "$rabbitmq_transition_state_target_version" == 4.3.5 ]] \
+                && "$rabbitmq_transition_state_source_class" == 4.3.6 \
+                && "$rabbitmq_transition_state_target_version" == 4.3.6 ]] \
                 || die "a stranded RabbitMQ transition helper is not paired with attested 4.3 host state."
             ;;
         *) die "the stranded RabbitMQ transition helper command or isolation policy drifted." ;;
@@ -5500,7 +5500,7 @@ reconcile_stranded_rabbitmq_clean_inspector() {
             ;;
         '100:101|["/bin/sh","/usr/local/bin/backupsheep-rabbitmq-volume-init","inspect-clean","4.3"]|null|none|true|true|no|false|32|67108864|67108864|250000000')
             expected_ref="$(expected_pinned_rabbitmq_image)"
-            inspector_version=4.3.5
+            inspector_version=4.3.6
             ;;
         *) die "the stranded RabbitMQ clean inspector runtime drifted." ;;
     esac
@@ -5520,7 +5520,7 @@ reconcile_stranded_rabbitmq_clean_inspector() {
         4.3:4.2.9)
             rabbitmq_prepared_state_matches_current_target && authorized=true
             ;;
-        4.3:4.3.5)
+        4.3:4.3.6)
             { rabbitmq_target_ready_state_matches_current_target \
                 || rabbitmq_attested_43_state_matches_current_target; } && authorized=true
             ;;
@@ -5612,7 +5612,7 @@ inspect_clean_rabbitmq_source_volume() {
     case "$source_version" in
         3.13.7) inspector_command=("${rabbit_legacy_clean_inspect_compose_command[@]}") ;;
         4.2.9) inspector_command=("${rabbit_42_clean_inspect_compose_command[@]}") ;;
-        4.3.5) inspector_command=("${rabbit_43_clean_inspect_compose_command[@]}") ;;
+        4.3.6) inspector_command=("${rabbit_43_clean_inspect_compose_command[@]}") ;;
         *) die "internal RabbitMQ clean source inspection version is invalid." ;;
     esac
     running_attachments="$("${docker_command[@]}" ps --quiet \
@@ -5671,7 +5671,7 @@ run_rabbitmq_same_version_recovery() {
             recovery_config_files+=",${rabbitmq_upgrade},${rabbitmq_recovery}"
             recovery_model=recovery-4.2
             ;;
-        4.3.5:4.3)
+        4.3.6:4.3)
             { rabbitmq_target_ready_state_matches_current_target \
                 || rabbitmq_attested_43_state_matches_current_target; } \
                 || die "RabbitMQ 4.3 recovery lacks exact target-ready or attested state."
@@ -5730,10 +5730,10 @@ run_rabbitmq_same_version_recovery() {
         || die "could not prove RabbitMQ volume detachment after same-version recovery."
     [[ -z "$attachments" ]] \
         || die "RabbitMQ same-version recovery left a volume attachment."
-    if [[ "$rabbitmq_same_version_recovery" == 4.3.5 ]] \
+    if [[ "$rabbitmq_same_version_recovery" == 4.3.6 ]] \
         && rabbitmq_attested_43_state_matches_current_target; then
         finalize_attested_rabbitmq_43_volume_witness
-        inspect_clean_rabbitmq_source_volume 4.3.5
+        inspect_clean_rabbitmq_source_volume 4.3.6
     fi
 }
 
@@ -5955,7 +5955,7 @@ validate_rabbitmq_data_generation() {
                 ;;
             4.3)
                 if rabbitmq_attested_43_state_matches_current_target; then
-                    rabbitmq_same_version_recovery=4.3.5
+                    rabbitmq_same_version_recovery=4.3.6
                     return
                 fi
                 if rabbitmq_target_ready_state_matches_current_target; then
@@ -6000,12 +6000,12 @@ validate_rabbitmq_data_generation() {
             fi
             if [[ "$rabbitmq_transition_target" == "4.3" ]] \
                 && rabbitmq_attested_43_state_matches_current_target; then
-                rabbitmq_same_version_recovery=4.3.5
+                rabbitmq_same_version_recovery=4.3.6
                 return
             fi
             if [[ "$rabbitmq_transition_target" == "4.3" ]] \
                 && rabbitmq_target_ready_state_matches_current_target; then
-                rabbitmq_same_version_recovery=4.3.5
+                rabbitmq_same_version_recovery=4.3.6
                 return
             fi
             die "the exact interrupted RabbitMQ target lacks matching protected durable transition state."
@@ -6034,7 +6034,7 @@ validate_rabbitmq_data_generation() {
         fi
         if [[ "$rabbitmq_transition_target" == "4.3" ]] \
             && rabbitmq_attested_43_state_matches_current_target; then
-            rabbitmq_same_version_recovery=4.3.5
+            rabbitmq_same_version_recovery=4.3.6
             return
         fi
         die "the RabbitMQ generation transition requires a running healthy source broker or matching protected durable transition state."
@@ -6091,8 +6091,8 @@ validate_rabbitmq_data_generation() {
         rabbitmq_uid_transition_required=true
     else
         if [[ "$rabbitmq_source_is_exact_transition_target" == true ]]; then
-            [[ "$server_version" == "4.3.5" ]] \
-                || die "the exact RabbitMQ 4.3 transition target does not report the pinned 4.3.5 server version."
+            [[ "$server_version" == "4.3.6" ]] \
+                || die "the exact RabbitMQ 4.3 transition target does not report the pinned 4.3.6 server version."
             validate_enabled_rabbitmq_feature_flags "$rabbit_container_id" required enabled "the RabbitMQ 4.3 interrupted-target reconciliation gate" required
             source_config_files="$(docker_resource_label container "$rabbit_container_id" com.docker.compose.project.config_files)" \
                 || die "could not bind the exact RabbitMQ 4.3 reconciliation model."
@@ -6129,7 +6129,7 @@ validate_rabbitmq_data_generation() {
                     || die "the exact canonical RabbitMQ 4.3 source is paired with inconsistent protected transition state."
                 source_binding="$(rabbitmq_source_evidence_binding "$rabbit_container_id" "$server_version")"
                 publish_rabbitmq_transition_state \
-                    "$(rabbitmq_transition_state_content attested "4.3.5" "$source_binding")"$'\n'
+                    "$(rabbitmq_transition_state_content attested "4.3.6" "$source_binding")"$'\n'
                 return
             fi
             rabbitmq_target_ready_state_matches_current_target \
@@ -6224,11 +6224,11 @@ wait_for_exact_rabbitmq_target() {
         case "$expected_server_version" in
             3.13.7) expected_image_ref="$(expected_pinned_rabbitmq_313_image)" ;;
             4.2.9) expected_image_ref="$(expected_pinned_rabbitmq_42_image)" ;;
-            4.3.5) expected_image_ref="$(expected_pinned_rabbitmq_image)" ;;
+            4.3.6) expected_image_ref="$(expected_pinned_rabbitmq_image)" ;;
             *) die "internal RabbitMQ postflight target is unsupported." ;;
         esac
         attest_pinned_rabbitmq_container_image "$rabbit_container_id" "$expected_image_ref"
-        if [[ "$expected_server_version" == "4.3.5" ]]; then
+        if [[ "$expected_server_version" == "4.3.6" ]]; then
             validate_enabled_rabbitmq_feature_flags "$rabbit_container_id" required enabled "$evidence_phase" required
         fi
         printf '%s\n' "$rabbit_container_id"
@@ -6296,7 +6296,7 @@ verify_and_record_completed_rabbitmq_43_transition() {
     fi
 
     rabbit_container_id="$(wait_for_exact_rabbitmq_target \
-        "$transition_config_files" "4.3.5" "the RabbitMQ 4.3 transition attestation")"
+        "$transition_config_files" "4.3.6" "the RabbitMQ 4.3 transition attestation")"
     # Advance protected host evidence before trusting a witness writable by the
     # broker uid. It remains present through witness and canonical proof and is
     # deleted only after the final .env commit is durable.
@@ -6327,7 +6327,7 @@ verify_and_record_completed_rabbitmq_43_transition() {
     compose_command=("${canonical_rabbit_compose_command[@]}")
     validate_compose_project_ownership false
     rabbit_container_id="$(wait_for_exact_rabbitmq_target \
-        "$canonical_config_files" "4.3.5" "the canonical RabbitMQ 4.3 reconciliation")"
+        "$canonical_config_files" "4.3.6" "the canonical RabbitMQ 4.3 reconciliation")"
     "${docker_command[@]}" exec --user rabbitmq "$rabbit_container_id" /bin/sh \
         /usr/local/bin/backupsheep-rabbitmq-volume-init verify >/dev/null \
         || die "the canonical RabbitMQ 4.3 container cannot verify its durable volume witness."

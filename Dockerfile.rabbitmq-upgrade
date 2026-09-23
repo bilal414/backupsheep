@@ -3,14 +3,14 @@
 # This image exists only for the explicitly witnessed RabbitMQ 4.2 compatibility
 # hop. It is built and signed independently from the normal 4.3 runtime so an
 # approved Compose override cannot substitute it into the steady-state service.
-FROM rabbitmq:4.2.9-alpine@sha256:b2e69a138ea46106d0336bf8741187cac59031b778517d9ed2c9740f139dfa5a
+FROM rabbitmq:4.2.9-alpine@sha256:b5c3420a9bf1066be2a01edf5bafbe846fc7a23e9f7cc5b36c04421d1eeb5af0
 
 LABEL org.opencontainers.image.title="BackupSheep RabbitMQ upgrade runtime" \
       org.opencontainers.image.description="RabbitMQ 4.2.9 compatibility hop with reviewed security package updates" \
       org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
       org.opencontainers.image.licenses="MPL-2.0" \
       com.backupsheep.rabbitmq.runtime-generation="4.2.9-alpine3.23-openssl3.5.8-v2" \
-      com.backupsheep.rabbitmq.base-index-digest="sha256:b2e69a138ea46106d0336bf8741187cac59031b778517d9ed2c9740f139dfa5a" \
+      com.backupsheep.rabbitmq.base-index-digest="sha256:b5c3420a9bf1066be2a01edf5bafbe846fc7a23e9f7cc5b36c04421d1eeb5af0" \
       com.backupsheep.rabbitmq.openssl-runtime-version="3.5.8" \
       com.backupsheep.rabbitmq.openssl-package-version="3.5.8-r0" \
       com.backupsheep.rabbitmq.enabled-plugins="none"

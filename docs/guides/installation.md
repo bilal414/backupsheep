@@ -380,7 +380,7 @@ be imported. Reapprove each exact account/host/port/key in PostgreSQL instead; a
 ambiguous or foreign legacy volume stops installation.
 
 An existing RabbitMQ data volume is a separate fail-closed gate. The installer never
-performs the 3.13.7 -> 4.2.9 -> 4.3.5/Khepri migration. A stopped blank-generation volume
+performs the 3.13.7 -> 4.2.9 -> 4.3.6/Khepri migration. A stopped blank-generation volume
 has one narrow installer exception: local-build mode with the exact reviewed
 `--legacy-rabbitmq-node-host HOST --skip-start` pair persists its node identity but does
 not inspect, open, or migrate it. The wrapper then requires the exact stock legacy model:
@@ -762,7 +762,7 @@ exited. Database identity provisioning, migration and the preflight command itse
 the only intentional exceptions.
 
 An existing RabbitMQ 3.13 volume requires the local-build-only, exact
-3.13.7 -> 4.2.9 -> 4.3.5 sequence before this Compose file can be used. Follow the
+3.13.7 -> 4.2.9 -> 4.3.6 sequence before this Compose file can be used. Follow the
 [RabbitMQ migration gate](rabbitmq-upgrade.md); never start the 4.3 image directly against
 a 3.13 data directory. Signed releases are fresh-only and cannot consume this migration
 path.

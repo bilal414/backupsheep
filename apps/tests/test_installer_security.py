@@ -1588,8 +1588,10 @@ reconcile_installer_temp_residues
         self.assertIn('exec --user rabbitmq "$rabbit_container_id"', self.installer)
         self.assertNotIn('exec --user 100:101 "$rabbit_container_id"', self.installer)
         self.assertIn("will not guess its format", self.installer)
-        self.assertIn("exact pinned 4.3.5 target", self.installer)
-        self.assertIn('[[ "$server_version" == "4.3.5" ]]', self.installer)
+        # The live broker is still the previous release's image during an
+        # upgrade, so the prior pinned 4.3 patch must be accepted too.
+        self.assertIn("        4.3.5|4.3.6) ;;\n", self.installer)
+        self.assertIn("is not a pinned 4.3 patch (4.3.5 or 4.3.6)", self.installer)
         main = self.installer.split("\nmain() {", 1)[1]
         self.assertLess(
             main.index("validate_compose_project_ownership"),
@@ -1829,7 +1831,7 @@ validate_rabbitmq_data_generation
         target_image_refs = {
             "3.13.7": f"backupsheep-rabbitmq-legacy-source:{source_commit}",
             "4.2.9": f"backupsheep-rabbitmq-upgrade:{source_commit}",
-            "4.3.5": f"backupsheep-rabbitmq:{source_commit}",
+            "4.3.6": f"backupsheep-rabbitmq:{source_commit}",
         }
 
         def run(
@@ -1861,7 +1863,7 @@ validate_rabbitmq_data_generation
                     1,
                 ).replace(
                     "BACKUPSHEEP_RABBITMQ_IMAGE=backupsheep-rabbitmq:local",
-                    f"BACKUPSHEEP_RABBITMQ_IMAGE={target_image_refs['4.3.5']}",
+                    f"BACKUPSHEEP_RABBITMQ_IMAGE={target_image_refs['4.3.6']}",
                     1,
                 ).replace(
                     "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE=backupsheep-rabbitmq-upgrade:local",
@@ -1920,9 +1922,9 @@ validate_rabbitmq_data_generation
             ("source-clean", "3.13.7", "4.2.9"),
             ("target-ready", "3.13.7", "4.2.9"),
             ("attested", "4.2.9", "4.2.9"),
-            ("prepared", "4.2.9", "4.3.5"),
-            ("target-ready", "4.2.9", "4.3.5"),
-            ("attested", "4.3.5", "4.3.5"),
+            ("prepared", "4.2.9", "4.3.6"),
+            ("target-ready", "4.2.9", "4.3.6"),
+            ("attested", "4.3.6", "4.3.6"),
         )
         for phase, source_class, target_version in valid_blank:
             with self.subTest(
@@ -1934,7 +1936,7 @@ validate_rabbitmq_data_generation
                 result = run(phase, source_class, target_version, "")
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-        committed = run("attested", "4.3.5", "4.3.5", "4.3")
+        committed = run("attested", "4.3.6", "4.3.6", "4.3")
         self.assertEqual(committed.returncode, 0, committed.stderr)
 
         for phase, source_class, target_version in valid_blank[:-1]:
@@ -1951,8 +1953,8 @@ validate_rabbitmq_data_generation
                 )
 
         invalid_combinations = (
-            ("source-clean", "4.2.9", "4.3.5"),
-            ("target-ready", "3.13.7", "4.3.5"),
+            ("source-clean", "4.2.9", "4.3.6"),
+            ("target-ready", "3.13.7", "4.3.6"),
             ("target-ready", "4.2.9", "4.2.9"),
         )
         for phase, source_class, target_version in invalid_combinations:
@@ -1973,7 +1975,7 @@ validate_rabbitmq_data_generation
             "4.2.9",
             "4.2.9",
             "",
-            target_image_ref_override=target_image_refs["4.3.5"],
+            target_image_ref_override=target_image_refs["4.3.6"],
         )
         self.assertNotEqual(mismatched_image.returncode, 0)
         self.assertIn(
@@ -1989,7 +1991,7 @@ validate_rabbitmq_data_generation
         target_image_refs = {
             "3.13.7": f"backupsheep-rabbitmq-legacy-source:{source_commit}",
             "4.2.9": f"backupsheep-rabbitmq-upgrade:{source_commit}",
-            "4.3.5": f"backupsheep-rabbitmq:{source_commit}",
+            "4.3.6": f"backupsheep-rabbitmq:{source_commit}",
         }
         target_image_id = "sha256:" + ("5" * 64)
         cases = (
@@ -1999,10 +2001,10 @@ validate_rabbitmq_data_generation
             ("source-clean", "3.13.7", "4.2.9", ""),
             ("target-ready", "3.13.7", "4.2.9", ""),
             ("attested", "4.2.9", "4.2.9", ""),
-            ("prepared", "4.2.9", "4.3.5", ""),
-            ("target-ready", "4.2.9", "4.3.5", ""),
-            ("attested", "4.3.5", "4.3.5", ""),
-            ("attested", "4.3.5", "4.3.5", "4.3"),
+            ("prepared", "4.2.9", "4.3.6", ""),
+            ("target-ready", "4.2.9", "4.3.6", ""),
+            ("attested", "4.3.6", "4.3.6", ""),
+            ("attested", "4.3.6", "4.3.6", "4.3"),
         )
 
         main_body = self.installer.split("\nmain() {", 1)[1]
@@ -2049,7 +2051,7 @@ validate_rabbitmq_data_generation
                     1,
                 ).replace(
                     "BACKUPSHEEP_RABBITMQ_IMAGE=backupsheep-rabbitmq:local",
-                    f"BACKUPSHEEP_RABBITMQ_IMAGE={target_image_refs['4.3.5']}",
+                    f"BACKUPSHEEP_RABBITMQ_IMAGE={target_image_refs['4.3.6']}",
                     1,
                 ).replace(
                     "BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE=backupsheep-rabbitmq-upgrade:local",
