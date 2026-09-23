@@ -15,10 +15,14 @@ RUN set -eux; \
     test "$(grep -Fc 'exec gosu postgres "$BASH_SOURCE" "$@"' /usr/local/bin/docker-entrypoint.sh)" = 1; \
     apk add --no-cache \
         'libcrypto3=3.5.8-r0' \
+        'libcurl=8.22.0-r0' \
         'libssl3=3.5.8-r0' \
+        'libuuid=2.42.3-r1' \
         'su-exec=0.3-r0'; \
     apk info -v 2>/dev/null | grep -Fxq 'libcrypto3-3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libcurl-8.22.0-r0'; \
     apk info -v 2>/dev/null | grep -Fxq 'libssl3-3.5.8-r0'; \
+    apk info -v 2>/dev/null | grep -Fxq 'libuuid-2.42.3-r1'; \
     apk info -v 2>/dev/null | grep -Fxq 'su-exec-0.3-r0'; \
     sed -i \
         's#exec gosu postgres "$BASH_SOURCE" "$@"#exec su-exec postgres "$BASH_SOURCE" "$@"#' \
