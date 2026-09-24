@@ -1,0 +1,29 @@
+meta {
+  name: GET /.well-known/oauth-authorization-server
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/.well-known/oauth-authorization-server
+  body: none
+  auth: none
+}
+
+headers {
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-well-known-oauth-authorization-server`
+
+  No authentication required. Read-only request.
+
+  Django action: `oauth2_provider.views.metadata.OAuthServerMetadataView.get`
+  Source: `.venv/lib/python3.14/site-packages/oauth2_provider/views/metadata.py`
+}

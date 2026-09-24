@@ -83,14 +83,21 @@ group cannot be deleted while it still has members.
 
 The API is mounted at `/api/v1/`. It supports:
 
-- the same CSRF-protected Django session used by the console;
-- DRF token authentication using `Authorization: Token <api-key>`.
+- personal API tokens (`Authorization: Bearer bsk_…`) created in Settings → API
+  access, scoped and bound to one workspace;
+- OAuth 2.0 access tokens issued by the built-in authorization server (`/o/`) to
+  registered applications and the mobile apps, scoped per consent;
+- the legacy login token returned by `POST /api/v1/auth/login/` as `api_key`
+  (`Authorization: Token <api-key>`), unscoped and replaced on every login;
+- the same CSRF-protected Django session used by the console.
 
-`POST /api/v1/auth/login/` starts a session and returns the user's API token as
-`api_key`. Treat that value as a secret. Most endpoints require authentication;
+Scopes limit what a token may call (for example `backups:read` or
+`backups:restore`); group permissions and node visibility still limit what its owner
+may do. Credential management, authenticator setup, and provider OAuth callbacks are
+reserved for interactive credentials. Most endpoints require authentication;
 public login/reset and narrowly scoped callback/webhook endpoints are explicit
 exceptions. The browsable API renderer is enabled only when Django `DEBUG` is
-on.
+on. See [API authentication](../api/authentication.md) and [OAuth 2.0](../api/oauth.md).
 
 ## API scoping and action visibility
 

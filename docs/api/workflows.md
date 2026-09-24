@@ -3,15 +3,20 @@
 These sequences show how the API resources fit together. Provider-specific required
 fields differ, so use the corresponding Bruno request for the exact JSON body.
 
-## 1. Inspect the current identity
+## 1. Obtain a credential and inspect the identity
 
-1. `POST /api/v1/auth/login/`
-2. Save `api_key` outside source control.
-3. `GET /api/v1/check/login/`
-4. `GET /api/v1/accounts/` and `GET /api/v1/members/` if the identity belongs to more
-   than one account.
+1. In the console open Settings → API access and create a personal API token with the
+   scopes the automation needs (or `POST /api/v1/tokens/` while signed in). Save the
+   `token` value outside source control; it is shown once.
+2. `GET /api/v1/mobile/bootstrap/` (scope `profile`) or `GET /api/v1/check/login/` to
+   confirm the credential and see the workspace, permissions, and capabilities it has.
+3. `GET /api/v1/accounts/` and `GET /api/v1/members/` (scope `account:read`) if the
+   identity belongs to more than one account. A personal token is bound to the
+   workspace chosen at creation.
 
-Use `Authorization: Token {{apiKey}}` on every subsequent request.
+Use `Authorization: Bearer {{apiToken}}` on every subsequent request. Automation that
+still logs in with `POST /api/v1/auth/login/` keeps using `Authorization: Token
+{{apiKey}}`; the Bruno collection is generated with that header.
 
 Provider OAuth is a browser-session workflow, not a bearer-token automation workflow.
 DigitalOcean and OVH authorization starts use `POST .../oauth_url/` and require the

@@ -33,7 +33,15 @@ and grants each role only the files it needs.
 | `APP_NAME` | ✅ | `BackupSheep` | Display name (can also be set in the wizard). |
 | `APP_DOMAIN` | ✅ | `localhost:8000` | Public host (`host[:port]`); used for `APP_URL` and CSRF trusted origins. |
 | `APP_PROTOCOL` | ✅ | `http://` | URL scheme (`http://` or `https://`), combined with `APP_DOMAIN`. |
-| `API_TOKEN_TTL_SECONDS` | optional | `2592000` | Lifetime of newly issued personal API tokens in seconds (30 days). Values above the 90-day maximum are rejected. |
+| `API_TOKEN_TTL_SECONDS` | optional | `2592000` | Lifetime of the legacy login token and the default lifetime of new personal API tokens in seconds (30 days). Values above the 90-day maximum are rejected. |
+| `API_TOKEN_MAX_TTL_SECONDS` | optional | `7776000` | Longest lifetime a member may choose for a personal API token (90 days; never above one year). |
+| `OAUTH2_ACCESS_TOKEN_TTL_SECONDS` | optional | `3600` | OAuth 2.0 access token lifetime in seconds (maximum 24 hours). |
+| `OAUTH2_REFRESH_TOKEN_TTL_SECONDS` | optional | `2592000` | OAuth 2.0 refresh token lifetime in seconds after the access token it renews expires (maximum one year). |
+| `OAUTH2_ALLOWED_REDIRECT_URI_SCHEMES` | optional | `https,backupsheep` | URI schemes OAuth applications may register as redirect URIs; add `http` only for loopback CLI callbacks. |
+| `API_THROTTLE_USER_RATE` | optional | `600/minute` | Sustained API request ceiling per signed-in identity. |
+| `API_THROTTLE_WRITE_RATE` | optional | `120/minute` | Ceiling for state-changing API requests per identity. |
+| `API_THROTTLE_ANON_RATE` | optional | `60/minute` | Ceiling for unauthenticated API requests per peer address. |
+| `API_DOCS_PUBLIC` | optional | `false` | Serve the OpenAPI document and `/api/v1/docs/` without a signed-in member. |
 | `SESSION_COOKIE_AGE` | optional | `43200` | Browser-session lifetime in seconds; 12 hours is the hard maximum. |
 | `SESSION_EXPIRE_AT_BROWSER_CLOSE` | optional | `true` | Also discard the browser session cookie when the browser closes. |
 | `AUTH_THROTTLE_TRUSTED_PROXY_ENABLED` | optional | `false` | Allow authentication throttles to use the dedicated proxy-overwritten client-IP header. |

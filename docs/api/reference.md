@@ -20,10 +20,19 @@ Some permissions or object state can still reject an operation.
 
 | Resource | Operations and actions |
 |---|---|
-| `auth/login/` | `POST` login and return the persistent token. |
-| `auth/logout/` | `GET` end the browser session; token remains valid. |
+| `auth/login/` | `POST` login and return the legacy login token. |
+| `auth/logout/` | `POST` end the browser session and revoke the legacy token, or revoke the presenting scoped credential. |
 | `auth/reset/` | `POST` request reset, `PATCH` complete reset. |
 | `check/login/` | `GET` current login/member context. |
+| `mobile/bootstrap/` | `GET` identity, permissions, and capabilities for native clients. |
+| `tokens/` | `GET`/`POST` personal API tokens; `GET`/`DELETE` `/{id}/`; `POST /{id}/rotate/`; `GET /scopes/`. Interactive credentials only. |
+| `oauth/applications/` | `GET`/`POST`; `GET`/`PATCH`/`DELETE` `/{id}/`; `POST /{id}/rotate_secret/`. Interactive credentials only. |
+| `oauth/authorized-applications/` | `GET` connected applications; `DELETE /{application_id}/` revokes their access. |
+| `schema/`, `docs/`, `docs/swagger/` | OpenAPI 3 document, Redoc, and Swagger UI (member-only unless `API_DOCS_PUBLIC`). |
+
+The OAuth 2.0 authorization server itself is mounted outside `/api/v1/`:
+`/o/authorize/`, `/o/token/`, `/o/revoke_token/`, `/o/introspect/`, and
+`/.well-known/oauth-authorization-server`. See [OAuth 2.0](oauth.md).
 | `members/` | CRUD; setup/verify/revoke MFA, switch current account, update membership. |
 | `accounts/` | CRUD; leave or remove a membership. |
 | `groups/` | CRUD account groups, permissions, and node scope. |

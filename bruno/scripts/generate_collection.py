@@ -47,6 +47,11 @@ CATEGORIES = {
     "notifications-telegram": ("93 Notifications", 93),
     "notifications-email": ("93 Notifications", 93),
     "utils": ("94 Utilities", 94),
+    "tokens": ("95 API Access", 95),
+    "oauth": ("95 API Access", 95),
+    "oauth-server": ("96 OAuth 2.0 Server", 96),
+    "schema": ("97 Documentation", 97),
+    "docs": ("97 Documentation", 97),
 }
 
 PROVIDER_GROUPS = {
@@ -160,6 +165,9 @@ def operation_id(operation: Operation) -> str:
 def grouping(operation: Operation) -> tuple[str, str | None, int]:
     if operation.path == "/healthz/":
         category_key = "health"
+        segments = []
+    elif operation.kind == "oauth-server":
+        category_key = "oauth-server"
         segments = []
     else:
         segments = [segment for segment in operation.path.split("/") if segment]
@@ -455,8 +463,10 @@ def render_request(operation: Operation, seq: int) -> str:
         lines.append("}")
 
     lines.extend(["", "headers {"])
-    if operation.auth in {"token", "optional-token"}:
+    if operation.auth in {"token", "optional-token", "interactive-token"}:
         lines.append("  Authorization: Token {{apiToken}}")
+    if operation.auth == "oauth-client" and body is None:
+        lines.append("  Content-Type: application/x-www-form-urlencoded")
     if body is not None:
         lines.append("  Content-Type: application/json")
     if needs_idempotency_header(operation):
@@ -523,6 +533,15 @@ def render_request(operation: Operation, seq: int) -> str:
         "browser-session-csrf": (
             "Requires the authenticated browser session and its Django CSRF token; "
             "API-token authentication is intentionally rejected."
+        ),
+        "interactive-token": (
+            "Requires the console session or the legacy login token "
+            "(`Authorization: Token <key>`); personal API tokens and OAuth access "
+            "tokens are rejected so a scoped credential can never mint a broader one."
+        ),
+        "oauth-client": (
+            "Authenticates the OAuth client itself (client_id plus secret, or the "
+            "PKCE code exchange) with a form-encoded body; API tokens are not accepted."
         ),
     }[operation.auth]
     safety_text = {
@@ -626,7 +645,12 @@ def main():
         "schema_version": 1,
         "generated_from": "Django root URL resolver on the checked-out branch",
         "scope": {
-            "included": ["/api/v1/**", "/healthz/"],
+            "included": [
+                "/api/v1/**",
+                "/healthz/",
+                "/o/** (OAuth 2.0 authorization server)",
+                "/.well-known/oauth-authorization-server",
+            ],
             "excluded": [
                 "/django-admin/** (HTML administrator)",
                 "/api-auth/** (DRF browser UI)",

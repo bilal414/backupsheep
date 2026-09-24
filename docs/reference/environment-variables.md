@@ -157,10 +157,36 @@ header_up X-BackupSheep-Client-IP {remote_host}
 
 | Variable | Default | Meaning |
 | --- | ---: | --- |
-| `API_TOKEN_TTL_SECONDS` | `2592000` | Personal API token lifetime in seconds (30 days); values above the 90-day maximum are rejected |
+| `API_TOKEN_TTL_SECONDS` | `2592000` | Lifetime in seconds of the legacy login token returned by `POST /api/v1/auth/login/` and the default lifetime of new personal API tokens (30 days); values above the 90-day maximum are rejected |
+| `API_TOKEN_MAX_TTL_SECONDS` | `7776000` | Longest lifetime (seconds) a member may choose for a personal API token; 90 days by default, never above one year |
 
-Shorten this value for stricter environments. It controls the lifetime assigned when an
-API token is issued.
+Shorten these values for stricter environments. Personal API tokens are created in
+Settings → API access or with `POST /api/v1/tokens/`; see [API authentication](../api/authentication.md).
+
+## OAuth 2.0 authorization server
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `OAUTH2_ACCESS_TOKEN_TTL_SECONDS` | `3600` | OAuth access token lifetime in seconds (maximum 86400) |
+| `OAUTH2_REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Refresh token lifetime in seconds, counted from the expiry of the access token it renews (maximum one year) |
+| `OAUTH2_ALLOWED_REDIRECT_URI_SCHEMES` | `https,backupsheep` | Comma-separated URI schemes an OAuth application may register as redirect URIs. Add `http` only to allow RFC 8252 loopback (`http://127.0.0.1:<port>/…`) callbacks for command-line clients |
+
+Refresh tokens rotate on every use and a replayed refresh token revokes its whole token
+family. Expired OAuth rows are pruned nightly by the `clear_expired_oauth_tokens` Celery
+beat task. See [OAuth 2.0](../api/oauth.md) for the client flows.
+
+## API rate limits and documentation
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `API_THROTTLE_USER_RATE` | `600/minute` | Sustained request ceiling per signed-in identity (sessions and every token type) |
+| `API_THROTTLE_WRITE_RATE` | `120/minute` | Ceiling for state-changing (`POST`/`PUT`/`PATCH`/`DELETE`) requests per identity |
+| `API_THROTTLE_ANON_RATE` | `60/minute` | Ceiling for unauthenticated requests per server-observed peer |
+| `API_DOCS_PUBLIC` | `false` | Serve `/api/v1/schema/` and `/api/v1/docs/` without a signed-in member |
+
+Rates use the form `<requests>/<second|minute|hour|day>`. Authentication endpoints keep
+their own stricter limits, and a limited request receives `429` with `Retry-After`.
+Peer identification follows the trusted-proxy rules described above.
 
 ## PostgreSQL
 
