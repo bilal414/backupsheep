@@ -5,13 +5,18 @@ import hashlib
 import secrets
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from datetime import timedelta
+
+from django.core.cache import cache
 from django.test import Client
+from django.utils import timezone
 from oauth2_provider.models import (
     get_access_token_model,
     get_application_model,
     get_refresh_token_model,
 )
 
+from apps.api.oauth2.maintenance import SWEEP_CACHE_KEY, sweep_expired_credentials_if_due
 from apps.console.member.models import CoreMemberAccount
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -484,6 +489,36 @@ class ClientCredentialsTests(OAuthMixin, BaseTestCase):
             status=CoreMemberAccount.Status.SUSPENDED
         )
         self.assertEqual(self.token().status_code, 400)
+
+
+class ExpiredCredentialSweepTests(OAuthMixin, BaseTestCase):
+    def setUp(self):
+        super().setUp()
+        factories.complete_onboarding()
+        self.client.force_login(self.user)
+        cache.delete(SWEEP_CACHE_KEY)
+
+    def test_token_endpoint_sweeps_expired_rows_at_most_once_per_interval(self):
+        app, tokens = self.obtain_tokens()
+        stale = AccessToken.objects.create(
+            user=self.user,
+            application=Application.objects.get(client_id=app["client_id"]),
+            token="stale-token",
+            scope="profile",
+            expires=timezone.now() - timedelta(days=400),
+        )
+        cache.delete(SWEEP_CACHE_KEY)
+        self.assertTrue(sweep_expired_credentials_if_due())
+        self.assertFalse(AccessToken.objects.filter(pk=stale.pk).exists())
+        # The live token issued moments ago survives, and the gate holds.
+        self.assertTrue(AccessToken.objects.filter(token_checksum=hashlib.sha256(tokens["access_token"].encode()).hexdigest()).exists())
+        self.assertFalse(sweep_expired_credentials_if_due())
+
+    def test_issuing_a_token_triggers_the_sweep_when_due(self):
+        cache.delete(SWEEP_CACHE_KEY)
+        self.obtain_tokens()
+        # obtain_tokens exchanged a code at /o/token/, which claimed the gate.
+        self.assertIsNotNone(cache.get(SWEEP_CACHE_KEY))
 
 
 class DiscoveryAndThrottlingTests(OAuthMixin, BaseTestCase):

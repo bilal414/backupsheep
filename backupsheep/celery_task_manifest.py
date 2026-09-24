@@ -300,9 +300,6 @@ TASK_POLICIES: dict[str, TaskPolicy] = {
     "delete_old_db_logs": _policy(
         "logs", ("beat", "logs"), "retention_sweep"
     ),
-    "clear_expired_oauth_tokens": _policy(
-        "logs", ("beat", "logs"), "retention_sweep"
-    ),
     "cleanup_celery_task_replays": _policy(
         "logs", ("beat", "logs"), "retention_sweep"
     ),

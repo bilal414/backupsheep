@@ -172,8 +172,8 @@ Settings → API access or with `POST /api/v1/tokens/`; see [API authentication]
 | `OAUTH2_ALLOWED_REDIRECT_URI_SCHEMES` | `https,backupsheep` | Comma-separated URI schemes an OAuth application may register as redirect URIs. Add `http` only to allow RFC 8252 loopback (`http://127.0.0.1:<port>/…`) callbacks for command-line clients |
 
 Refresh tokens rotate on every use and a replayed refresh token revokes its whole token
-family. Expired OAuth rows are pruned nightly by the `clear_expired_oauth_tokens` Celery
-beat task. See [OAuth 2.0](../api/oauth.md) for the client flows.
+family. Expired OAuth rows are swept by the web service itself (at most once an hour, from the
+token endpoint), because no worker lane may read credential tables. See [OAuth 2.0](../api/oauth.md) for the client flows.
 
 ## API rate limits and documentation
 

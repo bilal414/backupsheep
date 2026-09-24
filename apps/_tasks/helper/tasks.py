@@ -1582,23 +1582,6 @@ def delete_old_db_logs(self):
         capture_exception(e)
 
 
-@current_app.task(name="clear_expired_oauth_tokens", bind=True, ignore_result=True)
-def clear_expired_oauth_tokens(self):
-    """Prune expired OAuth 2.0 access tokens, refresh tokens and grants.
-
-    Expired rows are already rejected at authentication time; this logs-lane
-    sweep only keeps the django-oauth-toolkit tables from growing without bound.
-    Personal API tokens are deliberately not pruned: revoked and expired rows
-    remain visible in Settings as an audit trail. Scheduled daily by Celery beat.
-    """
-    from oauth2_provider.models import clear_expired
-
-    try:
-        clear_expired()
-    except Exception as e:
-        capture_exception(e)
-
-
 @current_app.task(name="poll_cloud_backup", bind=True, ignore_result=True)
 def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, timeout=86400):
     """Asynchronously wait for a cloud / volume snapshot to finish.
