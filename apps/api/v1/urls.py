@@ -28,5 +28,8 @@ urlpatterns = [
         path(r'', include('apps.api.v1.notification.urls')),
         path(r'', include('apps.api.v1.incoming.urls')),
         path(r'', include('apps.api.v1.utils.urls')),
+        path(r'', include('apps.api.v1.token.urls')),
+        path(r'', include('apps.api.v1.oauth.urls')),
+        path(r'', include('apps.api.v1.docs.urls')),
     ])),
 ]

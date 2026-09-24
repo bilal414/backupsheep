@@ -142,10 +142,23 @@ class APIAuthLogout(APIView):
 
     def post(self, request):
         try:
-            # TokenAuthentication and SessionAuthentication can both reach this
-            # endpoint. Revoke the user's single DRF bearer token in either case.
-            Token.objects.filter(user=request.user).delete()
-            logout(request)
+            from apps.api.oauth2.revocation import revoke_access_token
+            from apps.api.v1.utils.api_authentication import is_scoped_credential
+            from apps.console.api_access.models import CoreApiToken
+
+            credential = getattr(request, "auth", None)
+            if is_scoped_credential(credential):
+                # A scoped credential only ends itself: other tokens and the
+                # member's browser sessions are unaffected.
+                if isinstance(credential, CoreApiToken):
+                    credential.revoke()
+                else:
+                    revoke_access_token(credential)
+            else:
+                # TokenAuthentication and SessionAuthentication can both reach this
+                # endpoint. Revoke the user's single DRF bearer token in either case.
+                Token.objects.filter(user=request.user).delete()
+                logout(request)
             response = {"logout": True}
         except Exception as e:
             if hasattr(e, "detail"):

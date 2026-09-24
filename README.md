@@ -236,7 +236,7 @@ current user and operator guidance from dated engineering test reports.
 | Sources and destinations | [Backup sources](docs/features/backup-sources.md) · [Storage destinations](docs/features/storage-destinations.md) · [Provider matrix](docs/reference/provider-matrix.md) |
 | Backups and recovery | [Schedules and policies](docs/features/schedules-and-policies.md) · [Executions and history](docs/features/executions-and-history.md) · [Restores](docs/features/restores.md) |
 | Teams and alerts | [Teams, tenancy, and API access](docs/features/teams-tenancy-and-api-access.md) · [Notifications](docs/features/notifications.md) |
-| Automate | [REST API](docs/api/README.md) · [Endpoint reference](docs/api/reference.md) · [Bruno collection](bruno/README.md) |
+| Automate | [REST API](docs/api/README.md) · [Authentication and scopes](docs/api/authentication.md) · [OAuth 2.0](docs/api/oauth.md) · [Endpoint reference](docs/api/reference.md) · [Bruno collection](bruno/README.md) |
 | Operate safely | [Production](docs/guides/production.md) · [Operations](docs/guides/operations.md) · [Upgrades](docs/guides/upgrades.md) · [Disaster recovery](docs/guides/disaster-recovery.md) · [Troubleshooting](docs/guides/troubleshooting.md) |
 | Technical reference | [Architecture](docs/reference/architecture.md) · [Environment variables](docs/reference/environment-variables.md) |
 

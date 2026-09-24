@@ -1,0 +1,40 @@
+meta {
+  name: POST /o/authorize/
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/o/authorize/
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {}
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-o-authorize`
+
+  Requires the authenticated browser session and its Django CSRF token; API-token authentication is intentionally rejected. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.oauth2.views.AuthorizationView.post`
+  Source: `apps/api/oauth2/views.py`
+}

@@ -1,0 +1,30 @@
+meta {
+  name: GET /o/introspect/
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/o/introspect/
+  body: none
+  auth: none
+}
+
+headers {
+  Content-Type: application/x-www-form-urlencoded
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-o-introspect`
+
+  Authenticates the OAuth client itself (client_id plus secret, or the PKCE code exchange) with a form-encoded body; API tokens are not accepted. Read-only request.
+
+  Django action: `apps.api.oauth2.views.IntrospectTokenView.get`
+  Source: `apps/api/oauth2/views.py`
+}

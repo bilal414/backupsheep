@@ -1,0 +1,30 @@
+meta {
+  name: GET /api/v1/oauth/applications/
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/v1/oauth/applications/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-oauth-applications`
+
+  Requires the console session or the legacy login token (`Authorization: Token <key>`); personal API tokens and OAuth access tokens are rejected so a scoped credential can never mint a broader one. Read-only request.
+
+  Django action: `apps.api.v1.oauth.views.OAuthApplicationViewSet.list`
+  Source: `apps/api/v1/oauth/views.py`
+}

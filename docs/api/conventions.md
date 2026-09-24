@@ -54,6 +54,38 @@ There is no single global filter schema. Unknown filters may be ignored. Start w
 query examples in Bruno and confirm a provider's filter class before depending on a
 query parameter in long-lived automation.
 
+## Pagination
+
+List endpoints return the complete collection unless the request includes `limit`.
+With `limit` (1–500) and an optional zero-based `offset`, the response becomes the
+standard envelope:
+
+```json
+{
+  "count": 1234,
+  "next": "https://backup.example.com/api/v1/backups/website/?limit=100&offset=100",
+  "previous": null,
+  "results": [ ... ]
+}
+```
+
+Follow `next` until it is `null`. Values above 500 are clamped, and an invalid `limit`
+returns the smallest page rather than the whole collection. The console's DataTables
+requests use their own parameters and are unaffected.
+
+## Rate limits
+
+Every identity shares one sustained ceiling across sessions and tokens (default
+600 requests/minute), with a tighter limit for state-changing requests (default
+120/minute) and a per-peer limit for unauthenticated requests (default 60/minute).
+Login, password reset, authenticator, credential management, SSH host-key scans, the
+OAuth token endpoint, and the documentation endpoints keep their own stricter limits.
+
+A limited request receives `429 Too Many Requests` with a `Retry-After` header. Back
+off for at least that long; a client that keeps retrying stays throttled. Operators can
+tune the global limits with `API_THROTTLE_USER_RATE`, `API_THROTTLE_WRITE_RATE`, and
+`API_THROTTLE_ANON_RATE`.
+
 ## Background operations
 
 BackupSheep performs backups, restores, provider snapshots, uploads, replication, and
@@ -129,11 +161,11 @@ Success responses commonly use `200`, `201`, `202`, or `204`. Common failures in
 | Status | Typical meaning |
 |---|---|
 | `400` | Invalid body, invalid state transition, validation failure, or missing idempotency input. |
-| `401` | Missing/invalid authentication. |
-| `403` | CSRF or group/account permission failure. |
+| `401` | Missing, invalid, expired, or revoked credential. |
+| `403` | Missing scope (`"code": "insufficient_scope"`), endpoint reserved for interactive credentials (`"code": "interactive_credential_required"`), CSRF, or group/account permission failure. |
 | `404` | Route or scoped object not found. |
 | `409` | Object is still attached, duplicate/conflicting operation, or reused idempotency key with different input. |
-| `429` | Authentication or provider-related rate limiting. |
+| `429` | Rate limiting (`Retry-After` is set). |
 | `5xx` | Application, broker, worker, or upstream failure; inspect durable state before retrying a mutation. |
 
 Error bodies are not fully uniform because the API contains both newer durable
@@ -143,8 +175,13 @@ and safe `code`/`message` fields rather than parsing one global envelope.
 ## OAuth callbacks
 
 Routes under `/api/v1/callback/` complete interactive OAuth or provider authorization
-flows. They depend on browser session state and query parameters from the provider.
-They are included in Bruno for route completeness, but they are not a substitute for
-starting the corresponding OAuth flow in the console.
+flows (BackupSheep acting as an OAuth *client* of DigitalOcean, Google, Dropbox, and so
+on). They depend on browser session state and query parameters from the provider and
+are never available to scoped tokens. They are included in Bruno for route
+completeness, but they are not a substitute for starting the corresponding OAuth flow
+in the console.
+
+BackupSheep's own authorization server, used by third-party apps to obtain access to
+BackupSheep, lives under `/o/` and is described in [OAuth 2.0](oauth.md).
 
 Never paste a real OAuth authorization code into a committed environment.

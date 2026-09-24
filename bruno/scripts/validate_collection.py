@@ -79,7 +79,9 @@ def main():
             errors.append(f"{key} has the wrong URL in {row['file']}")
         if "Authorization: Bearer" in text:
             errors.append(f"{key} incorrectly uses Bearer auth in {row['file']}")
-        if expected.auth in {"token", "optional-token"}:
+        if expected.auth in {"token", "optional-token", "interactive-token"}:
+            # Credential management accepts the legacy login token but never a
+            # scoped bearer credential, so Bruno keeps using the DRF Token header.
             if "Authorization: Token {{apiToken}}" not in text:
                 errors.append(f"{key} is missing DRF Token auth in {row['file']}")
         elif "Authorization:" in text:

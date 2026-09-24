@@ -1,0 +1,40 @@
+meta {
+  name: POST /o/revoke_token/
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/o/revoke_token/
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {}
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-o-revoke-token`
+
+  Authenticates the OAuth client itself (client_id plus secret, or the PKCE code exchange) with a form-encoded body; API tokens are not accepted. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.oauth2.views.RevokeTokenView.post`
+  Source: `apps/api/oauth2/views.py`
+}

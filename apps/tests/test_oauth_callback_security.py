@@ -398,6 +398,11 @@ class OAuthStateSecurityTests(SimpleTestCase):
     GOOGLE_CLIENT_SECRET="google-secret-marker",
 )
 class OAuthCallbackBoundaryTests(SimpleTestCase):
+    # The global API throttles record request history in the database cache,
+    # so invoking a DRF view (even with a mocked identity) touches the default
+    # database. Nothing here persists model rows.
+    databases = {"default"}
+
     callback_cases = (
         (APICallbackSlack, "slack", False, "https://slack.com/api/oauth.v2.access"),
         (

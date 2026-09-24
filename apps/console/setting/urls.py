@@ -13,6 +13,7 @@ urlpatterns = [
                 path("account/", views.AccountView.as_view(), name="account"),
                 path("password/", views.PasswordView.as_view(), name="password"),
                 path("multifactor/", views.MultiFactorView.as_view(), name="multifactor"),
+                path("api-access/", views.ApiAccessView.as_view(), name="api_access"),
                 path("groups/", views.GroupView.as_view(), name="group"),
                 path("users/", views.UserView.as_view(), name="user"),
                 path("invites/", views.InviteView.as_view(), name="invite"),

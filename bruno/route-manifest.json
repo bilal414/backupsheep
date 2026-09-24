@@ -4,7 +4,9 @@
   "scope": {
     "included": [
       "/api/v1/**",
-      "/healthz/"
+      "/healthz/",
+      "/o/** (OAuth 2.0 authorization server)",
+      "/.well-known/oauth-authorization-server"
     ],
     "excluded": [
       "/django-admin/** (HTML administrator)",
@@ -15,12 +17,25 @@
     ]
   },
   "counts": {
-    "api_operations": 892,
-    "health_operations": 1,
-    "total_operations": 893,
-    "unique_paths": 512
+    "api_operations": 909,
+    "health_operations": 8,
+    "total_operations": 917,
+    "unique_paths": 529
   },
   "operations": [
+    {
+      "operation_id": "get-well-known-oauth-authorization-server",
+      "method": "GET",
+      "path": "/.well-known/oauth-authorization-server",
+      "regex_route": ".well-known/oauth-authorization-server",
+      "view": "oauth2_provider.views.metadata.OAuthServerMetadataView",
+      "action": "get",
+      "source": ".venv/lib/python3.14/site-packages/oauth2_provider/views/metadata.py",
+      "auth": "none",
+      "safety": "safe-read",
+      "kind": "oauth-server",
+      "file": "requests/96 OAuth 2.0 Server/001-get-get.bru"
+    },
     {
       "operation_id": "get-api-v1-accounts",
       "method": "GET",
@@ -5976,6 +5991,32 @@
       "file": "requests/70 Backup Sources/Databases/008-put-update.bru"
     },
     {
+      "operation_id": "get-api-v1-docs",
+      "method": "GET",
+      "path": "/api/v1/docs/",
+      "regex_route": "api/v1/docs/",
+      "view": "apps.api.v1.docs.views.ApiRedocView",
+      "action": "get",
+      "source": "apps/api/v1/docs/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "documentation",
+      "file": "requests/97 Documentation/001-get-get.bru"
+    },
+    {
+      "operation_id": "get-api-v1-docs-swagger",
+      "method": "GET",
+      "path": "/api/v1/docs/swagger/",
+      "regex_route": "api/v1/docs/swagger/",
+      "view": "apps.api.v1.docs.views.ApiSwaggerView",
+      "action": "get",
+      "source": "apps/api/v1/docs/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "documentation",
+      "file": "requests/97 Documentation/002-get-get.bru"
+    },
+    {
       "operation_id": "get-api-v1-groups",
       "method": "GET",
       "path": "/api/v1/groups/",
@@ -6847,6 +6888,110 @@
       "file": "requests/93 Notifications/Telegram/007-post-validate.bru"
     },
     {
+      "operation_id": "get-api-v1-oauth-applications",
+      "method": "GET",
+      "path": "/api/v1/oauth/applications/",
+      "regex_route": "api/v1/^oauth/applications/$",
+      "view": "apps.api.v1.oauth.views.OAuthApplicationViewSet",
+      "action": "list",
+      "source": "apps/api/v1/oauth/views.py",
+      "auth": "interactive-token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/001-get-list.bru"
+    },
+    {
+      "operation_id": "post-api-v1-oauth-applications",
+      "method": "POST",
+      "path": "/api/v1/oauth/applications/",
+      "regex_route": "api/v1/^oauth/applications/$",
+      "view": "apps.api.v1.oauth.views.OAuthApplicationViewSet",
+      "action": "create",
+      "source": "apps/api/v1/oauth/views.py",
+      "auth": "interactive-token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/002-post-create.bru"
+    },
+    {
+      "operation_id": "delete-api-v1-oauth-applications-resourceid",
+      "method": "DELETE",
+      "path": "/api/v1/oauth/applications/{{resourceId}}/",
+      "regex_route": "api/v1/^oauth/applications/(?P<pk>[^/.]+)/$",
+      "view": "apps.api.v1.oauth.views.OAuthApplicationViewSet",
+      "action": "destroy",
+      "source": "apps/api/v1/oauth/views.py",
+      "auth": "interactive-token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/003-delete-destroy.bru"
+    },
+    {
+      "operation_id": "get-api-v1-oauth-applications-resourceid",
+      "method": "GET",
+      "path": "/api/v1/oauth/applications/{{resourceId}}/",
+      "regex_route": "api/v1/^oauth/applications/(?P<pk>[^/.]+)/$",
+      "view": "apps.api.v1.oauth.views.OAuthApplicationViewSet",
+      "action": "retrieve",
+      "source": "apps/api/v1/oauth/views.py",
+      "auth": "interactive-token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/004-get-retrieve.bru"
+    },
+    {
+      "operation_id": "patch-api-v1-oauth-applications-resourceid",
+      "method": "PATCH",
+      "path": "/api/v1/oauth/applications/{{resourceId}}/",
+      "regex_route": "api/v1/^oauth/applications/(?P<pk>[^/.]+)/$",
+      "view": "apps.api.v1.oauth.views.OAuthApplicationViewSet",
+      "action": "partial_update",
+      "source": "apps/api/v1/oauth/views.py",
+      "auth": "interactive-token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/005-patch-partial-update.bru"
+    },
+    {
+      "operation_id": "post-api-v1-oauth-applications-resourceid-rotate-secret",
+      "method": "POST",
+      "path": "/api/v1/oauth/applications/{{resourceId}}/rotate_secret/",
+      "regex_route": "api/v1/^oauth/applications/(?P<pk>[^/.]+)/rotate_secret/$",
+      "view": "apps.api.v1.oauth.views.OAuthApplicationViewSet",
+      "action": "rotate_secret",
+      "source": "apps/api/v1/oauth/views.py",
+      "auth": "interactive-token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/006-post-rotate-secret.bru"
+    },
+    {
+      "operation_id": "get-api-v1-oauth-authorized-applications",
+      "method": "GET",
+      "path": "/api/v1/oauth/authorized-applications/",
+      "regex_route": "api/v1/^oauth/authorized-applications/$",
+      "view": "apps.api.v1.oauth.views.AuthorizedApplicationViewSet",
+      "action": "list",
+      "source": "apps/api/v1/oauth/views.py",
+      "auth": "interactive-token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/007-get-list.bru"
+    },
+    {
+      "operation_id": "delete-api-v1-oauth-authorized-applications-resourceid",
+      "method": "DELETE",
+      "path": "/api/v1/oauth/authorized-applications/{{resourceId}}/",
+      "regex_route": "api/v1/^oauth/authorized-applications/(?P<pk>\\d+)/$",
+      "view": "apps.api.v1.oauth.views.AuthorizedApplicationViewSet",
+      "action": "destroy",
+      "source": "apps/api/v1/oauth/views.py",
+      "auth": "interactive-token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/008-delete-destroy.bru"
+    },
+    {
       "operation_id": "get-api-v1-saas-basecamp",
       "method": "GET",
       "path": "/api/v1/saas/basecamp/",
@@ -7079,6 +7224,19 @@
       "safety": "mutation",
       "kind": "machine-api",
       "file": "requests/91 Schedules/009-post-trigger.bru"
+    },
+    {
+      "operation_id": "get-api-v1-schema",
+      "method": "GET",
+      "path": "/api/v1/schema/",
+      "regex_route": "api/v1/schema/",
+      "view": "apps.api.v1.docs.views.ApiSchemaView",
+      "action": "get",
+      "source": "apps/api/v1/docs/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "documentation",
+      "file": "requests/97 Documentation/003-get-get.bru"
     },
     {
       "operation_id": "get-api-v1-stats-backups",
@@ -10422,6 +10580,84 @@
       "file": "requests/80 Storage/Aggregate/006-post-validate.bru"
     },
     {
+      "operation_id": "get-api-v1-tokens",
+      "method": "GET",
+      "path": "/api/v1/tokens/",
+      "regex_route": "api/v1/^tokens/$",
+      "view": "apps.api.v1.token.views.ApiTokenViewSet",
+      "action": "list",
+      "source": "apps/api/v1/token/views.py",
+      "auth": "interactive-token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/009-get-list.bru"
+    },
+    {
+      "operation_id": "post-api-v1-tokens",
+      "method": "POST",
+      "path": "/api/v1/tokens/",
+      "regex_route": "api/v1/^tokens/$",
+      "view": "apps.api.v1.token.views.ApiTokenViewSet",
+      "action": "create",
+      "source": "apps/api/v1/token/views.py",
+      "auth": "interactive-token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/010-post-create.bru"
+    },
+    {
+      "operation_id": "get-api-v1-tokens-scopes",
+      "method": "GET",
+      "path": "/api/v1/tokens/scopes/",
+      "regex_route": "api/v1/^tokens/scopes/$",
+      "view": "apps.api.v1.token.views.ApiTokenViewSet",
+      "action": "scopes",
+      "source": "apps/api/v1/token/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/011-get-scopes.bru"
+    },
+    {
+      "operation_id": "delete-api-v1-tokens-resourceid",
+      "method": "DELETE",
+      "path": "/api/v1/tokens/{{resourceId}}/",
+      "regex_route": "api/v1/^tokens/(?P<pk>[^/.]+)/$",
+      "view": "apps.api.v1.token.views.ApiTokenViewSet",
+      "action": "destroy",
+      "source": "apps/api/v1/token/views.py",
+      "auth": "interactive-token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/012-delete-destroy.bru"
+    },
+    {
+      "operation_id": "get-api-v1-tokens-resourceid",
+      "method": "GET",
+      "path": "/api/v1/tokens/{{resourceId}}/",
+      "regex_route": "api/v1/^tokens/(?P<pk>[^/.]+)/$",
+      "view": "apps.api.v1.token.views.ApiTokenViewSet",
+      "action": "retrieve",
+      "source": "apps/api/v1/token/views.py",
+      "auth": "interactive-token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/013-get-retrieve.bru"
+    },
+    {
+      "operation_id": "post-api-v1-tokens-resourceid-rotate",
+      "method": "POST",
+      "path": "/api/v1/tokens/{{resourceId}}/rotate/",
+      "regex_route": "api/v1/^tokens/(?P<pk>[^/.]+)/rotate/$",
+      "view": "apps.api.v1.token.views.ApiTokenViewSet",
+      "action": "rotate",
+      "source": "apps/api/v1/token/views.py",
+      "auth": "interactive-token",
+      "safety": "mutation",
+      "kind": "machine-api",
+      "file": "requests/95 API Access/014-post-rotate.bru"
+    },
+    {
       "operation_id": "post-api-v1-utils-ssh-host-keys-approve",
       "method": "POST",
       "path": "/api/v1/utils/ssh-host-keys/approve/",
@@ -11629,6 +11865,84 @@
       "safety": "safe-read",
       "kind": "health",
       "file": "requests/00 Health/001-get-get.bru"
+    },
+    {
+      "operation_id": "get-o-authorize",
+      "method": "GET",
+      "path": "/o/authorize/",
+      "regex_route": "o/authorize/",
+      "view": "apps.api.oauth2.views.AuthorizationView",
+      "action": "get",
+      "source": "apps/api/oauth2/views.py",
+      "auth": "browser-session-csrf",
+      "safety": "safe-read",
+      "kind": "oauth-server",
+      "file": "requests/96 OAuth 2.0 Server/002-get-get.bru"
+    },
+    {
+      "operation_id": "post-o-authorize",
+      "method": "POST",
+      "path": "/o/authorize/",
+      "regex_route": "o/authorize/",
+      "view": "apps.api.oauth2.views.AuthorizationView",
+      "action": "post",
+      "source": "apps/api/oauth2/views.py",
+      "auth": "browser-session-csrf",
+      "safety": "mutation",
+      "kind": "oauth-server",
+      "file": "requests/96 OAuth 2.0 Server/003-post-post.bru"
+    },
+    {
+      "operation_id": "get-o-introspect",
+      "method": "GET",
+      "path": "/o/introspect/",
+      "regex_route": "o/introspect/",
+      "view": "apps.api.oauth2.views.IntrospectTokenView",
+      "action": "get",
+      "source": "apps/api/oauth2/views.py",
+      "auth": "oauth-client",
+      "safety": "safe-read",
+      "kind": "oauth-server",
+      "file": "requests/96 OAuth 2.0 Server/004-get-get.bru"
+    },
+    {
+      "operation_id": "post-o-introspect",
+      "method": "POST",
+      "path": "/o/introspect/",
+      "regex_route": "o/introspect/",
+      "view": "apps.api.oauth2.views.IntrospectTokenView",
+      "action": "post",
+      "source": "apps/api/oauth2/views.py",
+      "auth": "oauth-client",
+      "safety": "mutation",
+      "kind": "oauth-server",
+      "file": "requests/96 OAuth 2.0 Server/005-post-post.bru"
+    },
+    {
+      "operation_id": "post-o-revoke-token",
+      "method": "POST",
+      "path": "/o/revoke_token/",
+      "regex_route": "o/revoke_token/",
+      "view": "apps.api.oauth2.views.RevokeTokenView",
+      "action": "post",
+      "source": "apps/api/oauth2/views.py",
+      "auth": "oauth-client",
+      "safety": "mutation",
+      "kind": "oauth-server",
+      "file": "requests/96 OAuth 2.0 Server/006-post-post.bru"
+    },
+    {
+      "operation_id": "post-o-token",
+      "method": "POST",
+      "path": "/o/token/",
+      "regex_route": "o/token/",
+      "view": "apps.api.oauth2.views.TokenView",
+      "action": "post",
+      "source": "apps/api/oauth2/views.py",
+      "auth": "oauth-client",
+      "safety": "mutation",
+      "kind": "oauth-server",
+      "file": "requests/96 OAuth 2.0 Server/007-post-post.bru"
     }
   ]
 }

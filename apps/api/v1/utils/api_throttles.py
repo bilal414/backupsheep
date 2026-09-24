@@ -177,6 +177,104 @@ class MFAIdentityRateThrottle(_SubmittedIdentityThrottle):
         return "mfa-user", getattr(user, "pk", None)
 
 
+def _configured_rate(setting_name, default):
+    return str(getattr(settings, setting_name, default) or default)
+
+
+class ApiUserRateThrottle(SimpleRateThrottle):
+    """Sustained per-identity limit for every authenticated API request.
+
+    Applies to sessions, legacy tokens, personal API tokens and OAuth tokens
+    alike (keyed by the user).  Anonymous requests are keyed by the server-
+    observed peer so unauthenticated endpoints share the same ceiling.
+    """
+
+    scope = "api-user"
+
+    def get_rate(self):
+        return _configured_rate("API_THROTTLE_USER_RATE", "600/minute")
+
+    def get_cache_key(self, request, view):
+        user = getattr(request, "user", None)
+        user_pk = getattr(user, "pk", None) if getattr(user, "is_authenticated", False) else None
+        if user_pk is not None:
+            ident = _keyed_identifier("user", user_pk)
+        else:
+            # Anonymous callers (and identity objects without a primary key)
+            # share the server-observed peer bucket.
+            ident = _keyed_identifier("peer", _server_observed_peer(request))
+        return self.cache_format % {"scope": self.scope, "ident": ident}
+
+
+class ApiWriteRateThrottle(ApiUserRateThrottle):
+    """Tighter per-identity limit for state-changing requests."""
+
+    scope = "api-write"
+
+    def get_rate(self):
+        return _configured_rate("API_THROTTLE_WRITE_RATE", "120/minute")
+
+    def allow_request(self, request, view):
+        if request.method.upper() in ("GET", "HEAD", "OPTIONS"):
+            return True
+        return super().allow_request(request, view)
+
+
+class ApiAnonRateThrottle(_ServerPeerThrottle):
+    """Per-peer limit for unauthenticated API requests."""
+
+    scope = "api-anon"
+
+    def get_rate(self):
+        return _configured_rate("API_THROTTLE_ANON_RATE", "60/minute")
+
+    def allow_request(self, request, view):
+        user = getattr(request, "user", None)
+        if user is not None and user.is_authenticated:
+            return True
+        return super().allow_request(request, view)
+
+
+class ApiCredentialManagementThrottle(_SubmittedIdentityThrottle):
+    """Bound password-confirmed credential minting per authenticated identity."""
+
+    scope = "api-credential-management"
+    rate = "10/minute"
+
+    def identity(self, request):
+        user = getattr(request, "user", None)
+        return "credential-management-user", getattr(user, "pk", None)
+
+
+class ApiDocsRateThrottle(_ServerPeerThrottle):
+    """Schema generation is CPU-bound; bound it per peer regardless of identity."""
+
+    scope = "api-docs-peer"
+    rate = "30/minute"
+
+
+class OAuthTokenEndpointPeerThrottle(_ServerPeerThrottle):
+    """Coarse guard for the OAuth token, revocation and introspection endpoints."""
+
+    scope = "oauth-token-peer"
+    rate = "60/minute"
+
+
+class OAuthTokenEndpointClientThrottle(_SubmittedIdentityThrottle):
+    """Limit token-endpoint attempts per submitted OAuth client."""
+
+    scope = "oauth-token-client"
+    rate = "30/minute"
+
+    def identity(self, request):
+        client_id = request.POST.get("client_id") if hasattr(request, "POST") else None
+        if not client_id:
+            # Confidential clients may authenticate with HTTP Basic instead.
+            header = request.META.get("HTTP_AUTHORIZATION", "")
+            client_id = header[:512] if header.lower().startswith("basic ") else None
+        return "oauth-client", client_id
+
+
 class SSHHostKeyPeerThrottle(_ServerPeerThrottle):
     """Bound unauthenticated handshakes initiated by one observed peer."""
 

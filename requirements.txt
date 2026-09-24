@@ -62,6 +62,11 @@ python-dotenv==1.2.2
 cryptography==50.0.0
 sentry-sdk==2.60.0
 
+# API platform: OAuth 2.0 authorization server and OpenAPI documentation
+django-oauth-toolkit==3.4.1
+drf-spectacular==0.30.0
+drf-spectacular-sidecar==2026.9.1
+
 # Utilities & Helpers
 humanfriendly==10.0
 humanize==4.15.0

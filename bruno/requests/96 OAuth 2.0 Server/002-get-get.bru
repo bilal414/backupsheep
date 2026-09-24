@@ -1,0 +1,29 @@
+meta {
+  name: GET /o/authorize/
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/o/authorize/
+  body: none
+  auth: none
+}
+
+headers {
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-o-authorize`
+
+  Requires the authenticated browser session and its Django CSRF token; API-token authentication is intentionally rejected. Read-only request.
+
+  Django action: `apps.api.oauth2.views.AuthorizationView.get`
+  Source: `apps/api/oauth2/views.py`
+}

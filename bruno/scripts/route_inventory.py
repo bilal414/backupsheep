@@ -140,12 +140,23 @@ def _source(callback) -> str:
 
 
 def _auth(path: str) -> str:
-    if path in {"/healthz/", "/api/v1/utils/test/"}:
+    if path in {"/healthz/", "/api/v1/utils/test/", "/.well-known/oauth-authorization-server"}:
         return "none"
     if path.startswith("/api/v1/auth/"):
         return "none"
     if path == "/api/v1/check/login/":
         return "optional-token"
+    if path == "/o/authorize/":
+        # The consent page runs inside the signed-in console session.
+        return "browser-session-csrf"
+    if path.startswith("/o/"):
+        # Token, revocation and introspection authenticate the OAuth client
+        # (client_id/secret or PKCE code exchange), never an API token.
+        return "oauth-client"
+    if path.startswith(("/api/v1/tokens/", "/api/v1/oauth/")) and path != "/api/v1/tokens/scopes/":
+        # Credential management is reserved for the console session or the
+        # legacy login token; scoped tokens are rejected.
+        return "interactive-token"
     if path in {
         "/api/v1/connections/digitalocean/oauth_url/",
         "/api/v1/connections/ovh_ca/oauth_url/",
@@ -187,6 +198,10 @@ def _kind(path: str) -> str:
         return "health"
     if path.startswith("/api/v1/callback/"):
         return "browser-oauth-callback"
+    if path.startswith("/o/") or path == "/.well-known/oauth-authorization-server":
+        return "oauth-server"
+    if path.startswith("/api/v1/docs/") or path == "/api/v1/schema/":
+        return "documentation"
     return "machine-api"
 
 
@@ -203,7 +218,12 @@ def operations() -> list[Operation]:
                 walk(pattern.url_patterns, route)
                 continue
             path = normalize_route(route)
-            if not (path.startswith("/api/v1/") or path == "/healthz/"):
+            if not (
+                path.startswith("/api/v1/")
+                or path == "/healthz/"
+                or path.startswith("/o/")
+                or path == "/.well-known/oauth-authorization-server"
+            ):
                 continue
             callback = pattern.callback
             view_class = _view_class(callback)

@@ -49,8 +49,10 @@ drift can be detected during documentation validation.
 | Guide | What it covers |
 |---|---|
 | [REST API overview](api/README.md) | Base URL, scope, formats, security, and quick start. |
-| [Authentication](api/authentication.md) | DRF tokens, browser sessions, CSRF, reset endpoints, and account context. |
-| [Conventions and safety](api/conventions.md) | CRUD patterns, filters, asynchronous work, idempotency, errors, and mutations. |
+| [Authentication](api/authentication.md) | Personal API tokens, scopes, OAuth access tokens, the legacy login token, sessions, and CSRF. |
+| [OAuth 2.0](api/oauth.md) | Application registration, authorization code + PKCE, refresh rotation, client credentials, and revocation. |
+| [iOS integration](api/ios.md) | Native-app contract with a Swift `ASWebAuthenticationSession` example and token-handling rules. |
+| [Conventions and safety](api/conventions.md) | CRUD patterns, filters, pagination, rate limits, asynchronous work, idempotency, errors, and mutations. |
 | [Common API workflows](api/workflows.md) | Connection-to-backup and restore sequences. |
 | [Endpoint reference](api/reference.md) | Human-readable map of every endpoint family. |
 | [Bruno collection](../bruno/README.md) | Runnable request for every active API method plus resolver-based coverage validation. |

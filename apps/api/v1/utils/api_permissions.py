@@ -289,3 +289,20 @@ class MemberGroupPermissions(permissions.BasePermission):
 class WebhookPermissions(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.method == "POST"
+
+
+class InteractiveCredentialPermission(permissions.BasePermission):
+    """Reject personal API tokens and OAuth tokens.
+
+    Credential management (tokens, OAuth applications, connected apps) must not
+    be reachable with a scoped bearer credential, otherwise a leaked token could
+    mint a broader one.  The authenticators already classify these routes as
+    interactive-only; this permission is the explicit, view-level statement.
+    """
+
+    message = "This endpoint requires the console session or the login token."
+
+    def has_permission(self, request, view):
+        from apps.api.v1.utils.api_authentication import is_scoped_credential
+
+        return not is_scoped_credential(getattr(request, "auth", None))
