@@ -9,7 +9,7 @@ FROM rabbitmq:4.3.5@sha256:f3aa266b9f3ee3d06c6658804aa3b8e4474bfc18880dcc20f4699
 # RabbitMQ 3.13 requires OTP 26, but the historical image carries an OTP patch
 # with known high/critical vulnerabilities.  Import the latest reviewed OTP 26
 # patch without changing the RabbitMQ application or its on-disk data format.
-FROM erlang:26.2.5.21@sha256:f9007e3e435761bd7f88aafa4bfab20fd4107baa88e3ff45e935ef2aa3e892d5 AS erlang-runtime
+FROM erlang:29.1.0.0@sha256:b7b1061febd7f48a65e7d44ad3685d6ec99bef905df907533f1349d8dfdf9323 AS erlang-runtime
 
 FROM rabbitmq:3.13.7@sha256:87178a0ee3e2f52980ba356d38646ed1056705ff2d5ff281f8965456eaa0c1e3
 
