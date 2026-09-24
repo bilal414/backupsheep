@@ -6,7 +6,7 @@
 # LTS image, receives Python from the separately pinned official Python image, and
 # installs only authenticated offline runtime packages and verified client artifacts.
 
-FROM python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS python-runtime
+FROM python:3.14.7-slim-trixie@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS python-runtime
 
 FROM python-runtime AS python-wheels
 
