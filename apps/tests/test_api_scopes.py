@@ -30,7 +30,7 @@ def _concrete(route):
     return route if route.startswith("/") else "/" + route
 
 
-def registered_api_operations():
+def registered_api_operations(prefixes=("/api/v1/",)):
     operations = []
 
     def walk(patterns, prefix=""):
@@ -40,7 +40,7 @@ def registered_api_operations():
                 walk(pattern.url_patterns, route)
                 continue
             path = _concrete(route)
-            if not path.startswith("/api/v1/"):
+            if not path.startswith(tuple(prefixes)):
                 continue
             callback = pattern.callback
             actions = getattr(callback, "actions", None)
@@ -54,7 +54,7 @@ def registered_api_operations():
                     if method not in ("head", "options") and callable(getattr(view_class, method, None))
                 ] or ["GET"]
             for method in methods:
-                operations.append((method, path, route))
+                operations.append((method, path, route, callback))
 
     walk(get_resolver().url_patterns)
     return operations
@@ -64,13 +64,13 @@ class ScopeRegistryTests(SimpleTestCase):
     def test_every_api_route_is_classified(self):
         unclassified = [
             (method, route)
-            for method, path, route in registered_api_operations()
+            for method, path, route, _callback in registered_api_operations()
             if requirement_for(method, path) is None
         ]
         self.assertEqual(unclassified, [], "add a rule to api_scopes.RULES for these routes")
 
     def test_scoped_requirements_only_reference_registered_scopes(self):
-        for method, path, _route in registered_api_operations():
+        for method, path, _route, _callback in registered_api_operations():
             requirement = requirement_for(method, path)
             if requirement.needs_scope:
                 self.assertIn(requirement.scope, SCOPES, (method, path))
@@ -168,3 +168,24 @@ class ScopeRegistryTests(SimpleTestCase):
 
     def test_safe_methods_constant_matches_http(self):
         self.assertEqual(tuple(api_scopes.SAFE_METHODS), _SAFE)
+
+
+    def test_public_routes_are_served_by_repository_views(self):
+        """The Bruno manifest records each view's source file; a third-party
+        view mounted directly would record a site-packages path that differs
+        between machines and break the collection validator in CI."""
+        import inspect
+        from pathlib import Path
+
+        from django.conf import settings
+
+        root = Path(settings.BASE_DIR).resolve()
+        foreign = set()
+        for _method, path, _route, callback in registered_api_operations(
+            prefixes=("/api/v1/", "/o/", "/.well-known/oauth-authorization-server")
+        ):
+            view = getattr(callback, "view_class", None) or getattr(callback, "cls", None) or callback
+            source = Path(inspect.getsourcefile(view)).resolve()
+            if root not in source.parents:
+                foreign.add((path, str(source)))
+        self.assertEqual(sorted(foreign), [], "subclass third-party views inside the repository")

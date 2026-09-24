@@ -8,7 +8,6 @@ dynamic-registration views are deliberately not mounted.
 """
 
 from django.urls import path
-from oauth2_provider.views import OAuthServerMetadataView
 
 from apps.api.oauth2 import views
 
@@ -21,7 +20,7 @@ urlpatterns = [
     path("o/introspect/", views.IntrospectTokenView.as_view(), name="introspect"),
     path(
         ".well-known/oauth-authorization-server",
-        OAuthServerMetadataView.as_view(),
+        views.OAuthServerMetadataView.as_view(),
         name="oauth-server-metadata",
     ),
 ]

@@ -11,15 +11,15 @@ window.BACKUPSHEEP_DOC_CATALOG = {
     "generatedFrom": "Django root URL resolver on the checked-out branch",
     "configurationVariables": 306,
     "provenance": {
-      "sourceRevision": "928dd6393482",
+      "sourceRevision": "2959f49f9f9e",
       "catalogSource": "working-tree",
       "workingTreeApiChanges": true,
       "includesWorkingTreeApiChanges": true,
       "committedApi": {
-        "api_operations": 892,
-        "health_operations": 1,
-        "total_operations": 893,
-        "unique_paths": 512
+        "api_operations": 909,
+        "health_operations": 8,
+        "total_operations": 917,
+        "unique_paths": 529
       }
     }
   },
@@ -29,15 +29,15 @@ window.BACKUPSHEEP_DOC_CATALOG = {
       "method": "GET",
       "path": "/.well-known/oauth-authorization-server",
       "regex_route": ".well-known/oauth-authorization-server",
-      "view": "oauth2_provider.views.metadata.OAuthServerMetadataView",
+      "view": "apps.api.oauth2.views.OAuthServerMetadataView",
       "action": "get",
-      "source": ".venv/lib/python3.14/site-packages/oauth2_provider/views/metadata.py",
+      "source": "apps/api/oauth2/views.py",
       "auth": "none",
       "safety": "safe-read",
       "kind": "oauth-server",
       "file": "requests/96 OAuth 2.0 Server/001-get-get.bru",
       "family": "root",
-      "source_href": "../../.venv/lib/python3.14/site-packages/oauth2_provider/views/metadata.py",
+      "source_href": "../../apps/api/oauth2/views.py",
       "bruno_href": "../../bruno/requests/96 OAuth 2.0 Server/001-get-get.bru"
     },
     {
