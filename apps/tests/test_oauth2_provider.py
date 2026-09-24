@@ -379,9 +379,9 @@ class RefreshAndRevocationTests(OAuthMixin, BaseTestCase):
         auth = {"HTTP_AUTHORIZATION": f"Bearer {rotated['access_token']}"}
         self.assertEqual(self.api.get("/api/v1/mobile/bootstrap/", **auth).status_code, 200)
 
-        # Replaying the original refresh token after the grace window is an attack
-        # signal: the whole family, including the freshly rotated pair, is revoked.
-        RefreshToken.objects.update(revoked=RefreshToken.objects.first().revoked and RefreshToken.objects.first().revoked - __import__("datetime").timedelta(seconds=120))
+        # Replaying the original refresh token is an attack signal: the whole
+        # family, including the freshly rotated pair, is revoked immediately
+        # (hashed token storage leaves no grace window).
         replay = self.refresh(self.tokens["refresh_token"])
         self.assertEqual(replay.status_code, 400)
         self.assertEqual(self.api.get("/api/v1/mobile/bootstrap/", **auth).status_code, 401)

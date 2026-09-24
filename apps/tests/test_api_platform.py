@@ -172,6 +172,23 @@ class DocumentationTests(BaseTestCase):
         self.assertEqual(len(ApiSchemaView._schema_cache), 1)
 
 
+class DeploymentCheckTests(BaseTestCase):
+    def test_deploy_system_checks_report_no_errors(self):
+        """docker_preflight runs ``check --deploy`` with fail_level=ERROR inside
+        every production container; a settings combination that trips a
+        deploy-only error (for example django-oauth-toolkit's E001) would stop
+        the stack from starting without any unit test noticing."""
+        from django.core import checks
+
+        messages = checks.run_checks(include_deployment_checks=True)
+        errors = [str(message) for message in messages if message.level >= checks.ERROR]
+        self.assertEqual(errors, [])
+        oauth_messages = [
+            str(message) for message in messages if str(message.id or "").startswith("oauth2_provider.")
+        ]
+        self.assertEqual(oauth_messages, [])
+
+
 class ApiAccessConsolePageTests(BaseTestCase):
     def setUp(self):
         super().setUp()
