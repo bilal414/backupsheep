@@ -32,6 +32,9 @@ from dotenv import dotenv_values
 from backupsheep.sentry_security import scrub_sentry_event
 from backupsheep.runtime_secrets import resolve_file_backed_secrets
 from backupsheep.celery_task_manifest import celery_routes
+# Pure-Python policy modules (no Django imports) shared with the API layer.
+from apps.api.v1.utils.api_scopes import DEFAULT_OAUTH_SCOPES, SCOPES as API_SCOPES
+from apps.api.v1.docs.description import API_DOCS_DESCRIPTION
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -152,6 +155,84 @@ API_TOKEN_TTL_SECONDS = _bounded_positive_int(
     90 * 24 * 60 * 60,
 )
 
+# Personal API tokens created through /api/v1/tokens/ choose their own lifetime up
+# to this ceiling (default 90 days, never more than one year).
+API_TOKEN_MAX_TTL_SECONDS = _bounded_positive_int(
+    "API_TOKEN_MAX_TTL_SECONDS",
+    90 * 24 * 60 * 60,
+    365 * 24 * 60 * 60,
+)
+
+# OAuth 2.0 authorization server (third-party integrations and the mobile apps).
+# Access tokens are short-lived; refresh tokens rotate on every use and are bounded
+# independently.  Neither value can be disabled.
+OAUTH2_ACCESS_TOKEN_TTL_SECONDS = _bounded_positive_int(
+    "OAUTH2_ACCESS_TOKEN_TTL_SECONDS",
+    60 * 60,
+    24 * 60 * 60,
+)
+OAUTH2_REFRESH_TOKEN_TTL_SECONDS = _bounded_positive_int(
+    "OAUTH2_REFRESH_TOKEN_TTL_SECONDS",
+    30 * 24 * 60 * 60,
+    365 * 24 * 60 * 60,
+)
+
+
+def _redirect_uri_schemes(name, default):
+    """Parse the exact redirect URI schemes OAuth clients may register."""
+
+    raw_value = config.get(name, default)
+    values = (
+        raw_value
+        if isinstance(raw_value, (list, tuple))
+        else str(raw_value).split(",")
+    )
+    schemes = []
+    for value in values:
+        value = str(value).strip().lower()
+        if not value:
+            continue
+        if not re.fullmatch(r"[a-z][a-z0-9+.-]*", value):
+            raise ImproperlyConfigured(
+                f"{name} must contain comma-separated URI schemes such as https or a "
+                "reverse-domain native app scheme."
+            )
+        if value not in schemes:
+            schemes.append(value)
+    if not schemes:
+        raise ImproperlyConfigured(f"{name} must allow at least one redirect URI scheme.")
+    return schemes
+
+
+# ``https`` for web and universal-link clients plus the BackupSheep mobile app's
+# private-use scheme. Add ``http`` only to support RFC 8252 loopback (127.0.0.1)
+# callbacks for command-line clients; it is never matched against other hosts.
+OAUTH2_ALLOWED_REDIRECT_URI_SCHEMES = _redirect_uri_schemes(
+    "OAUTH2_ALLOWED_REDIRECT_URI_SCHEMES", "https,backupsheep"
+)
+
+
+def _throttle_rate(name, default):
+    """Validate a DRF-style ``<requests>/<period>`` rate at boot."""
+
+    value = str(config.get(name, default) or default).strip().lower()
+    if not re.fullmatch(r"[1-9][0-9]{0,6}/(second|minute|hour|day)", value):
+        raise ImproperlyConfigured(
+            f"{name} must look like 600/minute (requests per second, minute, hour or day)."
+        )
+    return value
+
+
+# Global API abuse limits. Identity-keyed limits apply to sessions and every token
+# type alike; the anonymous limit is keyed by the server-observed peer.
+API_THROTTLE_USER_RATE = _throttle_rate("API_THROTTLE_USER_RATE", "600/minute")
+API_THROTTLE_WRITE_RATE = _throttle_rate("API_THROTTLE_WRITE_RATE", "120/minute")
+API_THROTTLE_ANON_RATE = _throttle_rate("API_THROTTLE_ANON_RATE", "60/minute")
+
+# The OpenAPI document and the Redoc/Swagger pages describe every endpoint of this
+# install. They require a signed-in member unless an operator publishes them.
+API_DOCS_PUBLIC = _as_bool(config.get("API_DOCS_PUBLIC", "false"))
+
 # Bound browser authentication independently of API tokens. Browser-close removes
 # the client cookie early; the server-side row still has this absolute upper bound.
 SESSION_COOKIE_AGE = _bounded_positive_int(
@@ -234,6 +315,9 @@ INSTALLED_APPS = [
     "django.contrib.humanize",
     "django_user_agents",
     "django_filters",
+    "oauth2_provider",
+    "drf_spectacular",
+    "drf_spectacular_sidecar",
     "django_celery_results",
     "django_celery_beat",
     "apps.apps.BackupSheepAppConfig",
@@ -313,9 +397,26 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
     ),
     "DEFAULT_AUTHENTICATION_CLASSES": (
+        # Order matters: the cheap ``bsk_`` prefix check runs first, then OAuth
+        # bearer tokens, then the legacy login token and the console session.
+        # Scoped credentials enforce their scope inside the authenticator, so
+        # every view is covered regardless of its own permission classes.
+        "apps.api.v1.utils.api_authentication.ApiTokenAuthentication",
+        "apps.api.v1.utils.api_authentication.ScopedOAuth2Authentication",
         "apps.api.v1.utils.api_authentication.CustomTokenAuthentication",
         "apps.api.v1.utils.api_authentication.ConsoleSessionAuthentication",
     ),
+    # Sustained per-identity and per-peer ceilings for every endpoint. Views that
+    # declare their own throttle_classes (login, reset, MFA, SSH scans) keep them.
+    "DEFAULT_THROTTLE_CLASSES": (
+        "apps.api.v1.utils.api_throttles.ApiUserRateThrottle",
+        "apps.api.v1.utils.api_throttles.ApiWriteRateThrottle",
+        "apps.api.v1.utils.api_throttles.ApiAnonRateThrottle",
+    ),
+    # Opt-in ``limit``/``offset`` pagination capped at 500 rows; responses stay
+    # unpaginated (and DataTables-compatible) unless ``limit`` is sent.
+    "DEFAULT_PAGINATION_CLASS": "apps.api.v1.utils.api_pagination.ApiLimitOffsetPagination",
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     # The browsable API UI is handy in development but exposes a self-documenting,
     # form-driven interface in production, so only enable it when DEBUG is on.
     "DEFAULT_RENDERER_CLASSES": (
@@ -326,6 +427,97 @@ REST_FRAMEWORK = {
     "DEFAULT_FILTER_BACKENDS": (
         "django_filters.rest_framework.DjangoFilterBackend",
     ),
+}
+
+# OAuth 2.0 authorization server (django-oauth-toolkit). Only the authorization
+# code grant with PKCE (S256), refresh tokens with rotation and replay detection,
+# and the client-credentials grant are offered; the implicit and password grants
+# are refused, tokens are stored hashed, and redirect URIs must match exactly.
+OAUTH2_PROVIDER = {
+    "SCOPES": dict(API_SCOPES),
+    "DEFAULT_SCOPES": list(DEFAULT_OAUTH_SCOPES),
+    "OAUTH2_VALIDATOR_CLASS": "apps.api.oauth2.validators.BackupSheepOAuth2Validator",
+    "PKCE_REQUIRED": True,
+    "ALLOWED_REDIRECT_URI_SCHEMES": list(OAUTH2_ALLOWED_REDIRECT_URI_SCHEMES),
+    "ALLOW_URI_WILDCARDS": False,
+    "ALLOW_LOCALHOST_LOOPBACK": False,
+    "AUTHORIZATION_CODE_EXPIRE_SECONDS": 60,
+    "ACCESS_TOKEN_EXPIRE_SECONDS": OAUTH2_ACCESS_TOKEN_TTL_SECONDS,
+    "REFRESH_TOKEN_EXPIRE_SECONDS": OAUTH2_REFRESH_TOKEN_TTL_SECONDS,
+    "ROTATE_REFRESH_TOKEN": True,
+    "REFRESH_TOKEN_REUSE_PROTECTION": True,
+    # A client that never received the rotated pair may retry once within this
+    # window; anything later revokes the whole token family.
+    "REFRESH_TOKEN_GRACE_PERIOD_SECONDS": 30,
+    "REQUEST_APPROVAL_PROMPT": "force",
+    "ERROR_RESPONSE_WITH_SCOPES": True,
+    "OAUTH2_RESPONSE_TYPES_SUPPORTED": ["code"],
+    "OAUTH2_GRANT_TYPES_SUPPORTED": [
+        "authorization_code",
+        "refresh_token",
+        "client_credentials",
+    ],
+    "OAUTH2_TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED": [
+        "client_secret_basic",
+        "client_secret_post",
+        "none",
+    ],
+    "COMPLIANT_BCP_RFC9700_IMPLICIT_GRANT": True,
+    "COMPLIANT_BCP_RFC9700_PASSWORD_GRANT": True,
+    "COMPLIANT_BCP_RFC9700_PKCE_METHOD": True,
+    "COMPLIANT_BCP_RFC9700_ACCESS_TOKEN_TRANSPORT": True,
+    "COMPLIANT_BCP_RFC9700_AUTHZ_RESPONSE_ISS": True,
+    "COMPLIANT_BCP_RFC9700_TOKEN_STORAGE": True,
+    "COMPLIANT_BCP_RFC9700_REFRESH_TOKEN": True,
+    "COMPLIANT_BCP_RFC9700_REDIRECT_URI_SCHEME": (
+        "http" not in OAUTH2_ALLOWED_REDIRECT_URI_SCHEMES
+    ),
+    "COMPLIANT_BCP_RFC9700_REDIRECT_URI_MATCHING": True,
+    "COMPLIANT_BCP_RFC9700_PKCE_REQUIRED": True,
+    "CLEAR_EXPIRED_TOKENS_BATCH_SIZE": 5000,
+}
+
+# OpenAPI 3 document and the bundled Redoc/Swagger UI (served from local static
+# files; nothing is loaded from a CDN).
+SPECTACULAR_SETTINGS = {
+    "TITLE": "BackupSheep API",
+    "VERSION": "1",
+    "DESCRIPTION": API_DOCS_DESCRIPTION,
+    "SCHEMA_PATH_PREFIX": r"/api/v1",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SERVE_PERMISSIONS": ["apps.api.v1.docs.permissions.ApiDocsPermission"],
+    "COMPONENT_SPLIT_REQUEST": True,
+    "SWAGGER_UI_DIST": "SIDECAR",
+    "SWAGGER_UI_FAVICON_HREF": "SIDECAR",
+    "REDOC_DIST": "SIDECAR",
+    "OAUTH2_FLOWS": ["authorizationCode", "clientCredentials"],
+    "OAUTH2_AUTHORIZATION_URL": "/o/authorize/",
+    "OAUTH2_TOKEN_URL": "/o/token/",
+    "OAUTH2_REFRESH_URL": "/o/token/",
+    "OAUTH2_SCOPES": dict(API_SCOPES),
+    "POSTPROCESSING_HOOKS": [
+        "drf_spectacular.hooks.postprocess_schema_enums",
+        "apps.api.v1.docs.schema.postprocess_security",
+    ],
+    "SWAGGER_UI_SETTINGS": {
+        "deepLinking": True,
+        "persistAuthorization": False,
+        "displayOperationId": False,
+        "filter": True,
+    },
+    "REDOC_UI_SETTINGS": {
+        "hideDownloadButton": False,
+        "expandResponses": "200,201",
+        "pathInMiddlePanel": True,
+    },
+    "EXTERNAL_DOCS": {
+        "description": "API guides in the BackupSheep repository",
+        "url": "https://github.com/bilal414/backupsheep/tree/main/docs/api",
+    },
+    # Enum naming collisions between provider serializers are resolved by hash
+    # suffixes; suppress the resulting advisory output outside of test runs.
+    "DISABLE_ERRORS_AND_WARNINGS": not DEBUG,
+    "ENABLE_DJANGO_DEPLOY_CHECK": False,
 }
 
 # Database
@@ -788,6 +980,10 @@ LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/onboarding',
     # Public team-invite acceptance page (no login required).
     r'/invite/',
+    # OAuth 2.0 endpoints: the token/revoke/introspect endpoints authenticate the
+    # client themselves, and the consent page redirects to login with ``next``.
+    r'/o/',
+    r'/.well-known/oauth-authorization-server',
 ]
 
 # POSTMARK - Email Service
@@ -1572,6 +1768,11 @@ CELERY_BEAT_SCHEDULE = {
     "delete-old-db-logs": {
         "task": "delete_old_db_logs",
         "schedule": crontab(minute=30, hour=3),  # daily at 03:30 (worker timezone)
+    },
+    # Prune expired OAuth 2.0 tokens and authorization codes (see the task docstring).
+    "clear-expired-oauth-tokens": {
+        "task": "clear_expired_oauth_tokens",
+        "schedule": crontab(minute=40, hour=3),  # daily at 03:40 (worker timezone)
     },
     # Retry deletes that were deferred by S3 Object Lock retention/legal holds, so
     # keep_last retention resumes once the protection window expires.

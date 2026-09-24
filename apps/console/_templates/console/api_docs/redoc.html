@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>{{ title|default:"BackupSheep API" }}</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <meta name="referrer" content="no-referrer">
+    <link rel="shortcut icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <style>
+      /* Redoc renders inside this container; system fonts avoid third-party origins. */
+      body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="redoc-container"></div>
+    <script src="{{ redoc_standalone }}"></script>
+    <script>
+      const redocSettings = {{ settings|default:"{}"|safe }};
+      Redoc.init("{{ schema_url }}", redocSettings, document.getElementById("redoc-container"));
+    </script>
+  </body>
+</html>

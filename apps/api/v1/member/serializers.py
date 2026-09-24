@@ -6,6 +6,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework import serializers
 from apps.console.account.models import CoreAccount
 from apps.api.v1.account.serializers import CoreAccountSerializer
+from apps.api.v1.utils.api_authentication import is_scoped_credential
 from apps.console.member.models import CoreMember, CoreMemberAccount
 from utils.middleware import AUTH_SESSION_VERSION_KEY
 
@@ -155,6 +156,15 @@ class UserWriteSerializer(serializers.ModelSerializer):
         )
         if not changing_password:
             return data
+
+        request = self.context.get("request")
+        if request is not None and is_scoped_credential(getattr(request, "auth", None)):
+            # Personal API tokens and OAuth tokens are workspace/scope limited
+            # credentials; changing the identity's password is reserved for an
+            # interactive session or the login token.
+            raise serializers.ValidationError(
+                {"password": "Password changes require an interactive console session."}
+            )
 
         if not all(
             data.get(key) for key in ("current_password", "password", "password_confirm")

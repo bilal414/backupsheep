@@ -1,0 +1,91 @@
+{% extends "_master_auth.html" %}
+{% block title %}Authorize {{ application.name|default:"application" }}{% endblock %}
+{% block og_title %}Authorize application{% endblock %}
+{% block description %}Grant an application access to your BackupSheep workspace.{% endblock %}
+{% block page_class %}page_oauth_authorize{% endblock %}
+
+{% block content %}
+<div class="flex min-h-full flex-col justify-center px-4 py-12 sm:px-6 lg:px-8">
+    <div class="sm:mx-auto sm:w-full sm:max-w-md">
+        <img class="mx-auto h-10 w-auto" src="{{ STATIC_URL }}console/images/logo.webp" alt="{{ site.app_name }}">
+        {% if not error %}
+            <h1 class="mt-8 text-center text-2xl font-semibold tracking-tight text-slate-900">Authorize {{ application.name }}</h1>
+            <p class="mt-2 text-center text-sm text-slate-500">This application wants access to your {{ site.app_name }} account.</p>
+        {% else %}
+            <h1 class="mt-8 text-center text-2xl font-semibold tracking-tight text-slate-900">Authorization request rejected</h1>
+        {% endif %}
+    </div>
+
+    <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+        <div class="rounded-xl border border-slate-200 bg-white px-5 py-8 shadow-sm sm:px-10">
+            {% if not error %}
+                <form id="authorizationForm" method="post" class="space-y-6">
+                    {% csrf_token %}
+                    {% for field in form %}{% if field.is_hidden %}{{ field }}{% endif %}{% endfor %}
+
+                    <dl class="space-y-3 text-sm">
+                        <div class="flex items-start justify-between gap-4">
+                            <dt class="text-slate-500">Signed in as</dt>
+                            <dd class="text-right font-medium text-slate-900">{{ request.user.email }}</dd>
+                        </div>
+                        <div class="flex items-start justify-between gap-4">
+                            <dt class="text-slate-500">Workspace</dt>
+                            <dd class="text-right font-medium text-slate-900">{{ account.get_name|default:"Current workspace" }}</dd>
+                        </div>
+                        <div class="flex items-start justify-between gap-4">
+                            <dt class="text-slate-500">Redirects to</dt>
+                            <dd class="min-w-0 break-all text-right font-mono text-xs text-slate-700">{{ redirect_uri }}</dd>
+                        </div>
+                    </dl>
+
+                    <div>
+                        <h2 class="text-sm font-semibold text-slate-900">{{ application.name }} will be able to</h2>
+                        <ul class="mt-3 space-y-2">
+                            {% for item in scope_details %}
+                                <li class="flex gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                    <svg class="mt-0.5 h-4 w-4 flex-none text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
+                                    </svg>
+                                    <div class="min-w-0">
+                                        <p class="text-sm text-slate-800">{{ item.description }}</p>
+                                        <p class="mt-0.5 font-mono text-xs text-slate-500">{{ item.scope }}</p>
+                                    </div>
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+
+                    {% if form.errors or form.non_field_errors %}
+                        <div class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium leading-6 text-red-800" role="alert">
+                            The authorization request could not be processed. Start again from the application.
+                        </div>
+                    {% endif %}
+
+                    <p class="text-xs leading-5 text-slate-500">You can revoke this access at any time from Settings &rarr; API access. Access is limited by your own permissions in this workspace.</p>
+
+                    <div class="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                        <button type="submit" name="cancel" value="1"
+                                class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                            Cancel
+                        </button>
+                        <button type="submit" name="allow" value="Authorize"
+                                class="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                            Authorize
+                        </button>
+                    </div>
+                </form>
+            {% else %}
+                <div class="space-y-4">
+                    <div class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-6 text-red-800" role="alert">
+                        <p class="font-semibold">{{ error.error }}</p>
+                        <p class="mt-1">{{ error.description }}</p>
+                    </div>
+                    <p class="text-xs leading-5 text-slate-500">The application sent an invalid authorization request. Nothing was granted. Return to the application and try again; if the problem persists, contact the application's developer.</p>
+                    <a href="{{ home_url }}" class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">Back to {{ site.app_name }}</a>
+                </div>
+            {% endif %}
+        </div>
+        <p class="mt-8 text-center text-xs text-slate-400">{{ site.app_name }} &mdash; automated backups for your infrastructure</p>
+    </div>
+</div>
+{% endblock %}

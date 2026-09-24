@@ -14,3 +14,4 @@ from apps.console.usage.models import *
 from apps.console.utils.models import *
 from apps.console.setting.models import *
 from apps.console.task_security.models import *
+from apps.console.api_access.models import *

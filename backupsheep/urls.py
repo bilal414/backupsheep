@@ -52,6 +52,9 @@ urlpatterns = [
     path("security.txt", security_txt, name="security-txt-legacy"),
     path("", include("apps.console.urls")),
     path("", include("apps.api.urls")),
+    # OAuth 2.0 authorization server: /o/authorize/, /o/token/, /o/revoke_token/,
+    # /o/introspect/ and the RFC 8414 metadata document.
+    path("", include("apps.api.oauth2.urls")),
 ]
 
 if settings.DJANGO_ADMIN_ENABLED:

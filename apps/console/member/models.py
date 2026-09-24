@@ -121,8 +121,21 @@ class CoreMember(TimeStampedModel):
 
             return target
 
+    def bind_membership(self, membership):
+        """Pin this in-memory member to one ACTIVE membership for the request.
+
+        Personal API tokens are workspace-bound: every account-scoped queryset
+        must resolve to the token's workspace even when the member's console
+        ``current`` selector points elsewhere.  The binding lives on the Python
+        instance only and never touches the database.
+        """
+        self._bound_membership = membership
+
     def get_active_current_membership(self):
         """Return an active current membership, repairing a stale selector safely."""
+        bound = getattr(self, "_bound_membership", None)
+        if bound is not None:
+            return bound
         membership = (
             self.memberships.filter(
                 current=True,
