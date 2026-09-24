@@ -1,0 +1,514 @@
+{% extends "console/setting/_base.html" %}
+{% block title %}Settings - API access{% endblock %}
+{% block meta_title %}Settings - API access{% endblock %}
+{% block meta_description %}Manage personal API tokens, OAuth applications, and connected apps.{% endblock %}
+{% block meta_keywords %}Settings - API access{% endblock %}
+{% block settings_page_title %}API access{% endblock %}
+{% block settings_page_description %}Personal API tokens for your scripts and integrations, OAuth 2.0 applications you publish, and the apps you have connected to your account.{% endblock %}
+
+{% block settings_content %}
+    {{ api_access_initial|json_script:"settings-api-access-initial" }}
+    <div class="space-y-6" x-data="settingsApiAccess()" x-init="load()">
+
+        {# ---- One-time secret reveal ---- #}
+        <div x-cloak x-show="reveal" class="rounded-xl border border-emerald-200 bg-emerald-50 p-5 shadow-sm" role="status" aria-live="polite">
+            <p class="text-sm font-semibold text-emerald-900" x-text="reveal && reveal.title"></p>
+            <p class="mt-1 text-xs leading-5 text-emerald-800">Copy this value now. It is shown only once and cannot be recovered later; only a digest is stored.</p>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+                <code class="min-w-0 flex-1 break-all rounded-lg border border-emerald-200 bg-white px-3 py-2 font-mono text-xs text-slate-900" x-text="reveal && reveal.value"></code>
+                <button type="button" @click="copyReveal()" class="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800">Copy</button>
+                <button type="button" @click="reveal = null" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">Dismiss</button>
+            </div>
+            <p x-cloak x-show="reveal && reveal.secondary" class="mt-3 text-xs text-emerald-900"><span class="font-semibold">Client ID:</span> <code class="font-mono" x-text="reveal && reveal.secondary"></code></p>
+        </div>
+
+        {# ---- Personal API tokens ---- #}
+        <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="tokens-heading">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                <div class="min-w-0">
+                    <h2 id="tokens-heading" class="text-sm font-semibold text-slate-900">Personal API tokens</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">Sent as <code class="font-mono">Authorization: Bearer bsk_…</code>. Each token is limited to the scopes you choose and bound to one workspace. <a :href="initial.docs_url" class="font-medium text-indigo-600 hover:text-indigo-700">API documentation</a></p>
+                </div>
+                <button type="button" @click="openTokenForm()" :disabled="busy || !initial.has_usable_password" class="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">New token</button>
+            </div>
+
+            <div x-cloak x-show="!initial.has_usable_password" class="mx-5 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" role="status">
+                Creating credentials requires confirming your password, and this identity has no usable password.
+            </div>
+
+            <form x-cloak x-show="tokenForm.open" @submit.prevent="createToken()" novalidate class="border-b border-slate-200 bg-slate-50 px-5 py-5">
+                <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                    <div>
+                        <label for="token_name" class="block text-sm font-medium text-slate-700">Name</label>
+                        <input x-model="tokenForm.name" id="token_name" type="text" maxlength="128" autocomplete="off" placeholder="Nightly report job"
+                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                        <p x-cloak x-show="tokenErrors.name" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(tokenErrors.name)"></p>
+                    </div>
+                    <div>
+                        <label for="token_account" class="block text-sm font-medium text-slate-700">Workspace</label>
+                        <select x-model.number="tokenForm.account_id" id="token_account" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <template x-for="workspace in initial.workspaces" :key="workspace.id">
+                                <option :value="workspace.id" x-text="workspace.name"></option>
+                            </template>
+                        </select>
+                        <p x-cloak x-show="tokenErrors.account_id" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(tokenErrors.account_id)"></p>
+                    </div>
+                    <div>
+                        <label for="token_expires" class="block text-sm font-medium text-slate-700">Expires after</label>
+                        <select x-model.number="tokenForm.expires_in" id="token_expires" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <template x-for="option in ttlOptions()" :key="option.seconds">
+                                <option :value="option.seconds" x-text="option.label"></option>
+                            </template>
+                        </select>
+                        <p x-cloak x-show="tokenErrors.expires_in" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(tokenErrors.expires_in)"></p>
+                    </div>
+                    <div>
+                        <label for="token_password" class="block text-sm font-medium text-slate-700">Current password</label>
+                        <input x-model="tokenForm.current_password" id="token_password" type="password" autocomplete="current-password"
+                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                        <p x-cloak x-show="tokenErrors.current_password" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(tokenErrors.current_password)"></p>
+                    </div>
+                    <fieldset class="sm:col-span-2">
+                        <legend class="text-sm font-medium text-slate-700">Scopes</legend>
+                        <p class="mt-0.5 text-xs text-slate-500">Grant only what the integration needs. Write scopes include their read scope; restore and download are always explicit.</p>
+                        <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            <template x-for="scope in initial.scopes" :key="scope.scope">
+                                <label class="flex items-start gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                    <input type="checkbox" :value="scope.scope" x-model="tokenForm.scopes" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600">
+                                    <span class="min-w-0">
+                                        <span class="block font-mono text-xs font-semibold text-slate-900" x-text="scope.scope"></span>
+                                        <span class="block text-xs leading-5 text-slate-600" x-text="scope.description"></span>
+                                    </span>
+                                </label>
+                            </template>
+                        </div>
+                        <p x-cloak x-show="tokenErrors.scopes" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(tokenErrors.scopes)"></p>
+                    </fieldset>
+                    <p x-cloak x-show="tokenErrors.detail || tokenErrors.non_field_errors" class="sm:col-span-2 text-sm font-medium text-red-700" role="alert" x-text="firstError(tokenErrors.detail || tokenErrors.non_field_errors)"></p>
+                </div>
+                <div class="mt-5 flex flex-wrap items-center justify-end gap-3">
+                    <button type="button" @click="tokenForm.open = false" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Cancel</button>
+                    <button type="submit" :disabled="busy || !tokenForm.name || !tokenForm.scopes.length || !tokenForm.current_password" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"><span x-text="busy ? 'Creating…' : 'Create token'"></span></button>
+                </div>
+            </form>
+
+            <div class="p-5">
+                <p x-cloak x-show="loaded && !tokens.length" class="text-sm text-slate-500">No personal API tokens yet.</p>
+                <div x-cloak x-show="tokens.length" class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-sm">
+                        <thead>
+                            <tr class="bg-slate-50">
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Token</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Scopes</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
+                                <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            <template x-for="token in tokens" :key="token.id">
+                                <tr>
+                                    <td class="px-4 py-3">
+                                        <span class="block font-medium text-slate-900" x-text="token.name"></span>
+                                        <span class="mt-0.5 block font-mono text-xs text-slate-500" x-text="token.key_prefix + '…'"></span>
+                                        <span class="mt-0.5 block text-xs text-slate-500" x-text="token.account.name"></span>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <div class="flex flex-wrap gap-1">
+                                            <template x-for="scope in token.scopes" :key="scope">
+                                                <span class="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-700" x-text="scope"></span>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3 text-slate-700">
+                                        <span class="font-medium" :class="{'text-emerald-700': token.status === 'active', 'text-amber-700': token.status === 'expired', 'text-slate-500': token.status === 'revoked'}" x-text="statusLabel(token)"></span>
+                                        <span class="mt-0.5 block text-xs text-slate-500" x-text="'Expires ' + formatDate(token.expires_at)"></span>
+                                        <span class="mt-0.5 block text-xs text-slate-500" x-text="token.last_used_at ? 'Last used ' + formatDate(token.last_used_at) : 'Never used'"></span>
+                                    </td>
+                                    <td class="px-4 py-3 text-right">
+                                        <div class="flex flex-wrap items-center justify-end gap-2">
+                                            <button type="button" x-show="token.status !== 'revoked'" @click="askPassword('rotate-token', token)" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50">Rotate</button>
+                                            <button type="button" x-show="token.status !== 'revoked'" @click="confirmAction('revoke-token', token)" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50">Revoke</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        {# ---- Connected applications ---- #}
+        <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="authorized-heading">
+            <div class="border-b border-slate-200 px-5 py-4">
+                <h2 id="authorized-heading" class="text-sm font-semibold text-slate-900">Connected applications</h2>
+                <p class="mt-0.5 text-xs text-slate-500">Applications that currently hold OAuth access on your behalf. Revoking ends all of their tokens immediately.</p>
+            </div>
+            <div class="p-5">
+                <p x-cloak x-show="loaded && !authorized.length" class="text-sm text-slate-500">No applications are connected to your account.</p>
+                <ul x-cloak x-show="authorized.length" class="divide-y divide-slate-100">
+                    <template x-for="grant in authorized" :key="grant.application.id">
+                        <li class="flex flex-wrap items-start justify-between gap-3 py-3">
+                            <div class="min-w-0">
+                                <p class="font-medium text-slate-900" x-text="grant.application.name"></p>
+                                <p class="mt-0.5 font-mono text-xs text-slate-500" x-text="grant.application.client_id"></p>
+                                <div class="mt-1 flex flex-wrap gap-1">
+                                    <template x-for="scope in grant.scopes" :key="scope">
+                                        <span class="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-700" x-text="scope"></span>
+                                    </template>
+                                </div>
+                                <p class="mt-1 text-xs text-slate-500" x-text="'Last authorized ' + formatDate(grant.last_authorized) + ' · ' + grant.active_tokens + ' active token(s)'"></p>
+                            </div>
+                            <button type="button" @click="confirmAction('revoke-grant', grant)" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50">Revoke access</button>
+                        </li>
+                    </template>
+                </ul>
+            </div>
+        </section>
+
+        {# ---- OAuth applications you own ---- #}
+        <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="apps-heading">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                <div class="min-w-0">
+                    <h2 id="apps-heading" class="text-sm font-semibold text-slate-900">OAuth 2.0 applications</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">Register an application to let other people grant it scoped access with the authorization-code flow (PKCE required). Endpoints: <code class="font-mono" x-text="initial.oauth.authorization_endpoint"></code>, <code class="font-mono" x-text="initial.oauth.token_endpoint"></code>.</p>
+                </div>
+                <button type="button" @click="openAppForm()" :disabled="busy || !initial.has_usable_password" class="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">Register application</button>
+            </div>
+
+            <form x-cloak x-show="appForm.open" @submit.prevent="submitApp()" novalidate class="border-b border-slate-200 bg-slate-50 px-5 py-5">
+                <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                    <div>
+                        <label for="app_name" class="block text-sm font-medium text-slate-700">Application name</label>
+                        <input x-model="appForm.name" id="app_name" type="text" maxlength="255" autocomplete="off"
+                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                        <p x-cloak x-show="appErrors.name" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(appErrors.name)"></p>
+                    </div>
+                    <div x-show="!appForm.id">
+                        <label for="app_type" class="block text-sm font-medium text-slate-700">Client type</label>
+                        <select x-model="appForm.client_type" id="app_type" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <option value="public">Public — mobile, desktop or browser app (no secret, PKCE)</option>
+                            <option value="confidential">Confidential — server-side app with a client secret</option>
+                        </select>
+                        <p x-cloak x-show="appErrors.client_type" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(appErrors.client_type)"></p>
+                    </div>
+                    <div x-show="!appForm.id">
+                        <label for="app_grant" class="block text-sm font-medium text-slate-700">Grant type</label>
+                        <select x-model="appForm.authorization_grant_type" id="app_grant" class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                            <option value="authorization-code">Authorization code — members grant access on a consent page</option>
+                            <option value="client-credentials">Client credentials — acts as you, no user interaction</option>
+                        </select>
+                        <p x-cloak x-show="appErrors.authorization_grant_type" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(appErrors.authorization_grant_type)"></p>
+                    </div>
+                    <div class="sm:col-span-2" x-show="appForm.authorization_grant_type === 'authorization-code'">
+                        <label for="app_redirects" class="block text-sm font-medium text-slate-700">Redirect URIs (one per line)</label>
+                        <textarea x-model="appForm.redirect_uris_text" id="app_redirects" rows="3" spellcheck="false"
+                                  class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
+                        <p class="mt-1.5 text-xs text-slate-500">Exact matches only. Allowed schemes: <span x-text="initial.redirect_uri_schemes.join(', ')"></span>.</p>
+                        <p x-cloak x-show="appErrors.redirect_uris" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(appErrors.redirect_uris)"></p>
+                    </div>
+                    <div x-show="!appForm.id">
+                        <label for="app_password" class="block text-sm font-medium text-slate-700">Current password</label>
+                        <input x-model="appForm.current_password" id="app_password" type="password" autocomplete="current-password"
+                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                        <p x-cloak x-show="appErrors.current_password" class="mt-1.5 text-xs font-medium text-red-600" x-text="firstError(appErrors.current_password)"></p>
+                    </div>
+                    <p x-cloak x-show="appErrors.detail || appErrors.non_field_errors" class="sm:col-span-2 text-sm font-medium text-red-700" role="alert" x-text="firstError(appErrors.detail || appErrors.non_field_errors)"></p>
+                </div>
+                <div class="mt-5 flex flex-wrap items-center justify-end gap-3">
+                    <button type="button" @click="appForm.open = false" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Cancel</button>
+                    <button type="submit" :disabled="busy || !appForm.name || (!appForm.id && !appForm.current_password)" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"><span x-text="busy ? 'Saving…' : (appForm.id ? 'Save changes' : 'Register application')"></span></button>
+                </div>
+            </form>
+
+            <div class="p-5">
+                <p x-cloak x-show="loaded && !applications.length" class="text-sm text-slate-500">You have not registered any applications.</p>
+                <ul x-cloak x-show="applications.length" class="divide-y divide-slate-100">
+                    <template x-for="app in applications" :key="app.id">
+                        <li class="flex flex-wrap items-start justify-between gap-3 py-3">
+                            <div class="min-w-0">
+                                <p class="font-medium text-slate-900" x-text="app.name"></p>
+                                <p class="mt-0.5 text-xs text-slate-500"><span x-text="app.client_type"></span> · <span x-text="app.authorization_grant_type"></span></p>
+                                <p class="mt-0.5 font-mono text-xs text-slate-700">client_id: <span x-text="app.client_id"></span></p>
+                                <ul class="mt-1 space-y-0.5">
+                                    <template x-for="uri in app.redirect_uris" :key="uri">
+                                        <li class="break-all font-mono text-xs text-slate-500" x-text="uri"></li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <div class="flex flex-wrap items-center justify-end gap-2">
+                                <button type="button" @click="editApp(app)" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50">Edit</button>
+                                <button type="button" x-show="app.client_type === 'confidential'" @click="askPassword('rotate-secret', app)" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50">Rotate secret</button>
+                                <button type="button" @click="confirmAction('delete-app', app)" :disabled="busy" class="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50">Delete</button>
+                            </div>
+                        </li>
+                    </template>
+                </ul>
+            </div>
+        </section>
+
+        {# ---- Password prompt for rotate actions ---- #}
+        <div x-cloak x-show="prompt" class="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40 px-4" role="dialog" aria-modal="true" aria-labelledby="prompt-heading">
+            <form @submit.prevent="runPrompt()" class="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl" novalidate>
+                <h3 id="prompt-heading" class="text-sm font-semibold text-slate-900" x-text="prompt && prompt.title"></h3>
+                <p class="mt-1 text-xs leading-5 text-slate-500" x-text="prompt && prompt.description"></p>
+                <label for="prompt_password" class="mt-4 block text-sm font-medium text-slate-700">Current password</label>
+                <input x-model="promptPassword" id="prompt_password" type="password" autocomplete="current-password"
+                       class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                <p x-cloak x-show="promptError" class="mt-1.5 text-xs font-medium text-red-600" x-text="promptError"></p>
+                <div class="mt-5 flex justify-end gap-3">
+                    <button type="button" @click="prompt = null" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Cancel</button>
+                    <button type="submit" :disabled="busy || !promptPassword" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60">Continue</button>
+                </div>
+            </form>
+        </div>
+
+        {# ---- Confirmation for destructive actions ---- #}
+        <div x-cloak x-show="confirm" class="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40 px-4" role="dialog" aria-modal="true" aria-labelledby="confirm-heading">
+            <div class="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl">
+                <h3 id="confirm-heading" class="text-sm font-semibold text-slate-900" x-text="confirm && confirm.title"></h3>
+                <p class="mt-1 text-xs leading-5 text-slate-500" x-text="confirm && confirm.description"></p>
+                <div class="mt-5 flex justify-end gap-3">
+                    <button type="button" @click="confirm = null" :disabled="busy" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Keep</button>
+                    <button type="button" @click="runConfirm()" :disabled="busy" class="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-700 disabled:opacity-60" x-text="confirm && confirm.button"></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('settingsApiAccess', () => ({
+                initial: JSON.parse(document.getElementById('settings-api-access-initial').textContent),
+                tokens: [],
+                applications: [],
+                authorized: [],
+                loaded: false,
+                busy: false,
+                reveal: null,
+                prompt: null,
+                promptPassword: '',
+                promptError: '',
+                confirm: null,
+                tokenForm: {open: false, name: '', scopes: [], expires_in: null, account_id: null, current_password: ''},
+                tokenErrors: {},
+                appForm: {open: false, id: null, name: '', client_type: 'public', authorization_grant_type: 'authorization-code', redirect_uris_text: '', current_password: ''},
+                appErrors: {},
+
+                firstError(value) {
+                    if (Array.isArray(value)) return value[0] || '';
+                    if (value && typeof value === 'object') return Object.values(value).flat()[0] || '';
+                    return value || '';
+                },
+                formatDate(value) {
+                    if (!value) return '—';
+                    try { return new Date(value).toLocaleString(); } catch (error) { return value; }
+                },
+                statusLabel(token) {
+                    return {active: 'Active', expired: 'Expired', revoked: 'Revoked'}[token.status] || token.status;
+                },
+                ttlOptions() {
+                    const day = 86400;
+                    const candidates = [
+                        {seconds: 7 * day, label: '7 days'},
+                        {seconds: 30 * day, label: '30 days'},
+                        {seconds: 90 * day, label: '90 days'},
+                        {seconds: 180 * day, label: '180 days'},
+                        {seconds: 365 * day, label: '1 year'},
+                    ];
+                    const options = candidates.filter((option) => option.seconds <= this.initial.max_ttl_seconds);
+                    if (!options.some((option) => option.seconds === this.initial.max_ttl_seconds)) {
+                        options.push({seconds: this.initial.max_ttl_seconds, label: Math.round(this.initial.max_ttl_seconds / day) + ' days (maximum)'});
+                    }
+                    return options;
+                },
+                notify(success, heading, details) {
+                    Alpine.store('notifications').items.push({show: true, success: success, error: !success, heading: heading, details: details});
+                },
+                async request(method, url, body) {
+                    const init = {method: method, headers: {'Accept': 'application/json'}};
+                    if (body !== undefined) {
+                        init.headers['Content-Type'] = 'application/json';
+                        init.body = JSON.stringify(body);
+                    }
+                    const response = await fetch(url, init);
+                    let json = {};
+                    if (response.status !== 204) {
+                        try { json = await response.json(); } catch (error) { json = {}; }
+                    }
+                    if (response.status === 429) {
+                        json = {detail: 'Too many attempts. Wait a minute and try again.'};
+                    }
+                    return {ok: response.ok, status: response.status, json: json};
+                },
+                async load() {
+                    this.tokenForm.account_id = this.initial.current_account_id;
+                    this.tokenForm.expires_in = this.ttlOptions().some((o) => o.seconds === this.initial.default_ttl_seconds)
+                        ? this.initial.default_ttl_seconds
+                        : this.ttlOptions()[0].seconds;
+                    const [tokens, applications, authorized] = await Promise.all([
+                        this.request('GET', '/api/v1/tokens/'),
+                        this.request('GET', '/api/v1/oauth/applications/'),
+                        this.request('GET', '/api/v1/oauth/authorized-applications/'),
+                    ]);
+                    this.tokens = tokens.ok ? tokens.json : [];
+                    this.applications = applications.ok ? applications.json : [];
+                    this.authorized = authorized.ok ? authorized.json : [];
+                    this.loaded = true;
+                },
+                copyReveal() {
+                    if (!this.reveal || !navigator.clipboard) return;
+                    navigator.clipboard.writeText(this.reveal.value).then(
+                        () => this.notify(true, 'Copied', 'The secret was copied to the clipboard.'),
+                        () => this.notify(false, 'Copy failed', 'Select the value and copy it manually.'),
+                    );
+                },
+
+                // ---- personal tokens ----
+                openTokenForm() {
+                    this.tokenErrors = {};
+                    this.tokenForm = {open: true, name: '', scopes: [], expires_in: this.tokenForm.expires_in, account_id: this.initial.current_account_id, current_password: ''};
+                },
+                async createToken() {
+                    if (this.busy) return;
+                    this.busy = true;
+                    this.tokenErrors = {};
+                    try {
+                        const result = await this.request('POST', '/api/v1/tokens/', {
+                            name: this.tokenForm.name,
+                            scopes: this.tokenForm.scopes,
+                            expires_in: this.tokenForm.expires_in,
+                            account_id: this.tokenForm.account_id,
+                            current_password: this.tokenForm.current_password,
+                        });
+                        if (!result.ok) {
+                            this.tokenErrors = result.json;
+                            throw new Error(this.firstError(result.json.detail) || 'The token could not be created.');
+                        }
+                        this.reveal = {title: 'Personal API token “' + result.json.name + '”', value: result.json.token, secondary: null};
+                        this.tokenForm.open = false;
+                        this.tokenForm.current_password = '';
+                        await this.load();
+                        this.notify(true, 'Token created', 'Copy the secret now; it will not be shown again.');
+                    } catch (error) {
+                        this.notify(false, 'Token not created', error.message);
+                    } finally {
+                        this.busy = false;
+                    }
+                },
+
+                // ---- password-confirmed actions ----
+                askPassword(kind, target) {
+                    this.promptPassword = '';
+                    this.promptError = '';
+                    if (kind === 'rotate-token') {
+                        this.prompt = {kind, target, title: 'Rotate token “' + target.name + '”', description: 'The current secret stops working immediately and a new one is shown once.'};
+                    } else {
+                        this.prompt = {kind, target, title: 'Rotate client secret for “' + target.name + '”', description: 'Deployed copies of the old secret stop working immediately.'};
+                    }
+                },
+                async runPrompt() {
+                    if (this.busy || !this.prompt) return;
+                    this.busy = true;
+                    this.promptError = '';
+                    const {kind, target} = this.prompt;
+                    try {
+                        const url = kind === 'rotate-token'
+                            ? '/api/v1/tokens/' + target.id + '/rotate/'
+                            : '/api/v1/oauth/applications/' + target.id + '/rotate_secret/';
+                        const result = await this.request('POST', url, {current_password: this.promptPassword});
+                        if (!result.ok) {
+                            this.promptError = this.firstError(result.json.current_password || result.json.detail || result.json) || 'The request was rejected.';
+                            return;
+                        }
+                        this.reveal = kind === 'rotate-token'
+                            ? {title: 'New secret for token “' + result.json.name + '”', value: result.json.token, secondary: null}
+                            : {title: 'New client secret for “' + result.json.name + '”', value: result.json.client_secret, secondary: result.json.client_id};
+                        this.prompt = null;
+                        await this.load();
+                        this.notify(true, 'Secret rotated', 'Copy the new value now; it will not be shown again.');
+                    } finally {
+                        this.busy = false;
+                    }
+                },
+
+                // ---- destructive actions ----
+                confirmAction(kind, target) {
+                    const map = {
+                        'revoke-token': {title: 'Revoke token “' + target.name + '”?', description: 'Integrations using this token stop working immediately. The row stays in this list as an audit record.', button: 'Revoke token'},
+                        'revoke-grant': {title: 'Revoke access for “' + target.application.name + '”?', description: 'Every access and refresh token this application holds for you is revoked. You can authorize it again later.', button: 'Revoke access'},
+                        'delete-app': {title: 'Delete application “' + target.name + '”?', description: 'All tokens issued to this application are revoked and its client ID stops working.', button: 'Delete application'},
+                    };
+                    this.confirm = Object.assign({kind, target}, map[kind]);
+                },
+                async runConfirm() {
+                    if (this.busy || !this.confirm) return;
+                    this.busy = true;
+                    const {kind, target} = this.confirm;
+                    try {
+                        const url = kind === 'revoke-token'
+                            ? '/api/v1/tokens/' + target.id + '/'
+                            : kind === 'revoke-grant'
+                                ? '/api/v1/oauth/authorized-applications/' + target.application.id + '/'
+                                : '/api/v1/oauth/applications/' + target.id + '/';
+                        const result = await this.request('DELETE', url);
+                        if (!result.ok) throw new Error(this.firstError(result.json.detail || result.json) || 'The request was rejected.');
+                        this.confirm = null;
+                        await this.load();
+                        this.notify(true, 'Done', 'The change was applied.');
+                    } catch (error) {
+                        this.notify(false, 'Not applied', error.message);
+                    } finally {
+                        this.busy = false;
+                    }
+                },
+
+                // ---- OAuth applications ----
+                openAppForm() {
+                    this.appErrors = {};
+                    this.appForm = {open: true, id: null, name: '', client_type: 'public', authorization_grant_type: 'authorization-code', redirect_uris_text: '', current_password: ''};
+                },
+                editApp(app) {
+                    this.appErrors = {};
+                    this.appForm = {open: true, id: app.id, name: app.name, client_type: app.client_type, authorization_grant_type: app.authorization_grant_type, redirect_uris_text: app.redirect_uris.join('\n'), current_password: ''};
+                },
+                async submitApp() {
+                    if (this.busy) return;
+                    this.busy = true;
+                    this.appErrors = {};
+                    const redirectUris = this.appForm.redirect_uris_text.split('\n').map((line) => line.trim()).filter(Boolean);
+                    try {
+                        let result;
+                        if (this.appForm.id) {
+                            result = await this.request('PATCH', '/api/v1/oauth/applications/' + this.appForm.id + '/', {name: this.appForm.name, redirect_uris: redirectUris});
+                        } else {
+                            result = await this.request('POST', '/api/v1/oauth/applications/', {
+                                name: this.appForm.name,
+                                client_type: this.appForm.client_type,
+                                authorization_grant_type: this.appForm.authorization_grant_type,
+                                redirect_uris: redirectUris,
+                                current_password: this.appForm.current_password,
+                            });
+                        }
+                        if (!result.ok) {
+                            this.appErrors = result.json;
+                            throw new Error(this.firstError(result.json.detail) || 'The application could not be saved.');
+                        }
+                        if (!this.appForm.id && result.json.client_secret) {
+                            this.reveal = {title: 'Client secret for “' + result.json.name + '”', value: result.json.client_secret, secondary: result.json.client_id};
+                        } else if (!this.appForm.id) {
+                            this.reveal = {title: 'Client ID for “' + result.json.name + '”', value: result.json.client_id, secondary: null};
+                        }
+                        this.appForm.open = false;
+                        await this.load();
+                        this.notify(true, this.appForm.id ? 'Application updated' : 'Application registered', this.appForm.id ? 'The changes were saved.' : 'Use the client ID in your application.');
+                    } catch (error) {
+                        this.notify(false, 'Application not saved', error.message);
+                    } finally {
+                        this.busy = false;
+                    }
+                },
+            }));
+        });
+    </script>
+{% endblock %}

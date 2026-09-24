@@ -6,6 +6,7 @@
     <p>Security</p>
     <a href="{% url 'console:settings:multifactor' %}" {% if active_url == "multifactor" %}aria-current="page"{% endif %}>Authenticator</a>
     <a href="{% url 'console:settings:password' %}" {% if active_url == "password" %}aria-current="page"{% endif %}>Password</a>
+    <a href="{% url 'console:settings:api_access' %}" {% if active_url == "api_access" %}aria-current="page"{% endif %}>API access</a>
 </div>
 <div class="settings-nav-group">
     <p>Workspace</p>

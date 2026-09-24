@@ -132,6 +132,52 @@ class PasswordView(SettingsContextMixin, LoginRequiredMixin, TemplateView):
         return self.render_to_response(context)
 
 
+class ApiAccessView(SettingsContextMixin, LoginRequiredMixin, TemplateView):
+    """Personal API tokens, OAuth applications and connected apps.
+
+    The page only renders the shell and catalog data; every mutation goes
+    through the session-authenticated API so the console and third-party
+    clients share one audited code path.
+    """
+
+    template_name = "console/setting/api_access.html"
+    settings_scope = "identity"
+
+    def get(self, request, *args, **kwargs):
+        from apps.api.v1.utils.api_scopes import scope_catalog
+        from apps.console.api_access.models import CoreApiToken
+        from apps.console.member.models import CoreMemberAccount
+
+        context = self.get_context_data(**kwargs)
+        context["heading"] = "Settings - API access"
+        context["active_url"] = "api_access"
+        member = request.user.member
+        context["account"] = member.get_current_account()
+        context["api_access_initial"] = {
+            "member_id": member.id,
+            "scopes": scope_catalog(),
+            "workspaces": [
+                {"id": membership.account_id, "name": membership.account.get_name()}
+                for membership in member.memberships.filter(
+                    status=CoreMemberAccount.Status.ACTIVE
+                ).select_related("account")
+            ],
+            "current_account_id": getattr(context["account"], "id", None),
+            "default_ttl_seconds": CoreApiToken.default_ttl_seconds(),
+            "max_ttl_seconds": CoreApiToken.max_ttl_seconds(),
+            "redirect_uri_schemes": list(settings.OAUTH2_ALLOWED_REDIRECT_URI_SCHEMES),
+            "has_usable_password": request.user.has_usable_password(),
+            "docs_url": "/api/v1/docs/",
+            "oauth": {
+                "authorization_endpoint": "/o/authorize/",
+                "token_endpoint": "/o/token/",
+                "revocation_endpoint": "/o/revoke_token/",
+                "metadata_url": "/.well-known/oauth-authorization-server",
+            },
+        }
+        return self.render_to_response(context)
+
+
 class MultiFactorView(SettingsContextMixin, LoginRequiredMixin, TemplateView):
     template_name = "console/setting/multifactor.html"
     settings_scope = "identity"
