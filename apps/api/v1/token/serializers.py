@@ -64,10 +64,18 @@ class ApiTokenCreateSerializer(CurrentPasswordSerializer):
     )
 
     def validate_scopes(self, value):
+        unknown = sorted({scope for scope in value if scope not in SCOPES})
+        if unknown:
+            raise serializers.ValidationError(
+                "Unknown scope(s): " + ", ".join(unknown) + ". See GET /api/v1/tokens/scopes/."
+            )
         try:
             return validate_scopes(value)
-        except ValueError as error:
-            raise serializers.ValidationError(str(error))
+        except ValueError:
+            # Never echo exception text into a response.
+            raise serializers.ValidationError(
+                "Scopes must be a non-empty list of registered scope names."
+            )
 
     def validate_expires_in(self, value):
         maximum = int(settings.API_TOKEN_MAX_TTL_SECONDS)
