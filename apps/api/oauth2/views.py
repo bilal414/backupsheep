@@ -16,6 +16,7 @@ from oauth2_provider.views.introspect import IntrospectTokenView as DotIntrospec
 from oauth2_provider.views.metadata import OAuthServerMetadataView as DotOAuthServerMetadataView
 from oauthlib.oauth2.rfc6749.errors import InvalidRequestError
 
+from apps.api.oauth2.maintenance import sweep_expired_credentials_if_due
 from apps.api.v1.utils.api_scopes import SCOPES
 from apps.api.v1.utils.api_throttles import (
     OAuthTokenEndpointClientThrottle,
@@ -153,7 +154,12 @@ class OAuthServerMetadataView(DotOAuthServerMetadataView):
 
 
 class TokenView(ThrottledOAuthEndpointMixin, dot_views.TokenView):
-    pass
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        # Token issuance is the natural moment to prune expired rows; the sweep
+        # is cache-gated so the fleet performs it at most once per hour.
+        sweep_expired_credentials_if_due()
+        return response
 
 
 class RevokeTokenView(ThrottledOAuthEndpointMixin, dot_views.RevokeTokenView):

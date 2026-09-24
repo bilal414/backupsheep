@@ -281,6 +281,7 @@ EXPECTED_TABLES = frozenset(
         "core_account_mtm_group",
         "core_account_mtm_group_nodes",
         "core_alibab_region",
+        "core_api_token",
         "core_auth_aws",
         "core_auth_aws_rds",
         "core_auth_basecamp",
@@ -446,6 +447,12 @@ EXPECTED_TABLES = frozenset(
         "django_content_type",
         "django_migrations",
         "django_session",
+        "oauth2_provider_accesstoken",
+        "oauth2_provider_application",
+        "oauth2_provider_devicegrant",
+        "oauth2_provider_grant",
+        "oauth2_provider_idtoken",
+        "oauth2_provider_refreshtoken",
         "util_country",
         "util_delete_files",
         "util_mariadb_options",
@@ -513,6 +520,9 @@ RETIRED_TABLES = frozenset(
         "core_wordpress_backup_mtm_storage_points",
     }
 )
+# Personal API tokens (hashed) and the OAuth 2.0 authorization server's client,
+# grant and token tables are bearer-credential material: only the web/app lane
+# authenticates with them, and expired rows are swept from that lane too.
 IDENTITY_TABLES = frozenset(
     {
         "auth_group",
@@ -522,6 +532,7 @@ IDENTITY_TABLES = frozenset(
         "auth_user_groups",
         "auth_user_user_permissions",
         "authtoken_token",
+        "core_api_token",
         "core_account_mtm_group",
         "core_account_mtm_group_nodes",
         "core_invite",
@@ -530,6 +541,12 @@ IDENTITY_TABLES = frozenset(
         "core_member_mtm_account",
         "django_admin_log",
         "django_session",
+        "oauth2_provider_accesstoken",
+        "oauth2_provider_application",
+        "oauth2_provider_devicegrant",
+        "oauth2_provider_grant",
+        "oauth2_provider_idtoken",
+        "oauth2_provider_refreshtoken",
     }
 )
 PROVIDER_AUTH_TABLES = frozenset(

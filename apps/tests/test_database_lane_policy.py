@@ -9,6 +9,9 @@ from backupsheep.artifact_crypto.envelope import (
     FORMAT_VERSION,
 )
 from backupsheep.database_lane_policy import (
+    EXPECTED_TABLES,
+    IDENTITY_TABLES,
+    lanes_with_table_privilege,
     ARTIFACT_LEDGER_TABLES,
     BEAT_TABLES,
     CLOUD_NODE_AND_BACKUP_WRITES,
@@ -185,6 +188,26 @@ class DatabaseLanePolicyTests(SimpleTestCase):
         ):
             with self.subTest(table=table):
                 self.assertNotIn(table, beat)
+
+    def test_api_credential_tables_are_web_lane_only(self):
+        # Personal API tokens and the OAuth 2.0 client/grant/token tables hold
+        # bearer-credential material; only the web/app lane may touch them.
+        for table in (
+            "core_api_token",
+            "oauth2_provider_accesstoken",
+            "oauth2_provider_application",
+            "oauth2_provider_devicegrant",
+            "oauth2_provider_grant",
+            "oauth2_provider_idtoken",
+            "oauth2_provider_refreshtoken",
+        ):
+            with self.subTest(table=table):
+                self.assertIn(table, EXPECTED_TABLES)
+                self.assertIn(table, IDENTITY_TABLES)
+                for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                    self.assertEqual(
+                        lanes_with_table_privilege(table, privilege), frozenset({"app"})
+                    )
 
     def test_storage_cannot_read_identity_source_or_provider_secrets(self):
         denied = {

@@ -1769,11 +1769,6 @@ CELERY_BEAT_SCHEDULE = {
         "task": "delete_old_db_logs",
         "schedule": crontab(minute=30, hour=3),  # daily at 03:30 (worker timezone)
     },
-    # Prune expired OAuth 2.0 tokens and authorization codes (see the task docstring).
-    "clear-expired-oauth-tokens": {
-        "task": "clear_expired_oauth_tokens",
-        "schedule": crontab(minute=40, hour=3),  # daily at 03:40 (worker timezone)
-    },
     # Retry deletes that were deferred by S3 Object Lock retention/legal holds, so
     # keep_last retention resumes once the protection window expires.
     "retry-protected-storage-deletes": {
