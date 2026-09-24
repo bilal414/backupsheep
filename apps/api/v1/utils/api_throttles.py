@@ -196,9 +196,12 @@ class ApiUserRateThrottle(SimpleRateThrottle):
 
     def get_cache_key(self, request, view):
         user = getattr(request, "user", None)
-        if user is not None and user.is_authenticated:
-            ident = _keyed_identifier("user", user.pk)
+        user_pk = getattr(user, "pk", None) if getattr(user, "is_authenticated", False) else None
+        if user_pk is not None:
+            ident = _keyed_identifier("user", user_pk)
         else:
+            # Anonymous callers (and identity objects without a primary key)
+            # share the server-observed peer bucket.
             ident = _keyed_identifier("peer", _server_observed_peer(request))
         return self.cache_format % {"scope": self.scope, "ident": ident}
 
