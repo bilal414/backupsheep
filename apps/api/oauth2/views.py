@@ -13,6 +13,7 @@ from django.shortcuts import render
 from oauth2_provider.exceptions import OAuthToolkitError
 from oauth2_provider.views import base as dot_views
 from oauth2_provider.views.introspect import IntrospectTokenView as DotIntrospectTokenView
+from oauth2_provider.views.metadata import OAuthServerMetadataView as DotOAuthServerMetadataView
 from oauthlib.oauth2.rfc6749.errors import InvalidRequestError
 
 from apps.api.v1.utils.api_scopes import SCOPES
@@ -140,6 +141,15 @@ class AuthorizationView(dot_views.AuthorizationView):
         response["Referrer-Policy"] = "no-referrer"
         response["Cache-Control"] = "no-store, private, max-age=0"
         return response
+
+
+class OAuthServerMetadataView(DotOAuthServerMetadataView):
+    """RFC 8414 discovery document.
+
+    Subclassed (rather than mounted from the toolkit directly) so the route's
+    source is a repository file: the Bruno manifest records each view's source
+    path and a site-packages location differs between machines.
+    """
 
 
 class TokenView(ThrottledOAuthEndpointMixin, dot_views.TokenView):
