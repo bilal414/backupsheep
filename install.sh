@@ -2062,8 +2062,8 @@ validate_installer_rabbitmq_transition_state() {
         prepared:legacy-volume:3.13.7|attested:3.13.7:3.13.7|\
         prepared:3.13.7:4.2.9|source-clean:3.13.7:4.2.9|\
         target-ready:3.13.7:4.2.9|attested:4.2.9:4.2.9|\
-        prepared:4.2.9:4.3.5|target-ready:4.2.9:4.3.5|\
-        attested:4.3.5:4.3.5) ;;
+        prepared:4.2.9:4.3.6|target-ready:4.2.9:4.3.6|\
+        attested:4.3.6:4.3.6) ;;
         *) die "RabbitMQ durable transition state has an impossible phase/source/target combination." ;;
     esac
     cmp -s "$path" <(printf '%s\n' "${lines[@]}") \
@@ -2081,7 +2081,7 @@ validate_installer_rabbitmq_transition_state() {
         4.2.9)
             expected_target_image_ref="$(read_env_value BACKUPSHEEP_RABBITMQ_UPGRADE_IMAGE)"
             ;;
-        4.3.5)
+        4.3.6)
             expected_target_image_ref="$(read_env_value BACKUPSHEEP_RABBITMQ_IMAGE)"
             ;;
         *) die "RabbitMQ durable transition state has an unsupported target version." ;;
@@ -2094,7 +2094,7 @@ validate_installer_rabbitmq_transition_state() {
     case "$env_generation" in
         "") ;;
         4.3)
-            [[ "${phase}:${source_class}:${target_version}" == "attested:4.3.5:4.3.5" ]] \
+            [[ "${phase}:${source_class}:${target_version}" == "attested:4.3.6:4.3.6" ]] \
                 || die "Committed RabbitMQ generation is inconsistent with protected transition state."
             ;;
         *) die "RabbitMQ durable transition state is paired with an invalid data generation." ;;
@@ -6036,8 +6036,12 @@ validate_rabbitmq_data_generation() {
         rabbitmq-diagnostics -q -n "rabbit@$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" \
         server_version 2>/dev/null)" \
         || die "Could not query the existing RabbitMQ server version without consuming work."
-    [[ "$server_version" == "4.3.5" ]] \
-        || die "RabbitMQ ${server_version} is not the exact pinned 4.3.5 target. Complete or reconcile the documented 3.13/4.2.9/4.3.5 Khepri migration before install.sh can continue."
+    # The live broker still runs the previous release's image here; 4.3.5 is the
+    # prior pinned 4.3 patch and upgrades in place when Compose recreates it.
+    case "$server_version" in
+        4.3.5|4.3.6) ;;
+        *) die "RabbitMQ ${server_version} is not a pinned 4.3 patch (4.3.5 or 4.3.6). Complete or reconcile the documented 3.13/4.2.9/4.3.6 Khepri migration before install.sh can continue." ;;
+    esac
     [[ "$("$DOCKER_BIN" inspect --format '{{.Config.Hostname}}' "$rabbit_container_id")" \
         == "$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" ]] \
         || die "The live RabbitMQ container hostname differs from its protected durable node host."
@@ -6046,7 +6050,7 @@ validate_rabbitmq_data_generation() {
         == "rabbit@$(read_env_value BACKUPSHEEP_RABBITMQ_NODE_HOST)" ]] \
         || die "The live RabbitMQ server opened a different durable node database."
     if [[ -z "$generation" ]]; then
-        die "A live RabbitMQ volume has no attested generation witness. Run the wrapper's explicit 4.3 reconciliation command so it can prove the isolated base-model image reference, local image ID, exact 4.3.5 server and Khepri state before atomically recording the witness."
+        die "A live RabbitMQ volume has no attested generation witness. Run the wrapper's explicit 4.3 reconciliation command so it can prove the isolated base-model image reference, local image ID, exact 4.3.6 server and Khepri state before atomically recording the witness."
     fi
 }
 

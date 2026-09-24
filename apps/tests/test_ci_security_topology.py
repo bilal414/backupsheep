@@ -140,7 +140,7 @@ class CISecurityTopologyContractTests(TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.runner)
         self.assertNotIn(
-            "290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240",
+            "2531fe16e1cb4ec4086d3eaa63118c8f074dd98620d55f022f453a397b18f037",
             self.runner,
         )
 
@@ -249,7 +249,7 @@ class CISecurityTopologyContractTests(TestCase):
             "rabbitmqctl -q -n \"$node_name\" enable_feature_flag khepri_db",
             "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=3.13.7",
             "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.2.9",
-            "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.3.5",
+            "BACKUPSHEEP_RABBITMQ_SAME_VERSION_RECOVERY=4.3.6",
             'docker container kill --signal KILL "$container_name"',
             "assert_final_topology \"$steady_container\"",
             "list_global_parameters",

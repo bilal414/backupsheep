@@ -363,9 +363,9 @@ def image_metadata(reference):
             "config_user": "100:101",
             "labels": {
                 "com.backupsheep.rabbitmq.runtime-generation":
-                    "4.3.5-alpine3.23-openssl3.5.8-v2",
+                    "4.3.6-alpine3.23-openssl3.5.8-v2",
                 "com.backupsheep.rabbitmq.base-index-digest":
-                    "sha256:290b4731353a388f75cfdd358f79a3f4925ab3c1e9d23394db635bcb112b3240",
+                    "sha256:2531fe16e1cb4ec4086d3eaa63118c8f074dd98620d55f022f453a397b18f037",
                 "com.backupsheep.rabbitmq.openssl-donor-index-digest": "",
                 "com.backupsheep.rabbitmq.erlang-donor-index-digest": "",
                 "com.backupsheep.rabbitmq.erlang-runtime-version": "",
@@ -381,7 +381,7 @@ def image_metadata(reference):
                 "com.backupsheep.rabbitmq.runtime-generation":
                     "4.2.9-alpine3.23-openssl3.5.8-v2",
                 "com.backupsheep.rabbitmq.base-index-digest":
-                    "sha256:b2e69a138ea46106d0336bf8741187cac59031b778517d9ed2c9740f139dfa5a",
+                    "sha256:b5c3420a9bf1066be2a01edf5bafbe846fc7a23e9f7cc5b36c04421d1eeb5af0",
                 "com.backupsheep.rabbitmq.openssl-donor-index-digest": "",
                 "com.backupsheep.rabbitmq.erlang-donor-index-digest": "",
                 "com.backupsheep.rabbitmq.erlang-runtime-version": "",
@@ -1330,7 +1330,7 @@ def handle_compose(arguments, state):
                     rabbit.pop(key, None)
             state["rabbitmq_server_version"] = transition.get(
                 "server_version",
-                "3.13.7" if transition_313 else "4.2.9" if transition_42 else "4.3.5",
+                "3.13.7" if transition_313 else "4.2.9" if transition_42 else "4.3.6",
             )
             state["rabbitmq_node"] = transition.get(
                 "rabbitmq_node", f"rabbit@{rabbitmq_node_host}"
@@ -1479,7 +1479,7 @@ def handle_raw_docker(arguments, state):
             action = arguments[-1]
             sys.exit(state.get(f"rabbitmq_volume_{action}_exit_code", 0))
         elif "server_version" in arguments:
-            emit(state.get("rabbitmq_server_version", "4.3.5"))
+            emit(state.get("rabbitmq_server_version", "4.3.6"))
         elif "enable_feature_flag" in arguments and arguments[-1] == "all":
             exit_code = state.get("rabbitmq_enable_feature_flag_exit_code", 0)
             if exit_code:
@@ -2156,7 +2156,7 @@ class SecureComposeWrapperTests(TestCase):
         final_newline=True,
     ):
         target_version = {
-            "3.13": "3.13.7", "4.2": "4.2.9", "4.3": "4.3.5"
+            "3.13": "3.13.7", "4.2": "4.2.9", "4.3": "4.3.6"
         }[target]
         if config_hash is None:
             config_hash = (
@@ -3900,7 +3900,7 @@ class SecureComposeWrapperTests(TestCase):
             ),
             compose_up_transition_result={
                 "installation_id": INSTALLATION_ID,
-                "server_version": "4.3.5",
+                "server_version": "4.3.6",
                 "feature_flags": (
                     "name stability state\n"
                     "khepri_db required enabled\n"
@@ -3958,7 +3958,7 @@ class SecureComposeWrapperTests(TestCase):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=transition_history,
-            server_version="4.3.5",
+            server_version="4.3.6",
             feature_flags=RABBITMQ_43_FEATURE_FLAGS,
         )
         self.write_rabbit_transition_ledger(
@@ -3995,12 +3995,12 @@ class SecureComposeWrapperTests(TestCase):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
-            server_version="4.3.5",
+            server_version="4.3.6",
             feature_flags=RABBITMQ_43_FEATURE_FLAGS,
         )
         self.write_rabbit_transition_ledger(
             phase="attested",
-            source_class="4.3.5",
+            source_class="4.3.6",
             target="4.3",
         )
         self.clear_events()
@@ -4061,14 +4061,14 @@ class SecureComposeWrapperTests(TestCase):
                         "server_version": "4.2.9",
                     }
                 },
-                "not the pinned 4.3.5 target during the RabbitMQ 4.3 transition attestation",
+                "not the pinned 4.3.6 target during the RabbitMQ 4.3 transition attestation",
             ),
             (
                 "wrong-post-identity",
                 {
                     "compose_up_transition_result": {
                         "installation_id": OTHER_INSTALLATION_ID,
-                        "server_version": "4.3.5",
+                        "server_version": "4.3.6",
                     }
                 },
                 "different BackupSheep installation identity",
@@ -4078,7 +4078,7 @@ class SecureComposeWrapperTests(TestCase):
                 {
                     "compose_up_transition_result": {
                         "installation_id": INSTALLATION_ID,
-                        "server_version": "4.3.5",
+                        "server_version": "4.3.6",
                         "feature_flags": (
                             "khepri_db stable enabled\nkhepri_db stable enabled"
                         ),
@@ -4091,7 +4091,7 @@ class SecureComposeWrapperTests(TestCase):
                 {
                     "compose_up_transition_result": {
                         "installation_id": INSTALLATION_ID,
-                        "server_version": "4.3.5",
+                        "server_version": "4.3.6",
                         "image_id": "sha256:" + ("d" * 64),
                     }
                 },
@@ -4160,7 +4160,7 @@ class SecureComposeWrapperTests(TestCase):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
-            server_version="4.3.5",
+            server_version="4.3.6",
             feature_flags=RABBITMQ_43_FEATURE_FLAGS,
         )
         state = self.state()
@@ -4228,7 +4228,7 @@ class SecureComposeWrapperTests(TestCase):
             }
         )
         self.write_rabbit_transition_ledger(
-            phase="attested", source_class="4.3.5", target="4.3"
+            phase="attested", source_class="4.3.6", target="4.3"
         )
         self.run_wrapper(
             "--allow-rabbitmq-generation-transition=4.3",
@@ -4282,7 +4282,7 @@ class SecureComposeWrapperTests(TestCase):
             },
         )
         self.write_rabbit_transition_ledger(
-            phase="attested", source_class="4.3.5", target="4.3"
+            phase="attested", source_class="4.3.6", target="4.3"
         )
         self.run_wrapper(
             "--allow-rabbitmq-generation-transition=4.3",
@@ -4324,7 +4324,7 @@ class SecureComposeWrapperTests(TestCase):
             },
         )
         self.write_rabbit_transition_ledger(
-            phase="attested", source_class="4.3.5", target="4.3"
+            phase="attested", source_class="4.3.6", target="4.3"
         )
         self.clear_events()
         self.assert_refused(
@@ -4409,11 +4409,11 @@ class SecureComposeWrapperTests(TestCase):
                     self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "''"
                 )
 
-    def test_exact_435_reconciliation_records_witness_but_newer_43_is_not_downgraded(self):
+    def test_exact_436_reconciliation_records_witness_but_newer_43_is_not_downgraded(self):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
-            server_version="4.3.5",
+            server_version="4.3.6",
             feature_flags=RABBITMQ_43_FEATURE_FLAGS,
         )
         self.run_wrapper(
@@ -4428,7 +4428,7 @@ class SecureComposeWrapperTests(TestCase):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
-            server_version="4.3.6",
+            server_version="4.3.7",
             feature_flags=RABBITMQ_43_FEATURE_FLAGS,
         )
         self.clear_events()
@@ -4437,7 +4437,7 @@ class SecureComposeWrapperTests(TestCase):
                 "--allow-rabbitmq-generation-transition=4.3",
                 "up", "--detach", "--no-deps", "rabbitmq",
             ),
-            "does not report the pinned 4.3.5 server version",
+            "does not report the pinned 4.3.6 server version",
         )
         self.assertEqual(
             self.env_value("BACKUPSHEEP_RABBITMQ_DATA_GENERATION"), "''"
@@ -4446,7 +4446,7 @@ class SecureComposeWrapperTests(TestCase):
     def test_43_reconciliation_rejects_default_override_rabbit_image_substitution(self):
         override = self.root / "docker-compose.override.yml"
         override.write_text(
-            "services:\n  rabbitmq:\n    image: attacker/rabbitmq:4.3.5\n",
+            "services:\n  rabbitmq:\n    image: attacker/rabbitmq:4.3.6\n",
             encoding="utf-8",
         )
         override.chmod(0o600)
@@ -4454,10 +4454,10 @@ class SecureComposeWrapperTests(TestCase):
         config_history = f"{self.base_file.resolve()},{override.resolve()}"
         self.rabbit_transition_state(
             config_files=config_history,
-            server_version="4.3.5",
+            server_version="4.3.6",
             feature_flags="name stability state\nkhepri_db stable enabled",
             combined_rabbitmq_image=(
-                "attacker/rabbitmq:4.3.5@sha256:" + ("e" * 64)
+                "attacker/rabbitmq:4.3.6@sha256:" + ("e" * 64)
             ),
         )
         self.assert_refused(
@@ -4495,7 +4495,7 @@ class SecureComposeWrapperTests(TestCase):
         self.write_env(generation_value="''")
         self.rabbit_transition_state(
             config_files=str(self.base_file.resolve()),
-            server_version="4.3.5",
+            server_version="4.3.6",
             feature_flags=RABBITMQ_43_FEATURE_FLAGS,
             container_image_id="sha256:" + ("d" * 64),
         )

@@ -5,9 +5,11 @@
 The supply-chain workflow installs `pip-audit` and its complete CPython 3.14/Linux
 dependency closure from the whole-file and artifact-hash-locked
 `deploy/dependency-audit-requirements.lock`, then audits the exact application
-`requirements.lock` with hash enforcement and dependency resolution disabled. It fails
-when the locked runtime inventory has a known advisory. The root `package-lock.json`
-remains the single frontend lock and is audited separately.
+`requirements.lock` with hash enforcement and dependency resolution disabled. A known
+advisory in the locked runtime inventory is reported as a warning on branches and pull
+requests and fails release-tag builds; the frontend `npm audit` and the Trivy dependency
+scan follow the same rule. The root `package-lock.json` remains the single frontend lock
+and is audited separately.
 
 ## Current hash-lock boundary
 

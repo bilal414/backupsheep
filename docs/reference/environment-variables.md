@@ -86,7 +86,7 @@ reviewed `rabbitmq` or 12-lowercase-hex node host only in local-build mode throu
 `--legacy-rabbitmq-node-host HOST --skip-start`; that installer run does not open or
 migrate the broker. Signed releases are fresh-only and reject legacy adoption plus every
 wrapper transition command. Existing broker data delegates generation creation to the
-reviewed wrapper after the explicit pinned 3.13.7 source, 4.2.9, and 4.3.5 hops, and only
+reviewed wrapper after the explicit pinned 3.13.7 source, 4.2.9, and 4.3.6 hops, and only
 when the post-transition container passes exact base-model, installation-ID,
 node-host/node-name, image-reference, local image-ID, health, version and Khepri
 attestation.
@@ -97,7 +97,7 @@ refuses a stopped broker, orphan volume, duplicate resource, unknown generation,
 requires the installation-owner-only host transition ledger bound to the exact source,
 target image ID and target configuration hash. The only valid progression is prepared
 legacy-volume to attested 3.13.7 (P313/A313), prepared 3.13.7 to attested 4.2.9 (P42/A42),
-then prepared 4.2.9 to attested 4.3.5 (P43/A43). With A43, the wrapper's networkless path
+then prepared 4.2.9 to attested 4.3.6 (P43/A43). With A43, the wrapper's networkless path
 may repair or create the secondary volume witness on the already-migrated nonempty tree
 before canonical proof and the `.env`-last commit. The broker uid can write that volume
 and invoke its mounted helper, so the pending/final volume record is never authorization
