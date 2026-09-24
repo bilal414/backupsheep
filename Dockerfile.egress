@@ -2,7 +2,7 @@
 
 # Compile the strict-mode DNS proxy as a static, PIE, stack-protected binary. The
 # compiler toolchain never enters the runtime image.
-FROM alpine:3.22.5@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS resolver-builder
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS resolver-builder
 
 RUN apk add --no-cache \
         gcc=14.2.0-r6 \
@@ -35,7 +35,7 @@ RUN cc -std=c11 -Os -Wall -Wextra -Werror -Wconversion -Wformat=2 -fanalyzer \
 # no-secret reconciler can update exact peer sets without abandoning the already-
 # running application's network namespace. Strict mode adds one zero-capability
 # loopback-only DNS proxy under a separate UID.
-FROM alpine:3.22.5@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 LABEL org.opencontainers.image.title="BackupSheep egress guard" \
       org.opencontainers.image.description="No-secret outbound network policy guard" \
