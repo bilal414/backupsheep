@@ -446,9 +446,12 @@ OAUTH2_PROVIDER = {
     "REFRESH_TOKEN_EXPIRE_SECONDS": OAUTH2_REFRESH_TOKEN_TTL_SECONDS,
     "ROTATE_REFRESH_TOKEN": True,
     "REFRESH_TOKEN_REUSE_PROTECTION": True,
-    # A client that never received the rotated pair may retry once within this
-    # window; anything later revokes the whole token family.
-    "REFRESH_TOKEN_GRACE_PERIOD_SECONDS": 30,
+    # No rotation grace window: the toolkit refuses one alongside hashed token
+    # storage (oauth2_provider.E001 under ``check --deploy``) because the
+    # previously issued token can no longer be returned. A client that loses the
+    # rotated response must re-authorize; a replayed refresh token revokes the
+    # whole family.
+    "REFRESH_TOKEN_GRACE_PERIOD_SECONDS": 0,
     "REQUEST_APPROVAL_PROMPT": "force",
     "ERROR_RESPONSE_WITH_SCOPES": True,
     "OAUTH2_RESPONSE_TYPES_SUPPORTED": ["code"],

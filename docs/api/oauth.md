@@ -133,9 +133,10 @@ omit it for anything that is not shipped by the operator.
    grant_type=refresh_token&refresh_token=REFRESH_TOKEN&client_id=CLIENT_ID
    ```
 
-   Store the **new** refresh token; the previous one is now invalid (a 30-second grace
-   window covers a lost response). Using an old refresh token later revokes the entire
-   family, and the app must send the member through the consent page again.
+   Store the **new** refresh token before using the new access token; the previous
+   refresh token is invalid immediately (there is no grace window, because tokens are
+   stored hashed). Using an old refresh token revokes the entire family, and the app
+   must send the member through the consent page again.
 
 Scopes are listed in [Authentication → Scopes](authentication.md#scopes) and in the
 discovery document's `scopes_supported`. Request only what the application needs;
