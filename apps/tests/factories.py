@@ -102,3 +102,15 @@ def make_schedule(node, member, *, keep_last=None, storages=(), status=None):
     for s in storages:
         schedule.storage_points.add(s)
     return schedule
+
+
+def complete_onboarding():
+    """Mark the install as configured so anonymous/bearer requests are not
+    redirected into the first-run wizard by OnboardingMiddleware."""
+    from apps.console.setting.models import CoreSiteSettings
+
+    site = CoreSiteSettings.load()
+    if not site.setup_completed:
+        site.setup_completed = True
+        site.save(update_fields=["setup_completed", "modified"])
+    return site
