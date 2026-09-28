@@ -32,7 +32,7 @@ google-auth-oauthlib==1.4.0
 google-api-python-client==2.198.0
 
 ## Azure
-azure-storage-blob==12.30.0
+azure-storage-blob==12.30.2
 
 ## Other Cloud Services
 dropbox==12.2.1
