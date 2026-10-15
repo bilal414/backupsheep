@@ -57,11 +57,11 @@ class PostgresImageHardeningContractTests(TestCase):
             self.dockerfile,
         )
         self.assertIn(
-            'com.backupsheep.postgres.openssl-package-version="3.5.8-r0"',
+            'com.backupsheep.postgres.openssl-package-version="3.5.9-r0"',
             self.dockerfile,
         )
-        self.assertIn("'libcrypto3=3.5.8-r0'", self.dockerfile)
-        self.assertIn("'libssl3=3.5.8-r0'", self.dockerfile)
+        self.assertIn("'libcrypto3=3.5.9-r0'", self.dockerfile)
+        self.assertIn("'libssl3=3.5.9-r0'", self.dockerfile)
         self.assertIn("deploy/postgres/entrypoint.sh", self.dockerfile)
         self.assertIn("deploy/postgres/storage-witness.sh", self.dockerfile)
         self.assertIn(
