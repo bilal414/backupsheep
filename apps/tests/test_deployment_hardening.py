@@ -1533,15 +1533,15 @@ raise SystemExit(99)
             dockerfile,
         )
         self.assertIn(
-            'com.backupsheep.egress.openssl-package-version="3.5.8-r0"',
+            'com.backupsheep.egress.openssl-package-version="3.5.9-r0"',
             dockerfile,
         )
-        self.assertEqual(dockerfile.count("libcrypto3=3.5.8-r0"), 2)
-        self.assertEqual(dockerfile.count("libssl3=3.5.8-r0"), 2)
+        self.assertEqual(dockerfile.count("libcrypto3=3.5.9-r0"), 2)
+        self.assertEqual(dockerfile.count("libssl3=3.5.9-r0"), 2)
         self.assertEqual(
-            dockerfile.count("grep -Fxq 'libcrypto3-3.5.8-r0'"), 2
+            dockerfile.count("grep -Fxq 'libcrypto3-3.5.9-r0'"), 2
         )
-        self.assertEqual(dockerfile.count("grep -Fxq 'libssl3-3.5.8-r0'"), 2)
+        self.assertEqual(dockerfile.count("grep -Fxq 'libssl3-3.5.9-r0'"), 2)
         self.assertIn(
             "meta skuid != 10020 meta skuid != @strict_workload_lease reject",
             entrypoint,
