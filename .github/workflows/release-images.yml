@@ -182,7 +182,7 @@ jobs:
 
       - name: Build application candidate from exact remote commit
         id: build-app
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile
@@ -200,7 +200,7 @@ jobs:
           sbom: true
 
       - name: Materialize the exact amd64 application child for migration inventory
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile
@@ -216,7 +216,7 @@ jobs:
 
       - name: Build PostgreSQL candidate from exact remote commit
         id: build-postgres
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.postgres
@@ -235,7 +235,7 @@ jobs:
 
       - name: Build egress-guard candidate from exact remote commit
         id: build-egress
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.egress
@@ -254,7 +254,7 @@ jobs:
 
       - name: Build RabbitMQ runtime candidate from exact remote commit
         id: build-rabbitmq
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.rabbitmq
@@ -273,7 +273,7 @@ jobs:
 
       - name: Build RabbitMQ compatibility-upgrade candidate from exact remote commit
         id: build-rabbitmq-upgrade
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.rabbitmq-upgrade
@@ -735,7 +735,7 @@ jobs:
 
       - name: Rebuild the protected application from the exact remote commit
         id: protected-build-app
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile
@@ -753,7 +753,7 @@ jobs:
           sbom: true
 
       - name: Materialize the protected exact amd64 application child
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile
@@ -769,7 +769,7 @@ jobs:
 
       - name: Rebuild the protected PostgreSQL image from the exact remote commit
         id: protected-build-postgres
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.postgres
@@ -788,7 +788,7 @@ jobs:
 
       - name: Rebuild the protected egress guard from the exact remote commit
         id: protected-build-egress
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.egress
@@ -807,7 +807,7 @@ jobs:
 
       - name: Rebuild protected RabbitMQ from the exact remote commit
         id: protected-build-rabbitmq
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.rabbitmq
@@ -826,7 +826,7 @@ jobs:
 
       - name: Rebuild the protected RabbitMQ upgrade helper from the exact remote commit
         id: protected-build-rabbitmq-upgrade
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/${{ github.repository }}.git#${{ github.sha }}
           file: Dockerfile.rabbitmq-upgrade
