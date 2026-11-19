@@ -347,7 +347,7 @@ RUN set -eux; \
 # glibc ABI required by the verified Oracle and PGDG artifacts. The base carries
 # an unused Pebble binary; remove it in a networkless parent stage so neither the
 # package-preparation stage nor the final runtime can accidentally inherit it.
-FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS ubuntu-runtime-base
+FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78 AS ubuntu-runtime-base
 
 RUN --network=none set -eux; \
     rm -f /usr/bin/pebble; \
