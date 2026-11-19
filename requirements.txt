@@ -39,7 +39,7 @@ dropbox==12.2.1
 pcloud==2.0.1
 ibm-cos-sdk==2.16.2
 oss2==2.19.1
-cos-python-sdk-v5==1.9.43
+cos-python-sdk-v5==1.9.44
 oci==2.184.2
 ovh==1.2.0
 
