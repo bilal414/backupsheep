@@ -160,7 +160,7 @@ jobs:
             --evidence "$GRYPE_DB_EVIDENCE"
 
       - name: Install pinned QEMU emulation
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           image: tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541
           platforms: arm64
@@ -711,7 +711,7 @@ jobs:
           grep -qx '{}' "$TOOL_DIR/empty-grype.yaml"
 
       - name: Install pinned QEMU for the protected rebuild
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           image: tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541
           platforms: arm64
