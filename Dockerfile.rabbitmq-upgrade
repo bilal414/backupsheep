@@ -3,7 +3,7 @@
 # This image exists only for the explicitly witnessed RabbitMQ 4.2 compatibility
 # hop. It is built and signed independently from the normal 4.3 runtime so an
 # approved Compose override cannot substitute it into the steady-state service.
-FROM rabbitmq:4.2.9-alpine@sha256:b5c3420a9bf1066be2a01edf5bafbe846fc7a23e9f7cc5b36c04421d1eeb5af0
+FROM rabbitmq:4.3.5-alpine@sha256:3486d98205df3d6395ed70e7924baa13b561cbac54116c0ddae5b0b7382bbabd
 
 LABEL org.opencontainers.image.title="BackupSheep RabbitMQ upgrade runtime" \
       org.opencontainers.image.description="RabbitMQ 4.2.9 compatibility hop with reviewed security package updates" \
